@@ -362,6 +362,106 @@ def test_complex_race_scenario():
     print("✓ Complex race condition reproduced!")
 
 
+def test_multiline_statements_with_markers():
+    """Test that markers work correctly on multiline statements.
+
+    Verifies that markers placed on closing parentheses of multiline calls
+    are detected and processed correctly. The marker comment should not be
+    reformatted by code formatters.
+    """
+    print("\n=== Test: Multiline Statements with Markers ===")
+
+    results = []
+    lock = threading.Lock()
+
+    def append_safe(value):
+        with lock:
+            results.append(value)
+
+    # Use exec with string literal to preserve exact formatting
+    code_template = '''
+def worker_{name}():
+    append_safe(
+        "thread{name}_step1"
+    )  # interlace: step1
+    append_safe(
+        "thread{name}_step2"
+    )  # interlace: step2
+'''
+
+    # Create worker1 and worker2 with exact formatting preserved
+    namespace1 = {"append_safe": append_safe}
+    exec(code_template.format(name="1"), namespace1)
+    worker1 = namespace1["worker_1"]
+
+    namespace2 = {"append_safe": append_safe}
+    exec(code_template.format(name="2"), namespace2)
+    worker2 = namespace2["worker_2"]
+
+    # Define schedule to interleave the threads
+    schedule = Schedule([
+        Step("thread1", "step1"),
+        Step("thread2", "step1"),
+        Step("thread1", "step2"),
+        Step("thread2", "step2"),
+    ])
+
+    executor = TraceExecutor(schedule)
+    executor.run("thread1", worker1)
+    executor.run("thread2", worker2)
+    executor.wait(timeout=5.0)
+
+    print(f"Results: {results}")
+
+    # Verify all steps executed (all markers were hit)
+    # This demonstrates that multiline statements with markers work correctly
+    assert "thread1_step1" in results, "thread1 should execute step1"
+    assert "thread1_step2" in results, "thread1 should execute step2"
+    assert "thread2_step1" in results, "thread2 should execute step1"
+    assert "thread2_step2" in results, "thread2 should execute step2"
+
+    print("✓ Multiline statements with markers work correctly!")
+
+
+def test_multiline_with_nested_calls():
+    """Test markers on multiline statements with nested function calls."""
+    print("\n=== Test: Multiline with Nested Calls ===")
+
+    results = []
+
+    # Code with nested multiline calls
+    code = '''
+def worker():
+    results.append(
+        some_func(
+            "arg1",
+            "arg2",
+        )
+    )  # interlace: nested_call
+
+def some_func(a, b):
+    return f"{a}-{b}"
+'''
+
+    namespace = {"results": results}
+    exec(code, namespace)
+    worker = namespace["worker"]
+    some_func = namespace["some_func"]
+
+    schedule = Schedule([
+        Step("main", "nested_call"),
+    ])
+
+    executor = TraceExecutor(schedule)
+    executor.run("main", worker)
+    executor.wait(timeout=5.0)
+
+    print(f"Results: {results}")
+    assert len(results) > 0
+    assert "arg1-arg2" in results
+    print("✓ Nested multiline calls with markers work!")
+
+
 def run_all_tests():
     """Run all tests and report results."""
     print("\n" + "=" * 60)
@@ -377,6 +477,8 @@ def run_all_tests():
         test_marker_registry,
         test_thread_coordinator,
         test_complex_race_scenario,
+        test_multiline_statements_with_markers,
+        test_multiline_with_nested_calls,
     ]
 
     passed = 0

@@ -296,7 +296,8 @@ class TraceExecutor:
         thread = threading.Thread(
             target=self._thread_wrapper,
             args=(thread_name, target, args, kwargs),
-            name=thread_name
+            name=thread_name,
+            daemon=True
         )
         self.threads.append(thread)
         thread.start()

@@ -4,7 +4,7 @@
 include ../venv.mk
 
 test: $(VENV_BIN)activate
-	$(PYTEST)
+	timeout 300 $(PYTEST)
 
 clean:
 	rm -rf __pycache__ .pytest_cache .eggs *.egg-info dist build .uv-cache .venv
