@@ -1,0 +1,352 @@
+"""
+Await-point-level deterministic async concurrency testing.
+
+Uses the shared InterleavedLoop abstraction to control which async task
+resumes at each await point, enabling fine-grained control over task
+interleaving.
+
+This pairs naturally with property-based testing: rather than specifying exact
+schedules, generate random interleavings and check that invariants hold (or
+that bugs can be found).
+
+The core insight: in async Python, context switches happen ONLY at await
+points. The event loop is single-threaded. By controlling which task resumes
+at each await point, we can explore the full space of possible interleavings —
+and there are far fewer of them than in threaded code.
+
+Example — find a race condition with random schedule exploration:
+
+    >>> import asyncio
+    >>> from interlace.async_bytecode import explore_interleavings, await_point
+    >>>
+    >>> class Counter:
+    ...     def __init__(self):
+    ...         self.value = 0
+    ...     async def increment(self):
+    ...         temp = self.value
+    ...         await await_point()  # Yield control; race can happen here
+    ...         self.value = temp + 1
+    >>>
+    >>> result = asyncio.run(explore_interleavings(
+    ...     setup=lambda: Counter(),
+    ...     tasks=[lambda c: c.increment(), lambda c: c.increment()],
+    ...     invariant=lambda c: c.value == 2,
+    ... ))
+    >>> assert not result.property_holds  # race condition found!
+
+The await_point() function marks explicit yield points where context switches
+can occur. This is analogous to bytecode.py's opcode-level tracing, but for
+async code the number of interleaving points is much smaller and more explicit.
+
+In production async code, every `await` is a potential context switch point.
+For testing, call `await await_point()` at each location where a race
+condition could manifest.
+"""
+
+import asyncio
+import contextvars
+import random
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Any, Set
+
+from interlace.async_scheduler import InterleavedLoop
+
+
+# Context variable to track the active scheduler and task ID
+_scheduler_var: contextvars.ContextVar[Optional['AwaitScheduler']] = (
+    contextvars.ContextVar('_scheduler', default=None)
+)
+_task_id_var: contextvars.ContextVar[Optional[int]] = (
+    contextvars.ContextVar('_task_id', default=None)
+)
+
+
+async def await_point():
+    """Yield to the scheduler at an await point.
+
+    Call this at every point where a context switch could happen in your
+    async code. This is the async equivalent of a bytecode opcode — the
+    atomic unit of interleaving.
+
+    In typical async code, every `await` statement is a potential context
+    switch point. For testing race conditions, replace strategic awaits
+    with `await await_point()` to allow the scheduler to control ordering.
+
+    If no scheduler is active (i.e., not running under AsyncBytecodeInterlace),
+    this function returns immediately without blocking.
+    """
+    scheduler = _scheduler_var.get()
+    if scheduler is not None:
+        await scheduler.wait_for_turn()
+
+
+class AwaitScheduler(InterleavedLoop):
+    """Controls async task execution at await-point granularity.
+
+    The schedule is a list of task indices. Each entry means "let this
+    task resume from its next await point." When the schedule is
+    exhausted, all tasks run freely to completion.
+
+    Built on the shared InterleavedLoop abstraction, using index-based
+    scheduling as its policy.
+    """
+
+    def __init__(self, schedule: List[int], num_tasks: int):
+        super().__init__()
+        self.schedule = schedule
+        self.num_tasks = num_tasks
+        self._index = 0
+
+    # -- InterleavedLoop policy -----------------------------------------
+
+    def should_proceed(self, task_id: Any, marker: Any = None) -> bool:
+        # Skip past done tasks
+        while self._index < len(self.schedule):
+            if self.schedule[self._index] in self._tasks_done:
+                self._index += 1
+                continue
+            break
+
+        if self._index >= len(self.schedule):
+            self._finished = True
+            return True
+
+        return self.schedule[self._index] == task_id
+
+    def on_proceed(self, task_id: Any, marker: Any = None) -> None:
+        if self._index < len(self.schedule):
+            self._index += 1
+
+    def _handle_timeout(self, task_id: Any, marker: Any = None) -> None:
+        needed = self.schedule[self._index] if self._index < len(self.schedule) else '?'
+        self._error = TimeoutError(
+            f"Deadlock: schedule wants task {needed} "
+            f"at index {self._index}/{len(self.schedule)}"
+        )
+        self._condition.notify_all()
+
+    def _setup_task_context(self, task_id: Any) -> None:
+        _scheduler_var.set(self)
+        _task_id_var.set(task_id)
+
+    def _cleanup_task_context(self, task_id: Any) -> None:
+        _scheduler_var.set(None)
+        _task_id_var.set(None)
+
+    # -- Backward-compatible convenience methods ------------------------
+
+    async def wait_for_turn(self) -> None:
+        """Block until it's the calling task's turn.
+
+        Called by await_point().  Reads the task ID from contextvars.
+        """
+        task_id = _task_id_var.get()
+        if task_id is None:
+            return
+        await self.pause(task_id)
+
+    async def mark_done(self, task_id: int) -> None:
+        """Mark a task as finished."""
+        await self._mark_done(task_id)
+
+    async def report_error(self, error: Exception) -> None:
+        """Report an error and unblock all tasks."""
+        await self._report_error(error)
+
+    @property
+    def had_error(self) -> bool:
+        return self._error is not None
+
+
+class AsyncBytecodeInterlace:
+    """Run concurrent async functions with await-point-level interleaving control.
+
+    Creates asyncio tasks for each function and delegates to the
+    AwaitScheduler (an InterleavedLoop subclass) for execution and
+    context setup.
+    """
+
+    def __init__(self, scheduler: AwaitScheduler):
+        self.scheduler = scheduler
+        self.errors: Dict[int, Exception] = {}
+
+    async def run(
+        self,
+        funcs: List[Callable],
+        args: Optional[List[tuple]] = None,
+        kwargs: Optional[List[dict]] = None,
+        timeout: float = 10.0,
+    ):
+        """Run async functions concurrently with controlled interleaving.
+
+        Args:
+            funcs: One async callable per task.
+            args: Per-task positional args.
+            kwargs: Per-task keyword args.
+            timeout: Max wait time for all tasks.
+        """
+        if args is None:
+            args = [() for _ in funcs]
+        if kwargs is None:
+            kwargs = [{} for _ in funcs]
+
+        task_funcs = {
+            i: (lambda f=func, a=a, kw=kw: f(*a, **kw))
+            for i, (func, a, kw) in enumerate(zip(funcs, args, kwargs))
+        }
+
+        try:
+            await self.scheduler.run_all(task_funcs, timeout=timeout)
+        except TimeoutError:
+            pass  # match original behavior: swallow timeout in runner
+
+
+@asynccontextmanager
+async def controlled_interleaving(schedule: List[int], num_tasks: int = 2):
+    """Context manager for running async code under a specific interleaving.
+
+    Args:
+        schedule: List of task indices controlling await-point execution order.
+        num_tasks: Number of tasks.
+
+    Yields:
+        AsyncBytecodeInterlace runner.
+
+    Example:
+        >>> async with controlled_interleaving([0, 1, 0, 1], num_tasks=2) as runner:
+        ...     await runner.run([coro1, coro2])
+    """
+    scheduler = AwaitScheduler(schedule, num_tasks)
+    runner = AsyncBytecodeInterlace(scheduler)
+    yield runner
+
+
+# ---------------------------------------------------------------------------
+# Property-based testing
+# ---------------------------------------------------------------------------
+
+@dataclass
+class InterleavingResult:
+    """Result of exploring async interleavings.
+
+    Attributes:
+        property_holds: True if the invariant held under all tested interleavings.
+        counterexample: A schedule that violated the invariant (if any).
+        num_explored: How many interleavings were tested.
+    """
+    property_holds: bool
+    counterexample: Optional[List[int]] = None
+    num_explored: int = 0
+
+
+async def run_with_schedule(
+    schedule: List[int],
+    setup: Callable,
+    tasks: List[Callable],
+    timeout: float = 5.0,
+) -> Any:
+    """Run one async interleaving and return the state object.
+
+    Args:
+        schedule: Await-point-level schedule (list of task indices).
+        setup: Returns fresh shared state.
+        tasks: Async callables that each receive the state as their argument.
+        timeout: Max seconds.
+
+    Returns:
+        The state object after execution.
+    """
+    scheduler = AwaitScheduler(schedule, len(tasks))
+    runner = AsyncBytecodeInterlace(scheduler)
+
+    state = setup()
+    funcs = [lambda s=state, t=t: t(s) for t in tasks]
+
+    try:
+        await runner.run(funcs, timeout=timeout)
+    except asyncio.TimeoutError:
+        pass
+
+    return state
+
+
+async def explore_interleavings(
+    setup: Callable,
+    tasks: List[Callable],
+    invariant: Callable[[Any], bool],
+    max_attempts: int = 200,
+    max_ops: int = 100,
+    timeout_per_run: float = 5.0,
+    seed: Optional[int] = None,
+) -> InterleavingResult:
+    """Search for async interleavings that violate an invariant.
+
+    Generates random await-point-level schedules and tests whether the
+    invariant holds under each one. If a violation is found, returns
+    immediately with the counterexample schedule.
+
+    This is the async analogue of property-based testing for concurrency:
+    instead of generating random *inputs*, we generate random *interleavings*
+    and check that the result satisfies an invariant.
+
+    Note: max_ops defaults to 100 (vs 300 for bytecode.py) because async
+    code has far fewer interleaving points than threaded bytecode execution.
+    Each await_point() call represents a much coarser-grained checkpoint.
+
+    Args:
+        setup: Returns fresh shared state for each attempt.
+        tasks: Async callables that each receive the state as their argument.
+        invariant: Predicate on the state. Returns True if the property holds.
+        max_attempts: How many random interleavings to try.
+        max_ops: Maximum schedule length per attempt.
+        timeout_per_run: Timeout for each individual run.
+        seed: Optional RNG seed for reproducibility.
+
+    Returns:
+        InterleavingResult with the outcome.
+    """
+    rng = random.Random(seed)
+    num_tasks = len(tasks)
+    result = InterleavingResult(property_holds=True, num_explored=0)
+
+    for _ in range(max_attempts):
+        length = rng.randint(1, max_ops)
+        schedule = [rng.randint(0, num_tasks - 1) for _ in range(length)]
+
+        state = await run_with_schedule(schedule, setup, tasks, timeout=timeout_per_run)
+        result.num_explored += 1
+
+        if not invariant(state):
+            result.property_holds = False
+            result.counterexample = schedule
+            return result
+
+    return result
+
+
+def schedule_strategy(num_tasks: int, max_ops: int = 100):
+    """Hypothesis strategy for generating await-point schedules.
+
+    For use with hypothesis @given decorator in your own tests:
+
+        >>> from hypothesis import given
+        >>> from interlace.async_bytecode import schedule_strategy, run_with_schedule
+        >>> import asyncio
+        >>>
+        >>> @given(schedule=schedule_strategy(2))
+        ... def test_my_invariant(schedule):
+        ...     state = asyncio.run(run_with_schedule(schedule, setup, tasks))
+        ...     assert state.value == expected
+
+    Note: max_ops defaults to 100 (vs 300 for bytecode.py) because async
+    code has far fewer interleaving points. Each schedule entry corresponds
+    to one await_point() call, not one bytecode opcode.
+    """
+    from hypothesis import strategies as st
+
+    return st.lists(
+        st.integers(min_value=0, max_value=num_tasks - 1),
+        min_size=1,
+        max_size=max_ops,
+    )
