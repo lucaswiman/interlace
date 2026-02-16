@@ -75,7 +75,9 @@ Interlace provides two different ways to control thread interleaving:
 
 ### 1. Trace Markers
 
-Use comment-based markers for reproducing known race conditions or investigating whether a particular race condition is possible. Markers can be placed inline with code or on empty lines:
+Use comment-based markers for reproducing known race conditions or investigating whether a particular race condition is possible. Markers can be placed inline with code or on empty lines.
+
+**How it works:** Each thread is run with a [`sys.settrace`](https://docs.python.org/3/library/sys.html#sys.settrace) callback that fires on every source line. The callback scans each line for `# interlace: <name>` comments. When a marker is hit, the thread pauses and waits for a `ThreadCoordinator` to grant it the next turn according to the schedule. This gives you deterministic control over the order threads reach each synchronization point, without changing any executable code — markers are just comments.
 
 ```python
 from interlace.trace_markers import Schedule, Step, TraceExecutor
@@ -131,9 +133,15 @@ assert counter.value == 1  # Race condition!
 
 ### 2. Bytecode Manipulation (Experimental)
 
-> ⚠️ **Warning:** Bytecode instrumentation is **experimental**. It requires monkey-patching basic concurrency primitives during test execution and only works on python>=3.12 (which includes tracing opcodes rather than lines. Use with caution.
+> ⚠️ **Warning:** Bytecode instrumentation is **experimental**. It requires monkey-patching basic concurrency primitives during test execution and relies on `f_trace_opcodes` (available since Python 3.7). Use with caution.
 
 Automatically instrument functions using bytecode rewriting. No checkpoints needed!
+
+**How it works:** Each thread is run with a [`sys.settrace`](https://docs.python.org/3/library/sys.html#sys.settrace) callback that sets `f_trace_opcodes = True` on every frame, so the callback fires at every *bytecode instruction* rather than every source line. At each opcode, the thread calls `scheduler.wait_for_turn()` which blocks until the schedule says it's that thread's turn. This gives complete control over interleaving at the finest granularity CPython offers.
+
+Because the scheduler controls which thread runs each opcode, any blocking call that happens in C code (like `threading.Lock.acquire()`) would deadlock — the blocked thread holds a scheduler turn but can't make progress. To prevent this, all standard threading and queue primitives (`Lock`, `RLock`, `Semaphore`, `BoundedSemaphore`, `Event`, `Condition`, `Queue`, `LifoQueue`, `PriorityQueue`) are monkey-patched with cooperative versions that spin-yield via the scheduler instead of blocking.
+
+For property-based exploration, `explore_interleavings()` generates random schedules and checks that an invariant holds under each one. If any schedule violates the invariant, it returns the counterexample schedule for deterministic reproduction.
 
 ```python
 from interlace.bytecode import explore_interleavings

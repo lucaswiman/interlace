@@ -12,7 +12,6 @@ Some tests may timeout/deadlock, demonstrating the need for cooperative wrappers
 
 import threading
 import queue
-import pytest
 from interlace.bytecode import explore_interleavings
 
 
@@ -92,7 +91,6 @@ class SemaphoreResource:
         self.semaphore.release()
 
 
-@pytest.mark.skip(reason="Deadlocks without cooperative Semaphore - demonstrates need for wrapper")
 def test_semaphore_race_condition():
     """Test that Semaphore without cooperative wrapper can cause issues.
 
@@ -135,7 +133,6 @@ class BoundedSemaphoreResource:
         self.semaphore.release()
 
 
-@pytest.mark.skip(reason="Deadlocks without cooperative BoundedSemaphore - demonstrates need for wrapper")
 def test_bounded_semaphore_race_condition():
     """Test that BoundedSemaphore without cooperative wrapper can cause issues.
 
@@ -239,7 +236,6 @@ class ConditionQueue:
             return item
 
 
-@pytest.mark.skip(reason="Deadlocks without cooperative Condition - demonstrates need for wrapper")
 def test_condition_race_condition():
     """Test that Condition.wait() without cooperative wrapper can cause issues.
 
@@ -283,7 +279,6 @@ class QueueConsumer:
             self.consumed.append(item)
 
 
-@pytest.mark.skip(reason="Deadlocks without cooperative Queue.get() - demonstrates need for wrapper")
 def test_queue_get_race_condition():
     """Test that Queue.get() without cooperative wrapper can cause issues.
 
@@ -381,7 +376,6 @@ class MultiPrimitiveSystem:
             self.value += item
 
 
-@pytest.mark.skip(reason="Deadlocks without cooperative primitives - demonstrates need for wrappers")
 def test_multiple_primitives_race_condition():
     """Test interaction of multiple threading primitives.
 

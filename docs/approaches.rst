@@ -7,18 +7,17 @@ Interlace provides two approaches for controlling thread interleaving. This docu
 Trace Markers (Recommended)
 ---------------------------
 
-Trace Markers are the recommended approach for most use cases. They use lightweight comment-based markers to define synchronization points in your code.
-
-**Key Advantages:**
-
-- **Lightweight** - Just comments in code, minimal overhead
-- **Explicit** - You control exactly where synchronization happens
-- **Readable** - Code intent is clear from markers
-- **No semantic code changes** - Markers are just comments; logic remains unchanged
-- **Two styles** - Use empty line markers for clarity or inline markers for compactness
-- **Stable** - Mature and well-tested API
+Trace Markers are the recommended approach for most use cases. They use lightweight comment-based markers to define synchronization points in your code, requiring no semantic code changes to production code.
 
 **How It Works:**
+
+Each thread is run with a ``sys.settrace`` callback that fires on every source
+line. The callback scans each line for ``# interlace: <name>`` comments using a
+``MarkerRegistry`` that caches marker locations per file. When a marker is hit,
+the thread calls ``ThreadCoordinator.wait_for_turn()`` which blocks until the
+schedule says it's that thread's turn to proceed past that marker. This gives
+deterministic control over the order threads reach each synchronization point,
+without changing any executable code — markers are just comments.
 
 .. code-block:: python
 
@@ -34,8 +33,6 @@ Trace Markers are the recommended approach for most use cases. They use lightwei
            temp += 1
            # interlace: before_write
            self.value = temp
-
-Trace markers are comments that Interlace parses to insert checkpoints. When you run code with a ``TraceExecutor`` and a defined schedule, execution pauses at each marked point to follow the schedule.
 
 **When to Use:**
 
@@ -72,6 +69,28 @@ Bytecode instrumentation automatically inserts checkpoints into functions using 
 - **Higher overhead** - Bytecode instrumentation adds runtime cost
 
 **How It Works:**
+
+Each thread is run with a ``sys.settrace`` callback that sets
+``f_trace_opcodes = True`` on every frame, so the callback fires at every
+*bytecode instruction* rather than every source line. At each opcode the thread
+calls ``scheduler.wait_for_turn()``, which blocks until the schedule says it's
+that thread's turn. Only user code is traced — stdlib and threading internals
+are skipped.
+
+Because the scheduler controls which thread runs each opcode, any blocking call
+that happens in C code (like ``threading.Lock.acquire()``) would deadlock — the
+blocked thread holds a scheduler turn but can't make progress. To prevent this,
+all standard threading and queue primitives (``Lock``, ``RLock``,
+``Semaphore``, ``BoundedSemaphore``, ``Event``, ``Condition``, ``Queue``,
+``LifoQueue``, ``PriorityQueue``) are monkey-patched with cooperative versions
+that spin-yield via the scheduler instead of blocking. The patching is scoped
+to each test run: primitives are replaced before ``setup()`` and restored
+afterwards.
+
+For property-based exploration, ``explore_interleavings()`` generates random
+opcode-level schedules and checks that an invariant holds under each one. If
+any schedule violates the invariant, it returns the counterexample schedule for
+deterministic reproduction.
 
 .. code-block:: python
 
