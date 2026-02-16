@@ -36,13 +36,17 @@ import queue
 import random
 import sys
 import threading
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, TypeVar
 
 from interlace.common import InterleavingResult
 
+# Type variable for the shared state passed between setup and thread functions
+T = TypeVar("T")
+
 # Directories to never trace into (stdlib, site-packages, threading internals)
-_SKIP_DIRS: Set[str] = set()
+_SKIP_DIRS: set[str] = set()
 for _p in sys.path:
     if "lib/python" in _p or "site-packages" in _p:
         _SKIP_DIRS.add(_p)
@@ -70,15 +74,15 @@ class OpcodeScheduler:
     exhausted, all threads run freely to completion.
     """
 
-    def __init__(self, schedule: List[int], num_threads: int):
+    def __init__(self, schedule: list[int], num_threads: int):
         self.schedule = schedule
         self.num_threads = num_threads
         self._index = 0
         self._lock = _real_lock()
         self._condition = threading.Condition(self._lock)
         self._finished = False
-        self._error: Optional[Exception] = None
-        self._threads_done: Set[int] = set()
+        self._error: Exception | None = None
+        self._threads_done: set[int] = set()
 
     def wait_for_turn(self, thread_id: int) -> bool:
         """Block until it's this thread's turn. Returns False when schedule exhausted."""
@@ -296,7 +300,7 @@ class _CooperativeSemaphore:
         self._value = value
         self._lock = _real_lock()
 
-    def acquire(self, blocking: bool = True, timeout: Optional[float] = None) -> bool:
+    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
         # Fast path: try to decrement counter
         self._lock.acquire()
         if self._value > 0:
@@ -412,7 +416,7 @@ class _CooperativeEvent:
     def __init__(self):
         self._event = _real_event()
 
-    def wait(self, timeout: Optional[float] = None) -> bool:
+    def wait(self, timeout: float | None = None) -> bool:
         if self._event.is_set():
             return True
 
@@ -459,7 +463,7 @@ class _CooperativeCondition:
     itself uses _real_condition internally.
     """
 
-    def __init__(self, lock: Optional[_CooperativeLock] = None) -> None:
+    def __init__(self, lock: _CooperativeLock | None = None) -> None:
         if lock is None:
             lock = _CooperativeLock()
         self._lock = lock
@@ -480,7 +484,7 @@ class _CooperativeCondition:
     def __exit__(self, *args: Any) -> None:
         self._lock.release()
 
-    def wait(self, timeout: Optional[float] = None) -> bool:
+    def wait(self, timeout: float | None = None) -> bool:
         # Release the user lock, spin-yield, then re-acquire
         self._waiters += 1
         self._lock.release()
@@ -523,7 +527,7 @@ class _CooperativeCondition:
             self._waiters -= 1
             self._lock.acquire()
 
-    def wait_for(self, predicate: Callable[[], bool], timeout: Optional[float] = None) -> bool:
+    def wait_for(self, predicate: Callable[[], bool], timeout: float | None = None) -> bool:
         result = predicate()
         while not result:
             self.wait(timeout=timeout)
@@ -550,7 +554,7 @@ class _CooperativeQueue:
     def __init__(self, maxsize: int = 0) -> None:
         self._queue = self._queue_class(maxsize)
 
-    def get(self, block: bool = True, timeout: Optional[float] = None) -> Any:
+    def get(self, block: bool = True, timeout: float | None = None) -> Any:
         try:
             return self._queue.get(block=False)
         except queue.Empty:
@@ -586,7 +590,7 @@ class _CooperativeQueue:
                 return self._queue.get(block=True, timeout=1.0)
             scheduler.wait_for_turn(thread_id)
 
-    def put(self, item: Any, block: bool = True, timeout: Optional[float] = None) -> None:
+    def put(self, item: Any, block: bool = True, timeout: float | None = None) -> None:
         try:
             self._queue.put(item, block=False)
             return
@@ -680,8 +684,8 @@ class BytecodeInterlace:
     def __init__(self, scheduler: OpcodeScheduler, cooperative_locks: bool = True):
         self.scheduler = scheduler
         self.cooperative_locks = cooperative_locks
-        self.threads: List[threading.Thread] = []
-        self.errors: Dict[int, Exception] = {}
+        self.threads: list[threading.Thread] = []
+        self.errors: dict[int, Exception] = {}
         self._lock_patched = False
 
     def _patch_locks(self):
@@ -736,7 +740,7 @@ class BytecodeInterlace:
         return trace
 
     def _run_thread(
-        self, thread_id: int, func: Callable[..., None], args: Tuple[Any, ...], kwargs: Dict[str, Any]
+        self, thread_id: int, func: Callable[..., None], args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> None:
         """Thread entry point. Installs tracing, runs func, cleans up."""
         try:
@@ -758,9 +762,9 @@ class BytecodeInterlace:
 
     def run(
         self,
-        funcs: List[Callable[..., None]],
-        args: Optional[List[Tuple[Any, ...]]] = None,
-        kwargs: Optional[List[Dict[str, Any]]] = None,
+        funcs: list[Callable[..., None]],
+        args: list[tuple[Any, ...]] | None = None,
+        kwargs: list[dict[str, Any]] | None = None,
         timeout: float = 10.0,
     ) -> None:
         """Run functions concurrently with controlled interleaving.
@@ -795,7 +799,7 @@ class BytecodeInterlace:
 
 
 @contextmanager
-def controlled_interleaving(schedule: List[int], num_threads: int = 2):
+def controlled_interleaving(schedule: list[int], num_threads: int = 2):
     """Context manager for running code under a specific interleaving.
 
     Args:
@@ -820,12 +824,12 @@ def controlled_interleaving(schedule: List[int], num_threads: int = 2):
 
 
 def run_with_schedule(
-    schedule: List[int],
-    setup: Callable,
-    threads: List[Callable],
+    schedule: list[int],
+    setup: Callable[[], T],
+    threads: list[Callable[[T], None]],
     timeout: float = 5.0,
     cooperative_locks: bool = True,
-) -> Any:
+) -> T:
     """Run one interleaving and return the state object.
 
     Args:
@@ -846,23 +850,31 @@ def run_with_schedule(
     runner._patch_locks()
     try:
         state = setup()
-        funcs = [lambda s=state, t=t: t(s) for t in threads]
-        runner.run(funcs, timeout=timeout)
-    except TimeoutError:
-        pass
+
+        def make_thread_func(thread_func: Callable[[T], None], thread_state: T) -> Callable[[], None]:
+            def thread_wrapper() -> None:
+                thread_func(thread_state)
+
+            return thread_wrapper
+
+        funcs: list[Callable[[], None]] = [make_thread_func(t, state) for t in threads]
+        try:
+            runner.run(funcs, timeout=timeout)
+        except TimeoutError:
+            pass
     finally:
         runner._unpatch_locks()
     return state
 
 
 def explore_interleavings(
-    setup: Callable,
-    threads: List[Callable],
-    invariant: Callable[[Any], bool],
+    setup: Callable[[], T],
+    threads: list[Callable[[T], None]],
+    invariant: Callable[[T], bool],
     max_attempts: int = 200,
     max_ops: int = 300,
     timeout_per_run: float = 5.0,
-    seed: Optional[int] = None,
+    seed: int | None = None,
 ) -> InterleavingResult:
     """Search for interleavings that violate an invariant.
 

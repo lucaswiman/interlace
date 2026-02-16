@@ -27,11 +27,8 @@ from interlace.bytecode import (
     controlled_interleaving,
     explore_interleavings,
 )
-from interlace.trace_markers import (
-    Schedule,
-    Step,
-    TraceExecutor,
-)
+from interlace.common import Schedule, Step
+from interlace.trace_markers import TraceExecutor
 
 
 def pytest_configure(config):

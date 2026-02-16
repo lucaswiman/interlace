@@ -14,7 +14,8 @@ import sys
 # Add parent directory to path so we can import interlace
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from interlace.async_trace_markers import AsyncTaskCoordinator, AsyncTraceExecutor, Schedule, Step, async_interlace
+from interlace.async_trace_markers import AsyncTaskCoordinator, AsyncTraceExecutor, async_interlace
+from interlace.common import Schedule, Step
 
 
 class BankAccount:

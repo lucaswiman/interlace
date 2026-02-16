@@ -46,15 +46,16 @@ condition could manifest.
 import asyncio
 import contextvars
 import random
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Callable, Coroutine, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 from interlace.async_scheduler import InterleavedLoop
 from interlace.common import InterleavingResult
 
 # Context variable to track the active scheduler and task ID
 _scheduler_var: contextvars.ContextVar[Optional["AwaitScheduler"]] = contextvars.ContextVar("_scheduler", default=None)
-_task_id_var: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar("_task_id", default=None)
+_task_id_var: contextvars.ContextVar[int | None] = contextvars.ContextVar("_task_id", default=None)
 
 
 async def await_point():
@@ -89,7 +90,7 @@ class AwaitScheduler(InterleavedLoop):
     scheduling as its policy.
     """
 
-    def __init__(self, schedule: List[int], num_tasks: int):
+    def __init__(self, schedule: list[int], num_tasks: int):
         super().__init__()
         self.schedule = schedule
         self.num_tasks = num_tasks
@@ -146,13 +147,13 @@ class AsyncBytecodeInterlace:
 
     def __init__(self, scheduler: AwaitScheduler):
         self.scheduler = scheduler
-        self.errors: Dict[int, Exception] = {}
+        self.errors: dict[int, Exception] = {}
 
     async def run(
         self,
-        funcs: List[Callable[..., Coroutine[Any, Any, None]]],
-        args: Optional[List[Tuple[Any, ...]]] = None,
-        kwargs: Optional[List[Dict[str, Any]]] = None,
+        funcs: list[Callable[..., Coroutine[Any, Any, None]]],
+        args: list[tuple[Any, ...]] | None = None,
+        kwargs: list[dict[str, Any]] | None = None,
         timeout: float = 10.0,
     ):
         """Run async functions concurrently with controlled interleaving.
@@ -168,7 +169,7 @@ class AsyncBytecodeInterlace:
         if kwargs is None:
             kwargs = [{} for _ in funcs]
 
-        task_funcs: Dict[int, Callable[..., Coroutine[Any, Any, None]]] = {
+        task_funcs: dict[int, Callable[..., Coroutine[Any, Any, None]]] = {
             i: (lambda f=func, a=a, kw=kw: f(*a, **kw))  # type: ignore[assignment]
             for i, (func, a, kw) in enumerate(zip(funcs, args, kwargs))
         }
@@ -181,7 +182,7 @@ class AsyncBytecodeInterlace:
 
 @asynccontextmanager
 async def controlled_interleaving(
-    schedule: List[int], num_tasks: int = 2
+    schedule: list[int], num_tasks: int = 2
 ) -> AsyncGenerator[AsyncBytecodeInterlace, None]:
     """Context manager for running async code under a specific interleaving.
 
@@ -207,9 +208,9 @@ async def controlled_interleaving(
 
 
 async def run_with_schedule(
-    schedule: List[int],
+    schedule: list[int],
     setup: Callable[[], Any],
-    tasks: List[Callable[[Any], Coroutine[Any, Any, None]]],
+    tasks: list[Callable[[Any], Coroutine[Any, Any, None]]],
     timeout: float = 5.0,
 ) -> Any:
     """Run one async interleaving and return the state object.
@@ -227,7 +228,7 @@ async def run_with_schedule(
     runner = AsyncBytecodeInterlace(scheduler)
 
     state = setup()
-    funcs: List[Callable[..., Coroutine[Any, Any, None]]] = [lambda s=state, t=t: t(s) for t in tasks]  # type: ignore[assignment]
+    funcs: list[Callable[..., Coroutine[Any, Any, None]]] = [lambda s=state, t=t: t(s) for t in tasks]  # type: ignore[assignment]
 
     try:
         await runner.run(funcs, timeout=timeout)
@@ -239,12 +240,12 @@ async def run_with_schedule(
 
 async def explore_interleavings(
     setup: Callable[[], Any],
-    tasks: List[Callable[[Any], Coroutine[Any, Any, None]]],
+    tasks: list[Callable[[Any], Coroutine[Any, Any, None]]],
     invariant: Callable[[Any], bool],
     max_attempts: int = 200,
     max_ops: int = 100,
     timeout_per_run: float = 5.0,
-    seed: Optional[int] = None,
+    seed: int | None = None,
 ) -> InterleavingResult:
     """Search for async interleavings that violate an invariant.
 

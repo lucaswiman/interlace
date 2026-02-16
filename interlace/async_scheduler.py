@@ -41,7 +41,8 @@ Example — a simple round-robin scheduler:
 """
 
 import asyncio
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Union
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 
 class InterleavedLoop:
@@ -65,8 +66,8 @@ class InterleavedLoop:
     def __init__(self):
         self._condition = asyncio.Condition()
         self._finished = False
-        self._error: Optional[Exception] = None
-        self._tasks_done: Set[Any] = set()
+        self._error: Exception | None = None
+        self._tasks_done: set[Any] = set()
 
     # ------------------------------------------------------------------
     # Scheduling policy — override in subclasses
@@ -169,7 +170,7 @@ class InterleavedLoop:
 
     async def run_all(
         self,
-        task_funcs: Union[Dict[Any, Callable[..., Awaitable[None]]], List[Callable[..., Awaitable[None]]]],
+        task_funcs: dict[Any, Callable[..., Awaitable[None]]] | list[Callable[..., Awaitable[None]]],
         timeout: float = 10.0,
     ) -> None:
         """Run tasks with controlled interleaving.
@@ -183,7 +184,7 @@ class InterleavedLoop:
         if isinstance(task_funcs, list):
             task_funcs = dict(enumerate(task_funcs))
 
-        errors: Dict[Any, Exception] = {}
+        errors: dict[Any, Exception] = {}
 
         async def _run(task_id: Any, func: Callable[..., Awaitable[None]]) -> None:
             try:

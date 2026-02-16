@@ -1,7 +1,6 @@
 """Shared data structures for interlace."""
 
 from dataclasses import dataclass
-from typing import List, Optional
 
 
 @dataclass
@@ -27,7 +26,7 @@ class Schedule:
     execute which marker in order.
     """
 
-    def __init__(self, steps: List[Step]):
+    def __init__(self, steps: list[Step]):
         """Initialize a schedule with a list of steps.
 
         Args:
@@ -56,5 +55,5 @@ class InterleavingResult:
     """
 
     property_holds: bool
-    counterexample: Optional[List[int]] = None
+    counterexample: list[int] | None = None
     num_explored: int = 0

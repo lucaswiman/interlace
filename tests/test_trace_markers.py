@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import threading
 
-from interlace.trace_markers import MarkerRegistry, Schedule, Step, ThreadCoordinator, TraceExecutor, interlace
+from interlace.common import Schedule, Step
+from interlace.trace_markers import MarkerRegistry, ThreadCoordinator, TraceExecutor, interlace
 
 
 class BankAccount:
