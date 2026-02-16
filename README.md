@@ -73,7 +73,65 @@ assert account.balance == 150, "Race condition detected!"
 
 Interlace provides two different ways to control thread interleaving:
 
-### 1. Bytecode Manipulation
+### 1. Trace Markers
+
+Use comment-based markers for reproducing known race conditions or investigating whether a particular race condition is possible. Markers can be placed inline with code or on empty lines:
+
+```python
+from interlace.trace_markers import Schedule, Step, TraceExecutor
+
+class Counter:
+    def __init__(self):
+        self.value = 0
+
+    def increment(self):
+        # Markers on empty lines (cleaner):
+        # interlace: after_read
+        temp = self.value
+        temp += 1
+        # interlace: before_write
+        self.value = temp
+
+        # Or use inline markers:
+        # temp = self.value  # interlace: after_read
+        # self.value = temp  # interlace: before_write
+
+counter = Counter()
+
+# Define execution order using markers
+schedule = Schedule([
+    Step("thread1", "after_read"),
+    Step("thread2", "after_read"),
+    Step("thread1", "before_write"),
+    Step("thread2", "before_write"),
+])
+
+def worker1():
+    counter.increment()
+
+def worker2():
+    counter.increment()
+
+# Run with controlled interleaving
+executor = TraceExecutor(schedule)
+executor.run("thread1", worker1)
+executor.run("thread2", worker2)
+executor.wait(timeout=5.0)
+
+assert counter.value == 1  # Race condition!
+```
+
+**Advantages:**
+- Lightweight - just comments in code
+- Two placement styles: empty lines (cleaner) or inline (compact)
+- Automatic execution tracing
+- Simple and readable
+- No semantic code changes required
+- Stable and well-tested
+
+### 2. Bytecode Manipulation (Experimental)
+
+> ⚠️ **Warning:** Bytecode instrumentation is **experimental**. It requires monkey-patching basic concurrency primitives during test execution and only works on python>=3.12 (which includes tracing opcodes rather than lines. Use with caution.
 
 Automatically instrument functions using bytecode rewriting. No checkpoints needed!
 
@@ -139,70 +197,39 @@ with controlled_interleaving(schedule, num_threads=2) as runner:
 print(f"Interleaved result: {counter2.value}")  # Might be wrong due to race
 ```
 
-**Advantages:**
+**Advantages (Experimental):**
 - No manual checkpoint insertion needed
 - Can test unmodified third-party code
 - Property-based exploration finds edge cases
 - Automatic bytecode instrumentation
 
-### 2. Trace Markers
+**Limitations:**
+- Results may vary across Python versions
+- Some bytecode patterns may not be instrumented correctly
+- Performance impact is higher than trace markers
+- Less predictable behavior than explicit markers
+- **API may change in future versions**
 
-Use comment-based markers for simple, lightweight control. Markers can be placed inline with code or on empty lines:
+### When to Use Each Approach
 
-```python
-from interlace.trace_markers import Schedule, Step, TraceExecutor
+**Use Trace Markers (recommended) if:**
+- You want stable, predictable behavior
+- You're comfortable adding comments to code
+- You have specific synchronization points in mind
+- You need deterministic test results
+- You're testing code you can modify
 
-class Counter:
-    def __init__(self):
-        self.value = 0
-
-    def increment(self):
-        # Markers on empty lines (cleaner):
-        # interlace: after_read
-        temp = self.value
-        temp += 1
-        # interlace: before_write
-        self.value = temp
-
-        # Or use inline markers:
-        # temp = self.value  # interlace: after_read
-        # self.value = temp  # interlace: before_write
-
-counter = Counter()
-
-# Define execution order using markers
-schedule = Schedule([
-    Step("thread1", "after_read"),
-    Step("thread2", "after_read"),
-    Step("thread1", "before_write"),
-    Step("thread2", "before_write"),
-])
-
-def worker1():
-    counter.increment()
-
-def worker2():
-    counter.increment()
-
-# Run with controlled interleaving
-executor = TraceExecutor(schedule)
-executor.run("thread1", worker1)
-executor.run("thread2", worker2)
-executor.wait(timeout=5.0)
-
-assert counter.value == 1  # Race condition!
-```
-
-**Advantages:**
-- Lightweight - just comments in code
-- Two placement styles: empty lines (cleaner) or inline (compact)
-- Automatic execution tracing
-- Simple and readable
-- No code modification needed for markers
+**Use Bytecode Instrumentation (with caution) if:**
+- You need to test unmodified third-party code
+- You want automatic race condition discovery
+- You're comfortable with experimental features
+- You have time to handle potential API changes
 
 ## Async Support
 
-Both approaches have async variants. For example, with async trace markers:
+Both approaches have async variants. Trace marker async support is stable, while bytecode instrumentation async support is experimental (see above).
+
+### Async Trace Markers (Recommended)
 
 ```python
 import asyncio
@@ -278,16 +305,17 @@ interlace/
 ├── Makefile                    # Project build targets
 ├── pyproject.toml              # Python packaging configuration
 ├── README.md                   # This file
+├── docs/                       # Documentation (Sphinx/ReadTheDocs)
 ├── interlace/                  # Python package
 │   ├── __init__.py
-│   ├── bytecode.py             # Bytecode instrumentation
-│   ├── async_bytecode.py       # Async bytecode instrumentation
-│   ├── async_scheduler.py      # Async scheduling utilities
-│   ├── trace_markers.py        # Trace marker approach
-│   └── async_trace_markers.py  # Async trace markers
+│   ├── trace_markers.py        # Trace marker approach (recommended)
+│   ├── async_trace_markers.py  # Async trace markers (recommended)
+│   ├── bytecode.py             # Bytecode instrumentation (experimental)
+│   ├── async_bytecode.py       # Async bytecode instrumentation (experimental)
+│   └── async_scheduler.py      # Async scheduling utilities
 └── tests/                      # Test suite
-    ├── test_bytecode.py
-    ├── test_async_bytecode.py
     ├── test_trace_markers.py
-    └── test_async_trace_markers.py
+    ├── test_async_trace_markers.py
+    ├── test_bytecode.py        # Bytecode tests (experimental)
+    └── test_async_bytecode.py  # Async bytecode tests (experimental)
 ```

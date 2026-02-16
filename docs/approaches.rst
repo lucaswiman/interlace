@@ -1,0 +1,199 @@
+Approaches to Concurrency Control
+==================================
+
+Interlace provides two approaches for controlling thread interleaving. This document explains the characteristics, trade-offs, and use cases for each.
+
+
+Trace Markers (Recommended)
+---------------------------
+
+Trace Markers are the recommended approach for most use cases. They use lightweight comment-based markers to define synchronization points in your code.
+
+**Key Advantages:**
+
+- **Lightweight** - Just comments in code, minimal overhead
+- **Explicit** - You control exactly where synchronization happens
+- **Readable** - Code intent is clear from markers
+- **No semantic code changes** - Markers are just comments; logic remains unchanged
+- **Two styles** - Use empty line markers for clarity or inline markers for compactness
+- **Stable** - Mature and well-tested API
+
+**How It Works:**
+
+.. code-block:: python
+
+   from interlace.trace_markers import Schedule, Step, TraceExecutor
+
+   class Counter:
+       def __init__(self):
+           self.value = 0
+
+       def increment(self):
+           # interlace: after_read
+           temp = self.value
+           temp += 1
+           # interlace: before_write
+           self.value = temp
+
+Trace markers are comments that Interlace parses to insert checkpoints. When you run code with a ``TraceExecutor`` and a defined schedule, execution pauses at each marked point to follow the schedule.
+
+**When to Use:**
+
+- You want explicit control over synchronization points
+- You're testing code you can modify slightly (adding comments)
+- You need a stable, well-understood approach
+- You want minimal performance impact
+- You're testing for specific race conditions at known points
+
+
+**Async Support:**
+
+.. warning::
+
+   **WIP**: Async trace marker syntax and semantics are still being finalized.
+   See :doc:`future_work` for planned improvements.
+
+
+Bytecode Instrumentation (Experimental)
+----------------------------------------
+
+.. warning::
+
+   Bytecode instrumentation is **experimental** and should be used with caution. The API may change, and behavior is not guaranteed to be stable across Python versions.
+
+Bytecode instrumentation automatically inserts checkpoints into functions using Python bytecode rewriting. No manual marker insertion is needed.
+
+**Key Characteristics:**
+
+- **Experimental** - API may change, use with care
+- **Automatic** - No manual checkpoint insertion required
+- **Unmodified code** - Can test third-party code without changes
+- **Property-based exploration** - Can discover edge cases automatically
+- **Higher overhead** - Bytecode instrumentation adds runtime cost
+
+**How It Works:**
+
+.. code-block:: python
+
+   from interlace.bytecode import explore_interleavings
+
+   class Counter:
+       def __init__(self, value=0):
+           self.value = value
+
+       def increment(self):
+           temp = self.value
+           self.value = temp + 1
+
+   # Automatically explore different interleavings
+   result = explore_interleavings(
+       setup=lambda: Counter(value=0),
+       threads=[
+           lambda c: c.increment(),
+           lambda c: c.increment(),
+       ],
+       invariant=lambda c: c.value == 2,  # Should hold if no races
+       max_attempts=200,
+       max_ops=200,
+       seed=42,
+   )
+
+   if not result.property_holds:
+       print(f"Race condition found after {result.num_explored} attempts")
+       print(f"Expected: 2, Got: {result.counterexample.value}")
+
+**When to Use (with caution):**
+
+- You want to automatically discover race conditions
+- You're testing unmodified third-party code
+- You're comfortable with experimental features
+- You need to explore many possible interleavings
+- Performance is not a critical concern
+
+**Controlled Interleaving:**
+
+You can also use explicit schedules with bytecode instrumentation:
+
+.. code-block:: python
+
+   from interlace.bytecode import controlled_interleaving
+
+   counter = Counter(value=0)
+
+   # Sequential schedule: thread 1 completes before thread 2
+   schedule = [0] * 200 + [1] * 200
+   with controlled_interleaving(schedule, num_threads=2) as runner:
+       runner.run([
+           lambda: counter.increment(),
+           lambda: counter.increment(),
+       ])
+
+   print(f"Sequential result: {counter.value}")  # Correct: 2
+
+**Limitations and Caveats:**
+
+- Results may vary across Python versions
+- Some bytecode patterns may not be instrumented correctly
+- Performance impact is higher than trace markers
+- Less predictable behavior than explicit markers
+- Async bytecode instrumentation is also experimental
+
+
+Comparison Table
+----------------
+
+.. list-table::
+   :header-rows: 1
+
+   * - Feature
+     - Trace Markers
+     - Bytecode Instrumentation
+   * - Status
+     - Stable, recommended
+     - Experimental
+   * - Manual checkpoint insertion
+     - Yes (comments)
+     - No (automatic)
+   * - Works with unmodified code
+     - No (needs comments)
+     - Yes
+   * - Performance
+     - Low overhead
+     - Higher overhead
+   * - Determinism
+     - High
+     - Lower (Python version dependent)
+   * - Async support
+     - Yes, stable
+     - Yes, experimental
+   * - Property-based exploration
+     - Manual schedules
+     - Automatic
+   * - Learning curve
+     - Low
+     - Medium
+   * - Recommended for most cases
+     - ✓
+     -
+
+
+Choosing the Right Approach
+---------------------------
+
+**Use Trace Markers if:**
+
+- You want stable, predictable behavior
+- You're comfortable adding comments to code
+- You have specific synchronization points in mind
+- You need deterministic test results
+- You're testing code you can modify
+
+**Use Bytecode Instrumentation if:**
+
+- You need to test unmodified third-party code
+- You want automatic race condition discovery
+- You're comfortable with experimental features
+- You have time to handle potential API changes
+- Performance is not a concern
+
+**In most cases, start with Trace Markers.** They provide clear, explicit control and stable behavior. Use bytecode instrumentation when you specifically need its capabilities.

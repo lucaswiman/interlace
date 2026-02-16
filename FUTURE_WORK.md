@@ -1,5 +1,30 @@
 # Future Work
 
+## Async Trace Markers: Finalize Syntax and Semantics
+
+**Priority: High** — The async trace marker API is currently experimental and uses explicit `await mark()` function calls, which is verbose and departs from the sync API's elegant comment-based approach.
+
+**Goal**: Design and implement a comment-based marking syntax for async code that mirrors the synchronous trace markers approach, eliminating the need to pass marker functions to tasks.
+
+### Current Issues
+
+1. **Explicit function calls are verbose**: Users must:
+   - Get a marker function from `executor.marker('task_name')`
+   - Pass it to every task that needs markers
+   - Call `await mark('marker_name')` at each synchronization point
+
+2. **Inconsistent API**: The sync API uses `# interlace: marker_name` comments (non-invasive), while async requires explicit `await mark()` calls (invasive to function signatures).
+
+3. **Not user-friendly**: For new users coming from the sync API, the async approach feels like a step backward.
+
+### Proposed Solutions: Implicit Marker Injection via `sys.settrace`
+- Use `sys.settrace` with line-level tracing.
+- Insert implicit checkpoints at `await` boundaries, triggered by comments. This could be implemented in two ways:
+  1. Allow continued execution in that context until the next "await" statement or opcode. (With pure async code, race conditions only happen at await/etc. Can we identify this? Probably by using our own event loop.)
+  2. Throw a configuration error unless the next statement is an await, since races cannot take place in (pure) async code _except_ by await statements.
+
+---
+
 ## Cooperative Wrappers for Threading Primitives
 
 Currently, only `threading.Lock` has a cooperative wrapper (`_CooperativeLock` in
