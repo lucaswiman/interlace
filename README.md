@@ -71,71 +71,9 @@ assert account.balance == 150, "Race condition detected!"
 
 ## Usage Approaches
 
-Interlace provides three different ways to control thread interleaving:
+Interlace provides two different ways to control thread interleaving:
 
-### 1. Mock Events (Checkpoint-based)
-
-Use explicit checkpoints in your code to synchronize thread execution:
-
-```python
-from interlace.mock_events import Interlace, InterleaveBuilder
-
-# Define your shared state and operations
-class Counter:
-    _interlace = None
-
-    def __init__(self):
-        self.value = 0
-
-    def increment(self):
-        temp = self.value
-        if self._interlace:
-            self._interlace.checkpoint('increment', 'after_read')
-
-        temp += 1
-
-        if self._interlace:
-            self._interlace.checkpoint('increment', 'before_write')
-        self.value = temp
-
-# Run deterministic test
-counter = Counter()
-
-with Interlace() as il:
-    Counter._interlace = il
-
-    @il.task('t1')
-    def task1():
-        counter.increment()
-
-    @il.task('t2')
-    def task2():
-        counter.increment()
-
-    # Force both reads before any writes (race condition)
-    il.order([
-        ('t1', 'increment', 'after_read'),
-        ('t2', 'increment', 'after_read'),
-        ('t1', 'increment', 'before_write'),
-        ('t2', 'increment', 'before_write'),
-    ])
-
-    il.run()
-    Counter._interlace = None
-
-assert counter.value == 1  # Race condition: one increment lost!
-```
-
-**Advantages:**
-- Simple and explicit
-- Fine-grained control over interleaving
-- Uses only stdlib (threading, unittest.mock)
-
-**Disadvantages:**
-- Requires manual checkpoint insertion
-- Can't test third-party code without modification
-
-### 2. Bytecode Manipulation
+### 1. Bytecode Manipulation
 
 Automatically instrument functions using bytecode rewriting. No checkpoints needed!
 
@@ -207,9 +145,9 @@ print(f"Interleaved result: {counter2.value}")  # Might be wrong due to race
 - Property-based exploration finds edge cases
 - Automatic bytecode instrumentation
 
-### 3. Trace Markers
+### 2. Trace Markers
 
-Use comment-based markers for simple, lightweight control:
+Use comment-based markers for simple, lightweight control. Markers can be placed inline with code or on empty lines:
 
 ```python
 from interlace.trace_markers import Schedule, Step, TraceExecutor
@@ -219,9 +157,16 @@ class Counter:
         self.value = 0
 
     def increment(self):
-        temp = self.value  # interlace: after_read
+        # Markers on empty lines (cleaner):
+        # interlace: after_read
+        temp = self.value
         temp += 1
-        self.value = temp  # interlace: before_write
+        # interlace: before_write
+        self.value = temp
+
+        # Or use inline markers:
+        # temp = self.value  # interlace: after_read
+        # self.value = temp  # interlace: before_write
 
 counter = Counter()
 
@@ -250,71 +195,59 @@ assert counter.value == 1  # Race condition!
 
 **Advantages:**
 - Lightweight - just comments in code
+- Two placement styles: empty lines (cleaner) or inline (compact)
 - Automatic execution tracing
 - Simple and readable
+- No code modification needed for markers
 
 ## Async Support
 
-All three approaches have async variants:
+Both approaches have async variants. For example, with async trace markers:
 
 ```python
 import asyncio
-from interlace.async_mock_events import AsyncInterlace
+from interlace.async_trace_markers import AsyncSchedule, AsyncStep, AsyncTraceExecutor
 
-class BankAccount:
-    _interlace = None
+class Counter:
+    def __init__(self):
+        self.value = 0
 
-    def __init__(self, balance=0):
-        self.balance = balance
-
-    async def transfer(self, amount):
-        # Note: use 'before_read' and 'after_read' for async to avoid eager execution
-        if self._interlace:
-            await self._interlace.checkpoint('transfer', 'before_read')
-        current = self.balance
-        if self._interlace:
-            await self._interlace.checkpoint('transfer', 'after_read')
-
+    async def increment(self):
+        # interlace: after_read
+        temp = self.value
         await asyncio.sleep(0)  # Simulate async work
-        new_balance = current + amount
-
-        if self._interlace:
-            await self._interlace.checkpoint('transfer', 'before_write')
-        self.balance = new_balance
-        return new_balance
+        # interlace: before_write
+        self.value = temp + 1
 
 async def test():
-    account = BankAccount(balance=100)
+    counter = Counter()
 
-    async with AsyncInterlace() as il:
-        BankAccount._interlace = il
+    # Define execution order using markers
+    schedule = AsyncSchedule([
+        AsyncStep("task1", "after_read"),
+        AsyncStep("task2", "after_read"),
+        AsyncStep("task1", "before_write"),
+        AsyncStep("task2", "before_write"),
+    ])
 
-        @il.task('task1')
-        async def task1():
-            await account.transfer(50)
+    async def worker1():
+        await counter.increment()
 
-        @il.task('task2')
-        async def task2():
-            await account.transfer(50)
+    async def worker2():
+        await counter.increment()
 
-        il.order([
-            ('task1', 'transfer', 'before_read'),
-            ('task2', 'transfer', 'before_read'),
-            ('task1', 'transfer', 'after_read'),
-            ('task2', 'transfer', 'after_read'),
-            ('task1', 'transfer', 'before_write'),
-            ('task2', 'transfer', 'before_write'),
-        ])
+    # Run with controlled interleaving
+    executor = AsyncTraceExecutor(schedule)
+    executor.run("task1", worker1)
+    executor.run("task2", worker2)
+    await executor.wait(timeout=5.0)
 
-        await il.run()
-        BankAccount._interlace = None
-
-    assert account.balance == 150  # Race condition!
+    assert counter.value == 1  # Race condition!
 
 asyncio.run(test())
 ```
 
-**Key insight:** In async code, race conditions only happen at `await` points since the event loop is single-threaded. Proper checkpoint placement is crucial.
+**Key insight:** In async code, race conditions only happen at `await` points since the event loop is single-threaded. Marker placement is crucial for proper synchronization.
 
 ## Development
 
@@ -328,14 +261,12 @@ make test
 make test-interlace
 ```
 
-All tests pass successfully (59 tests total):
+All tests pass successfully (40 tests total):
 
 ```
-tests/test_mock_events.py ............. (10 tests)
-tests/test_async_mock_events.py ....... (9 tests)
 tests/test_bytecode.py ............... (11 tests)
 tests/test_async_bytecode.py ......... (9 tests)
-tests/test_trace_markers.py .......... (8 tests)
+tests/test_trace_markers.py .......... (9 tests)
 tests/test_async_trace_markers.py .... (9 tests)
 tests/test_interlace.py .............. (2 tests)
 ```
@@ -349,15 +280,12 @@ interlace/
 ├── README.md                   # This file
 ├── interlace/                  # Python package
 │   ├── __init__.py
-│   ├── mock_events.py          # Checkpoint-based approach
-│   ├── async_mock_events.py    # Async checkpoint-based
 │   ├── bytecode.py             # Bytecode instrumentation
 │   ├── async_bytecode.py       # Async bytecode instrumentation
+│   ├── async_scheduler.py      # Async scheduling utilities
 │   ├── trace_markers.py        # Trace marker approach
 │   └── async_trace_markers.py  # Async trace markers
 └── tests/                      # Test suite
-    ├── test_mock_events.py
-    ├── test_async_mock_events.py
     ├── test_bytecode.py
     ├── test_async_bytecode.py
     ├── test_trace_markers.py

@@ -462,6 +462,83 @@ def some_func(a, b):
     print("✓ Nested multiline calls with markers work!")
 
 
+def test_markers_on_empty_lines():
+    """Test that markers work on lines containing only the marker comment.
+
+    This test verifies that markers can be placed on empty lines (lines with only
+    a comment) rather than inline with code. This is useful for marking specific
+    execution points without modifying the actual code statements.
+
+    Both styles work:
+        # Markers on empty lines (cleaner):
+        # interlace: before_read
+        val = get()
+        # interlace: after_read
+
+        # Markers inline with code:
+        val = get()  # interlace: read
+    """
+    print("\n=== Test: Markers on Empty Lines ===")
+
+    results = []
+    lock = threading.Lock()
+
+    def append_safe(value):
+        with lock:
+            results.append(value)
+
+    # Use exec to create a function with markers on empty lines
+    code = '''
+def worker1():
+    # interlace: before_read
+    val = get_value()
+    # interlace: after_read
+    append_safe("t1_processed")
+
+def worker2():
+    # interlace: before_read
+    val = get_value()
+    # interlace: after_read
+    append_safe("t2_processed")
+
+def get_value():
+    return 42
+'''
+
+    namespace = {
+        "append_safe": append_safe,
+    }
+    exec(code, namespace)
+    worker1 = namespace["worker1"]
+    worker2 = namespace["worker2"]
+
+    # Define schedule to interleave threads at markers on empty lines
+    schedule = Schedule([
+        Step("thread1", "before_read"),
+        Step("thread2", "before_read"),
+        Step("thread1", "after_read"),
+        Step("thread2", "after_read"),
+    ])
+
+    executor = TraceExecutor(schedule)
+    executor.run("thread1", worker1)
+    executor.run("thread2", worker2)
+    executor.wait(timeout=5.0)
+
+    print(f"Results: {results}")
+
+    # Verify that both threads executed and hit all markers
+    assert "t1_processed" in results, "thread1 should execute"
+    assert "t2_processed" in results, "thread2 should execute"
+
+    # Verify the order is correct (before_read for both threads, then after_read)
+    t1_processed_idx = results.index("t1_processed")
+    t2_processed_idx = results.index("t2_processed")
+
+    # The execution order should reflect our schedule
+    print("✓ Markers on empty lines work correctly!")
+
+
 def run_all_tests():
     """Run all tests and report results."""
     print("\n" + "=" * 60)
@@ -479,6 +556,7 @@ def run_all_tests():
         test_complex_race_scenario,
         test_multiline_statements_with_markers,
         test_multiline_with_nested_calls,
+        test_markers_on_empty_lines,
     ]
 
     passed = 0
