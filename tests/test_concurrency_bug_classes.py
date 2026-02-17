@@ -342,33 +342,29 @@ def test_async_suspension_point_race_exact_schedule():
 
     Forces both tasks to read before either writes, causing lost update.
     """
+    counter = AsyncBuggyCounter()
 
-    async def run_test():
-        counter = AsyncBuggyCounter()
+    # Schedule that causes lost update in async context
+    schedule = Schedule(
+        [
+            Step("task1", "read_value"),
+            Step("task2", "read_value"),
+            Step("task1", "write_value"),
+            Step("task2", "write_value"),
+        ]
+    )
 
-        # Schedule that causes lost update in async context
-        schedule = Schedule(
-            [
-                Step("task1", "read_value"),
-                Step("task2", "read_value"),
-                Step("task1", "write_value"),
-                Step("task2", "write_value"),
-            ]
-        )
+    executor = AsyncTraceExecutor(schedule)
 
-        executor = AsyncTraceExecutor(schedule)
+    executor.run(
+        {
+            "task1": counter.increment,
+            "task2": counter.increment,
+        }
+    )
 
-        await executor.run(
-            {
-                "task1": counter.increment,
-                "task2": counter.increment,
-            }
-        )
-
-        # Bug manifests: both increments happened but value is only 1
-        assert counter.value == 1, "Lost update in async - expected 2 but got 1"
-
-    asyncio.run(run_test())
+    # Bug manifests: both increments happened but value is only 1
+    assert counter.value == 1, "Lost update in async - expected 2 but got 1"
 
 
 def test_async_suspension_point_race_exploration():
@@ -435,30 +431,26 @@ def test_async_order_violation_exact_schedule():
     Forces use_resource() to run before init_resource(). The user task
     sees resource=None because init hasn't happened yet.
     """
+    manager = AsyncBuggyResourceManager()
 
-    async def run_test():
-        manager = AsyncBuggyResourceManager()
+    # Schedule that violates order: use before init
+    schedule = Schedule(
+        [
+            Step("user_task", "use_resource"),
+            Step("init_task", "init_resource"),
+        ]
+    )
 
-        # Schedule that violates order: use before init
-        schedule = Schedule(
-            [
-                Step("user_task", "use_resource"),
-                Step("init_task", "init_resource"),
-            ]
-        )
+    executor = AsyncTraceExecutor(schedule)
 
-        executor = AsyncTraceExecutor(schedule)
+    executor.run(
+        {
+            "init_task": lambda: manager.init_resource("hello"),
+            "user_task": manager.use_resource,
+        }
+    )
 
-        await executor.run(
-            {
-                "init_task": lambda: manager.init_resource("hello"),
-                "user_task": manager.use_resource,
-            }
-        )
-
-        assert manager.used_before_init, "Resource should have been used before initialization"
-
-    asyncio.run(run_test())
+    assert manager.used_before_init, "Resource should have been used before initialization"
 
 
 def test_async_order_violation_exploration():

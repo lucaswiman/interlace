@@ -177,28 +177,25 @@ Testing race conditions in async code using async trace markers:
            await asyncio.sleep(0)  # Yield point for marker
            self.balance = new_balance
 
-   async def main():
-       account = AsyncBankAccount(balance=100)
+   account = AsyncBankAccount(balance=100)
 
-       # Define a schedule that triggers the race condition
-       schedule = Schedule([
-           Step("task1", "after_read"),    # Task1 reads 100
-           Step("task2", "after_read"),    # Task2 reads 100
-           Step("task1", "before_write"),  # Task1 writes 150
-           Step("task2", "before_write"),  # Task2 writes 150
-       ])
+   # Define a schedule that triggers the race condition
+   schedule = Schedule([
+       Step("task1", "after_read"),    # Task1 reads 100
+       Step("task2", "after_read"),    # Task2 reads 100
+       Step("task1", "before_write"),  # Task1 writes 150
+       Step("task2", "before_write"),  # Task2 writes 150
+   ])
 
-       executor = AsyncTraceExecutor(schedule)
-       await executor.run({
-           "task1": lambda: account.transfer(50),
-           "task2": lambda: account.transfer(50),
-       })
+   executor = AsyncTraceExecutor(schedule)
+   executor.run({
+       "task1": lambda: account.transfer(50),
+       "task2": lambda: account.transfer(50),
+   })
 
-       # Race condition: one transfer was lost
-       assert account.balance == 150, f"Expected 150, got {account.balance}"
-       print("Async race condition detected!")
-
-   asyncio.run(main())
+   # Race condition: one transfer was lost
+   assert account.balance == 150, f"Expected 150, got {account.balance}"
+   print("Async race condition detected!")
 
 
 Example 5: Finding Race Conditions Automatically (Experimental)

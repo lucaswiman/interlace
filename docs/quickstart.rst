@@ -149,26 +149,23 @@ code only occur at ``await`` points:
            await asyncio.sleep(0)  # Yield point for marker
            self.value = temp + 1
 
-   async def main():
-       counter = AsyncCounter()
+   counter = AsyncCounter()
 
-       # Same schedule syntax as sync version
-       schedule = Schedule([
-           Step("task1", "after_read"),
-           Step("task2", "after_read"),
-           Step("task1", "before_write"),
-           Step("task2", "before_write"),
-       ])
+   # Same schedule syntax as sync version
+   schedule = Schedule([
+       Step("task1", "after_read"),
+       Step("task2", "after_read"),
+       Step("task1", "before_write"),
+       Step("task2", "before_write"),
+   ])
 
-       executor = AsyncTraceExecutor(schedule)
-       await executor.run({
-           "task1": counter.increment,
-           "task2": counter.increment,
-       })
+   executor = AsyncTraceExecutor(schedule)
+   executor.run({
+       "task1": counter.increment,
+       "task2": counter.increment,
+   })
 
-       assert counter.value == 1, "Race condition detected!"
-
-   asyncio.run(main())
+   assert counter.value == 1, "Race condition detected!"
 
 
 Next Steps

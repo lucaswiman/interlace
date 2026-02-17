@@ -121,6 +121,13 @@ def _check_thread_cleanup(request):
             f"If this is intentional (e.g., testing deadlocks that cannot be cleaned up), "
             f"mark the test with @pytest.mark.intentionally_leaves_dangling_threads"
         )
+    # Fail on non-daemon threads (these would block pytest exit)
+    if non_daemon_threads:
+        thread_info = ", ".join(f"{t.name} (ident={t.ident})" for t in non_daemon_threads)
+        pytest.fail(
+            f"Test {request.node.nodeid} left {len(non_daemon_threads)} non-daemon thread(s) running: {thread_info}. "
+            f"All threads must be joined before test completion."
+        )
 
 
 @pytest.fixture

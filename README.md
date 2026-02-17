@@ -253,27 +253,24 @@ class Counter:
         await asyncio.sleep(0)  # Yield point for marker
         self.value = temp + 1
 
-async def test():
-    counter = Counter()
+counter = Counter()
 
-    # Define execution order using markers
-    schedule = Schedule([
-        Step("task1", "after_read"),
-        Step("task2", "after_read"),
-        Step("task1", "before_write"),
-        Step("task2", "before_write"),
-    ])
+# Define execution order using markers
+schedule = Schedule([
+    Step("task1", "after_read"),
+    Step("task2", "after_read"),
+    Step("task1", "before_write"),
+    Step("task2", "before_write"),
+])
 
-    # Run with controlled interleaving
-    executor = AsyncTraceExecutor(schedule)
-    await executor.run({
-        "task1": counter.increment,
-        "task2": counter.increment,
-    })
+# Run with controlled interleaving (synchronous method)
+executor = AsyncTraceExecutor(schedule)
+executor.run({
+    "task1": counter.increment,
+    "task2": counter.increment,
+})
 
-    assert counter.value == 1  # Race condition!
-
-asyncio.run(test())
+assert counter.value == 1  # Race condition!
 ```
 
 **Key insight:** In async code, race conditions only happen at `await` points since the event loop is single-threaded. Marker placement is crucial for proper synchronization.

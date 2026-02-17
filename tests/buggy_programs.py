@@ -222,23 +222,20 @@ class AsyncBuggyCounter:
     def __init__(self):
         self.value = 0
 
+    async def get_value(self):
+        """Get counter value (simulates async I/O)."""
+        return self.value
+
+    async def set_value(self, value):
+        """Set counter value (simulates async I/O)."""
+        self.value = value
+
     async def increment(self):
-        """Increment the counter (not atomic due to await in the middle).
-
-        Marker pattern: the ``# interlace:`` comment and ``await`` come BEFORE
-        the operation they gate, so the scheduler can control when each
-        operation executes.
-        """
-        import asyncio
-
+        """Increment the counter (not atomic due to await in the middle)."""
         # interlace: read_value
-        await asyncio.sleep(0)
-        current = self.value
-
-        new_value = current + 1
+        current = await self.get_value()
         # interlace: write_value
-        await asyncio.sleep(0)
-        self.value = new_value
+        await self.set_value(current + 1)
 
 
 class AsyncBuggyCounterBytecode:
@@ -279,21 +276,23 @@ class AsyncBuggyResourceManager:
         self.resource = None
         self.used_before_init = False
 
+    async def _write_resource(self, value):
+        """Write resource value (simulates async I/O)."""
+        self.resource = value
+
+    async def _read_resource(self):
+        """Read resource value (simulates async I/O)."""
+        return self.resource
+
     async def init_resource(self, value):
         """Initialize the resource - should be called before use."""
-        import asyncio
-
         # interlace: init_resource
-        await asyncio.sleep(0)
-        self.resource = value
+        await self._write_resource(value)
 
     async def use_resource(self):
         """Use the resource - assumes it's been initialized."""
-        import asyncio
-
         # interlace: use_resource
-        await asyncio.sleep(0)
-        val = self.resource
+        val = await self._read_resource()
         if val is None:
             self.used_before_init = True
             return None

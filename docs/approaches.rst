@@ -51,7 +51,6 @@ placed before awaits to define synchronization boundaries.
 
 .. code-block:: python
 
-   import asyncio
    from interlace.async_trace_markers import AsyncTraceExecutor
    from interlace.common import Schedule, Step
 
@@ -59,13 +58,37 @@ placed before awaits to define synchronization boundaries.
        def __init__(self):
            self.value = 0
 
+       async def get_count(self):
+           """Read the counter value (simulates async I/O like database read)."""
+           return self.value
+
+       async def set_count(self, value):
+           """Write the counter value (simulates async I/O like database write)."""
+           self.value = value
+
        async def increment(self):
-           # interlace: after_read
-           temp = self.value
-           await asyncio.sleep(0)  # Yield point for marker
-           # interlace: before_write
-           await asyncio.sleep(0)  # Yield point for marker
-           self.value = temp + 1
+           """Increment with a race condition between read and write."""
+           # interlace: read_counter
+           current = await self.get_count()
+           # interlace: write_counter
+           await self.set_count(current + 1)
+
+   # Alternative: markers inside the async methods themselves
+   class AsyncCounterAlt:
+       def __init__(self):
+           self.value = 0
+
+       async def get_count(self):
+           # interlace: read_counter
+           return self.value
+
+       async def set_count(self, value):
+           # interlace: write_counter
+           self.value = value
+
+       async def increment(self):
+           current = await self.get_count()
+           await self.set_count(current + 1)
 
 
 Bytecode Instrumentation (Experimental)
