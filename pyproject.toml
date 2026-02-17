@@ -2,6 +2,9 @@
 requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+packages = ["interlace"]
+
 [project]
 name = "interlace"
 version = "0.1.0"
@@ -36,6 +39,7 @@ line-length = 120
 select = ["E", "F", "W", "I", "N", "UP", "A", "C4", "ISC", "PIE", "Q", "LOG", "PERF"]
 ignore = [
     "E402",   # Module level import not at top of file (valid in conftest.py)
+    "E501",   # Line too long (conflicts with docstring formatting in some cases)
     "F841",   # Unused variable (often intentional in test setup)
     "C408",   # Unnecessary dict() call (dict() with kwargs is more readable)
     "PERF203",  # try-except in loop (performance suggestion, acceptable for test code)

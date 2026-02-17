@@ -76,7 +76,7 @@ below for the principled solution.
 - [x] Reuse `MarkerRegistry` from sync trace markers
 - [x] Update tests to remove explicit `await mark()` calls
 - [ ] Add optional marker validation (warn if two markers with no `await` between)
-- [ ] Add comprehensive documentation and examples
+- [x] Add comprehensive documentation and examples
 
 ### Implementation: Coroutine-Driving with settrace
 
