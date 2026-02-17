@@ -168,14 +168,26 @@ thin dispatch wrappers over them.
 
 **Priority: Medium** — Future work for exhaustive async/thread interleaving exploration.
 
+**Full specification:** [`ideas/dpor_spec.md`](ideas/dpor_spec.md) — comprehensive
+design document covering the Rust DPOR engine, vector clock data structures, conflict
+detection strategies for Python, integration with both bytecode and trace marker modes,
+preemption bounding, and a phased implementation plan. The Rust core is modeled on
+Tokio's [loom](https://github.com/tokio-rs/loom) library for direct algorithm translation
+via PyO3.
+
 **Status**:
-- [ ] Design conflict detection for memory locations (object attributes, dict keys, list indices)
-- [ ] Implement happens-before tracking based on synchronization
-- [ ] Implement backtrack set computation for classic DPOR
-- [ ] Add execution replay support
+- [x] Design conflict detection for memory locations (object attributes, dict keys, list indices) — see spec Section 5
+- [x] Design happens-before tracking based on synchronization — see spec Section 6
+- [x] Design backtrack set computation for classic DPOR — see spec Section 4
+- [x] Design execution replay support — see spec Section 4.4
+- [ ] Implement Rust DPOR core with PyO3 bindings (spec Phase 1)
+- [ ] Integrate with bytecode instrumentation (spec Phase 2)
+- [ ] Add synchronization-aware happens-before to cooperative wrappers (spec Phase 3)
+- [ ] Add preemption bounding (spec Phase 4)
+- [ ] Integrate with trace markers + conflict annotations (spec Phase 5)
 - [ ] For async DPOR: Create custom `InterlaceEventLoop(asyncio.SelectorEventLoop)` subclass
 - [ ] Integrate coroutine-driving from async trace markers into custom event loop
-- [ ] Research and potentially implement Optimal DPOR (Abdulla et al., 2014)
+- [ ] Research and potentially implement Optimal DPOR (Abdulla et al., 2014) — see spec Section 8
 
 The current exploration strategy in `explore_interleavings()` generates random
 schedules — essentially a random walk through the interleaving space. This works
