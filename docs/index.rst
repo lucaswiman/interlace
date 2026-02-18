@@ -20,7 +20,7 @@ Interlace provides tools for controlling thread interleaving at a fine-grained l
 Key Features
 ------------
 
-- **Deterministically reproduce race conditions** - Force specific interleavings to make race conditions happen reliably in tests
+- **Deterministically reproduce race conditions** - Force specific execution ordering to make race conditions happen reliably in tests
 - **Test concurrent code exhaustively** - Explore different execution orders to find bugs
 - **Verify synchronization correctness** - Ensure that proper locking prevents race conditions
 - **Lightweight integration** - No need to modify third-party code when using trace markers
@@ -31,7 +31,7 @@ Instead of relying on timing-based race detection (which is unreliable), Interla
 Getting Started
 ---------------
 
-The recommended approach for most use cases is **Trace Markers** - a lightweight, comment-based approach that requires minimal code changes:
+**Trace Markers** are a lightweight, comment-based approach that requires minimal code changes:
 
 .. code-block:: python
 
@@ -42,26 +42,25 @@ The recommended approach for most use cases is **Trace Markers** - a lightweight
            self.value = 0
 
        def increment(self):
-           # interlace: after_read
-           temp = self.value
+           temp = self.value  # interlace: read_value
            temp += 1
-           # interlace: before_write
-           self.value = temp
+           self.value = temp  # interlace: write_value
 
-   counter = Counter()
-   schedule = Schedule([
-       Step("thread1", "after_read"),
-       Step("thread2", "after_read"),
-       Step("thread1", "before_write"),
-       Step("thread2", "before_write"),
-   ])
+   def test_counter_lost_update():
+       counter = Counter()
+       schedule = Schedule([
+           Step("thread1", "read_value"),
+           Step("thread2", "read_value"),
+           Step("thread1", "write_value"),
+           Step("thread2", "write_value"),
+       ])
 
-   executor = TraceExecutor(schedule)
-   executor.run("thread1", lambda: counter.increment())
-   executor.run("thread2", lambda: counter.increment())
-   executor.wait(timeout=5.0)
+       executor = TraceExecutor(schedule)
+       executor.run("thread1", counter.increment)
+       executor.run("thread2", counter.increment)
+       executor.wait(timeout=5.0)
 
-   assert counter.value == 1  # Race condition detected!
+       assert counter.value == 1  # One increment lost
 
 For more information, see :doc:`quickstart` and :doc:`approaches`.
 

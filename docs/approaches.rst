@@ -1,13 +1,14 @@
 Approaches to Concurrency Control
 ==================================
 
-Interlace provides two approaches for controlling thread interleaving. This document explains the characteristics, trade-offs, and use cases for each.
+Interlace provides two approaches for controlling thread interleaving.
 
 
-Trace Markers (Recommended)
----------------------------
+Trace Markers
+--------------
 
-Trace Markers are the recommended approach for most use cases. They use lightweight comment-based markers to define synchronization points in your code, requiring no semantic code changes to production code.
+Trace Markers use lightweight comment-based markers to define synchronization
+points in your code, requiring no semantic code changes.
 
 **How It Works:**
 
@@ -19,6 +20,10 @@ schedule says it's that thread's turn to proceed past that marker. This gives
 deterministic control over the order threads reach each synchronization point,
 without changing any executable code — markers are just comments.
 
+A marker **gates** the code that follows it. Name markers after the operation
+they gate (e.g. ``read_value``, ``write_balance``) rather than with temporal
+prefixes like ``before_`` or ``after_``.
+
 .. code-block:: python
 
    from interlace.trace_markers import Schedule, Step, TraceExecutor
@@ -28,26 +33,26 @@ without changing any executable code — markers are just comments.
            self.value = 0
 
        def increment(self):
-           # interlace: after_read
-           temp = self.value
+           temp = self.value  # interlace: read_value
            temp += 1
-           # interlace: before_write
-           self.value = temp
-
-**When to Use:**
-
-- You want explicit control over synchronization points
-- You're testing code you can modify slightly (adding comments)
-- You need a stable, well-understood approach
-- You want minimal performance impact
-- You're testing for specific race conditions at known points
+           self.value = temp  # interlace: write_value
 
 
 **Async Support:**
 
-Async trace markers use the same comment-based syntax as sync trace markers. Race
-conditions in async code only occur at ``await`` points, so markers should be
-placed before awaits to define synchronization boundaries.
+Async trace markers use the same comment-based syntax. Each async task runs in
+its own thread (via ``asyncio.run``), with the same ``sys.settrace`` mechanism
+controlling interleaving between tasks.
+
+The synchronization contract:
+
+- A marker gates the next ``await`` expression (or the line it's on if inline).
+  When a task reaches a marker, it pauses until the scheduler grants it a turn.
+  Only then does the gated ``await`` execute.
+- Between two markers, the task runs without interruption from other scheduled
+  tasks. Any intermediate ``await`` calls within that span complete normally.
+- Because async code can only interleave at ``await`` points, markers should be
+  placed to gate the ``await`` expressions whose ordering you want to control.
 
 .. code-block:: python
 
@@ -100,14 +105,6 @@ Bytecode Instrumentation (Experimental)
 
 Bytecode instrumentation automatically inserts checkpoints into functions using Python bytecode rewriting. No manual marker insertion is needed.
 
-**Key Characteristics:**
-
-- **Experimental** - API may change, use with care
-- **Automatic** - No manual checkpoint insertion required
-- **Unmodified code** - Can test third-party code without changes
-- **Property-based exploration** - Can discover edge cases automatically
-- **Higher overhead** - Bytecode instrumentation adds runtime cost
-
 **How It Works:**
 
 Each thread is run with a ``sys.settrace`` callback that sets
@@ -127,10 +124,10 @@ that spin-yield via the scheduler instead of blocking. The patching is scoped
 to each test run: primitives are replaced before ``setup()`` and restored
 afterwards.
 
-For property-based exploration, ``explore_interleavings()`` generates random
-opcode-level schedules and checks that an invariant holds under each one. If
-any schedule violates the invariant, it returns the counterexample schedule for
-deterministic reproduction.
+``explore_interleavings()`` does property-based exploration in the style of
+`Hypothesis <https://hypothesis.readthedocs.io/>`_: it generates random
+opcode-level schedules and checks that an invariant holds under each one,
+returning any counterexample schedule.
 
 .. code-block:: python
 
@@ -144,30 +141,21 @@ deterministic reproduction.
            temp = self.value
            self.value = temp + 1
 
-   # Automatically explore different interleavings
-   result = explore_interleavings(
-       setup=lambda: Counter(value=0),
-       threads=[
-           lambda c: c.increment(),
-           lambda c: c.increment(),
-       ],
-       invariant=lambda c: c.value == 2,  # Should hold if no races
-       max_attempts=200,
-       max_ops=200,
-       seed=42,
-   )
+   def test_counter_increment_is_not_atomic():
+       result = explore_interleavings(
+           setup=lambda: Counter(value=0),
+           threads=[
+               lambda c: c.increment(),
+               lambda c: c.increment(),
+           ],
+           invariant=lambda c: c.value == 2,
+           max_attempts=200,
+           max_ops=200,
+           seed=42,
+       )
 
-   if not result.property_holds:
-       print(f"Race condition found after {result.num_explored} attempts")
-       print(f"Expected: 2, Got: {result.counterexample.value}")
-
-**When to Use (with caution):**
-
-- You want to automatically discover race conditions
-- You're testing unmodified third-party code
-- You're comfortable with experimental features
-- You need to explore many possible interleavings
-- Performance is not a critical concern
+       assert not result.property_holds
+       assert result.counterexample.value == 1
 
 **Controlled Interleaving (Internal/Advanced):**
 
@@ -186,70 +174,9 @@ debugging this library or building tooling on top of it, rather than for general
    The async variant (``interlace.async_bytecode``) uses ``await_point()`` markers rather
    than opcodes, so its schedules are stable — see that module for details.
 
-**Limitations and Caveats:**
+**Limitations:**
 
 - Results may vary across Python versions
 - Some bytecode patterns may not be instrumented correctly
 - Performance impact is higher than trace markers
-- Less predictable behavior than explicit markers
 - Async bytecode instrumentation is also experimental
-
-
-Comparison Table
-----------------
-
-.. list-table::
-   :header-rows: 1
-
-   * - Feature
-     - Trace Markers
-     - Bytecode Instrumentation
-   * - Status
-     - Stable, recommended
-     - Experimental
-   * - Manual checkpoint insertion
-     - Yes (comments)
-     - No (automatic)
-   * - Works with unmodified code
-     - No (needs comments)
-     - Yes
-   * - Performance
-     - Low overhead
-     - Higher overhead
-   * - Determinism
-     - High
-     - Lower (Python version dependent)
-   * - Async support
-     - Yes, stable
-     - Yes, experimental
-   * - Property-based exploration
-     - Manual schedules
-     - Automatic
-   * - Learning curve
-     - Low
-     - Medium
-   * - Recommended for most cases
-     - ✓
-     -
-
-
-Choosing the Right Approach
----------------------------
-
-**Use Trace Markers if:**
-
-- You want stable, predictable behavior
-- You're comfortable adding comments to code
-- You have specific synchronization points in mind
-- You need deterministic test results
-- You're testing code you can modify
-
-**Use Bytecode Instrumentation if:**
-
-- You need to test unmodified third-party code
-- You want automatic race condition discovery
-- You're comfortable with experimental features
-- You have time to handle potential API changes
-- Performance is not a concern
-
-**In most cases, start with Trace Markers.** They provide clear, explicit control and stable behavior. Use bytecode instrumentation when you specifically need its capabilities.

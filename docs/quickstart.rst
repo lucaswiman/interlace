@@ -1,13 +1,11 @@
 Quick Start
 ===========
 
-This guide will get you up and running with Interlace using the recommended **Trace Markers** approach.
+This guide will get you up and running with Interlace using **Trace Markers**.
 
 
-Basic Example: Detecting a Race Condition
-------------------------------------------
-
-Let's create a simple example that demonstrates a race condition in a counter:
+Basic Example: Triggering a Race Condition
+-------------------------------------------
 
 .. code-block:: python
 
@@ -18,70 +16,67 @@ Let's create a simple example that demonstrates a race condition in a counter:
            self.value = 0
 
        def increment(self):
-           # interlace: after_read
-           temp = self.value
+           temp = self.value  # interlace: read_value
            temp += 1
-           # interlace: before_write
-           self.value = temp
+           self.value = temp  # interlace: write_value
 
-   # Create a counter
-   counter = Counter()
+   def test_counter_lost_update():
+       counter = Counter()
 
-   # Define an interleaving that triggers the race condition
-   # Both threads read before either writes, causing lost updates
-   schedule = Schedule([
-       Step("thread1", "after_read"),    # T1 reads 0
-       Step("thread2", "after_read"),    # T2 reads 0 (both see same value!)
-       Step("thread1", "before_write"),  # T1 writes 1
-       Step("thread2", "before_write"),  # T2 writes 1 (overwrites T1's update!)
-   ])
+       # Both threads read before either writes, causing a lost update
+       schedule = Schedule([
+           Step("thread1", "read_value"),    # T1 reads 0
+           Step("thread2", "read_value"),    # T2 reads 0 (both see same value!)
+           Step("thread1", "write_value"),   # T1 writes 1
+           Step("thread2", "write_value"),   # T2 writes 1 (overwrites T1's update!)
+       ])
 
-   # Execute with controlled interleaving
-   executor = TraceExecutor(schedule)
-   executor.run("thread1", lambda: counter.increment())
-   executor.run("thread2", lambda: counter.increment())
-   executor.wait(timeout=5.0)
+       executor = TraceExecutor(schedule)
+       executor.run("thread1", counter.increment)
+       executor.run("thread2", counter.increment)
+       executor.wait(timeout=5.0)
 
-   # Verify the race condition occurred
-   assert counter.value == 1, f"Expected 1 (race condition), got {counter.value}"
-   print("Race condition detected!")
+       assert counter.value == 1  # One increment lost
 
 
 Understanding Trace Markers
 ----------------------------
 
-Trace markers are simple comments that tell Interlace where synchronization points are:
-
-.. code-block:: python
-
-   def increment(self):
-       # interlace: after_read
-       temp = self.value
-       temp += 1
-       # interlace: before_write
-       self.value = temp
+Trace markers are comments of the form ``# interlace: <name>`` that tell
+Interlace where synchronization points are. A marker **gates** the code that
+follows it: when a thread reaches a marker, it pauses until the scheduler grants
+it a turn. Only then does the gated code execute.
 
 Two placement styles are supported:
 
-1. **On empty lines** (recommended for clarity):
+1. **Inline with code** (marker on the same line as the operation it gates):
 
    .. code-block:: python
 
        def increment(self):
-           # interlace: after_read
+           temp = self.value  # interlace: read_value
+           temp += 1
+           self.value = temp  # interlace: write_value
+
+   Here ``read_value`` gates the read of ``self.value``, and ``write_value``
+   gates the write.
+
+2. **On a separate line** before the operation:
+
+   .. code-block:: python
+
+       def increment(self):
+           # interlace: read_value
            temp = self.value
            temp += 1
-           # interlace: before_write
+           # interlace: write_value
            self.value = temp
 
-2. **Inline with code** (compact style):
+   The semantics are the same: the marker gates the next executable line.
 
-   .. code-block:: python
-
-       def increment(self):
-           temp = self.value  # interlace: after_read
-           temp += 1
-           self.value = temp  # interlace: before_write
+Name markers after the operation they gate (``read_value``, ``write_balance``,
+``acquire_lock``, etc.) rather than using temporal prefixes like ``before_`` or
+``after_``.
 
 
 Creating Schedules
@@ -128,12 +123,20 @@ Execute your code with a specific schedule:
 Async Support
 -------------
 
-Async trace markers use the same comment-based syntax. Race conditions in async
-code only occur at ``await`` points:
+Async trace markers use the same comment-based syntax. Each async task runs in
+its own thread (via ``asyncio.run``), with ``sys.settrace`` controlling
+interleaving between tasks.
+
+A marker gates the next ``await`` expression. When a task reaches a marker, it
+pauses until the scheduler grants it a turn; only then does the gated ``await``
+execute. Between two markers the task runs without interruption from other
+scheduled tasks.
+
+Here is a complete async example — the same lost-update race as the sync
+version, but with ``await`` boundaries:
 
 .. code-block:: python
 
-   import asyncio
    from interlace.async_trace_markers import AsyncTraceExecutor
    from interlace.common import Schedule, Step
 
@@ -141,36 +144,53 @@ code only occur at ``await`` points:
        def __init__(self):
            self.value = 0
 
+       async def get_value(self):
+           return self.value
+
+       async def set_value(self, new_value):
+           self.value = new_value
+
        async def increment(self):
-           # interlace: after_read
-           temp = self.value
-           await asyncio.sleep(0)  # Yield point for marker
-           # interlace: before_write
-           await asyncio.sleep(0)  # Yield point for marker
-           self.value = temp + 1
+           # interlace: read_value
+           temp = await self.get_value()
+           # interlace: write_value
+           await self.set_value(temp + 1)
 
-   counter = AsyncCounter()
+   def test_async_counter_lost_update():
+       counter = AsyncCounter()
 
-   # Same schedule syntax as sync version
-   schedule = Schedule([
-       Step("task1", "after_read"),
-       Step("task2", "after_read"),
-       Step("task1", "before_write"),
-       Step("task2", "before_write"),
-   ])
+       # Both tasks read before either writes — triggers the lost update
+       schedule = Schedule([
+           Step("task1", "read_value"),
+           Step("task2", "read_value"),
+           Step("task1", "write_value"),
+           Step("task2", "write_value"),
+       ])
 
-   executor = AsyncTraceExecutor(schedule)
-   executor.run({
-       "task1": counter.increment,
-       "task2": counter.increment,
-   })
+       executor = AsyncTraceExecutor(schedule)
+       executor.run({
+           "task1": counter.increment,
+           "task2": counter.increment,
+       })
 
-   assert counter.value == 1, "Race condition detected!"
+       # Both tasks read 0, then both write 1 — one increment is lost
+       assert counter.value == 1
 
+   def test_async_counter_serialized():
+       counter = AsyncCounter()
 
-Next Steps
-----------
+       # Serialized: task1 completes before task2 starts
+       schedule = Schedule([
+           Step("task1", "read_value"),
+           Step("task1", "write_value"),
+           Step("task2", "read_value"),
+           Step("task2", "write_value"),
+       ])
 
-- Read :doc:`approaches` for detailed information about trace markers and other approaches
-- See :doc:`examples` for more complete examples
-- Check the :doc:`api_reference` for detailed API documentation
+       executor = AsyncTraceExecutor(schedule)
+       executor.run({
+           "task1": counter.increment,
+           "task2": counter.increment,
+       })
+
+       assert counter.value == 2  # No lost update
