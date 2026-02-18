@@ -138,6 +138,9 @@ pauses until the scheduler grants it a turn; only then does the gated ``await``
 execute. Between two markers the task runs without interruption from other
 scheduled tasks.
 
+Here is a complete async example — the same lost-update race as the sync
+version, but with ``await`` boundaries:
+
 .. code-block:: python
 
    from interlace.async_trace_markers import AsyncTraceExecutor
@@ -161,7 +164,7 @@ scheduled tasks.
 
    counter = AsyncCounter()
 
-   # Same schedule syntax as sync version
+   # Both tasks read before either writes — triggers the lost update
    schedule = Schedule([
        Step("task1", "read_value"),
        Step("task2", "read_value"),
@@ -175,4 +178,24 @@ scheduled tasks.
        "task2": counter.increment,
    })
 
-   assert counter.value == 1, "Race condition triggered!"
+   # Both tasks read 0, then both write 1 — one increment is lost
+   assert counter.value == 1, f"Expected 1 (lost update), got {counter.value}"
+
+   # Now verify the correct schedule gives the right answer
+   counter_ok = AsyncCounter()
+
+   correct_schedule = Schedule([
+       Step("task1", "read_value"),
+       Step("task1", "write_value"),
+       Step("task2", "read_value"),
+       Step("task2", "write_value"),
+   ])
+
+   executor_ok = AsyncTraceExecutor(correct_schedule)
+   executor_ok.run({
+       "task1": counter_ok.increment,
+       "task2": counter_ok.increment,
+   })
+
+   # Serialized: task1 reads 0, writes 1, then task2 reads 1, writes 2
+   assert counter_ok.value == 2, f"Expected 2 (correct), got {counter_ok.value}"

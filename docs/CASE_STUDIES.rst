@@ -6,7 +6,7 @@ This document presents ten case studies demonstrating how **interlace** finds
 and reproduces concurrency bugs in Python libraries by running bytecode
 exploration directly against **unmodified library code**.
 
-**Total: 31 passing tests across 10 libraries.**
+**Total: 31 concurrency bugs found and reproduced across 10 libraries.**
 
 Run the full suites::
 
