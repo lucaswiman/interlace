@@ -44,7 +44,9 @@ jobs:
         run: uv pip install -e .[dev]
 
       - name: Build documentation
-        run: make docs-html
+        run: |
+          source .venv/bin/activate
+          make docs-html
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
