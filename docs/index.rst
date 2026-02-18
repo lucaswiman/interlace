@@ -42,18 +42,16 @@ The recommended approach for most use cases is **Trace Markers** - a lightweight
            self.value = 0
 
        def increment(self):
-           # interlace: after_read
-           temp = self.value
+           temp = self.value  # interlace: read_value
            temp += 1
-           # interlace: before_write
-           self.value = temp
+           self.value = temp  # interlace: write_value
 
    counter = Counter()
    schedule = Schedule([
-       Step("thread1", "after_read"),
-       Step("thread2", "after_read"),
-       Step("thread1", "before_write"),
-       Step("thread2", "before_write"),
+       Step("thread1", "read_value"),
+       Step("thread2", "read_value"),
+       Step("thread1", "write_value"),
+       Step("thread2", "write_value"),
    ])
 
    executor = TraceExecutor(schedule)
@@ -61,7 +59,7 @@ The recommended approach for most use cases is **Trace Markers** - a lightweight
    executor.run("thread2", lambda: counter.increment())
    executor.wait(timeout=5.0)
 
-   assert counter.value == 1  # Race condition detected!
+   assert counter.value == 1  # Race condition!
 
 For more information, see :doc:`quickstart` and :doc:`approaches`.
 
