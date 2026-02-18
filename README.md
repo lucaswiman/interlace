@@ -62,7 +62,11 @@ Interlace provides two different ways to control thread interleaving:
 
 ### 1. Trace Markers
 
-Use comment-based markers (`# interlace: <name>`) to control thread execution at specific points in your code. Each thread runs with a [`sys.settrace`](https://docs.python.org/3/library/sys.html#sys.settrace) callback that pauses at markers and waits for a schedule to grant the next execution turn. This gives deterministic control over execution order without modifying code semantics — markers are just comments placed on empty lines or inline.
+Trace markers are special comments (`# interlace: <marker-name>`) which mark particular synchronization points in multithreaded or async code. These are intended to make it easier to reproduce race conditions in test cases and inspect whether some race conditions are possible.
+
+The execution ordering is controlled with a "schedule" object that says what order the threads / markers should run in.
+
+Each thread runs with a [`sys.settrace`](https://docs.python.org/3/library/sys.html#sys.settrace) callback that pauses at markers and waits for a schedule to grant the next execution turn. This gives deterministic control over execution order without modifying code semantics — markers are just comments placed on empty lines or inline.
 
 ```python
 from interlace.trace_markers import Schedule, Step, TraceExecutor
