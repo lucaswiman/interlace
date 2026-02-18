@@ -6,7 +6,31 @@ This document presents ten case studies demonstrating how **interlace** finds
 and reproduces concurrency bugs in Python libraries by running bytecode
 exploration directly against **unmodified library code**.
 
-**Total: 31 concurrency bugs found and reproduced across 10 libraries.**
+**Total: 31 concurrency bugs found across 10 libraries.**
+
+Key Findings
+============
+
+1. **Exploration is highly effective.** All 31 tests found their target bugs on
+   all 20 seeds. Simple counter races are found in 1-4 attempts; more complex
+   TOCTOU patterns take ~17 attempts on average. No models or simplifications
+   needed — interlace runs directly against real library code.
+
+2. **Plain ``+=`` without locks is a universal vulnerability.** Five of ten
+   libraries fail on simple counter increments: pybreaker, urllib3, SQLAlchemy,
+   cachetools, and pydis. Any unsynchronized counter is at risk.
+
+3. **Synchronization gaps vary in severity.** Three of five Round 1 libraries
+   use no synchronization primitives at all. Round 2 shows that even modern
+   libraries like urllib3 and amqtt have races in critical paths. Not all races
+   have equal impact — SQLAlchemy's race is cosmetic, while amqtt's corrupts
+   the MQTT protocol.
+
+4. **Impact assessment requires code reading.** Interlace correctly identifies
+   all non-atomic operations, but whether a race matters depends on its
+   call-site. The SQLAlchemy overflow counter is demonstrably racy, yet benign
+   in practice. This shows interlace's role: find the race, then reason about
+   whether it affects correctness.
 
 Run the full suites::
 
@@ -79,7 +103,6 @@ Metric                          Result
 ==============================  ===============================
 Seeds that found bug            **20 / 20**
 Avg. attempts to find           **1-3**
-Deterministic reproduction      **10/10**
 ==============================  ===============================
 
 The race window between the two ``with`` lock statements in ``_should_keep_going()``
@@ -126,7 +149,6 @@ Metric                          Result
 ==============================  ===============================================
 Seeds that found bug            **20 / 20**
 Avg. attempts to find           **1** (every seed, first try!)
-Deterministic reproduction      **10/10**
 ==============================  ===============================================
 
 The ``_get_libc`` method has a very short code path (dict.get, if-check, CDLL,
@@ -174,7 +196,6 @@ Metric                          Result
 ==============================  ===============================
 Seeds that found bug            **20 / 20**
 Avg. attempts to find           **4**
-Deterministic reproduction      **10/10**
 ==============================  ===============================
 
 Example output::
@@ -227,7 +248,6 @@ Metric                          Result
 ==============================  ===============================================
 Seeds that found bug            **20 / 20**
 Avg. attempts to find           **1.3** (most seeds find it on first try)
-Deterministic reproduction      **10/10**
 ==============================  ===============================================
 
 PyDispatcher's complete lack of synchronization means the race window in
@@ -286,7 +306,6 @@ INCR Lost Update::
     ==============================  ===============================
     Seeds that found bug            **20 / 20**
     Avg. attempts to find           **1.25**
-    Deterministic reproduction      **10/10**
     ==============================  ===============================
 
 The INCR race window (``value = self.get(key)`` ... ``self.set(key, ...)``) spans
@@ -340,7 +359,6 @@ Metric                          Result
 ==============================  ===============================
 Seeds that found bug            **20 / 20**
 Avg. attempts to find           **~2**
-Deterministic reproduction      **10/10**
 ==============================  ===============================
 
 **Test file:** `tests/test_pybreaker_real.py <case_studies/tests/test_pybreaker_real.py>`_
@@ -391,7 +409,6 @@ Metric                          Result
 ==============================  ===============================
 Seeds that found bug            **20 / 20**
 Avg. attempts to find           **~1.5**
-Deterministic reproduction      **10/10**
 ==============================  ===============================
 
 **Test file:** `tests/test_urllib3_real.py <case_studies/tests/test_urllib3_real.py>`_
@@ -475,7 +492,6 @@ Metric                          Result
 ==============================  ===============================
 Seeds that found race           **20 / 20**
 Avg. attempts to find           **~2.5**
-Deterministic reproduction      **10/10**
 ==============================  ===============================
 
 **Test file:** `tests/test_sqlalchemy_pool_real.py <case_studies/tests/test_sqlalchemy_pool_real.py>`_
@@ -525,7 +541,6 @@ Metric                          Result
 ==============================  ============================================
 Seeds that found bug            **20 / 20**
 Avg. attempts to find           **1** (every seed, every first attempt!)
-Deterministic reproduction      **10/10**
 ==============================  ============================================
 
 **Test file:** `tests/test_amqtt_real.py <case_studies/tests/test_amqtt_real.py>`_
@@ -585,7 +600,6 @@ Metric                          Result
 ==============================  ===============================
 Seeds that found bug            **20 / 20**
 Avg. attempts to find           **~17**
-Deterministic reproduction      **10/10**
 ==============================  ===============================
 
 **Test file:** `tests/test_pykka_real.py <case_studies/tests/test_pykka_real.py>`_
@@ -595,45 +609,18 @@ Deterministic reproduction      **10/10**
 Summary
 =======
 
-=================  ====================================  =======  ==================  ==============  =========
-Library            Finding                               Version  Seeds Found (/ 20)  Avg. Attempts   Reproduce
-=================  ====================================  =======  ==================  ==============  =========
-TPool              ``_should_keep_going`` TOCTOU        1bffaaf  **20 / 20**         1-3             10/10
-threadpoolctl      ``_get_libc`` TOCTOU                 cf38a18  **20 / 20**         **1**           10/10
-cachetools         ``__setitem__`` lost update          e5f8f01  **20 / 20**         4               10/10
-PyDispatcher       ``connect()`` TOCTOU                 0c2768d  **20 / 20**         1.3             10/10
-pydis              INCR lost update + SET NX            1b02b27  **20 / 20**         1.25            10/10
-pybreaker          ``increment_counter`` lost update    1.4.1    **20 / 20**         ~2              10/10
-urllib3            ``_new_conn`` lost update            2.x      **20 / 20**         ~1.5            10/10
-SQLAlchemy pool    ``_inc_overflow`` race (diagnostic)  2.x      **20 / 20**         ~2.5            10/10
-amqtt              ``next_packet_id`` duplicate IDs     main     **20 / 20**         **1**           10/10
-pykka              ``tell()`` TOCTOU ghost messages     4.4.1    **20 / 20**         ~17             10/10
-=================  ====================================  =======  ==================  ==============  =========
+=================  ====================================  =======  ==================  ==============
+Library            Finding                               Version  Seeds Found (/ 20)  Avg. Attempts
+=================  ====================================  =======  ==================  ==============
+TPool              ``_should_keep_going`` TOCTOU        1bffaaf  **20 / 20**         1-3
+threadpoolctl      ``_get_libc`` TOCTOU                 cf38a18  **20 / 20**         **1**
+cachetools         ``__setitem__`` lost update          e5f8f01  **20 / 20**         4
+PyDispatcher       ``connect()`` TOCTOU                 0c2768d  **20 / 20**         1.3
+pydis              INCR lost update + SET NX            1b02b27  **20 / 20**         1.25
+pybreaker          ``increment_counter`` lost update    1.4.1    **20 / 20**         ~2
+urllib3            ``_new_conn`` lost update            2.x      **20 / 20**         ~1.5
+SQLAlchemy pool    ``_inc_overflow`` race (diagnostic)  2.x      **20 / 20**         ~2.5
+amqtt              ``next_packet_id`` duplicate IDs     main     **20 / 20**         **1**
+pykka              ``tell()`` TOCTOU ghost messages     4.4.1    **20 / 20**         ~17
+=================  ====================================  =======  ==================  ==============
 
-Key Findings
-============
-
-1. **Exploration is highly effective.** All 31 tests found their target bugs on
-   all 20 seeds. Simple counter races are found in 1-4 attempts; more complex
-   TOCTOU patterns take ~17 attempts on average. No models or simplifications
-   needed — interlace runs directly against real library code.
-
-2. **Deterministic reproduction is 100% reliable.** Once a counterexample
-   schedule is found, ``run_with_schedule`` reproduces the bug 10/10 times
-   across all 10 libraries. These schedules are suitable as regression tests.
-
-3. **Plain ``+=`` without locks is a universal vulnerability.** Five of ten
-   libraries fail on simple counter increments: pybreaker, urllib3, SQLAlchemy,
-   cachetools, and pydis. Any unsynchronized counter is at risk.
-
-4. **Synchronization gaps vary in severity.** Three of five Round 1 libraries
-   use no synchronization primitives at all. Round 2 shows that even modern
-   libraries like urllib3 and amqtt have races in critical paths. Not all races
-   have equal impact — SQLAlchemy's race is cosmetic, while amqtt's corrupts
-   the MQTT protocol.
-
-5. **Impact assessment requires code reading.** Interlace correctly identifies
-   all non-atomic operations, but whether a race matters depends on its
-   call-site. The SQLAlchemy overflow counter is demonstrably racy, yet benign
-   in practice. This shows interlace's role: find the race, then reason about
-   whether it affects correctness.

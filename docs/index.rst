@@ -20,7 +20,7 @@ Interlace provides tools for controlling thread interleaving at a fine-grained l
 Key Features
 ------------
 
-- **Deterministically reproduce race conditions** - Force specific interleavings to make race conditions happen reliably in tests
+- **Deterministically reproduce race conditions** - Force specific execution ordering to make race conditions happen reliably in tests
 - **Test concurrent code exhaustively** - Explore different execution orders to find bugs
 - **Verify synchronization correctness** - Ensure that proper locking prevents race conditions
 - **Lightweight integration** - No need to modify third-party code when using trace markers
