@@ -200,49 +200,5 @@ assert counter.value == 1  # Race condition!
 ### Running Tests
 
 ```bash
-# From the interlace directory
 make test
-
-# Or from the root directory
-make test-interlace
-```
-
-All tests pass successfully:
-
-```
-tests/test_trace_markers.py .............. (Sync trace markers)
-tests/test_async_trace_markers.py ........ (Async trace markers)
-tests/test_bytecode.py ................... (Bytecode instrumentation)
-tests/test_async_bytecode.py ............. (Async bytecode instrumentation)
-tests/test_threading_primitives.py ....... (Threading primitive wrappers)
-tests/test_concurrency_bug_classes.py .... (Concurrency bug detection)
-tests/test_interlace.py .................. (Integration tests)
-```
-
-### Project Structure
-
-```
-interlace/
-├── Makefile                          # Project build targets
-├── pyproject.toml                    # Python packaging configuration
-├── README.md                         # This file
-├── docs/                             # Documentation (Sphinx/ReadTheDocs)
-├── interlace/                        # Python package
-│   ├── __init__.py
-│   ├── common.py                     # Shared types (Schedule, Step)
-│   ├── trace_markers.py              # Trace marker approach
-│   ├── async_trace_markers.py        # Async trace markers
-│   ├── bytecode.py                   # Bytecode instrumentation (experimental)
-│   ├── async_bytecode.py             # Async bytecode (experimental)
-│   └── async_scheduler.py            # Async scheduling utilities
-└── tests/                            # Test suite
-    ├── conftest.py                   # Pytest configuration
-    ├── buggy_programs.py             # Test programs with known bugs
-    ├── test_trace_markers.py
-    ├── test_async_trace_markers.py
-    ├── test_bytecode.py
-    ├── test_async_bytecode.py
-    ├── test_threading_primitives.py
-    ├── test_concurrency_bug_classes.py
-    └── test_interlace.py             # Integration tests
 ```
