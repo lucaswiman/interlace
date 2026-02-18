@@ -154,6 +154,7 @@ def test_convenience_function():
 
 def test_marker_registry():
     """MarkerRegistry scans frames and finds markers."""
+
     def test_function():
         x = 1  # interlace: marker1
         y = 2  # interlace: marker2
