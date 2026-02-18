@@ -143,15 +143,9 @@ if not result.property_holds:
     print(f"Expected value: 2, Got: {result.counterexample.value}")
 ```
 
-### Choosing an Approach
-
-**Trace markers** are stable and straightforward — add comments at synchronization points to control execution order. Use this for targeted testing of specific race conditions and when you can modify the code under test.
-
-**Bytecode instrumentation** requires no markers and can test unmodified third-party code, but it's experimental and may change. The results depend on Python version and bytecode patterns, performance overhead is higher, and threading primitives must be monkey-patched. Use only if you need property-based exploration or must test unmodified library code.
-
 ## Async Support
 
-Both approaches have async variants. Trace markers have stable async support, while bytecode instrumentation async support is experimental.
+Both approaches have async variants.
 
 ### Async Trace Markers
 

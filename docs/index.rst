@@ -31,7 +31,7 @@ Instead of relying on timing-based race detection (which is unreliable), Interla
 Getting Started
 ---------------
 
-The recommended approach for most use cases is **Trace Markers** - a lightweight, comment-based approach that requires minimal code changes:
+**Trace Markers** are a lightweight, comment-based approach that requires minimal code changes:
 
 .. code-block:: python
 

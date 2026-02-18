@@ -17,7 +17,7 @@ Two approaches are available:
 | Approach | Use when | Stability |
 |----------|----------|-----------|
 | **Bytecode exploration** (`interlace.bytecode`) | Testing unmodified third-party code; property-based search | Experimental but effective |
-| **Trace markers** (`interlace.trace_markers`) | You can add `# interlace: name` comments to source | Stable and recommended |
+| **Trace markers** (`interlace.trace_markers`) | You can add `# interlace: name` comments to source | Stable |
 
 For finding bugs in external libraries, **bytecode exploration** is the right
 choice.

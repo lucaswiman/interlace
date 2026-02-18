@@ -1,7 +1,7 @@
 Quick Start
 ===========
 
-This guide will get you up and running with Interlace using the recommended **Trace Markers** approach.
+This guide will get you up and running with Interlace using **Trace Markers**.
 
 
 Basic Example: Triggering a Race Condition
@@ -129,8 +129,14 @@ Execute your code with a specific schedule:
 Async Support
 -------------
 
-Async trace markers use the same comment-based syntax. Race conditions in async
-code only occur at ``await`` points since the event loop is single-threaded.
+Async trace markers use the same comment-based syntax. Each async task runs in
+its own thread (via ``asyncio.run``), with ``sys.settrace`` controlling
+interleaving between tasks.
+
+A marker gates the next ``await`` expression. When a task reaches a marker, it
+pauses until the scheduler grants it a turn; only then does the gated ``await``
+execute. Between two markers the task runs without interruption from other
+scheduled tasks.
 
 .. code-block:: python
 
@@ -170,11 +176,3 @@ code only occur at ``await`` points since the event loop is single-threaded.
    })
 
    assert counter.value == 1, "Race condition triggered!"
-
-
-Next Steps
-----------
-
-- Read :doc:`approaches` for detailed information about trace markers and other approaches
-- See :doc:`examples` for more complete examples
-- Check the :doc:`api_reference` for detailed API documentation

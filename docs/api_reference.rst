@@ -1,8 +1,8 @@
 API Reference
 =============
 
-Trace Markers (Recommended)
----------------------------
+Trace Markers
+--------------
 
 .. automodule:: interlace.trace_markers
    :members:
