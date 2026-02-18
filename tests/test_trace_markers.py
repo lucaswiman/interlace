@@ -4,7 +4,7 @@ import sys
 import threading
 
 from frontrun.common import Schedule, Step
-from frontrun.trace_markers import MarkerRegistry, ThreadCoordinator, TraceExecutor, interlace
+from frontrun.trace_markers import MarkerRegistry, ThreadCoordinator, TraceExecutor, frontrun
 
 
 class BankAccount:
@@ -124,7 +124,7 @@ def test_alternating_execution():
 
 
 def test_convenience_function():
-    """The interlace() convenience function."""
+    """The frontrun() convenience function."""
     results = []
     lock = threading.Lock()
 
@@ -147,7 +147,7 @@ def test_convenience_function():
         ]
     )
 
-    interlace(schedule=schedule, threads={"t1": worker1, "t2": worker2}, timeout=5.0)
+    frontrun(schedule=schedule, threads={"t1": worker1, "t2": worker2}, timeout=5.0)
 
     assert results == ["t1", "t2"]
 

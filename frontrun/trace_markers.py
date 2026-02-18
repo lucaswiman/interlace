@@ -313,7 +313,7 @@ class TraceExecutor:
         self.marker_registry = MarkerRegistry()
 
 
-def interlace(
+def frontrun(
     schedule: Schedule,
     threads: dict[str, Callable[..., None]],
     thread_args: dict[str, tuple[Any, ...]] | None = None,
@@ -334,7 +334,7 @@ def interlace(
 
     Example:
         ```python
-        interlace(
+        frontrun(
             schedule=Schedule([Step("t1", "marker1"), Step("t2", "marker1")]),
             threads={"t1": worker_func, "t2": worker_func},
         )

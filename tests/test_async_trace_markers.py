@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from frontrun.async_trace_markers import AsyncTraceExecutor, async_interlace
+from frontrun.async_trace_markers import AsyncTraceExecutor, async_frontrun
 from frontrun.common import Schedule, Step
 
 
@@ -140,7 +140,7 @@ def test_alternating_execution():
 
 
 def test_convenience_function():
-    """The async_interlace() convenience function."""
+    """The async_frontrun() convenience function."""
     results = []
 
     async def worker1():
@@ -160,7 +160,7 @@ def test_convenience_function():
         ]
     )
 
-    async_interlace(schedule=schedule, tasks={"t1": worker1, "t2": worker2}, timeout=5.0)
+    async_frontrun(schedule=schedule, tasks={"t1": worker1, "t2": worker2}, timeout=5.0)
 
     assert results == ["t1", "t2"]
 
@@ -279,7 +279,7 @@ def test_timeout():
         await asyncio.sleep(0)
 
     with pytest.raises(TimeoutError):
-        async_interlace(
+        async_frontrun(
             schedule=schedule,
             tasks={"t1": worker1, "t2": worker2},
             timeout=0.5,
@@ -305,7 +305,7 @@ def test_exception_propagation():
         await asyncio.sleep(0)
 
     with pytest.raises(ValueError, match="Intentional error in task1"):
-        async_interlace(schedule=schedule, tasks={"t1": worker1, "t2": worker2}, timeout=5.0)
+        async_frontrun(schedule=schedule, tasks={"t1": worker1, "t2": worker2}, timeout=5.0)
 
 
 def test_task_errors_tracked():

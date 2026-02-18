@@ -60,7 +60,7 @@ Example usage::
 
 Or using the convenience function::
 
-    async_interlace(
+    async_frontrun(
         schedule=schedule,
         tasks={'task1': worker1, 'task2': worker2},
     )
@@ -223,7 +223,7 @@ class AsyncTraceExecutor:
         self.marker_registry = MarkerRegistry()
 
 
-def async_interlace(
+def async_frontrun(
     schedule: Schedule,
     tasks: dict[str, Callable[..., Coroutine[Any, Any, None]]],
     task_args: dict[str, tuple[Any, ...]] | None = None,
@@ -255,7 +255,7 @@ def async_interlace(
             # frontrun: before_deposit
             await account.deposit(amount)
 
-        async_interlace(
+        async_frontrun(
             schedule=Schedule([
                 Step("t1", "before_deposit"),
                 Step("t2", "before_deposit")
