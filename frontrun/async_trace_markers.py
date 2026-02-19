@@ -1,8 +1,8 @@
 """
-Interlace: Deterministic async task interleaving using comment-based markers.
+Frontrun: Deterministic async task interleaving using comment-based markers.
 
 This module provides a mechanism to control async task execution order by marking
-synchronization points in code with ``# interlace: marker_name`` comments,
+synchronization points in code with ``# frontrun: marker_name`` comments,
 matching the elegant syntax of the sync trace_markers module.
 
 Key Insight: Thread-Based Execution with sys.settrace
@@ -28,10 +28,10 @@ Marker Semantics
 **Marker Placement**: Place markers to gate the operations you want to control.
 
 Inline markers (marker on same line as operation):
-    current = self.balance  # interlace: read_balance
+    current = self.balance  # frontrun: read_balance
 
 Separate-line markers (marker before operation):
-    # interlace: read_balance
+    # frontrun: read_balance
     current = self.balance
 
 Both styles work identically: the marker gates execution of the line, ensuring
@@ -40,9 +40,9 @@ it only executes after the scheduler approves this task at this marker.
 Example usage::
 
     async def worker_function():
-        # interlace: read_data
+        # frontrun: read_data
         x = await read_data()
-        # interlace: write_data
+        # frontrun: write_data
         await write_data(x)
 
     schedule = Schedule([
@@ -60,7 +60,7 @@ Example usage::
 
 Or using the convenience function::
 
-    async_interlace(
+    async_frontrun(
         schedule=schedule,
         tasks={'task1': worker1, 'task2': worker2},
     )
@@ -72,15 +72,15 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-from interlace.common import Schedule
-from interlace.trace_markers import MarkerRegistry, ThreadCoordinator
+from frontrun.common import Schedule
+from frontrun.trace_markers import MarkerRegistry, ThreadCoordinator
 
 
 class AsyncTraceExecutor:
     """Executes async tasks with interlaced execution according to a schedule.
 
-    This is the main interface for the async interlace library. It uses
-    comment-based markers (# interlace: marker_name) to control task
+    This is the main interface for the async frontrun library. It uses
+    comment-based markers (# frontrun: marker_name) to control task
     execution order.
 
     Unlike the sync version which runs tasks in actual threads, this runs
@@ -125,7 +125,7 @@ class AsyncTraceExecutor:
                 filename = frame.f_code.co_filename
                 lineno = frame.f_lineno
 
-                # Check current line (for inline markers like: x = 1  # interlace: marker)
+                # Check current line (for inline markers like: x = 1  # frontrun: marker)
                 marker_name = self.marker_registry.get_marker(filename, lineno)
                 if marker_name and (filename, lineno) not in processed_locations:
                     processed_locations.add((filename, lineno))
@@ -223,7 +223,7 @@ class AsyncTraceExecutor:
         self.marker_registry = MarkerRegistry()
 
 
-def async_interlace(
+def async_frontrun(
     schedule: Schedule,
     tasks: dict[str, Callable[..., Coroutine[Any, Any, None]]],
     task_args: dict[str, tuple[Any, ...]] | None = None,
@@ -235,7 +235,7 @@ def async_interlace(
     This is now a synchronous function (not async) that creates an executor
     and runs the tasks.
 
-    Tasks use # interlace: marker_name comments to mark synchronization points.
+    Tasks use # frontrun: marker_name comments to mark synchronization points.
     No need to pass marker functions to tasks - the executor automatically
     detects markers via sys.settrace.
 
@@ -252,10 +252,10 @@ def async_interlace(
     Example::
 
         async def worker(account, amount):
-            # interlace: before_deposit
+            # frontrun: before_deposit
             await account.deposit(amount)
 
-        async_interlace(
+        async_frontrun(
             schedule=Schedule([
                 Step("t1", "before_deposit"),
                 Step("t2", "before_deposit")

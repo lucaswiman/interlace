@@ -3,11 +3,11 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["interlace"]
+packages = ["frontrun"]
 
 [project]
-name = "interlace"
-version = "0.0.1"
+name = "frontrun"
+version = "0.0.2"
 description = "A library for deterministic concurrency testing that helps you reliably reproduce and test race conditions"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,11 +29,11 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/lucaswiman/interlace"
-Repository = "https://github.com/lucaswiman/interlace.git"
-Documentation = "https://lucaswiman.github.io/interlace"
-Changelog = "https://github.com/lucaswiman/interlace/blob/main/CHANGELOG.rst"
-Issues = "https://github.com/lucaswiman/interlace/issues"
+Homepage = "https://github.com/lucaswiman/frontrun"
+Repository = "https://github.com/lucaswiman/frontrun.git"
+Documentation = "https://lucaswiman.github.io/frontrun"
+Changelog = "https://github.com/lucaswiman/frontrun/blob/main/CHANGELOG.rst"
+Issues = "https://github.com/lucaswiman/frontrun/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -68,7 +68,7 @@ ignore = [
 ]
 
 [tool.pyright]
-include = ["interlace"]
+include = ["frontrun"]
 exclude = ["**/node_modules", "**/__pycache__"]
 typeCheckingMode = "strict"
 pythonVersion = "3.10"
