@@ -120,7 +120,12 @@ def _get_instructions(code: Any) -> dict[int, dis.Instruction]:
         if code_id in _INSTR_CACHE:
             return _INSTR_CACHE[code_id]
         mapping = {}
-        for instr in dis.get_instructions(code, show_caches=False):
+        # show_caches parameter was added in Python 3.11
+        if _PY_VERSION >= (3, 11):
+            instructions = dis.get_instructions(code, show_caches=False)
+        else:
+            instructions = dis.get_instructions(code)
+        for instr in instructions:
             mapping[instr.offset] = instr
         _INSTR_CACHE[code_id] = mapping
         return mapping
