@@ -43,6 +43,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
+from frontrun_dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]
+
 from frontrun._cooperative import (
     clear_context,
     patch_locks,
@@ -51,7 +53,6 @@ from frontrun._cooperative import (
     set_sync_reporter,
     unpatch_locks,
 )
-from frontrun_dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]
 
 T = TypeVar("T")
 
@@ -166,9 +167,6 @@ def _should_trace_file(filename: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _dpor_tls = threading.local()
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -593,8 +591,12 @@ class DporBytecodeRunner:
         execution = self.scheduler.execution
         # Shared context for cooperative primitives
         set_context(self.scheduler, thread_id)
+
         # Sync reporter so cooperative Lock/RLock report to the DPOR engine
-        set_sync_reporter(lambda event, obj_id: engine.report_sync(execution, thread_id, event, obj_id))
+        def _sync_reporter(event: str, obj_id: int) -> None:
+            engine.report_sync(execution, thread_id, event, obj_id)
+
+        set_sync_reporter(_sync_reporter)
         # DPOR-specific TLS for _process_opcode (shadow stacks, etc.)
         _dpor_tls.scheduler = self.scheduler
         _dpor_tls.thread_id = thread_id

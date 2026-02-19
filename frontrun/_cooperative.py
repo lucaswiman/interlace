@@ -20,7 +20,8 @@ happens-before engine without changing the core spin-yield logic.
 import queue
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Save real factories before any patching happens.
