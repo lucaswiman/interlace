@@ -1,0 +1,14 @@
+[package]
+name = "frontrun-dpor"
+version = "0.1.0"
+edition = "2021"
+description = "DPOR (Dynamic Partial Order Reduction) engine for frontrun concurrency testing"
+
+[lib]
+name = "frontrun_dpor"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+pyo3 = { version = "0.25", features = ["extension-module"] }
+
+[dev-dependencies]
