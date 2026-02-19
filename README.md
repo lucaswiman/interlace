@@ -8,6 +8,9 @@ pip install frontrun
 
 ## Overview
 
+Frontrun is named after the insider trading crime where someone uses insider information to make a timed trade for maximum profit.
+The principle is the same in this library, except that you used insider information about event ordering for maximum concurrency bugs!
+
 Frontrun provides tools for controlling thread interleaving at a fine-grained level, allowing you to:
 
 - **Deterministically reproduce race conditions** - Force specific execution ordering to make race conditions happen reliably in tests
