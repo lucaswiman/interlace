@@ -459,7 +459,7 @@ def _process_opcode(
             shadow.pop()
             shadow.push(None)
 
-    elif op.startswith("INPLACE_") or op.startswith("BINARY_"):
+    elif op.startswith(("INPLACE_", "BINARY_")):
         # Python 3.10 INPLACE_ADD, INPLACE_SUBTRACT, etc. and
         # BINARY_ADD, BINARY_MULTIPLY, etc. All pop 2, push 1.
         # (BINARY_OP and BINARY_SUBSCR are already handled above.)

@@ -380,6 +380,7 @@ def run_with_schedule(
     threads: list[Callable[[T], None]],
     timeout: float = 5.0,
     cooperative_locks: bool = True,
+    debug: bool = False,
 ) -> T:
     """Run one interleaving and return the state object.
 
@@ -412,7 +413,8 @@ def run_with_schedule(
         try:
             runner.run(funcs, timeout=timeout)
         except TimeoutError:
-            pass
+            if debug:
+                print("Timed out with {timeout=} on {schedule=}", flush=True)
     finally:
         runner._unpatch_locks()
     return state
@@ -426,6 +428,7 @@ def explore_interleavings(
     max_ops: int = 300,
     timeout_per_run: float = 5.0,
     seed: int | None = None,
+    debug: bool = False,
 ) -> InterleavingResult:
     """Search for interleavings that violate an invariant.
 
@@ -457,6 +460,8 @@ def explore_interleavings(
         length = rng.randint(1, max_ops)
         schedule = [rng.randint(0, num_threads - 1) for _ in range(length)]
 
+        if debug:
+            print(f"Running with {schedule=} {threads=}", flush=True)
         state = run_with_schedule(schedule, setup, threads, timeout=timeout_per_run)
         result.num_explored += 1
 
