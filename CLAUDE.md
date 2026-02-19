@@ -2,7 +2,13 @@
 
 ## Project overview
 
-frontrun is a Python library for deterministic concurrency testing. It helps reliably reproduce and test race conditions using two approaches: random bytecode exploration and systematic DPOR (Dynamic Partial Order Reduction) with a Rust engine.
+frontrun is a Python library for deterministic concurrency testing. It helps reliably reproduce and test race conditions using three approaches:
+
+1. **Trace markers** — Deterministic scheduling via `# frontrun: marker_name` comments in source code. Uses `sys.settrace` line-level tracing to synchronize threads at marked locations according to a pre-defined `Schedule`. Good for reproducing known race conditions.
+2. **Random bytecode exploration** — Fuzzes thread interleavings at bytecode-opcode granularity using random schedules. Integrates with Hypothesis for property-based testing. Good for discovering unknown bugs.
+3. **Systematic DPOR** — Dynamic Partial Order Reduction with a Rust engine. Systematically explores distinct interleavings based on shared-memory access conflicts. Good for exhaustive coverage of thread-level races.
+
+Each of the first two approaches also has an async variant (`async_trace_markers.py`, `async_bytecode.py`) that works with async tasks at await-point granularity.
 
 ## Commands
 
@@ -17,9 +23,13 @@ frontrun is a Python library for deterministic concurrency testing. It helps rel
 ## Project structure
 
 - `frontrun/` — Main Python package
+  - `trace_markers.py` — Deterministic trace-marker scheduling engine
+  - `async_trace_markers.py` — Async variant of trace markers
   - `bytecode.py` — Random bytecode exploration engine
+  - `async_bytecode.py` — Async variant of bytecode exploration (await-point granularity)
   - `dpor.py` — Systematic DPOR exploration engine (uses Rust extension)
   - `_cooperative.py` — Shared cooperative threading primitives
+  - `common.py` — Shared data structures (Schedule, Step, InterleavingResult)
 - `frontrun-dpor/` — Rust PyO3 extension for DPOR engine
 - `tests/` — Test suite (pytest + hypothesis)
 - `docs/` — Sphinx documentation
