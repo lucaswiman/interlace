@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import dis
 import os
-import queue
 import sys
 import threading
 from collections.abc import Callable
@@ -45,6 +44,15 @@ from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from frontrun_dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]
+
+from frontrun._cooperative import (
+    clear_context,
+    patch_locks,
+    real_lock,
+    set_context,
+    set_sync_reporter,
+    unpatch_locks,
+)
 
 T = TypeVar("T")
 
@@ -160,471 +168,6 @@ def _should_trace_file(filename: str) -> bool:
 
 _dpor_tls = threading.local()
 
-# Save real factories before any patching
-_real_lock = threading.Lock
-_real_rlock = threading.RLock
-_real_event = threading.Event
-_real_condition = threading.Condition
-_real_semaphore = threading.Semaphore
-_real_bounded_semaphore = threading.BoundedSemaphore
-_real_queue = queue.Queue
-_real_lifo_queue = queue.LifoQueue
-_real_priority_queue = queue.PriorityQueue
-
-
-# ---------------------------------------------------------------------------
-# DPOR Cooperative Primitives
-# ---------------------------------------------------------------------------
-
-
-class _DporCooperativeLock:
-    """Lock that yields to the DPOR scheduler and reports sync events."""
-
-    def __init__(self) -> None:
-        self._lock = _real_lock()
-        self._object_id = id(self)
-
-    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
-        if not blocking:
-            result = self._lock.acquire(blocking=False)
-            if result:
-                self._report_acquire()
-            return result
-
-        if self._lock.acquire(blocking=False):
-            self._report_acquire()
-            return True
-
-        ctx = _get_dpor_context()
-        if ctx is None:
-            result = self._lock.acquire(blocking=blocking, timeout=timeout)
-            if result:
-                self._report_acquire()
-            return result
-
-        scheduler, thread_id = ctx
-        while not self._lock.acquire(blocking=False):
-            if scheduler._finished or scheduler._error:
-                result = self._lock.acquire(blocking=blocking, timeout=1.0)
-                if result:
-                    self._report_acquire()
-                return result
-            scheduler.wait_for_turn(thread_id)
-
-        self._report_acquire()
-        return True
-
-    def release(self) -> None:
-        self._report_release()
-        self._lock.release()
-
-    def locked(self) -> bool:
-        return self._lock.locked()
-
-    def __enter__(self) -> _DporCooperativeLock:
-        self.acquire()
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self.release()
-
-    def _report_acquire(self) -> None:
-        engine = getattr(_dpor_tls, "engine", None)
-        execution = getattr(_dpor_tls, "execution", None)
-        thread_id = getattr(_dpor_tls, "thread_id", None)
-        if engine is not None and execution is not None and thread_id is not None:
-            engine.report_sync(execution, thread_id, "lock_acquire", self._object_id)
-
-    def _report_release(self) -> None:
-        engine = getattr(_dpor_tls, "engine", None)
-        execution = getattr(_dpor_tls, "execution", None)
-        thread_id = getattr(_dpor_tls, "thread_id", None)
-        if engine is not None and execution is not None and thread_id is not None:
-            engine.report_sync(execution, thread_id, "lock_release", self._object_id)
-
-
-class _DporCooperativeRLock:
-    """Reentrant lock that yields to the DPOR scheduler."""
-
-    def __init__(self) -> None:
-        self._lock = _real_lock()
-        self._owner: int | None = None
-        self._count = 0
-        self._object_id = id(self)
-
-    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
-        me = threading.get_ident()
-        if self._owner == me:
-            self._count += 1
-            return True
-
-        if not blocking:
-            if self._lock.acquire(blocking=False):
-                self._owner = me
-                self._count = 1
-                self._report_acquire()
-                return True
-            return False
-
-        if self._lock.acquire(blocking=False):
-            self._owner = me
-            self._count = 1
-            self._report_acquire()
-            return True
-
-        ctx = _get_dpor_context()
-        if ctx is None:
-            result = self._lock.acquire(blocking=blocking, timeout=timeout)
-            if result:
-                self._owner = me
-                self._count = 1
-                self._report_acquire()
-            return result
-
-        scheduler, thread_id = ctx
-        while not self._lock.acquire(blocking=False):
-            if scheduler._finished or scheduler._error:
-                result = self._lock.acquire(blocking=blocking, timeout=1.0)
-                if result:
-                    self._owner = me
-                    self._count = 1
-                    self._report_acquire()
-                return result
-            scheduler.wait_for_turn(thread_id)
-
-        self._owner = me
-        self._count = 1
-        self._report_acquire()
-        return True
-
-    def release(self) -> None:
-        if self._owner != threading.get_ident():
-            raise RuntimeError("cannot release un-acquired lock")
-        self._count -= 1
-        if self._count == 0:
-            self._owner = None
-            self._report_release()
-            self._lock.release()
-
-    def __enter__(self) -> _DporCooperativeRLock:
-        self.acquire()
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self.release()
-
-    def _is_owned(self) -> bool:
-        return self._owner == threading.get_ident()
-
-    def _report_acquire(self) -> None:
-        engine = getattr(_dpor_tls, "engine", None)
-        execution = getattr(_dpor_tls, "execution", None)
-        thread_id = getattr(_dpor_tls, "thread_id", None)
-        if engine is not None and execution is not None and thread_id is not None:
-            engine.report_sync(execution, thread_id, "lock_acquire", self._object_id)
-
-    def _report_release(self) -> None:
-        engine = getattr(_dpor_tls, "engine", None)
-        execution = getattr(_dpor_tls, "execution", None)
-        thread_id = getattr(_dpor_tls, "thread_id", None)
-        if engine is not None and execution is not None and thread_id is not None:
-            engine.report_sync(execution, thread_id, "lock_release", self._object_id)
-
-
-class _DporCooperativeEvent:
-    """Event that yields to the DPOR scheduler."""
-
-    def __init__(self) -> None:
-        self._event = _real_event()
-
-    def wait(self, timeout: float | None = None) -> bool:
-        if self._event.is_set():
-            return True
-
-        ctx = _get_dpor_context()
-        if ctx is None:
-            return self._event.wait(timeout=timeout)
-
-        scheduler, thread_id = ctx
-        if timeout is not None:
-            import time
-
-            deadline = time.monotonic() + timeout
-            while not self._event.is_set():
-                if scheduler._finished or scheduler._error:
-                    return self._event.wait(timeout=1.0)
-                if time.monotonic() >= deadline:
-                    return self._event.is_set()
-                scheduler.wait_for_turn(thread_id)
-            return True
-
-        while not self._event.is_set():
-            if scheduler._finished or scheduler._error:
-                return self._event.wait(timeout=1.0)
-            scheduler.wait_for_turn(thread_id)
-        return True
-
-    def set(self) -> None:
-        self._event.set()
-
-    def clear(self) -> None:
-        self._event.clear()
-
-    def is_set(self) -> bool:
-        return self._event.is_set()
-
-
-class _DporCooperativeCondition:
-    """Condition that yields to the DPOR scheduler."""
-
-    def __init__(self, lock: _DporCooperativeLock | None = None) -> None:
-        if lock is None:
-            lock = _DporCooperativeLock()
-        self._lock = lock
-        self._real_cond = _real_condition(_real_lock())
-        self._waiters = 0
-
-    def acquire(self, *args: Any, **kwargs: Any) -> bool:
-        return self._lock.acquire(*args, **kwargs)
-
-    def release(self) -> None:
-        self._lock.release()
-
-    def __enter__(self) -> _DporCooperativeCondition:
-        self._lock.acquire()
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self._lock.release()
-
-    def wait(self, timeout: float | None = None) -> bool:
-        self._waiters += 1
-        self._lock.release()
-        try:
-            ctx = _get_dpor_context()
-            if ctx is None:
-                with self._real_cond:
-                    return self._real_cond.wait(timeout=timeout)
-
-            scheduler, thread_id = ctx
-            with self._real_cond:
-                notified = self._real_cond.wait(timeout=0)
-            while not notified:
-                if scheduler._finished or scheduler._error:
-                    with self._real_cond:
-                        return self._real_cond.wait(timeout=1.0)
-                scheduler.wait_for_turn(thread_id)
-                with self._real_cond:
-                    notified = self._real_cond.wait(timeout=0)
-            return True
-        finally:
-            self._waiters -= 1
-            self._lock.acquire()
-
-    def wait_for(self, predicate: Callable[[], bool], timeout: float | None = None) -> bool:
-        result = predicate()
-        while not result:
-            self.wait(timeout=timeout)
-            result = predicate()
-            if timeout is not None:
-                break
-        return result
-
-    def notify(self, n: int = 1) -> None:
-        with self._real_cond:
-            self._real_cond.notify(n)
-
-    def notify_all(self) -> None:
-        with self._real_cond:
-            self._real_cond.notify_all()
-
-
-class _DporCooperativeSemaphore:
-    """Semaphore that yields to the DPOR scheduler."""
-
-    def __init__(self, value: int = 1) -> None:
-        if value < 0:
-            raise ValueError("semaphore initial value must be >= 0")
-        self._value = value
-        self._lock = _real_lock()
-
-    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
-        self._lock.acquire()
-        if self._value > 0:
-            self._value -= 1
-            self._lock.release()
-            return True
-        self._lock.release()
-
-        if not blocking:
-            return False
-
-        ctx = _get_dpor_context()
-        if ctx is None:
-            while True:
-                self._lock.acquire()
-                if self._value > 0:
-                    self._value -= 1
-                    self._lock.release()
-                    return True
-                self._lock.release()
-                import time
-
-                time.sleep(0.001)
-
-        scheduler, thread_id = ctx
-        while True:
-            self._lock.acquire()
-            if self._value > 0:
-                self._value -= 1
-                self._lock.release()
-                return True
-            self._lock.release()
-            if scheduler._finished or scheduler._error:
-                import time
-
-                deadline = time.monotonic() + 1.0
-                while time.monotonic() < deadline:
-                    self._lock.acquire()
-                    if self._value > 0:
-                        self._value -= 1
-                        self._lock.release()
-                        return True
-                    self._lock.release()
-                    time.sleep(0.001)
-                return False
-            scheduler.wait_for_turn(thread_id)
-
-    def release(self, n: int = 1) -> None:
-        if n < 1:
-            raise ValueError("n must be one or more")
-        self._lock.acquire()
-        self._value += n
-        self._lock.release()
-
-    def __enter__(self) -> _DporCooperativeSemaphore:
-        self.acquire()
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self.release()
-
-
-class _DporCooperativeBoundedSemaphore(_DporCooperativeSemaphore):
-    """BoundedSemaphore that yields to the DPOR scheduler."""
-
-    def __init__(self, value: int = 1) -> None:
-        super().__init__(value)
-        self._initial_value = value
-
-    def release(self, n: int = 1) -> None:
-        if n < 1:
-            raise ValueError("n must be one or more")
-        self._lock.acquire()
-        if self._value + n > self._initial_value:
-            self._lock.release()
-            raise ValueError("Semaphore released too many times")
-        self._value += n
-        self._lock.release()
-
-
-class _DporCooperativeQueue:
-    """Queue that yields to the DPOR scheduler."""
-
-    _queue_class = _real_queue
-
-    def __init__(self, maxsize: int = 0) -> None:
-        self._queue: Any = self._queue_class(maxsize)
-
-    def get(self, block: bool = True, timeout: float | None = None) -> Any:
-        try:
-            return self._queue.get(block=False)
-        except queue.Empty:
-            if not block:
-                raise
-
-        ctx = _get_dpor_context()
-        if ctx is None:
-            return self._queue.get(block=True, timeout=timeout)
-
-        scheduler, thread_id = ctx
-        while True:
-            try:
-                return self._queue.get(block=False)
-            except queue.Empty:
-                pass
-            if scheduler._finished or scheduler._error:
-                return self._queue.get(block=True, timeout=1.0)
-            scheduler.wait_for_turn(thread_id)
-
-    def put(self, item: Any, block: bool = True, timeout: float | None = None) -> None:
-        try:
-            self._queue.put(item, block=False)
-            return
-        except queue.Full:
-            if not block:
-                raise
-
-        ctx = _get_dpor_context()
-        if ctx is None:
-            self._queue.put(item, block=True, timeout=timeout)
-            return
-
-        scheduler, thread_id = ctx
-        while True:
-            try:
-                self._queue.put(item, block=False)
-                return
-            except queue.Full:
-                pass
-            if scheduler._finished or scheduler._error:
-                self._queue.put(item, block=True, timeout=1.0)
-                return
-            scheduler.wait_for_turn(thread_id)
-
-    def qsize(self) -> int:
-        return self._queue.qsize()
-
-    def empty(self) -> bool:
-        return self._queue.empty()
-
-    def full(self) -> bool:
-        return self._queue.full()
-
-    def get_nowait(self) -> Any:
-        return self._queue.get(block=False)
-
-    def put_nowait(self, item: Any) -> None:
-        self._queue.put(item, block=False)
-
-    def task_done(self) -> None:
-        self._queue.task_done()
-
-    def join(self) -> None:
-        self._queue.join()
-
-
-class _DporCooperativeLifoQueue(_DporCooperativeQueue):
-    _queue_class = _real_lifo_queue
-
-
-class _DporCooperativePriorityQueue(_DporCooperativeQueue):
-    _queue_class = _real_priority_queue
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _get_dpor_context() -> tuple[DporScheduler, int] | None:
-    """Get the DPOR scheduler context from thread-local storage."""
-    scheduler = getattr(_dpor_tls, "scheduler", None)
-    thread_id = getattr(_dpor_tls, "thread_id", None)
-    if scheduler is not None and thread_id is not None:
-        return scheduler, thread_id
-    return None
-
 
 # ---------------------------------------------------------------------------
 # DPOR Opcode Scheduler
@@ -642,7 +185,7 @@ class DporScheduler:
         self.engine = engine
         self.execution = execution
         self.num_threads = num_threads
-        self._lock = _real_lock()
+        self._lock = real_lock()
         self._condition = threading.Condition(self._lock)
         self._finished = False
         self._error: Exception | None = None
@@ -824,6 +367,38 @@ def _process_opcode(
         if n is not None and len(shadow.stack) >= n:
             shadow.stack[-1], shadow.stack[-n] = shadow.stack[-n], shadow.stack[-1]
 
+    # --- Python 3.10 stack manipulation (replaced by COPY/SWAP in 3.11) ---
+
+    elif op == "DUP_TOP":
+        shadow.push(shadow.peek())
+
+    elif op == "DUP_TOP_TWO":
+        b = shadow.peek(0)
+        a = shadow.peek(1)
+        shadow.push(a)
+        shadow.push(b)
+
+    elif op == "ROT_TWO":
+        if len(shadow.stack) >= 2:
+            shadow.stack[-1], shadow.stack[-2] = shadow.stack[-2], shadow.stack[-1]
+
+    elif op == "ROT_THREE":
+        if len(shadow.stack) >= 3:
+            shadow.stack[-1], shadow.stack[-2], shadow.stack[-3] = (
+                shadow.stack[-2],
+                shadow.stack[-3],
+                shadow.stack[-1],
+            )
+
+    elif op == "ROT_FOUR":
+        if len(shadow.stack) >= 4:
+            shadow.stack[-1], shadow.stack[-2], shadow.stack[-3], shadow.stack[-4] = (
+                shadow.stack[-2],
+                shadow.stack[-3],
+                shadow.stack[-4],
+                shadow.stack[-1],
+            )
+
     # === Attribute access: the instructions we care about most ===
 
     elif op == "LOAD_ATTR":
@@ -884,6 +459,14 @@ def _process_opcode(
             shadow.pop()
             shadow.push(None)
 
+    elif op.startswith(("INPLACE_", "BINARY_")):
+        # Python 3.10 INPLACE_ADD, INPLACE_SUBTRACT, etc. and
+        # BINARY_ADD, BINARY_MULTIPLY, etc. All pop 2, push 1.
+        # (BINARY_OP and BINARY_SUBSCR are already handled above.)
+        shadow.pop()
+        shadow.pop()
+        shadow.push(None)
+
     # === Store instructions ===
 
     elif op in ("STORE_FAST", "STORE_GLOBAL", "STORE_DEREF"):
@@ -942,28 +525,12 @@ class DporBytecodeRunner:
     def _patch_locks(self) -> None:
         if not self.cooperative_locks:
             return
-        threading.Lock = _DporCooperativeLock  # type: ignore[assignment]
-        threading.RLock = _DporCooperativeRLock  # type: ignore[assignment]
-        threading.Semaphore = _DporCooperativeSemaphore  # type: ignore[assignment]
-        threading.BoundedSemaphore = _DporCooperativeBoundedSemaphore  # type: ignore[assignment]
-        threading.Event = _DporCooperativeEvent  # type: ignore[assignment]
-        threading.Condition = _DporCooperativeCondition  # type: ignore[assignment]
-        queue.Queue = _DporCooperativeQueue  # type: ignore[assignment]
-        queue.LifoQueue = _DporCooperativeLifoQueue  # type: ignore[assignment]
-        queue.PriorityQueue = _DporCooperativePriorityQueue  # type: ignore[assignment]
+        patch_locks()
         self._lock_patched = True
 
     def _unpatch_locks(self) -> None:
         if self._lock_patched:
-            threading.Lock = _real_lock  # type: ignore[assignment]
-            threading.RLock = _real_rlock  # type: ignore[assignment]
-            threading.Semaphore = _real_semaphore  # type: ignore[assignment]
-            threading.BoundedSemaphore = _real_bounded_semaphore  # type: ignore[assignment]
-            threading.Event = _real_event  # type: ignore[assignment]
-            threading.Condition = _real_condition  # type: ignore[assignment]
-            queue.Queue = _real_queue  # type: ignore[assignment]
-            queue.LifoQueue = _real_lifo_queue  # type: ignore[assignment]
-            queue.PriorityQueue = _real_priority_queue  # type: ignore[assignment]
+            unpatch_locks()
             self._lock_patched = False
 
     # --- sys.settrace backend (3.10-3.11) ---
@@ -1058,6 +625,33 @@ class DporBytecodeRunner:
 
     # --- Thread entry points ---
 
+    def _setup_dpor_tls(self, thread_id: int) -> None:
+        """Set up both shared cooperative TLS and DPOR-specific TLS."""
+        engine = self.scheduler.engine
+        execution = self.scheduler.execution
+        # Shared context for cooperative primitives
+        set_context(self.scheduler, thread_id)
+
+        # Sync reporter so cooperative Lock/RLock report to the DPOR engine
+        def _sync_reporter(event: str, obj_id: int) -> None:
+            engine.report_sync(execution, thread_id, event, obj_id)
+
+        set_sync_reporter(_sync_reporter)
+        # DPOR-specific TLS for _process_opcode (shadow stacks, etc.)
+        _dpor_tls.scheduler = self.scheduler
+        _dpor_tls.thread_id = thread_id
+        _dpor_tls.engine = engine
+        _dpor_tls.execution = execution
+
+    def _teardown_dpor_tls(self) -> None:
+        """Clean up both shared and DPOR-specific TLS."""
+        clear_context()
+        set_sync_reporter(None)
+        _dpor_tls.scheduler = None
+        _dpor_tls.thread_id = None
+        _dpor_tls.engine = None
+        _dpor_tls.execution = None
+
     def _run_thread_settrace(
         self,
         thread_id: int,
@@ -1066,10 +660,7 @@ class DporBytecodeRunner:
     ) -> None:
         """Thread entry using sys.settrace (3.10-3.11)."""
         try:
-            _dpor_tls.scheduler = self.scheduler
-            _dpor_tls.thread_id = thread_id
-            _dpor_tls.engine = self.scheduler.engine
-            _dpor_tls.execution = self.scheduler.execution
+            self._setup_dpor_tls(thread_id)
 
             trace_fn = self._make_trace(thread_id)
             sys.settrace(trace_fn)
@@ -1079,10 +670,7 @@ class DporBytecodeRunner:
             self.scheduler.report_error(e)
         finally:
             sys.settrace(None)
-            _dpor_tls.scheduler = None
-            _dpor_tls.thread_id = None
-            _dpor_tls.engine = None
-            _dpor_tls.execution = None
+            self._teardown_dpor_tls()
             self.scheduler.mark_done(thread_id)
 
     def _run_thread_monitoring(
@@ -1093,20 +681,14 @@ class DporBytecodeRunner:
     ) -> None:
         """Thread entry using sys.monitoring (3.12+)."""
         try:
-            _dpor_tls.scheduler = self.scheduler
-            _dpor_tls.thread_id = thread_id
-            _dpor_tls.engine = self.scheduler.engine
-            _dpor_tls.execution = self.scheduler.execution
+            self._setup_dpor_tls(thread_id)
 
             func(*args)
         except Exception as e:
             self.errors[thread_id] = e
             self.scheduler.report_error(e)
         finally:
-            _dpor_tls.scheduler = None
-            _dpor_tls.thread_id = None
-            _dpor_tls.engine = None
-            _dpor_tls.execution = None
+            self._teardown_dpor_tls()
             self.scheduler.mark_done(thread_id)
 
     def run(
