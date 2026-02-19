@@ -44,7 +44,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
-from frontrun_dpor import PyDporEngine, PyExecution
+from frontrun_dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]
 
 T = TypeVar("T")
 
@@ -120,7 +120,12 @@ def _get_instructions(code: Any) -> dict[int, dis.Instruction]:
         if code_id in _INSTR_CACHE:
             return _INSTR_CACHE[code_id]
         mapping = {}
-        for instr in dis.get_instructions(code, show_caches=False):
+        # show_caches parameter was added in Python 3.11
+        if _PY_VERSION >= (3, 11):
+            instructions = dis.get_instructions(code, show_caches=False)
+        else:
+            instructions = dis.get_instructions(code)
+        for instr in instructions:
             mapping[instr.offset] = instr
         _INSTR_CACHE[code_id] = mapping
         return mapping
@@ -689,8 +694,7 @@ class DporScheduler:
                         self._condition.notify_all()
                         continue
                     self._error = TimeoutError(
-                        f"DPOR deadlock: waiting for thread {thread_id}, "
-                        f"current is {self._current_thread}"
+                        f"DPOR deadlock: waiting for thread {thread_id}, current is {self._current_thread}"
                     )
                     self._condition.notify_all()
                     return False
@@ -835,7 +839,7 @@ def _process_opcode(
             shadow.push(None)
 
     elif op == "STORE_ATTR":
-        obj = shadow.pop()   # TOS = object
+        obj = shadow.pop()  # TOS = object
         _val = shadow.pop()  # TOS1 = value
         _report_write(engine, execution, thread_id, obj, instr.argval)
 
@@ -1207,6 +1211,7 @@ def explore_dpor(
             def make_thread_func(thread_func: Callable[[T], None], s: T) -> Callable[[], None]:
                 def wrapper() -> None:
                     thread_func(s)
+
                 return wrapper
 
             funcs = [make_thread_func(t, state) for t in threads]

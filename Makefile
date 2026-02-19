@@ -11,6 +11,9 @@ PYTHON := $(VENV_BIN)python
 PYTEST := $(VENV_BIN)pytest
 MATURIN := $(VENV_BIN)maturin
 
+# Rust source files in dpor directory
+DPOR_RUST_SOURCES := $(wildcard frontrun-dpor/src/*.rs) frontrun-dpor/Cargo.toml
+
 # Use local caches for sandboxed environments
 export CARGO_HOME := $(CURDIR)/.cargo-cache
 export UV_CACHE_DIR := $(CURDIR)/.uv-cache
@@ -26,8 +29,8 @@ export UV_CACHE_DIR := $(CURDIR)/.uv-cache
 
 # Build the frontrun-dpor Rust extension for a specific Python version.
 # Uses maturin to compile the PyO3 extension module and install it into
-# the version-specific virtualenv.
-build-dpor-%: .venv-%/activate
+# the version-specific virtualenv. Rebuilds when Rust files in dpor change.
+build-dpor-%: .venv-%/activate $(DPOR_RUST_SOURCES)
 	uv pip install maturin --python=$(CURDIR)/.venv-$*/bin/python
 	cd frontrun-dpor && VIRTUAL_ENV=$(CURDIR)/.venv-$* $(CURDIR)/.venv-$*/bin/maturin develop --release
 
