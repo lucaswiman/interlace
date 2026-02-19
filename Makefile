@@ -12,7 +12,7 @@ PYTEST := $(VENV_BIN)pytest
 MATURIN := $(VENV_BIN)maturin
 
 # Rust source files in dpor directory
-DPOR_RUST_SOURCES := $(shell find frontrun-dpor -name "*.rs" -o -name "Cargo.toml")
+DPOR_RUST_SOURCES := $(wildcard frontrun-dpor/src/*.rs) frontrun-dpor/Cargo.toml
 
 # Use local caches for sandboxed environments
 export CARGO_HOME := $(CURDIR)/.cargo-cache
