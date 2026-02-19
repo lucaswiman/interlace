@@ -1,10 +1,10 @@
-# DPOR Specification for Interlace
+# DPOR Specification for Frontrun
 
 ## 1. Motivation and Background
 
 ### The Coverage Gap
 
-Interlace's `explore_interleavings()` currently generates random schedules — a random
+Frontrun's `explore_interleavings()` currently generates random schedules — a random
 walk through the interleaving space. For a program with `T` threads and `N` shared
 operations per thread, the number of distinct interleavings grows as
 `(T*N)! / (N!)^T`. Even modest programs (3 threads, 10 operations each) have billions
@@ -27,7 +27,7 @@ execution replays. Writing this core in Rust offers several advantages:
 
 1. **Direct translation from loom.** Tokio's [loom](https://github.com/tokio-rs/loom)
    library has a proven, battle-tested DPOR implementation in Rust. Writing
-   interlace's DPOR core in Rust lets us translate loom's data structures and
+   frontrun's DPOR core in Rust lets us translate loom's data structures and
    algorithms with minimal impedance mismatch, reusing the design decisions that
    loom's maintainers have already validated (CDSChecker-style exploration, bounded
    DPOR with preemption limits, vector clock dependency tracking).
@@ -85,7 +85,7 @@ around those schedules.
                        │
 ┌──────────────────────▼──────────────────────────────────┐
 │              Python Orchestration Layer                   │
-│  interlace/dpor.py                                       │
+│  frontrun/dpor.py                                       │
 │  - Wraps Rust engine in Python API                       │
 │  - Drives execution: run program, collect events,        │
 │    feed to engine, get next schedule                     │
@@ -95,7 +95,7 @@ around those schedules.
                        │ PyO3 FFI boundary
 ┌──────────────────────▼──────────────────────────────────┐
 │              Rust DPOR Engine                             │
-│  interlace-dpor/src/                                     │
+│  frontrun-dpor/src/                                     │
 │                                                          │
 │  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐  │
 │  │ Exploration  │  │ Execution    │  │ Vector Clocks  │  │
@@ -120,11 +120,11 @@ around those schedules.
 ### Directory Layout
 
 ```
-interlace/
-├── interlace/
+frontrun/
+├── frontrun/
 │   ├── dpor.py                  # Python API and orchestration
 │   └── ...                      # Existing modules unchanged
-├── interlace-dpor/              # Rust crate (PyO3 extension)
+├── frontrun-dpor/              # Rust crate (PyO3 extension)
 │   ├── Cargo.toml
 │   ├── pyproject.toml           # maturin build config
 │   └── src/
@@ -147,8 +147,8 @@ interlace/
 ## 3. Core Data Structures (Rust)
 
 These data structures are modeled directly on loom's internal representations,
-adapted for interlace's Python-centric use case. Where loom models C11 atomic
-operations with modification orders and reads-from relations, interlace models
+adapted for frontrun's Python-centric use case. Where loom models C11 atomic
+operations with modification orders and reads-from relations, frontrun models
 Python shared-memory accesses (object attribute reads/writes, dict operations, list
 mutations) with a simpler dependency relation.
 
@@ -310,7 +310,7 @@ impl Access {
 /// Identifies a shared memory location in the Python program.
 ///
 /// Unlike loom (which tracks atomic cells, mutexes, etc. as distinct object types),
-/// interlace must track Python-level shared state: object attributes, dict keys,
+/// frontrun must track Python-level shared state: object attributes, dict keys,
 /// list indices. The `ObjectId` captures the identity of the shared location.
 ///
 /// Object identity is determined by the Python orchestration layer and passed
@@ -821,9 +821,9 @@ impl DporEngine {
 The Python orchestration layer drives the Rust engine:
 
 ```python
-# interlace/dpor.py
+# frontrun/dpor.py
 
-from interlace_dpor import DporEngine, AccessKind, ObjectId
+from frontrun_dpor import DporEngine, AccessKind, ObjectId
 from typing import Callable, Any, Optional
 from dataclasses import dataclass
 
@@ -902,9 +902,9 @@ def explore_dpor(
 
 ## 5. Conflict Detection for Python
 
-The hardest part of adapting DPOR from loom to interlace is conflict detection.
+The hardest part of adapting DPOR from loom to frontrun is conflict detection.
 Loom instruments explicit `Atomic*` types — the user opts into tracking by using
-`loom::sync::AtomicUsize` instead of `std::sync::atomic::AtomicUsize`. Interlace
+`loom::sync::AtomicUsize` instead of `std::sync::atomic::AtomicUsize`. Frontrun
 must detect accesses to arbitrary Python shared state.
 
 ### 5.1 Approaches to Conflict Detection
@@ -944,10 +944,10 @@ Extend the trace marker syntax to declare accessed objects:
 
 ```python
 def transfer(self, amount):
-    # interlace: read_balance [self.balance:read]
+    # frontrun: read_balance [self.balance:read]
     current = self.balance
     new_balance = current + amount
-    # interlace: write_balance [self.balance:write]
+    # frontrun: write_balance [self.balance:write]
     self.balance = new_balance
 ```
 
@@ -962,11 +962,11 @@ produce an `ObjectId`.
 
 #### Approach C: Loom-Style Cooperative Primitives
 
-The `interlace.sync` module proposed in FUTURE_WORK.md would provide primitives that
+The `frontrun.sync` module proposed in FUTURE_WORK.md would provide primitives that
 self-report to the DPOR engine:
 
 ```python
-from interlace.sync import SharedVar
+from frontrun.sync import SharedVar
 
 balance = SharedVar(100)
 
@@ -1001,7 +1001,7 @@ class MarkerConflictSource(ConflictSource):
     ...
 
 class CooperativeConflictSource(ConflictSource):
-    """Conflict detection via interlace.sync primitives."""
+    """Conflict detection via frontrun.sync primitives."""
     ...
 ```
 
@@ -1020,7 +1020,7 @@ detector should filter out:
 2. **Immutable objects.** Accesses to `int`, `str`, `bytes`, `tuple`, `frozenset`
    values. Reads of immutable objects are always independent.
 
-3. **Scheduler internals.** Accesses to the interlace scheduler's own state, the
+3. **Scheduler internals.** Accesses to the frontrun scheduler's own state, the
    cooperative lock wrappers, etc. These must be invisible to DPOR.
 
 4. **Stdlib internals.** Accesses within `threading`, `queue`, `collections`, etc.
@@ -1098,7 +1098,7 @@ edges are:
 | `await` (yield to event loop) -> next task resumes | Scheduling order is the happens-before |
 | `Task.cancel()` -> `CancelledError` raised | Cancel happens-before exception |
 
-For async DPOR, the custom `InterlaceEventLoop` proposed in FUTURE_WORK.md would
+For async DPOR, the custom `FrontrunEventLoop` proposed in FUTURE_WORK.md would
 intercept all task scheduling decisions and report them to the DPOR engine.
 
 ---
@@ -1259,14 +1259,14 @@ impl DporEngine {
 ### 9.2 Build Configuration
 
 ```toml
-# interlace-dpor/Cargo.toml
+# frontrun-dpor/Cargo.toml
 [package]
-name = "interlace-dpor"
+name = "frontrun-dpor"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "interlace_dpor"
+name = "frontrun_dpor"
 crate-type = ["cdylib"]
 
 [dependencies]
@@ -1274,7 +1274,7 @@ pyo3 = { version = "0.22", features = ["extension-module"] }
 ```
 
 ```toml
-# interlace-dpor/pyproject.toml
+# frontrun-dpor/pyproject.toml
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
@@ -1285,7 +1285,7 @@ features = ["pyo3/extension-module"]
 
 ---
 
-## 10. Integration with Existing Interlace Infrastructure
+## 10. Integration with Existing Frontrun Infrastructure
 
 ### 10.1 Bytecode Mode Integration
 
@@ -1367,7 +1367,7 @@ reports a deadlock. This is a valid bug report — the interleaving led to a dea
 ### 11.3 Python-Specific Soundness Concerns
 
 1. **GIL interactions.** CPython's Global Interpreter Lock serializes Python
-   bytecode execution, but C extensions can release the GIL. Interlace's opcode
+   bytecode execution, but C extensions can release the GIL. Frontrun's opcode
    tracing only sees Python-level operations. Accesses that happen inside C
    extensions (while the GIL is released) are invisible to DPOR. This is a
    fundamental limitation — the same limitation applies to loom, which only sees
@@ -1527,5 +1527,5 @@ Add happens-before tracking to reduce false dependencies:
   https://www.maturin.rs/
 
 - **sys.settrace / f_trace_opcodes**: CPython's tracing infrastructure used by
-  interlace's bytecode instrumentation.
+  frontrun's bytecode instrumentation.
   https://docs.python.org/3/library/sys.html#sys.settrace

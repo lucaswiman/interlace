@@ -2,13 +2,13 @@
 import sys
 from pathlib import Path
 
-# Add parent directory to path so we can import interlace
+# Add parent directory to path so we can import frontrun
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Project information
-project = "Interlace"
-copyright = "2025, Interlace Contributors"  # noqa: A001
-author = "Interlace Contributors"
+project = "Frontrun"
+copyright = "2026, Lucas Wiman"  # noqa: A001
+author = "Frontrun Contributors"
 
 # The short X.Y version
 version = "0.0"
@@ -34,7 +34,7 @@ html_theme = "sphinx_rtd_theme"
 
 # Theme options are theme-specific and used by html_theme_path
 html_theme_options = {
-    "canonical_url": "https://lucaswiman.github.io/interlace",
+    "canonical_url": "https://lucaswiman.github.io/frontrun",
     "logo_only": False,
     "display_version": True,
     "prev_next_buttons_location": "bottom",
@@ -71,7 +71,7 @@ on_rtd = True
 html_context = {
     "display_github": True,
     "github_user": "lucaswiman",
-    "github_repo": "interlace",
+    "github_repo": "frontrun",
     "github_version": "main",
     "conf_py_path": "/docs/",
 }

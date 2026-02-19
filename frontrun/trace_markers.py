@@ -1,5 +1,5 @@
 """
-Interlace: Deterministic thread interleaving using sys.settrace and comment markers.
+Frontrun: Deterministic thread interleaving using sys.settrace and comment markers.
 
 This module provides a mechanism to control thread execution order by marking
 synchronization points in code with special comments and enforcing a predefined
@@ -8,8 +8,8 @@ execution schedule using Python's tracing facilities.
 Example usage:
     ```python
     def worker_function():
-        x = read_data()  # interlace: read
-        write_data(x)    # interlace: write
+        x = read_data()  # frontrun: read
+        write_data(x)    # frontrun: write
 
     schedule = Schedule([
         Step("thread1", "read"),
@@ -32,15 +32,15 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from interlace.common import Schedule
+from frontrun.common import Schedule
 
-MARKER_PATTERN = re.compile(r"#\s*interlace:\s*(\w+)")
+MARKER_PATTERN = re.compile(r"#\s*frontrun:\s*(\w+)")
 
 
 class MarkerRegistry:
     """Tracks marker locations in source code for efficient lookup.
 
-    This class scans source files to find lines with interlace markers and
+    This class scans source files to find lines with frontrun markers and
     maintains a mapping from (filename, line_number) to marker names.
     """
 
@@ -170,7 +170,7 @@ class ThreadCoordinator:
 class TraceExecutor:
     """Executes threads with interlaced execution according to a schedule.
 
-    This is the main interface for the interlace library. It sets up tracing
+    This is the main interface for the frontrun library. It sets up tracing
     for each thread and coordinates their execution.
     """
 
@@ -313,7 +313,7 @@ class TraceExecutor:
         self.marker_registry = MarkerRegistry()
 
 
-def interlace(
+def frontrun(
     schedule: Schedule,
     threads: dict[str, Callable[..., None]],
     thread_args: dict[str, tuple[Any, ...]] | None = None,
@@ -334,7 +334,7 @@ def interlace(
 
     Example:
         ```python
-        interlace(
+        frontrun(
             schedule=Schedule([Step("t1", "marker1"), Step("t2", "marker1")]),
             threads={"t1": worker_func, "t2": worker_func},
         )
