@@ -9,10 +9,26 @@ concurrency testing. For the underlying algorithm and theory, see
 What DPOR does
 --------------
 
-``explore_dpor()`` takes a setup function, a list of thread functions, and an
-invariant. It runs the threads under every meaningfully different interleaving
-and checks the invariant after each one. If the invariant ever fails, it
-returns a counterexample.
+DPOR and the invariant have separate jobs:
+
+- **DPOR decides which interleavings to run.** It watches every shared-memory
+  access, detects which operations *conflict* (access the same object with at
+  least one write), and uses that information to skip redundant orderings.
+  Two interleavings that only differ in the order of independent operations
+  (e.g. two reads, or accesses to different objects) are equivalent, so DPOR
+  runs only one representative from each equivalence class.
+
+- **The invariant decides whether a bug occurred.** After all threads finish,
+  ``explore_dpor()`` calls your invariant on the final state. DPOR has no
+  built-in notion of "correct" --- it doesn't know that ``counter == 1`` is
+  wrong and ``counter == 2`` is right. You supply that judgement via the
+  invariant.
+
+(The name "invariant" is standard in tools like this --- loom, CHESS, etc. ---
+even though it is technically a *postcondition* checked once after the threads
+finish, not a continuously-monitored loop invariant.)
+
+Putting the two together:
 
 .. code-block:: python
 
@@ -27,10 +43,10 @@ returns a counterexample.
    if not result.property_holds:
        print(f"Bug found after {result.executions_explored} executions")
 
-"Meaningfully different" means: two interleavings that only differ in the order
-of *independent* operations (e.g. two reads, or accesses to different objects)
-are treated as equivalent and only one is explored. This is what makes DPOR
-fast --- it skips redundant work that a naive scheduler would repeat.
+1. DPOR picks an interleaving (based on conflict analysis).
+2. ``setup()`` creates fresh state; the threads run under that interleaving.
+3. The invariant checks the final state.
+4. Repeat until all distinct interleavings are covered.
 
 
 What it can and cannot find
@@ -102,8 +118,10 @@ The ``explore_dpor()`` function is the main entry point:
     The length of this list determines the number of threads.
 
 ``invariant``
-    A predicate over the shared state. Checked after all threads finish.
-    Return ``True`` if the state is valid, ``False`` if there is a bug.
+    A predicate over the shared state that defines what "correct" means.
+    Called after all threads finish each execution. Return ``True`` if the
+    state is valid, ``False`` if there is a bug. DPOR decides *which*
+    interleavings to try; the invariant decides *whether each one passed*.
 
 ``preemption_bound`` *(default: 2)*
     Maximum number of preemptions (context switches away from a runnable
