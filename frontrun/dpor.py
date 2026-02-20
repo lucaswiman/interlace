@@ -53,6 +53,7 @@ from frontrun._cooperative import (
     set_sync_reporter,
     unpatch_locks,
 )
+from frontrun._deadlock import SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
 
 T = TypeVar("T")
 
@@ -179,6 +180,9 @@ class DporScheduler:
 
     Unlike the random OpcodeScheduler in bytecode.py, this scheduler gets
     its scheduling decisions from the Rust DPOR engine.
+
+    Deadlock detection uses a fallback timeout plus instant lock-ordering
+    cycle detection via the :class:`~frontrun._deadlock.WaitForGraph`.
     """
 
     def __init__(self, engine: PyDporEngine, execution: PyExecution, num_threads: int) -> None:
@@ -226,7 +230,8 @@ class DporScheduler:
                         self._finished = True
                     self._condition.notify_all()
                     return True
-                # Wait for our turn
+
+                # Wait for our turn (fallback timeout for C-blocked threads)
                 if not self._condition.wait(timeout=5.0):
                     if self._current_thread in self._threads_done:
                         # Current thread is done, try scheduling again
@@ -525,12 +530,14 @@ class DporBytecodeRunner:
     def _patch_locks(self) -> None:
         if not self.cooperative_locks:
             return
+        install_wait_for_graph()
         patch_locks()
         self._lock_patched = True
 
     def _unpatch_locks(self) -> None:
         if self._lock_patched:
             unpatch_locks()
+            uninstall_wait_for_graph()
             self._lock_patched = False
 
     # --- sys.settrace backend (3.10-3.11) ---
@@ -665,6 +672,8 @@ class DporBytecodeRunner:
             trace_fn = self._make_trace(thread_id)
             sys.settrace(trace_fn)
             func(*args)
+        except SchedulerAbort:
+            pass  # scheduler already has the error; just exit cleanly
         except Exception as e:
             self.errors[thread_id] = e
             self.scheduler.report_error(e)
@@ -684,6 +693,8 @@ class DporBytecodeRunner:
             self._setup_dpor_tls(thread_id)
 
             func(*args)
+        except SchedulerAbort:
+            pass  # scheduler already has the error; just exit cleanly
         except Exception as e:
             self.errors[thread_id] = e
             self.scheduler.report_error(e)

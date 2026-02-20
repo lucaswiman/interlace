@@ -15,6 +15,14 @@ queue-producing thread a chance to execute opcodes and make progress.
 An optional *sync reporter* callback (stored in thread-local storage)
 lets DPOR report ``lock_acquire`` / ``lock_release`` events to the Rust
 happens-before engine without changing the core spin-yield logic.
+
+**Deadlock detection** — cooperative Lock and RLock register waiting/holding
+edges in a global :class:`~frontrun._deadlock.WaitForGraph`.  If adding a
+waiting edge creates a cycle, a ``TimeoutError`` with a diagnostic message
+is raised immediately.  All spin loops also check ``scheduler._error``
+eagerly (before each iteration) and bail via
+:class:`~frontrun._deadlock.SchedulerAbort` when the scheduler has been
+torn down.
 """
 
 import queue
@@ -95,22 +103,28 @@ class CooperativeLock:
     spins with non-blocking attempts, calling
     ``scheduler.wait_for_turn()`` between each attempt.  This gives the
     lock-holding thread a chance to execute opcodes and release the lock.
+
+    Registers edges in the global :class:`WaitForGraph` so that lock-
+    ordering deadlocks are detected instantly via cycle detection.
     """
 
     def __init__(self) -> None:
         self._lock = real_lock()
         self._object_id = id(self)
+        self._owner_thread_id: int | None = None  # frontrun thread_id, not OS tid
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        from frontrun._deadlock import SchedulerAbort, format_cycle, get_wait_for_graph
+
         if not blocking:
             result = self._lock.acquire(blocking=False)
             if result:
-                self._report("lock_acquire")
+                self._set_owner_and_report("lock_acquire")
             return result
 
         # Fast path: uncontested
         if self._lock.acquire(blocking=False):
-            self._report("lock_acquire")
+            self._set_owner_and_report("lock_acquire")
             return True
 
         # Slow path: lock is held – get scheduler context from TLS.
@@ -119,25 +133,59 @@ class CooperativeLock:
             # Not in a managed thread — fall back to real blocking
             result = self._lock.acquire(blocking=blocking, timeout=timeout)
             if result:
-                self._report("lock_acquire")
+                self._set_owner_and_report("lock_acquire")
             return result
 
         scheduler, thread_id = ctx
-        # Spin: yield scheduler turns until we can acquire
-        while not self._lock.acquire(blocking=False):
-            if scheduler._finished or scheduler._error:
-                result = self._lock.acquire(blocking=blocking, timeout=1.0)
-                if result:
-                    self._report("lock_acquire")
-                return result
-            scheduler.wait_for_turn(thread_id)
 
+        # Register waiting edge in the wait-for graph
+        graph = get_wait_for_graph()
+        if graph is not None:
+            cycle = graph.add_waiting(thread_id, self._object_id)
+            if cycle is not None:
+                graph.remove_waiting(thread_id, self._object_id)
+                msg = f"Lock-ordering deadlock detected: {format_cycle(cycle)}"
+                scheduler.report_error(TimeoutError(msg))
+                raise SchedulerAbort(msg)
+
+        try:
+            # Spin: yield scheduler turns until we can acquire
+            while not self._lock.acquire(blocking=False):
+                if scheduler._finished or scheduler._error:
+                    if graph is not None:
+                        graph.remove_waiting(thread_id, self._object_id)
+                    result = self._lock.acquire(blocking=blocking, timeout=1.0)
+                    if result:
+                        self._set_owner_and_report("lock_acquire")
+                    return result
+                scheduler.wait_for_turn(thread_id)
+        except BaseException:
+            if graph is not None:
+                graph.remove_waiting(thread_id, self._object_id)
+            raise
+
+        # Acquired — update graph: remove waiting edge, add holding edge
+        if graph is not None:
+            graph.remove_waiting(thread_id, self._object_id)
+            graph.add_holding(thread_id, self._object_id)
+
+        self._owner_thread_id = thread_id
         self._report("lock_acquire")
         return True
 
     def release(self) -> None:
+        from frontrun._deadlock import get_wait_for_graph
+
+        owner = self._owner_thread_id
+        self._owner_thread_id = None
         self._report("lock_release")
         self._lock.release()
+
+        # Remove holding edge
+        if owner is not None:
+            graph = get_wait_for_graph()
+            if graph is not None:
+                graph.remove_holding(owner, self._object_id)
 
     def locked(self) -> bool:
         return self._lock.locked()
@@ -148,6 +196,19 @@ class CooperativeLock:
 
     def __exit__(self, *args: Any) -> None:
         self.release()
+
+    def _set_owner_and_report(self, event: str) -> None:
+        """Set owner from TLS context and report the event."""
+        from frontrun._deadlock import get_wait_for_graph
+
+        ctx = get_context()
+        if ctx is not None:
+            _, thread_id = ctx
+            self._owner_thread_id = thread_id
+            graph = get_wait_for_graph()
+            if graph is not None:
+                graph.add_holding(thread_id, self._object_id)
+        self._report(event)
 
     def _report(self, event: str) -> None:
         reporter = get_sync_reporter()
@@ -168,6 +229,9 @@ class CooperativeRLock:
 
     Tracks the owning thread and recursion count.  The same thread can
     acquire multiple times without blocking; other threads spin-yield.
+
+    Like :class:`CooperativeLock`, registers edges in the global
+    :class:`WaitForGraph` for instant deadlock cycle detection.
     """
 
     def __init__(self) -> None:
@@ -175,8 +239,11 @@ class CooperativeRLock:
         self._owner: int | None = None
         self._count = 0
         self._object_id = id(self)
+        self._owner_thread_id: int | None = None  # frontrun thread_id
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        from frontrun._deadlock import SchedulerAbort, format_cycle, get_wait_for_graph
+
         me = threading.get_ident()
         if self._owner == me:
             self._count += 1
@@ -186,7 +253,7 @@ class CooperativeRLock:
             if self._lock.acquire(blocking=False):
                 self._owner = me
                 self._count = 1
-                self._report("lock_acquire")
+                self._set_owner_and_report("lock_acquire")
                 return True
             return False
 
@@ -194,7 +261,7 @@ class CooperativeRLock:
         if self._lock.acquire(blocking=False):
             self._owner = me
             self._count = 1
-            self._report("lock_acquire")
+            self._set_owner_and_report("lock_acquire")
             return True
 
         # Slow path: spin-yield
@@ -204,33 +271,66 @@ class CooperativeRLock:
             if result:
                 self._owner = me
                 self._count = 1
-                self._report("lock_acquire")
+                self._set_owner_and_report("lock_acquire")
             return result
 
         scheduler, thread_id = ctx
-        while not self._lock.acquire(blocking=False):
-            if scheduler._finished or scheduler._error:
-                result = self._lock.acquire(blocking=blocking, timeout=1.0)
-                if result:
-                    self._owner = me
-                    self._count = 1
-                    self._report("lock_acquire")
-                return result
-            scheduler.wait_for_turn(thread_id)
+
+        # Register waiting edge in the wait-for graph
+        graph = get_wait_for_graph()
+        if graph is not None:
+            cycle = graph.add_waiting(thread_id, self._object_id)
+            if cycle is not None:
+                graph.remove_waiting(thread_id, self._object_id)
+                msg = f"Lock-ordering deadlock detected: {format_cycle(cycle)}"
+                scheduler.report_error(TimeoutError(msg))
+                raise SchedulerAbort(msg)
+
+        try:
+            while not self._lock.acquire(blocking=False):
+                if scheduler._finished or scheduler._error:
+                    if graph is not None:
+                        graph.remove_waiting(thread_id, self._object_id)
+                    result = self._lock.acquire(blocking=blocking, timeout=1.0)
+                    if result:
+                        self._owner = me
+                        self._count = 1
+                        self._set_owner_and_report("lock_acquire")
+                    return result
+                scheduler.wait_for_turn(thread_id)
+        except BaseException:
+            if graph is not None:
+                graph.remove_waiting(thread_id, self._object_id)
+            raise
+
+        # Acquired — update graph
+        if graph is not None:
+            graph.remove_waiting(thread_id, self._object_id)
+            graph.add_holding(thread_id, self._object_id)
 
         self._owner = me
+        self._owner_thread_id = thread_id
         self._count = 1
         self._report("lock_acquire")
         return True
 
     def release(self) -> None:
+        from frontrun._deadlock import get_wait_for_graph
+
         if self._owner != threading.get_ident():
             raise RuntimeError("cannot release un-acquired lock")
         self._count -= 1
         if self._count == 0:
+            owner_tid = self._owner_thread_id
             self._owner = None
+            self._owner_thread_id = None
             self._report("lock_release")
             self._lock.release()
+
+            if owner_tid is not None:
+                graph = get_wait_for_graph()
+                if graph is not None:
+                    graph.remove_holding(owner_tid, self._object_id)
 
     def __enter__(self) -> "CooperativeRLock":
         self.acquire()
@@ -241,6 +341,19 @@ class CooperativeRLock:
 
     def _is_owned(self) -> bool:
         return self._owner == threading.get_ident()
+
+    def _set_owner_and_report(self, event: str) -> None:
+        """Set frontrun thread_id owner from TLS and report."""
+        from frontrun._deadlock import get_wait_for_graph
+
+        ctx = get_context()
+        if ctx is not None:
+            _, thread_id = ctx
+            self._owner_thread_id = thread_id
+            graph = get_wait_for_graph()
+            if graph is not None:
+                graph.add_holding(thread_id, self._object_id)
+        self._report(event)
 
     def _report(self, event: str) -> None:
         reporter = get_sync_reporter()
@@ -275,6 +388,8 @@ class CooperativeSemaphore:
         self._lock = real_lock()
 
     def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
+        from frontrun._deadlock import SchedulerAbort
+
         # Fast path: try to decrement counter
         self._lock.acquire()
         if self._value > 0:
@@ -313,13 +428,16 @@ class CooperativeSemaphore:
         # Spin-yield loop for managed threads
         scheduler, thread_id = ctx
         while True:
+            # Aggressive error check (option 6)
+            if scheduler._error:
+                raise SchedulerAbort("scheduler aborted")
             self._lock.acquire()
             if self._value > 0:
                 self._value -= 1
                 self._lock.release()
                 return True
             self._lock.release()
-            if scheduler._finished or scheduler._error:
+            if scheduler._finished:
                 deadline = time.monotonic() + 1.0
                 while time.monotonic() < deadline:
                     self._lock.acquire()
@@ -394,6 +512,8 @@ class CooperativeEvent:
         self._event = real_event()
 
     def wait(self, timeout: float | None = None) -> bool:
+        from frontrun._deadlock import SchedulerAbort
+
         if self._event.is_set():
             return True
 
@@ -406,7 +526,9 @@ class CooperativeEvent:
         if timeout is not None:
             deadline: float = time.monotonic() + timeout
             while not self._event.is_set():
-                if scheduler._finished or scheduler._error:
+                if scheduler._error:
+                    raise SchedulerAbort("scheduler aborted")
+                if scheduler._finished:
                     return self._event.wait(timeout=1.0)
                 if time.monotonic() >= deadline:
                     return self._event.is_set()
@@ -414,7 +536,9 @@ class CooperativeEvent:
             return True
 
         while not self._event.is_set():
-            if scheduler._finished or scheduler._error:
+            if scheduler._error:
+                raise SchedulerAbort("scheduler aborted")
+            if scheduler._finished:
                 return self._event.wait(timeout=1.0)
             scheduler.wait_for_turn(thread_id)
         return True
@@ -465,6 +589,8 @@ class CooperativeCondition:
         self._lock.release()
 
     def wait(self, timeout: float | None = None) -> bool:
+        from frontrun._deadlock import SchedulerAbort
+
         # Release the user lock, spin-yield, then re-acquire
         self._waiters += 1
         self._lock.release()
@@ -481,7 +607,9 @@ class CooperativeCondition:
                 with self._real_cond:
                     notified = self._real_cond.wait(timeout=0)
                 while not notified:
-                    if scheduler._finished or scheduler._error:
+                    if scheduler._error:
+                        raise SchedulerAbort("scheduler aborted")
+                    if scheduler._finished:
                         with self._real_cond:
                             return self._real_cond.wait(timeout=1.0)
                     if time.monotonic() >= deadline:
@@ -494,7 +622,9 @@ class CooperativeCondition:
             with self._real_cond:
                 notified = self._real_cond.wait(timeout=0)
             while not notified:
-                if scheduler._finished or scheduler._error:
+                if scheduler._error:
+                    raise SchedulerAbort("scheduler aborted")
+                if scheduler._finished:
                     with self._real_cond:
                         return self._real_cond.wait(timeout=1.0)
                 scheduler.wait_for_turn(thread_id)
@@ -538,6 +668,8 @@ class CooperativeQueue:
         self._queue = self._queue_class(maxsize)
 
     def get(self, block: bool = True, timeout: float | None = None) -> Any:
+        from frontrun._deadlock import SchedulerAbort
+
         try:
             return self._queue.get(block=False)
         except queue.Empty:
@@ -553,26 +685,32 @@ class CooperativeQueue:
         if timeout is not None:
             deadline: float = time.monotonic() + timeout
             while True:
+                if scheduler._error:
+                    raise SchedulerAbort("scheduler aborted")
                 try:
                     return self._queue.get(block=False)
                 except queue.Empty:
                     pass
-                if scheduler._finished or scheduler._error:
+                if scheduler._finished:
                     return self._queue.get(block=True, timeout=1.0)
                 if time.monotonic() >= deadline:
                     raise queue.Empty
                 scheduler.wait_for_turn(thread_id)
 
         while True:
+            if scheduler._error:
+                raise SchedulerAbort("scheduler aborted")
             try:
                 return self._queue.get(block=False)
             except queue.Empty:
                 pass
-            if scheduler._finished or scheduler._error:
+            if scheduler._finished:
                 return self._queue.get(block=True, timeout=1.0)
             scheduler.wait_for_turn(thread_id)
 
     def put(self, item: Any, block: bool = True, timeout: float | None = None) -> None:
+        from frontrun._deadlock import SchedulerAbort
+
         try:
             self._queue.put(item, block=False)
             return
@@ -590,12 +728,14 @@ class CooperativeQueue:
         if timeout is not None:
             deadline: float = time.monotonic() + timeout
             while True:
+                if scheduler._error:
+                    raise SchedulerAbort("scheduler aborted")
                 try:
                     self._queue.put(item, block=False)
                     return
                 except queue.Full:
                     pass
-                if scheduler._finished or scheduler._error:
+                if scheduler._finished:
                     self._queue.put(item, block=True, timeout=1.0)
                     return
                 if time.monotonic() >= deadline:
@@ -603,12 +743,14 @@ class CooperativeQueue:
                 scheduler.wait_for_turn(thread_id)
 
         while True:
+            if scheduler._error:
+                raise SchedulerAbort("scheduler aborted")
             try:
                 self._queue.put(item, block=False)
                 return
             except queue.Full:
                 pass
-            if scheduler._finished or scheduler._error:
+            if scheduler._finished:
                 self._queue.put(item, block=True, timeout=1.0)
                 return
             scheduler.wait_for_turn(thread_id)
