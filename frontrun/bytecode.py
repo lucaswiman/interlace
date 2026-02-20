@@ -31,7 +31,6 @@ Example — find a race condition with random schedule exploration:
     >>> assert not result.property_holds  # race condition found!
 """
 
-import os
 import random
 import sys
 import threading
@@ -47,6 +46,7 @@ from frontrun._cooperative import (
     unpatch_locks,
 )
 from frontrun._deadlock import SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
+from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.common import InterleavingResult
 
 # Type variable for the shared state passed between setup and thread functions
@@ -57,26 +57,6 @@ _PY_VERSION = sys.version_info[:2]
 # free-threaded builds (3.13t/3.14t) where sys.settrace + f_trace_opcodes
 # has a known crash bug (CPython #118415).
 _USE_SYS_MONITORING = _PY_VERSION >= (3, 12)
-
-# Directories to never trace into (stdlib, site-packages, threading internals)
-_SKIP_DIRS: set[str] = set()
-for _p in sys.path:
-    if "lib/python" in _p or "site-packages" in _p:
-        _SKIP_DIRS.add(_p)
-_THREADING_FILE = threading.__file__
-_THIS_FILE = os.path.abspath(__file__)
-
-
-def _should_trace_file(filename: str) -> bool:
-    """Check whether a file is user code that should be traced."""
-    if filename == _THREADING_FILE or filename == _THIS_FILE:
-        return False
-    if filename.startswith("<"):
-        return False
-    for skip_dir in _SKIP_DIRS:
-        if filename.startswith(skip_dir):
-            return False
-    return True
 
 
 class OpcodeScheduler:

@@ -36,7 +36,6 @@ Usage::
 from __future__ import annotations
 
 import dis
-import os
 import sys
 import threading
 from collections.abc import Callable
@@ -54,6 +53,7 @@ from frontrun._cooperative import (
     unpatch_locks,
 )
 from frontrun._deadlock import SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
+from frontrun._tracing import should_trace_file as _should_trace_file
 
 T = TypeVar("T")
 
@@ -62,7 +62,6 @@ _PY_VERSION = sys.version_info[:2]
 # free-threaded builds (3.13t/3.14t) where sys.settrace + f_trace_opcodes
 # has a known crash bug (CPython #118415).
 _USE_SYS_MONITORING = _PY_VERSION >= (3, 12)
-_IS_FREE_THREADED = getattr(sys, "_is_gil_enabled", lambda: True)() is False
 
 # ---------------------------------------------------------------------------
 # Result type
@@ -141,29 +140,6 @@ def _get_instructions(code: Any) -> dict[int, dis.Instruction]:
 
 
 # ---------------------------------------------------------------------------
-# File filtering
-# ---------------------------------------------------------------------------
-
-_SKIP_DIRS: set[str] = set()
-for _p in sys.path:
-    if "lib/python" in _p or "site-packages" in _p:
-        _SKIP_DIRS.add(_p)
-_THREADING_FILE = threading.__file__
-_THIS_FILE = os.path.abspath(__file__)
-
-
-def _should_trace_file(filename: str) -> bool:
-    if filename == _THREADING_FILE or filename == _THIS_FILE:
-        return False
-    if filename.startswith("<"):
-        return False
-    for skip_dir in _SKIP_DIRS:
-        if filename.startswith(skip_dir):
-            return False
-    return True
-
-
-# ---------------------------------------------------------------------------
 # Thread-local state for the DPOR scheduler
 # ---------------------------------------------------------------------------
 
@@ -206,10 +182,6 @@ class DporScheduler:
 
     def _schedule_next(self) -> int | None:
         """Ask the DPOR engine which thread to run next."""
-        # Mark finished threads
-        for tid in list(self._threads_done):
-            self.execution.finish_thread(tid)
-
         runnable = self.execution.runnable_threads()
         if not runnable:
             return None
@@ -592,6 +564,12 @@ class DporBytecodeRunner:
             return None
 
         def handle_py_return(code: Any, instruction_offset: int, retval: Any) -> Any:
+            if not _should_trace_file(code.co_filename):
+                return None
+            thread_id = getattr(_dpor_tls, "thread_id", None)
+            if thread_id is not None:
+                frame = sys._getframe(1)
+                scheduler.remove_shadow_stack(id(frame))
             return None
 
         def handle_instruction(code: Any, instruction_offset: int) -> Any:

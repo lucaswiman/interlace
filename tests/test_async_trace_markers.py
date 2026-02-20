@@ -107,7 +107,7 @@ def test_multiple_markers_same_task():
     assert results == ["step1", "step2", "step3"]
 
 
-@pytest.mark.skipif(_free_threaded, reason="Flaky under free-threaded Python; see GH-XXX")
+@pytest.mark.skipif(_free_threaded, reason="Flaky under free-threaded Python")
 def test_alternating_execution():
     """Alternating execution between two tasks."""
     results = []
