@@ -67,6 +67,8 @@ class InterleavedLoop:
         self._finished = False
         self._error: Exception | None = None
         self._tasks_done: set[Any] = set()
+        self._num_tasks: int = 0  # set by run_all
+        self._waiting_count: int = 0
 
     # ------------------------------------------------------------------
     # Scheduling policy — override in subclasses
@@ -122,6 +124,9 @@ class InterleavedLoop:
         The call blocks (yields to the event loop) until should_proceed()
         returns True for this task, then calls on_proceed() and returns.
 
+        Uses all-tasks-waiting detection: if every non-done task is blocked
+        in ``pause()`` and none can proceed, deadlock is detected instantly.
+
         Args:
             task_id: Identity of the calling task.
             marker: Optional scheduling context.
@@ -136,18 +141,42 @@ class InterleavedLoop:
                     self._condition.notify_all()
                     return
 
+                # All-tasks-waiting detection
+                alive = self._num_tasks - len(self._tasks_done)
+                self._waiting_count += 1
                 try:
-                    await asyncio.wait_for(self._condition.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    self._handle_timeout(task_id, marker)
-                    return
+                    if self._waiting_count >= alive and alive > 0:
+                        self._handle_all_waiting_deadlock(task_id, marker)
+                        return
+
+                    try:
+                        await asyncio.wait_for(self._condition.wait(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        self._handle_timeout(task_id, marker)
+                        return
+                finally:
+                    self._waiting_count -= 1
 
     def _handle_timeout(self, task_id: Any, marker: Any = None) -> None:
         """Handle a timeout in pause(). Sets the error and wakes everyone.
 
         Override to provide a more informative error message.
         """
-        self._error = TimeoutError(f"Deadlock: task {task_id!r} timed out waiting at marker {marker!r}")
+        self._error = TimeoutError(
+            f"Deadlock: task {task_id!r} timed out waiting at marker {marker!r} (fallback timeout)"
+        )
+        self._condition.notify_all()
+
+    def _handle_all_waiting_deadlock(self, task_id: Any, marker: Any = None) -> None:
+        """Handle instant deadlock: all alive tasks are waiting, none can proceed.
+
+        Override to provide a more informative error message.
+        """
+        alive = self._num_tasks - len(self._tasks_done)
+        self._error = TimeoutError(
+            f"Deadlock: all {alive} alive tasks are waiting but none can proceed "
+            f"(task {task_id!r} at marker {marker!r})"
+        )
         self._condition.notify_all()
 
     # ------------------------------------------------------------------
@@ -183,6 +212,7 @@ class InterleavedLoop:
         if isinstance(task_funcs, list):
             task_funcs = dict(enumerate(task_funcs))
 
+        self._num_tasks = len(task_funcs)
         errors: dict[Any, Exception] = {}
 
         async def _run(task_id: Any, func: Callable[..., Awaitable[None]]) -> None:

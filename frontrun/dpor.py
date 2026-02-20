@@ -36,7 +36,6 @@ Usage::
 from __future__ import annotations
 
 import dis
-import os
 import sys
 import threading
 from collections.abc import Callable
@@ -53,6 +52,8 @@ from frontrun._cooperative import (
     set_sync_reporter,
     unpatch_locks,
 )
+from frontrun._deadlock import SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
+from frontrun._tracing import should_trace_file as _should_trace_file
 
 T = TypeVar("T")
 
@@ -61,7 +62,6 @@ _PY_VERSION = sys.version_info[:2]
 # free-threaded builds (3.13t/3.14t) where sys.settrace + f_trace_opcodes
 # has a known crash bug (CPython #118415).
 _USE_SYS_MONITORING = _PY_VERSION >= (3, 12)
-_IS_FREE_THREADED = getattr(sys, "_is_gil_enabled", lambda: True)() is False
 
 # ---------------------------------------------------------------------------
 # Result type
@@ -140,29 +140,6 @@ def _get_instructions(code: Any) -> dict[int, dis.Instruction]:
 
 
 # ---------------------------------------------------------------------------
-# File filtering
-# ---------------------------------------------------------------------------
-
-_SKIP_DIRS: set[str] = set()
-for _p in sys.path:
-    if "lib/python" in _p or "site-packages" in _p:
-        _SKIP_DIRS.add(_p)
-_THREADING_FILE = threading.__file__
-_THIS_FILE = os.path.abspath(__file__)
-
-
-def _should_trace_file(filename: str) -> bool:
-    if filename == _THREADING_FILE or filename == _THIS_FILE:
-        return False
-    if filename.startswith("<"):
-        return False
-    for skip_dir in _SKIP_DIRS:
-        if filename.startswith(skip_dir):
-            return False
-    return True
-
-
-# ---------------------------------------------------------------------------
 # Thread-local state for the DPOR scheduler
 # ---------------------------------------------------------------------------
 
@@ -179,6 +156,9 @@ class DporScheduler:
 
     Unlike the random OpcodeScheduler in bytecode.py, this scheduler gets
     its scheduling decisions from the Rust DPOR engine.
+
+    Deadlock detection uses a fallback timeout plus instant lock-ordering
+    cycle detection via the :class:`~frontrun._deadlock.WaitForGraph`.
     """
 
     def __init__(self, engine: PyDporEngine, execution: PyExecution, num_threads: int) -> None:
@@ -202,10 +182,6 @@ class DporScheduler:
 
     def _schedule_next(self) -> int | None:
         """Ask the DPOR engine which thread to run next."""
-        # Mark finished threads
-        for tid in list(self._threads_done):
-            self.execution.finish_thread(tid)
-
         runnable = self.execution.runnable_threads()
         if not runnable:
             return None
@@ -226,7 +202,8 @@ class DporScheduler:
                         self._finished = True
                     self._condition.notify_all()
                     return True
-                # Wait for our turn
+
+                # Wait for our turn (fallback timeout for C-blocked threads)
                 if not self._condition.wait(timeout=5.0):
                     if self._current_thread in self._threads_done:
                         # Current thread is done, try scheduling again
@@ -525,12 +502,14 @@ class DporBytecodeRunner:
     def _patch_locks(self) -> None:
         if not self.cooperative_locks:
             return
+        install_wait_for_graph()
         patch_locks()
         self._lock_patched = True
 
     def _unpatch_locks(self) -> None:
         if self._lock_patched:
             unpatch_locks()
+            uninstall_wait_for_graph()
             self._lock_patched = False
 
     # --- sys.settrace backend (3.10-3.11) ---
@@ -585,6 +564,12 @@ class DporBytecodeRunner:
             return None
 
         def handle_py_return(code: Any, instruction_offset: int, retval: Any) -> Any:
+            if not _should_trace_file(code.co_filename):
+                return None
+            thread_id = getattr(_dpor_tls, "thread_id", None)
+            if thread_id is not None:
+                frame = sys._getframe(1)
+                scheduler.remove_shadow_stack(id(frame))
             return None
 
         def handle_instruction(code: Any, instruction_offset: int) -> Any:
@@ -665,6 +650,8 @@ class DporBytecodeRunner:
             trace_fn = self._make_trace(thread_id)
             sys.settrace(trace_fn)
             func(*args)
+        except SchedulerAbort:
+            pass  # scheduler already has the error; just exit cleanly
         except Exception as e:
             self.errors[thread_id] = e
             self.scheduler.report_error(e)
@@ -684,6 +671,8 @@ class DporBytecodeRunner:
             self._setup_dpor_tls(thread_id)
 
             func(*args)
+        except SchedulerAbort:
+            pass  # scheduler already has the error; just exit cleanly
         except Exception as e:
             self.errors[thread_id] = e
             self.scheduler.report_error(e)

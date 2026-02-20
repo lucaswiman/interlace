@@ -129,8 +129,10 @@ class AsyncTraceExecutor:
                 marker_name = self.marker_registry.get_marker(filename, lineno)
                 if marker_name and (filename, lineno) not in processed_locations:
                     processed_locations.add((filename, lineno))
-                    # Block this thread until it's our turn
-                    self.coordinator.wait_for_turn(execution_name, marker_name)
+                    # Release execution lock while waiting (let other threads run).
+                    # wait_for_turn reacquires it before returning.
+                    self.coordinator._execution_lock.release()
+                    self.coordinator.wait_for_turn(execution_name, marker_name, _reacquire_execution_lock=True)
                     # Check if an error occurred in another task
                     if self.coordinator.error:
                         raise self.coordinator.error
@@ -141,15 +143,23 @@ class AsyncTraceExecutor:
                     prev_marker = self.marker_registry.get_marker(filename, lineno - 1)
                     if prev_marker and (filename, lineno - 1) not in processed_locations:
                         processed_locations.add((filename, lineno - 1))
-                        # Block this thread until it's our turn
-                        self.coordinator.wait_for_turn(execution_name, prev_marker)
+                        # Release execution lock while waiting (let other threads run).
+                        # wait_for_turn reacquires it before returning.
+                        self.coordinator._execution_lock.release()
+                        self.coordinator.wait_for_turn(execution_name, prev_marker, _reacquire_execution_lock=True)
                         # Check if an error occurred in another task
                         if self.coordinator.error:
                             raise self.coordinator.error
 
                 return trace_function
             except Exception as e:
-                # Report error and stop tracing
+                # Release execution lock before reporting to avoid deadlock
+                # (report_error needs the condition lock, which another thread
+                # may hold while waiting for _execution_lock in wait_for_turn).
+                try:
+                    self.coordinator._execution_lock.release()
+                except RuntimeError:
+                    pass
                 self.coordinator.report_error(e)
                 return None
 
@@ -162,20 +172,30 @@ class AsyncTraceExecutor:
             execution_name: The name of this task
             task_fn: The async function to execute
         """
+        error: Exception | None = None
         try:
             # Install trace function for this task
             trace_fn = self._create_trace_function(execution_name)
+            # Acquire execution lock before running (serializes with other threads)
+            self.coordinator._execution_lock.acquire()
             sys.settrace(trace_fn)
 
             # Run the async task in its own event loop
             asyncio.run(task_fn())
         except Exception as e:
-            # Store the error
+            # Store the error but don't call report_error yet — we may still
+            # hold _execution_lock and report_error needs the condition lock,
+            # which risks deadlock against wait_for_turn's lock ordering.
+            error = e
             self.task_errors[execution_name] = e
-            self.coordinator.report_error(e)
         finally:
-            # Clean up trace function
             sys.settrace(None)
+            try:
+                self.coordinator._execution_lock.release()
+            except RuntimeError:
+                pass
+            if error is not None:
+                self.coordinator.report_error(error)
 
     def run(self, tasks: dict[str, Callable[[], Coroutine[Any, Any, None]]], timeout: float = 10.0) -> None:
         """Run all tasks with controlled interleaving based on comment markers.

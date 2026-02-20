@@ -31,7 +31,6 @@ Example — find a race condition with random schedule exploration:
     >>> assert not result.property_holds  # race condition found!
 """
 
-import os
 import random
 import sys
 import threading
@@ -46,6 +45,8 @@ from frontrun._cooperative import (
     set_context,
     unpatch_locks,
 )
+from frontrun._deadlock import SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
+from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.common import InterleavingResult
 
 # Type variable for the shared state passed between setup and thread functions
@@ -57,26 +58,6 @@ _PY_VERSION = sys.version_info[:2]
 # has a known crash bug (CPython #118415).
 _USE_SYS_MONITORING = _PY_VERSION >= (3, 12)
 
-# Directories to never trace into (stdlib, site-packages, threading internals)
-_SKIP_DIRS: set[str] = set()
-for _p in sys.path:
-    if "lib/python" in _p or "site-packages" in _p:
-        _SKIP_DIRS.add(_p)
-_THREADING_FILE = threading.__file__
-_THIS_FILE = os.path.abspath(__file__)
-
-
-def _should_trace_file(filename: str) -> bool:
-    """Check whether a file is user code that should be traced."""
-    if filename == _THREADING_FILE or filename == _THIS_FILE:
-        return False
-    if filename.startswith("<"):
-        return False
-    for skip_dir in _SKIP_DIRS:
-        if filename.startswith(skip_dir):
-            return False
-    return True
-
 
 class OpcodeScheduler:
     """Controls thread execution at bytecode instruction granularity.
@@ -84,6 +65,11 @@ class OpcodeScheduler:
     The schedule is a list of thread indices. Each entry means "let this
     thread execute one bytecode instruction." When the schedule is
     exhausted, all threads run freely to completion.
+
+    Deadlock detection uses a 5 s fallback ``condition.wait`` timeout for
+    threads stuck in C extensions or other unmanaged blocking calls.  When
+    cooperative locks are enabled, the :class:`~frontrun._deadlock.WaitForGraph`
+    provides instant lock-ordering cycle detection.
     """
 
     def __init__(self, schedule: list[int], num_threads: int):
@@ -178,6 +164,7 @@ class BytecodeShuffler:
         """Replace threading and queue primitives with cooperative versions."""
         if not self.cooperative_locks:
             return
+        install_wait_for_graph()
         patch_locks()
         self._lock_patched = True
 
@@ -185,6 +172,7 @@ class BytecodeShuffler:
         """Restore the original threading and queue primitives."""
         if self._lock_patched:
             unpatch_locks()
+            uninstall_wait_for_graph()
             self._lock_patched = False
 
     def _make_trace(self, thread_id: int) -> Callable[[Any, str, Any], Any]:  # type: ignore[return-value]
@@ -276,6 +264,8 @@ class BytecodeShuffler:
             trace_fn = self._make_trace(thread_id)
             sys.settrace(trace_fn)
             func(*args, **kwargs)
+        except SchedulerAbort:
+            pass  # scheduler already has the error; just exit cleanly
         except Exception as e:
             self.errors[thread_id] = e
             self.scheduler.report_error(e)
@@ -292,6 +282,8 @@ class BytecodeShuffler:
             set_context(self.scheduler, thread_id)
 
             func(*args, **kwargs)
+        except SchedulerAbort:
+            pass  # scheduler already has the error; just exit cleanly
         except Exception as e:
             self.errors[thread_id] = e
             self.scheduler.report_error(e)
@@ -414,7 +406,7 @@ def run_with_schedule(
             runner.run(funcs, timeout=timeout)
         except TimeoutError:
             if debug:
-                print("Timed out with {timeout=} on {schedule=}", flush=True)
+                print(f"Timed out with {timeout=} on {schedule=}", flush=True)
     finally:
         runner._unpatch_locks()
     return state
