@@ -40,6 +40,11 @@ no further tracing overhead needed for that object.
 `Connection`, etc.) — fine. C extension objects like `sqlite3.Cursor` —
 raises `TypeError`. For those, fall back to `sys.setprofile` (below).
 
+**Verified:** See `ideas/experiments/test_class_reassignment.py`. `isinstance()`
+preserved, attributes preserved, thread-safe (10 concurrent swaps, 0 errors).
+Auto-swap from `sys.settrace` return event works. Confirmed failure on
+`socket.socket`, `sqlite3.Cursor`, and `io.StringIO` (all C extension types).
+
 ---
 
 ## `sys.setprofile` / `sys.monitoring` C_CALL Events
@@ -73,6 +78,12 @@ needed.
 **Interaction with `sys.settrace`:** Not a problem. Profile fires around C
 calls, trace fires around opcodes. They don't overlap — they fire at different
 times on different events.
+
+**Verified:** See `ideas/experiments/test_setprofile_c_calls.py`. `socket.connect`,
+`socket.sendall`, `socket.recv` all detected. Per-thread profiles are independent.
+Coexists with `sys.settrace` — both fire simultaneously. On 3.13 via
+`sys.monitoring`, INSTRUCTION + CALL events coexist on the same tool ID
+(see `test_monitoring_c_call.py`).
 
 ---
 
@@ -108,6 +119,14 @@ I/O to a new endpoint is detected, cache the result. GC non-determinism doesn't
 matter because you're just using it for resource *identification* — the actual
 conflict detection still goes through deterministic vector clocks in the Rust
 engine.
+
+**Verified:** See `ideas/experiments/test_gc_referrers.py`. Successfully walks
+`socket → DBConnection → ConnectionPool → Engine`. Key finding:
+`gc.get_referrers(obj)` returns `__dict__` (a plain dict), not the owning
+object — must walk *through* dicts by checking `getattr(dr, "__dict__") is c`.
+Two connections from the same pool both resolve to the same `id(engine)`.
+Cold walk: ~1.5ms (trivial graph) to ~25ms (27K objects). Cache lookup: ~1µs
+(1300x speedup).
 
 ---
 

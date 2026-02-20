@@ -390,3 +390,55 @@ Higher layers override lower ones (if a plugin provides precise per-table tracki
 **Frame introspection at I/O points:** When a resource access is detected (via any layer), inspect `sys._getframe()` to capture the call stack. Use the innermost user-code frame as the "operation identity." This lets you show the user *where* in their code the conflicting resource accesses happen, even without trace markers.
 
 **Import hook bytecode rewriting (long-term):** Eliminate `should_trace_file` filtering entirely. Rewrite bytecodes at import time to insert callbacks only around `CALL` instructions targeting resource methods. Zero overhead on non-resource code. This is a legitimate technique (coverage.py does it), but the implementation cost is high: the shadow stack code in `_process_opcode` already demonstrates ~200 lines of version-specific opcode handling across 3.10–3.14t. For the specific goal of "detect resource accesses," `sys.setprofile` achieves the same thing with ~20 lines.
+
+---
+
+## Experimental Findings
+
+Toy experiments in `ideas/experiments/` verified each technique. Key results:
+
+### `sys.setprofile` (test_setprofile_c_calls.py)
+
+- **`c_call` events fire for all socket operations:** `socket.connect`, `socket.sendall`, `socket.recv`, `socket.close` all detected. File I/O (`open`, `write`, `read`) also captured.
+- **Per-thread profiles work independently:** `sys.setprofile` is thread-local. Each thread's profile function sees only that thread's C calls — exactly what DPOR needs.
+- **Coexists with `sys.settrace`:** Both systems fire simultaneously without interference. `sys.settrace` captures Python call/return events while `sys.setprofile` captures C calls. Zero interaction issues.
+- **`__qualname__` available on C function objects:** `socket.sendall`, `socket.recv` etc. have `__qualname__` attributes, so matching against known resource functions is straightforward identity comparison (`arg is socket.socket.send`).
+
+### `sys.monitoring` C_CALL events (test_monitoring_c_call.py, Python 3.13)
+
+- **PEP 669 exposes `CALL`, `C_RAISE`, `C_RETURN` events** — `CALL` fires for both Python and C functions.
+- **INSTRUCTION + CALL coexist on the same tool ID:** 89 instruction events and 7 call events fired during a single function that does socket I/O. DPOR could use one tool for INSTRUCTION (existing) and add CALL events to the same bitmask.
+- **Python vs C calls distinguishable:** C functions lack `__code__` attribute, Python functions have it. `isinstance(callable_obj, type)` catches type constructors.
+
+### `__class__` reassignment (test_class_reassignment.py)
+
+- **Works perfectly on pure-Python objects:** `isinstance()` preserved, all attributes preserved, method dispatch goes through instrumented subclass. Thread-safe (10 concurrent swaps, zero errors).
+- **Fails on C extension types:** `socket.socket` → `TypeError: __class__ assignment: object layout differs`. `sqlite3.Cursor` → `TypeError: only supported for mutable types`. `io.StringIO` → same failure.
+- **Auto-swap from `sys.settrace` return event works:** The trace function can intercept return values and swap classes on the fly. Duck-type check (`hasattr(retval, "execute")`) correctly identifies resource-like objects.
+- **Practical implication:** Use for pure-Python library objects (SQLAlchemy Session, Connection, etc.). Fall back to `sys.setprofile` for C extension types (sqlite3, raw socket).
+
+### `gc.get_referrers()` one-shot (test_gc_referrers.py)
+
+- **Successfully walks from socket to Engine:** `socket → DBConnection → ConnectionPool → Engine` chain correctly traversed.
+- **Key implementation detail:** `gc.get_referrers(obj)` returns `__dict__` (a plain dict), not the owning object directly. Must walk *through* dicts: find the dict, then find which object's `__dict__` it is (`getattr(dr, "__dict__", None) is c`).
+- **Same-pool connections resolve to same Engine:** Two connections from the same pool both walk up to `id(engine)` — exactly the resource identity we need.
+- **Different engines resolve to different identities:** Confirmed.
+- **Cost:** ~1.5ms cold walk (trivial object graph), ~25ms with 27K objects. Cache lookup: ~1µs. **1300x speedup** after caching. Acceptable for one-shot startup-time use.
+
+### `sys.addaudithook` (test_audit_hook.py)
+
+- **`socket.connect` fires with address tuple:** `('127.0.0.1', port)` — perfect resource identity.
+- **`socket.sendmsg` does NOT fire** (at least not for `sendall` on this Python version). The audit event set is more limited than expected. `socket.__new__` and `socket.connect` are the reliable events.
+- **`open` fires with path and mode:** Both write and read opens captured. Mode is available for distinguishing read vs write access.
+- **`sqlite3.connect` fires with path and connection handle:** The handle is the actual `sqlite3.Connection` object — can be used as the resource root for `gc.get_referrers` or `__class__` swapping.
+- **Socket object identity preserved in audit args:** `args[0] is test_sock` → `True`. Can feed directly to `gc.get_referrers()`.
+- **No per-thread filtering:** Audit hooks fire globally. Must call `threading.current_thread()` inside the hook to attribute events to threads.
+
+### Recommended implementation order
+
+Based on experiments, the practical stack (from simplest to most complex):
+
+1. **`sys.setprofile`** (~30 lines): catches C-level I/O, per-thread, coexists with `sys.settrace`. Works today on 3.10+.
+2. **`sys.addaudithook`** (~20 lines): zero-config safety net for `socket.connect` and `open`. Limited event set but catches connection establishment.
+3. **`gc.get_referrers` one-shot** (~40 lines): maps low-level I/O objects to high-level resource owners. Must walk through `__dict__` dicts. Cache after first walk.
+4. **`__class__` reassignment** (~50 lines): makes pure-Python resource objects self-reporting. Auto-trigger from `sys.settrace` return events. Falls back gracefully on C types.
