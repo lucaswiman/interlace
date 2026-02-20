@@ -608,6 +608,8 @@ class CooperativeCondition:
     def wait(self, timeout: float | None = None) -> bool:
         from frontrun._deadlock import SchedulerAbort
 
+        # _waiters and notify_count_before_wait are written while we hold
+        # self._lock (the caller must hold it per the Condition API).
         self._waiters += 1
         # Record the counter BEFORE releasing the lock so that any
         # notify() that fires after we release is visible.
@@ -621,6 +623,11 @@ class CooperativeCondition:
                     return self._real_cond.wait(timeout=timeout)
 
             scheduler, thread_id = ctx
+
+            # The spin-loop reads of _notify_count below are intentionally
+            # done WITHOUT holding self._lock.  This is safe because
+            # _notify_count is monotonically increasing: a stale read can
+            # only cause one extra spin iteration, never a missed wakeup.
 
             if timeout is not None:
                 deadline = time.monotonic() + timeout
@@ -647,8 +654,10 @@ class CooperativeCondition:
                 scheduler.wait_for_turn(thread_id)
             return True
         finally:
-            self._waiters -= 1
             self._lock.acquire()
+            # Decrement AFTER re-acquiring the lock so that the write is
+            # serialised with notify_all()'s read of _waiters.
+            self._waiters -= 1
 
     def wait_for(self, predicate: Callable[[], bool], timeout: float | None = None) -> bool:
         result = predicate()
@@ -669,6 +678,9 @@ class CooperativeCondition:
         return result
 
     def notify(self, n: int = 1) -> None:
+        # The caller must hold self._lock (per the Condition API), so
+        # this increment is serialised with other notify/notify_all calls
+        # and with the _waiters bookkeeping in wait().
         self._notify_count += n
         # Also wake the real condition for threads in the non-cooperative
         # path (no scheduler context — they block in _real_cond.wait()).
@@ -676,6 +688,7 @@ class CooperativeCondition:
             self._real_cond.notify(n)
 
     def notify_all(self) -> None:
+        # Caller holds self._lock — see notify() comment.
         self._notify_count += max(self._waiters, 1)
         with self._real_cond:
             self._real_cond.notify_all()
