@@ -609,9 +609,9 @@ class CooperativeCondition:
         from frontrun._deadlock import SchedulerAbort
 
         self._waiters += 1
-        # Snapshot the counter BEFORE releasing the lock so that any
+        # Record the counter BEFORE releasing the lock so that any
         # notify() that fires after we release is visible.
-        snapshot = self._notify_count
+        notify_count_before_wait = self._notify_count
         self._lock.release()
         try:
             ctx = get_context()
@@ -624,26 +624,26 @@ class CooperativeCondition:
 
             if timeout is not None:
                 deadline = time.monotonic() + timeout
-                while self._notify_count <= snapshot:
+                while self._notify_count <= notify_count_before_wait:
                     if scheduler._error:
                         raise SchedulerAbort("scheduler aborted")
                     if scheduler._finished:
                         remaining = max(0.0, deadline - time.monotonic())
                         time.sleep(min(0.01, remaining))
-                        return self._notify_count > snapshot
+                        return self._notify_count > notify_count_before_wait
                     if time.monotonic() >= deadline:
                         return False
                     scheduler.wait_for_turn(thread_id)
                 return True
 
-            while self._notify_count <= snapshot:
+            while self._notify_count <= notify_count_before_wait:
                 if scheduler._error:
                     raise SchedulerAbort("scheduler aborted")
                 if scheduler._finished:
                     end = time.monotonic() + 1.0
-                    while self._notify_count <= snapshot and time.monotonic() < end:
+                    while self._notify_count <= notify_count_before_wait and time.monotonic() < end:
                         time.sleep(0.001)
-                    return self._notify_count > snapshot
+                    return self._notify_count > notify_count_before_wait
                 scheduler.wait_for_turn(thread_id)
             return True
         finally:
