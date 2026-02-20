@@ -64,6 +64,10 @@ visible at the bytecode level register as conflicts.
 - Lock acquire and release (``threading.Lock``, ``threading.RLock``)
 - Thread spawn and join
 
+Beyond invariant violations, DPOR also detects **deadlocks** (via wait-for-graph
+cycle detection) and **crashes** (unhandled exceptions in any thread are
+re-raised after the execution completes).
+
 **Operations DPOR does not see (and will therefore not explore):**
 
 - **Database operations.** Two threads calling ``cursor.execute("UPDATE ...")``
