@@ -9,10 +9,12 @@ import threading
 import time
 
 import pytest
+from frontrun_dpor import PyDporEngine
 
 from frontrun._cooperative import CooperativeCondition
 from frontrun.bytecode import BytecodeShuffler, OpcodeScheduler
 from frontrun.common import Schedule, Step
+from frontrun.dpor import DporBytecodeRunner, DporScheduler, explore_dpor
 from frontrun.trace_markers import TraceExecutor
 
 # ---------------------------------------------------------------------------
@@ -153,8 +155,6 @@ class TestDporStopOnFirst:
     def test_stop_on_first_reduces_exploration(self):
         """With stop_on_first=True (default), exploration should stop after
         the first counterexample is found."""
-        pytest.importorskip("frontrun_dpor")
-        from frontrun.dpor import explore_dpor
 
         class Counter:
             def __init__(self):
@@ -188,8 +188,6 @@ class TestDporStopOnFirst:
 
     def test_stop_on_first_false_explores_all(self):
         """With stop_on_first=False, all interleavings are explored."""
-        pytest.importorskip("frontrun_dpor")
-        from frontrun.dpor import explore_dpor
 
         class Counter:
             def __init__(self):
@@ -241,11 +239,6 @@ class TestTimeoutAccumulation:
     @pytest.mark.intentionally_leaves_dangling_threads
     def test_dpor_total_timeout_is_bounded(self):
         """Same test for DporBytecodeRunner."""
-        pytest.importorskip("frontrun_dpor")
-        from frontrun_dpor import PyDporEngine
-
-        from frontrun.dpor import DporBytecodeRunner, DporScheduler
-
         engine = PyDporEngine(num_threads=3)
         execution = engine.begin_execution()
         scheduler = DporScheduler(engine, execution, num_threads=3)
