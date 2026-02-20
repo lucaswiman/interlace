@@ -31,20 +31,21 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# Save real factories before any patching happens.
-# ---------------------------------------------------------------------------
-# threading.Lock is a factory function (_thread.allocate_lock), not a type.
+from frontrun import _real_threading as _rt
 
-real_lock = threading.Lock
-real_rlock = threading.RLock
-real_semaphore = threading.Semaphore
-real_bounded_semaphore = threading.BoundedSemaphore
-real_event = threading.Event
-real_condition = threading.Condition
-real_queue = queue.Queue
-real_lifo_queue = queue.LifoQueue
-real_priority_queue = queue.PriorityQueue
+# ---------------------------------------------------------------------------
+# Real (non-cooperative) factories, saved before any patching happens.
+# ---------------------------------------------------------------------------
+
+real_lock = _rt.lock
+real_rlock = _rt.rlock
+real_semaphore = _rt.semaphore
+real_bounded_semaphore = _rt.bounded_semaphore
+real_event = _rt.event
+real_condition = _rt.condition
+real_queue = _rt.queue_
+real_lifo_queue = _rt.lifo_queue
+real_priority_queue = _rt.priority_queue
 
 # ---------------------------------------------------------------------------
 # Thread-local scheduler context

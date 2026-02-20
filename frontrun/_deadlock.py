@@ -19,7 +19,7 @@ or other unmanaged blocking calls.
 
 from __future__ import annotations
 
-from frontrun._cooperative import real_lock
+from frontrun._real_threading import lock as _real_lock
 
 
 class SchedulerAbortError(Exception):
@@ -51,7 +51,7 @@ class WaitForGraph:
     """
 
     def __init__(self) -> None:
-        self._lock = real_lock()
+        self._lock = _real_lock()
         # adjacency: node -> set of successor nodes
         self._edges: dict[tuple[str, int], set[tuple[str, int]]] = {}
 
@@ -149,7 +149,7 @@ def format_cycle(cycle: list[tuple[str, int]]) -> str:
 # ---------------------------------------------------------------------------
 
 _global_graph: WaitForGraph | None = None
-_graph_lock = real_lock()
+_graph_lock = _real_lock()
 
 
 def get_wait_for_graph() -> WaitForGraph | None:
