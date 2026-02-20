@@ -167,7 +167,7 @@ def test_counter_race():
     assert result.executions_explored == 2  # only 2 of 6 interleavings needed
 ```
 
-**Scope and limitations:** DPOR works on pure Python shared-memory concurrency — attribute reads/writes, lock acquire/release, thread spawn/join. It cannot detect race conditions that involve external systems (databases, file systems, network services, message queues) because those operations are invisible to the bytecode-level instrumentation. For testing interactions with external systems, use trace markers with explicit scheduling instead.
+**Scope and limitations:** DPOR explores alternative schedules only where it sees a conflict (two threads accessing the same Python object with at least one write). Operations that go through C code — database queries, file I/O, network calls — look like opaque, independent function calls to the bytecode tracer. DPOR won't see a conflict between two threads calling `cursor.execute(...)` on the same row, so it will conclude they are independent and skip the interleavings where bugs hide. For testing those interactions, use trace markers with explicit scheduling instead.
 
 ## Async Support
 

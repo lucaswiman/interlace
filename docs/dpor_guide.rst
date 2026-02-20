@@ -52,33 +52,38 @@ Putting the two together:
 What it can and cannot find
 ---------------------------
 
-DPOR works by instrumenting Python bytecode to intercept shared-memory
-operations. This determines what is visible to the engine and what is not.
+DPOR explores alternative interleavings only where it detects a *conflict*
+--- two threads accessing the same object with at least one write. It detects
+conflicts by instrumenting Python bytecode, so only operations that are
+visible at the bytecode level register as conflicts.
 
-**What DPOR sees:**
+**Operations DPOR sees (and will explore reorderings of):**
 
 - Attribute reads and writes (``self.x``, ``obj.field = ...``)
 - Subscript reads and writes (``d[key]``, ``lst[i] = ...``)
 - Lock acquire and release (``threading.Lock``, ``threading.RLock``)
 - Thread spawn and join
 
-**What DPOR does not see:**
+**Operations DPOR does not see (and will therefore not explore):**
 
-- **Database operations.** A ``SELECT`` followed by an ``UPDATE`` looks like a
-  single opaque C function call to the bytecode tracer. The engine cannot
-  see that two threads are racing on the same row.
-- **File system access.** Reading and writing files goes through C-level I/O
-  that the tracer cannot intercept.
+- **Database operations.** Two threads calling ``cursor.execute("UPDATE ...")``
+  on the same row look like independent C function calls to the tracer ---
+  DPOR sees no conflict between them and only runs one interleaving.
+- **File system access.** ``open()`` / ``read()`` / ``write()`` go through
+  C-level I/O. Two threads writing to the same file appear independent.
 - **Network and IPC.** HTTP requests, message queues, Redis commands, etc.
-  are all invisible.
-- **C extensions.** Any shared state modified inside C code (NumPy arrays,
+  are opaque calls with no visible shared object.
+- **C extensions.** Shared state modified inside C code (NumPy arrays,
   database drivers, etc.) is not tracked.
 
-In short: DPOR finds races in *pure Python* shared-memory concurrency. For
-races that involve external systems, use :doc:`trace markers <approaches>`
-with explicit scheduling instead --- you annotate the points where
-interleaving matters and DPOR-style automation is not needed because the
-number of interesting orderings is small enough to enumerate by hand.
+The consequence is not that DPOR "can't run" on such code --- it will run
+fine, it just won't explore the interesting schedules. Because the external
+operations look independent, DPOR concludes that reordering them cannot change
+the outcome and skips all the alternative interleavings where the bugs hide.
+
+For these cases, use :doc:`trace markers <approaches>` with explicit
+scheduling instead --- you annotate the points where interleaving matters and
+enumerate the orderings by hand.
 
 
 Basic usage

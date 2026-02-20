@@ -214,10 +214,11 @@ performance.
    )
    assert not result.property_holds  # lost-update bug found in 2 executions
 
-**Scope:** DPOR works on pure Python shared-memory concurrency --- attribute
-reads/writes, locks, thread spawn/join. It cannot detect races that involve
-external systems (databases, file systems, network services) because those
-operations are invisible to bytecode-level instrumentation. For external
+**Scope:** DPOR explores alternative schedules only where it detects a
+conflict at the bytecode level (two threads accessing the same Python object
+with at least one write). Operations that go through C code --- database
+queries, file I/O, network calls --- look like opaque, independent function
+calls to the tracer, so DPOR won't explore their reorderings. For those
 interactions, use trace markers with explicit scheduling instead.
 
 For a practical guide see :doc:`dpor_guide`. For the algorithm details and
