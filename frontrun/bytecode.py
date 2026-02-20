@@ -426,7 +426,7 @@ def run_with_schedule(
             runner.run(funcs, timeout=timeout)
         except TimeoutError:
             if debug:
-                print("Timed out with {timeout=} on {schedule=}", flush=True)
+                print(f"Timed out with {timeout=} on {schedule=}", flush=True)
     finally:
         runner._unpatch_locks()
     return state
