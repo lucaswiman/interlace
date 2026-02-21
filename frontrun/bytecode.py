@@ -573,8 +573,15 @@ def explore_interleavings(
 
         if debug:
             print(f"Running with {schedule=} {threads=}", flush=True)
+        recorder = TraceRecorder()
         state = run_with_schedule(
-            schedule, setup, threads, timeout=timeout_per_run, detect_io=detect_io, deadlock_timeout=deadlock_timeout
+            schedule,
+            setup,
+            threads,
+            timeout=timeout_per_run,
+            detect_io=detect_io,
+            deadlock_timeout=deadlock_timeout,
+            trace_recorder=recorder,
         )
         result.num_explored += 1
         seen_schedule_hashes.add(hash(tuple(schedule)))
@@ -584,18 +591,7 @@ def explore_interleavings(
             result.counterexample = schedule
             result.unique_interleavings = len(seen_schedule_hashes)
 
-            # Replay the counterexample with trace recording to build explanation
             try:
-                recorder = TraceRecorder()
-                run_with_schedule(
-                    schedule,
-                    setup,
-                    threads,
-                    timeout=timeout_per_run,
-                    detect_io=detect_io,
-                    deadlock_timeout=deadlock_timeout,
-                    trace_recorder=recorder,
-                )
                 result.explanation = format_trace(
                     recorder.events,
                     num_threads=num_threads,
