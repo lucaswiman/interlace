@@ -188,7 +188,7 @@ def test_counter_race():
 
 Like `explore_interleavings`, DPOR produces `result.explanation` with the interleaved trace and reproduction statistics when a race is found.
 
-**Scope and limitations:** DPOR explores alternative schedules only where it sees a conflict (two threads accessing the same Python object with at least one write). Operations that go through C code — database queries, network calls — look like opaque, independent function calls to the bytecode tracer. DPOR won't see a conflict between two threads calling `cursor.execute(...)` on the same row, so it will conclude they are independent and skip the interleavings where bugs hide. For testing those interactions, use trace markers with explicit scheduling instead.
+**Scope and limitations:** DPOR explores alternative schedules only where it sees a conflict (two threads accessing the same Python object with at least one write). Direct socket I/O operations are detected automatically when `detect_io=True` (the default), so network conflicts are explored. However, operations in opaque C extensions — such as database drivers (`cursor.execute(...)`), Redis clients, or NumPy functions — look like single indivisible calls to the bytecode tracer, so DPOR won't see internal conflicts within them. For testing those interactions, use trace markers with explicit scheduling instead.
 
 ### Automatic I/O Detection
 
@@ -204,7 +204,7 @@ This does **not** cover opaque C-extension I/O (database drivers, Redis clients,
 
 ## Async Support
 
-Both approaches have async variants.
+Trace markers and bytecode exploration have async variants (DPOR does not yet have an async version).
 
 ### Async Trace Markers
 
@@ -246,6 +246,37 @@ def test_async_counter_lost_update():
 
     assert counter.value == 1  # One increment lost
 ```
+
+### Async Bytecode Exploration
+
+Async bytecode exploration works similarly to the threaded bytecode approach, but at await points instead of opcodes:
+
+```python
+import asyncio
+from frontrun.async_bytecode import explore_interleavings, await_point
+
+class Counter:
+    def __init__(self):
+        self.value = 0
+
+    async def increment(self):
+        temp = self.value
+        await await_point()  # Yield control; race can happen here
+        self.value = temp + 1
+
+async def test_async_counter_race():
+    result = await explore_interleavings(
+        setup=lambda: Counter(),
+        tasks=[lambda c: c.increment(), lambda c: c.increment()],
+        invariant=lambda c: c.value == 2,
+        max_attempts=200,
+    )
+
+    assert not result.property_holds  # race condition found
+    print(result.explanation)
+```
+
+Like its threaded counterpart, `explore_interleavings` generates random await-point-level schedules and checks that the invariant holds. Each task runs as a separate async coroutine, and you explicitly mark await points with `await await_point()` where context switches can occur.
 
 ## Pytest Plugin
 
