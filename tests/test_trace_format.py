@@ -462,18 +462,7 @@ class TestBytecodeIntegration:
 # Integration tests: explore_dpor produces explanation
 # ---------------------------------------------------------------------------
 
-try:
-    import frontrun_dpor as _  # noqa: F401
-
-    _has_dpor = True
-except ModuleNotFoundError:
-    _has_dpor = False
-
-import pytest
-
-
 class TestDporIntegration:
-    @pytest.mark.skipif(not _has_dpor, reason="frontrun_dpor Rust extension not built")
     def test_dpor_counter_has_explanation(self) -> None:
         """explore_dpor should produce an explanation for a counter race."""
         from frontrun.dpor import explore_dpor
@@ -499,7 +488,6 @@ class TestDporIntegration:
         assert "Race condition found" in result.explanation
         assert "value" in result.explanation
 
-    @pytest.mark.skipif(not _has_dpor, reason="frontrun_dpor Rust extension not built")
     def test_dpor_counter_reproduction_stats(self) -> None:
         """explore_dpor should report reproduction stats."""
         from frontrun.dpor import explore_dpor
@@ -527,7 +515,6 @@ class TestDporIntegration:
         assert result.explanation is not None
         assert "/5" in result.explanation
 
-    @pytest.mark.skipif(not _has_dpor, reason="frontrun_dpor Rust extension not built")
     def test_dpor_safe_counter_no_explanation(self) -> None:
         """When DPOR finds no race, explanation should be None."""
         import threading
