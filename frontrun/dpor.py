@@ -89,6 +89,10 @@ class DporResult:
         explanation: Human-readable explanation of the race condition, showing
             interleaved source lines and the conflict pattern. None if no
             race was found.
+        reproduction_attempts: Number of times the counterexample schedule
+            was re-run to test reproducibility.  0 if no counterexample.
+        reproduction_successes: How many of those re-runs reproduced the
+            invariant violation.
     """
 
     property_holds: bool
@@ -96,6 +100,8 @@ class DporResult:
     counterexample_schedule: list[int] | None = None
     failures: list[tuple[int, list[int]]] = field(default_factory=list)
     explanation: str | None = None
+    reproduction_attempts: int = 0
+    reproduction_successes: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -894,6 +900,7 @@ def explore_dpor(
     stop_on_first: bool = True,
     detect_io: bool = True,
     deadlock_timeout: float = 5.0,
+    reproduce_on_failure: int = 10,
 ) -> DporResult:
     """Systematically explore interleavings using DPOR.
 
@@ -921,6 +928,9 @@ def explore_dpor(
         deadlock_timeout: Seconds to wait before declaring a deadlock
             (default 5.0).  Increase for code that legitimately blocks
             in C extensions (NumPy, database queries, network I/O).
+        reproduce_on_failure: When a counterexample is found, replay the
+            same schedule this many times to measure reproducibility
+            (default 10).  Set to 0 to skip reproduction testing.
 
     Returns:
         DporResult with exploration statistics and any counterexample found.
@@ -982,15 +992,41 @@ def explore_dpor(
             result.property_holds = False
             with engine_lock:
                 schedule = execution.schedule_trace
-            result.failures.append((result.executions_explored, list(schedule)))
+            schedule_list = list(schedule)
+            result.failures.append((result.executions_explored, schedule_list))
             if result.counterexample_schedule is None:
-                result.counterexample_schedule = list(schedule)
+                result.counterexample_schedule = schedule_list
+
+            # Replay the counterexample to measure reproducibility
+            if reproduce_on_failure > 0 and result.reproduction_attempts == 0:
+                from frontrun.bytecode import run_with_schedule
+
+                successes = 0
+                for _ in range(reproduce_on_failure):
+                    try:
+                        replay_state = run_with_schedule(
+                            schedule_list,
+                            setup,
+                            threads,
+                            timeout=timeout_per_run,
+                            detect_io=detect_io,
+                            deadlock_timeout=deadlock_timeout,
+                        )
+                        if not invariant(replay_state):
+                            successes += 1
+                    except Exception:
+                        pass  # timeout / crash during replay — not a reproduction
+                result.reproduction_attempts = reproduce_on_failure
+                result.reproduction_successes = successes
+
             if result.explanation is None:
                 try:
                     result.explanation = format_trace(
                         recorder.events,
                         num_threads=num_threads,
                         num_explored=result.executions_explored,
+                        reproduction_attempts=result.reproduction_attempts,
+                        reproduction_successes=result.reproduction_successes,
                     )
                 except Exception:
                     pass  # Don't let trace formatting break the result

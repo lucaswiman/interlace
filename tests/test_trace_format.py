@@ -263,6 +263,39 @@ class TestFormatting:
         assert "LOAD_ATTR" in output
         assert "STORE_ATTR" in output
 
+    def test_reproduction_stats_shown(self) -> None:
+        """Reproduction stats are included in the output when provided."""
+        events = [
+            TraceEvent(0, 0, "counter.py", 10, "increment", "LOAD_ATTR", "read", "value", "Counter"),
+            TraceEvent(1, 1, "counter.py", 10, "increment", "LOAD_ATTR", "read", "value", "Counter"),
+            TraceEvent(2, 0, "counter.py", 11, "increment", "STORE_ATTR", "write", "value", "Counter"),
+            TraceEvent(3, 1, "counter.py", 11, "increment", "STORE_ATTR", "write", "value", "Counter"),
+        ]
+        output = format_trace(
+            events, num_threads=2, num_explored=3, reproduction_attempts=10, reproduction_successes=7
+        )
+        assert "7/10" in output
+        assert "70%" in output
+
+    def test_reproduction_stats_not_shown_when_zero(self) -> None:
+        """When reproduction_attempts=0, no reproduction line is shown."""
+        events = [
+            TraceEvent(0, 0, "counter.py", 10, "increment", "LOAD_ATTR", "read", "value", "Counter"),
+            TraceEvent(1, 1, "counter.py", 10, "increment", "LOAD_ATTR", "read", "value", "Counter"),
+        ]
+        output = format_trace(events, num_threads=2, reproduction_attempts=0, reproduction_successes=0)
+        assert "Reproduced" not in output
+
+    def test_reproduction_stats_zero_successes(self) -> None:
+        """When the race never reproduces, show 0/N."""
+        events = [
+            TraceEvent(0, 0, "counter.py", 10, "increment", "LOAD_ATTR", "read", "value", "Counter"),
+            TraceEvent(1, 1, "counter.py", 10, "increment", "LOAD_ATTR", "read", "value", "Counter"),
+        ]
+        output = format_trace(events, num_threads=2, reproduction_attempts=10, reproduction_successes=0)
+        assert "0/10" in output
+        assert "0%" in output
+
 
 # ---------------------------------------------------------------------------
 # Integration tests: explore_interleavings produces explanation
@@ -297,6 +330,64 @@ class TestBytecodeIntegration:
         # Should mention the relevant attribute
         assert "value" in result.explanation
 
+    def test_explore_counter_reproduction_stats(self) -> None:
+        """explore_interleavings should report reproduction stats."""
+        from frontrun.bytecode import explore_interleavings
+
+        class Counter:
+            def __init__(self) -> None:
+                self.value = 0
+
+            def increment(self) -> None:
+                temp = self.value
+                self.value = temp + 1
+
+        result = explore_interleavings(
+            setup=Counter,
+            threads=[lambda c: c.increment(), lambda c: c.increment()],
+            invariant=lambda c: c.value == 2,
+            max_attempts=200,
+            max_ops=200,
+            seed=42,
+            reproduce_on_failure=5,
+        )
+
+        assert not result.property_holds
+        assert result.reproduction_attempts == 5
+        assert 0 <= result.reproduction_successes <= 5
+        # The explanation should include the reproduction line
+        assert result.explanation is not None
+        assert "/5" in result.explanation
+
+    def test_explore_counter_skip_reproduction(self) -> None:
+        """reproduce_on_failure=0 skips reproduction testing."""
+        from frontrun.bytecode import explore_interleavings
+
+        class Counter:
+            def __init__(self) -> None:
+                self.value = 0
+
+            def increment(self) -> None:
+                temp = self.value
+                self.value = temp + 1
+
+        result = explore_interleavings(
+            setup=Counter,
+            threads=[lambda c: c.increment(), lambda c: c.increment()],
+            invariant=lambda c: c.value == 2,
+            max_attempts=200,
+            max_ops=200,
+            seed=42,
+            reproduce_on_failure=0,
+        )
+
+        assert not result.property_holds
+        assert result.reproduction_attempts == 0
+        assert result.reproduction_successes == 0
+        # The explanation should NOT include a reproduction line
+        assert result.explanation is not None
+        assert "Reproduced" not in result.explanation
+
     def test_safe_counter_no_explanation(self) -> None:
         """When no race is found, explanation should be None."""
         import threading
@@ -324,6 +415,8 @@ class TestBytecodeIntegration:
 
         assert result.property_holds
         assert result.explanation is None
+        assert result.reproduction_attempts == 0
+        assert result.reproduction_successes == 0
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +461,34 @@ class TestDporIntegration:
         assert "value" in result.explanation
 
     @pytest.mark.skipif(not _has_dpor, reason="frontrun_dpor Rust extension not built")
+    def test_dpor_counter_reproduction_stats(self) -> None:
+        """explore_dpor should report reproduction stats."""
+        from frontrun.dpor import explore_dpor
+
+        class Counter:
+            def __init__(self) -> None:
+                self.value = 0
+
+            def increment(self) -> None:
+                temp = self.value
+                self.value = temp + 1
+
+        result = explore_dpor(
+            setup=Counter,
+            threads=[lambda c: c.increment(), lambda c: c.increment()],
+            invariant=lambda c: c.value == 2,
+            max_executions=500,
+            preemption_bound=2,
+            reproduce_on_failure=5,
+        )
+
+        assert not result.property_holds
+        assert result.reproduction_attempts == 5
+        assert 0 <= result.reproduction_successes <= 5
+        assert result.explanation is not None
+        assert "/5" in result.explanation
+
+    @pytest.mark.skipif(not _has_dpor, reason="frontrun_dpor Rust extension not built")
     def test_dpor_safe_counter_no_explanation(self) -> None:
         """When DPOR finds no race, explanation should be None."""
         import threading
@@ -394,3 +515,5 @@ class TestDporIntegration:
 
         assert result.property_holds
         assert result.explanation is None
+        assert result.reproduction_attempts == 0
+        assert result.reproduction_successes == 0

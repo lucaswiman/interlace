@@ -366,6 +366,8 @@ def format_trace(
     num_explored: int = 0,
     invariant_desc: str | None = None,
     show_opcodes: bool = False,
+    reproduction_attempts: int = 0,
+    reproduction_successes: int = 0,
 ) -> str:
     """Format a trace as a human-readable interleaved source-line display.
 
@@ -376,6 +378,8 @@ def format_trace(
         num_explored: Number of interleavings explored before finding the bug.
         invariant_desc: Description of the violated invariant.
         show_opcodes: If True, include opcode-level detail for each line.
+        reproduction_attempts: How many times the schedule was replayed.
+        reproduction_successes: How many replays reproduced the failure.
 
     Returns:
         Multi-line string suitable for printing or attaching to test output.
@@ -443,6 +447,14 @@ def format_trace(
     if invariant_desc:
         parts.append("")
         parts.append(f"  Invariant violated: {invariant_desc}")
+
+    # Reproduction stats
+    if reproduction_attempts > 0:
+        parts.append("")
+        pct = reproduction_successes * 100 // reproduction_attempts
+        parts.append(
+            f"  Reproduced {reproduction_successes}/{reproduction_attempts} times ({pct}%)"
+        )
 
     parts.append("")
     return "\n".join(parts)

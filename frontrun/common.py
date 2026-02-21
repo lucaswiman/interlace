@@ -57,6 +57,10 @@ class InterleavingResult:
         explanation: Human-readable explanation of the race condition, showing
             interleaved source lines and the conflict pattern. None if no
             race was found.
+        reproduction_attempts: Number of times the counterexample schedule
+            was re-run to test reproducibility.  0 if no counterexample.
+        reproduction_successes: How many of those re-runs reproduced the
+            invariant violation.
     """
 
     property_holds: bool
@@ -64,3 +68,5 @@ class InterleavingResult:
     num_explored: int = 0
     unique_interleavings: int = 0
     explanation: str | None = None
+    reproduction_attempts: int = 0
+    reproduction_successes: int = 0

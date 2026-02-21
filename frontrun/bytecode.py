@@ -528,6 +528,7 @@ def explore_interleavings(
     debug: bool = False,
     detect_io: bool = True,
     deadlock_timeout: float = 5.0,
+    reproduce_on_failure: int = 10,
 ) -> InterleavingResult:
     """Search for interleavings that violate an invariant.
 
@@ -552,6 +553,9 @@ def explore_interleavings(
         deadlock_timeout: Seconds to wait before declaring a deadlock
             (default 5.0).  Increase for code that legitimately blocks
             in C extensions (NumPy, database queries, network I/O).
+        reproduce_on_failure: When a counterexample is found, replay the
+            same schedule this many times to measure reproducibility
+            (default 10).  Set to 0 to skip reproduction testing.
 
     Returns:
         InterleavingResult with the outcome.  The ``unique_interleavings``
@@ -591,11 +595,33 @@ def explore_interleavings(
             result.counterexample = schedule
             result.unique_interleavings = len(seen_schedule_hashes)
 
+            # Replay the counterexample to measure reproducibility
+            if reproduce_on_failure > 0:
+                successes = 0
+                for _ in range(reproduce_on_failure):
+                    try:
+                        replay_state = run_with_schedule(
+                            schedule,
+                            setup,
+                            threads,
+                            timeout=timeout_per_run,
+                            detect_io=detect_io,
+                            deadlock_timeout=deadlock_timeout,
+                        )
+                        if not invariant(replay_state):
+                            successes += 1
+                    except Exception:
+                        pass  # timeout / crash during replay — not a reproduction
+                result.reproduction_attempts = reproduce_on_failure
+                result.reproduction_successes = successes
+
             try:
                 result.explanation = format_trace(
                     recorder.events,
                     num_threads=num_threads,
                     num_explored=result.num_explored,
+                    reproduction_attempts=result.reproduction_attempts,
+                    reproduction_successes=result.reproduction_successes,
                 )
             except Exception:
                 pass  # Don't let trace formatting break the result
