@@ -97,6 +97,8 @@ def _replace_preexisting_locks() -> None:
         if is_rlock:
             wrapper = CooperativeRLock.__new__(CooperativeRLock)
             wrapper._lock = lock  # type: ignore[attr-defined]
+            wrapper._owner = None  # type: ignore[attr-defined]
+            wrapper._count = 0  # type: ignore[attr-defined]
             wrapper._object_id = id(wrapper)  # type: ignore[attr-defined]
             wrapper._owner_thread_id = None  # type: ignore[attr-defined]
         else:

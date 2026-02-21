@@ -208,6 +208,62 @@ and doesn't mind mass `ctypes` eval-stack surgery.
 
 ---
 
+## `gc.get_objects()` Lock Instance Replacement (`--frontrun-patch-locks=aggressive`)
+
+Walk all live objects via `gc.get_objects()`, find real `_thread.lock` and
+`_thread.RLock` instances, then use `gc.get_referrers()` to locate their
+containers (dicts, lists, `__dict__`) and swap in cooperative wrappers.
+
+```python
+for lock in gc.get_objects():
+    if type(lock) is real_lock_type:
+        wrapper = CooperativeLock.__new__(CooperativeLock)
+        wrapper._lock = lock
+        for referrer in gc.get_referrers(lock):
+            _try_replace(referrer, lock, wrapper)
+```
+
+**The appeal:** catches locks created before `patch_locks()` ran — e.g. stdlib
+module-level locks, third-party libraries that create locks at import time.
+Monkey-patching `threading.Lock` only affects *future* calls; this retroactively
+fixes *existing* instances.
+
+**Why it's problematic:**
+
+1. **Recursive wrapping.** The wrapper's `_lock` attribute refers to the real
+   lock. But `gc.get_referrers(real_lock)` also finds the wrapper's `__dict__`
+   as a referrer, so `_try_replace` wraps the wrapper — `CooperativeLock` whose
+   `_lock` is another `CooperativeLock` whose `_lock` is the real lock. Every
+   method call recurses. The fix is to skip referrers that are already
+   cooperative wrappers, but the check is fragile.
+
+2. **Stdlib internal locks.** Python's logging, threading, importlib, and io
+   modules all hold real locks in module-level or instance variables. Replacing
+   them with cooperative wrappers means `logging.Handler.acquire()` now calls
+   cooperative `acquire()` which imports `frontrun._deadlock` which may trigger
+   logging… infinite recursion at shutdown. The `_is_frontrun_internal` guard
+   only skips frontrun's own modules, not stdlib.
+
+3. **Best-effort coverage.** Locks in tuples, frozensets, C extension structs,
+   closure cells, and `__slots__` cannot be replaced. The user gets silent
+   partial coverage with no way to know which locks were missed.
+
+4. **Non-deterministic.** `gc.get_objects()` order depends on allocation
+   history. Different test runs may replace different subsets of locks depending
+   on import order, gc timing, and which objects have been collected.
+
+5. **Wrapper construction via `__new__`.** Bypassing `__init__` requires
+   manually initializing every field. When `CooperativeRLock` gains a new field,
+   the `__new__` path silently produces broken instances (as happened with
+   `_owner` and `_count`).
+
+**Current status:** Implemented as `--frontrun-patch-locks=aggressive` in
+`pytest_plugin.py`. Needs more thought about scoping (which locks to skip),
+recursive wrapping prevention, and whether the coverage gaps make it
+misleading rather than helpful.
+
+---
+
 ## Import Hook Bytecode Rewriting (Long-Term Option)
 
 A standard technique used by coverage.py and crosshair. Register a custom
