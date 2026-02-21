@@ -551,11 +551,9 @@ class DporBytecodeRunner:
     def __init__(
         self,
         scheduler: DporScheduler,
-        cooperative_locks: bool = True,
         detect_io: bool = True,
     ) -> None:
         self.scheduler = scheduler
-        self.cooperative_locks = cooperative_locks
         self.detect_io = detect_io
         self.threads: list[threading.Thread] = []
         self.errors: dict[int, Exception] = {}
@@ -564,8 +562,6 @@ class DporBytecodeRunner:
         self._monitoring_active = False
 
     def _patch_locks(self) -> None:
-        if not self.cooperative_locks:
-            return
         install_wait_for_graph()
         patch_locks()
         self._lock_patched = True
@@ -866,7 +862,6 @@ def explore_dpor(
     preemption_bound: int | None = 2,
     max_branches: int = 100_000,
     timeout_per_run: float = 5.0,
-    cooperative_locks: bool = True,
     stop_on_first: bool = True,
     detect_io: bool = True,
     deadlock_timeout: float = 5.0,
@@ -887,8 +882,6 @@ def explore_dpor(
             bugs. None = unbounded (full DPOR).
         max_branches: Maximum scheduling points per execution.
         timeout_per_run: Timeout per execution in seconds.
-        cooperative_locks: Replace threading/queue primitives with
-            scheduler-aware versions.
         stop_on_first: If True (default), stop exploring as soon as the
             first invariant violation is found.  Set to False to collect
             all failing interleavings.
@@ -926,7 +919,7 @@ def explore_dpor(
         scheduler = DporScheduler(
             engine, execution, num_threads, engine_lock=engine_lock, deadlock_timeout=deadlock_timeout
         )
-        runner = DporBytecodeRunner(scheduler, cooperative_locks=cooperative_locks, detect_io=detect_io)
+        runner = DporBytecodeRunner(scheduler, detect_io=detect_io)
 
         runner._patch_locks()
         runner._patch_io()

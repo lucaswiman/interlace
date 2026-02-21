@@ -170,21 +170,19 @@ class BytecodeShuffler:
     Sets up per-thread trace functions that intercept every bytecode
     instruction in user code and defer to the OpcodeScheduler.
 
-    When cooperative_locks=True (default), replaces threading and queue
-    primitives (Lock, RLock, Semaphore, BoundedSemaphore, Event,
-    Condition, Queue, LifoQueue, PriorityQueue) with cooperative
-    versions that yield scheduler turns instead of blocking in C. This
-    prevents the deadlock that otherwise occurs when one thread holds a
-    primitive and the scheduler gives a turn to another thread that
-    tries to acquire it.
+    Replaces threading and queue primitives (Lock, RLock, Semaphore,
+    BoundedSemaphore, Event, Condition, Queue, LifoQueue, PriorityQueue)
+    with cooperative versions that yield scheduler turns instead of
+    blocking in C. This prevents the deadlock that otherwise occurs when
+    one thread holds a primitive and the scheduler gives a turn to
+    another thread that tries to acquire it.
     """
 
     # sys.monitoring tool ID (use OPTIMIZER_ID to avoid conflict with DPOR's PROFILER_ID)
     _TOOL_ID: int | None = None
 
-    def __init__(self, scheduler: OpcodeScheduler, cooperative_locks: bool = True, detect_io: bool = True):
+    def __init__(self, scheduler: OpcodeScheduler, detect_io: bool = True):
         self.scheduler = scheduler
-        self.cooperative_locks = cooperative_locks
         self.detect_io = detect_io
         self.threads: list[threading.Thread] = []
         self.errors: dict[int, Exception] = {}
@@ -194,8 +192,6 @@ class BytecodeShuffler:
 
     def _patch_locks(self):
         """Replace threading and queue primitives with cooperative versions."""
-        if not self.cooperative_locks:
-            return
         install_wait_for_graph()
         patch_locks()
         self._lock_patched = True
@@ -449,7 +445,6 @@ def run_with_schedule(
     setup: Callable[[], T],
     threads: list[Callable[[T], None]],
     timeout: float = 5.0,
-    cooperative_locks: bool = True,
     detect_io: bool = True,
     debug: bool = False,
     deadlock_timeout: float = 5.0,
@@ -461,8 +456,6 @@ def run_with_schedule(
         setup: Returns fresh shared state.
         threads: Callables that each receive the state as their argument.
         timeout: Max seconds.
-        cooperative_locks: Replace threading/queue primitives with
-            scheduler-aware versions that prevent deadlocks (default True).
         detect_io: Automatically detect socket/file I/O and treat them
             as scheduling points (default True).
         deadlock_timeout: Seconds to wait before declaring a deadlock
@@ -473,7 +466,7 @@ def run_with_schedule(
         The state object after execution.
     """
     scheduler = OpcodeScheduler(schedule, len(threads), deadlock_timeout=deadlock_timeout)
-    runner = BytecodeShuffler(scheduler, cooperative_locks=cooperative_locks, detect_io=detect_io)
+    runner = BytecodeShuffler(scheduler, detect_io=detect_io)
 
     # Patch locks BEFORE setup() so any locks created there are cooperative
     runner._patch_locks()

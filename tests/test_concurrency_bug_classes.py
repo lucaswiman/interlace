@@ -41,7 +41,6 @@ from tests.buggy_programs import (
     AsyncBuggyResourceManager,
     AsyncBuggyResourceManagerBytecode,
     BuggyBankWithDeadlock,
-    BuggyBankWithDeadlockBytecode,
     BuggyCounter,
     BuggyCounterBytecode,
     BuggyResourceManager,
@@ -259,76 +258,6 @@ def test_deadlock_exact_schedule():
     # Verify that threads are still alive (deadlocked)
     alive_count = sum(1 for t in executor.threads if t.is_alive())
     assert alive_count > 0, "At least one thread should be deadlocked"
-
-
-@pytest.mark.intentionally_leaves_dangling_threads
-def test_deadlock_exploration():
-    """
-    Test deadlock using bytecode exploration with cooperative_locks=False.
-
-    With cooperative_locks=False, real Lock.acquire() blocks in C, so when the
-    scheduler interleaves lock acquisitions in the wrong order, a real deadlock
-    occurs. run_with_schedule catches the resulting TimeoutError and returns
-    the state with completed=False.
-
-    Note: explore_interleavings doesn't expose cooperative_locks, so we write
-    a manual exploration loop using run_with_schedule directly.
-    """
-    import random
-
-    rng = random.Random(42)
-    found_deadlock = False
-
-    for _ in range(50):
-        length = rng.randint(1, 300)
-        schedule = [rng.randint(0, 1) for _ in range(length)]
-
-        bank = run_with_schedule(
-            schedule,
-            setup=lambda: BuggyBankWithDeadlockBytecode(),
-            threads=[
-                lambda b: b.transfer_a_to_b(10),
-                lambda b: b.transfer_b_to_a(10),
-            ],
-            cooperative_locks=False,
-            timeout=0.5,
-        )
-
-        if not bank.completed:
-            found_deadlock = True
-            break
-
-    assert found_deadlock, "Should find a schedule that causes deadlock"
-
-
-@pytest.mark.intentionally_leaves_dangling_threads
-@given(schedule=schedule_strategy(num_threads=2, max_ops=50))
-@settings(max_examples=20, phases=[Phase.generate], deadline=None)
-def test_deadlock_hypothesis(schedule):
-    """
-    Test deadlock-prone code using Hypothesis with cooperative_locks=False.
-
-    With real locks and opposite acquisition order, some schedules will deadlock
-    (timeout -> completed=False) and others will complete (completed=True).
-
-    Uses short timeout and few examples since each deadlocking schedule blocks
-    for the full timeout duration.
-    """
-    bank = run_with_schedule(
-        schedule,
-        setup=lambda: BuggyBankWithDeadlockBytecode(),
-        threads=[
-            lambda b: b.transfer_a_to_b(10),
-            lambda b: b.transfer_b_to_a(10),
-        ],
-        cooperative_locks=False,
-        timeout=0.5,
-    )
-
-    # Some schedules will deadlock (completed=False), others won't
-    # We just verify the state is consistent
-    if bank.completed:
-        assert bank.account_a == 100 and bank.account_b == 100, "Total should be conserved after both transfers"
 
 
 # ============================================================================

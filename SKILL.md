@@ -290,8 +290,8 @@ informational notes rather than bugs.
 Frontrun replaces `threading.Lock`, `threading.Event`, `queue.Queue` etc. with
 cooperative versions that yield turns instead of blocking.  Code that uses
 **unpatched** C-level locks (e.g. `multiprocessing` primitives, some C
-extensions) can deadlock.  Workaround: set `cooperative_locks=False` in
-`BytecodeShuffler` and add explicit `time.sleep(0)` checkpoints instead.
+extensions) can deadlock.  Workaround: add explicit `time.sleep(0)` checkpoints
+in the code under test so the scheduler can interleave around the C-level lock.
 
 ---
 

@@ -154,12 +154,6 @@ The ``explore_dpor()`` function is the main entry point:
 ``timeout_per_run`` *(default: 5.0)*
     Timeout in seconds for each individual execution.
 
-``cooperative_locks`` *(default: True)*
-    Replace ``threading.Lock``, ``threading.Event``, ``queue.Queue``, etc.
-    with scheduler-aware versions. This is required for DPOR to control
-    scheduling around lock operations. Disable only if your code does not
-    use any standard library synchronization primitives.
-
 
 Interpreting results
 --------------------

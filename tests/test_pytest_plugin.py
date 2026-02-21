@@ -51,13 +51,16 @@ class TestPatchLocksRefCounting:
 
     def test_over_unpatch_does_not_corrupt_count(self):
         """Extra unpatches beyond the plugin baseline don't break future patches."""
-        # These are no-ops beyond the plugin's baseline (count won't go below 0)
+        # First unpatch consumes the plugin's baseline (count 1 → 0).
+        # Second unpatch is a no-op (count stays at 0).
         unpatch_locks()
         unpatch_locks()
         # Re-patch
         patch_locks()
         assert threading.Lock is CooperativeLock
-        unpatch_locks()  # balance our patch_locks()
+        # Don't unpatch here — the first unpatch_locks() consumed the
+        # plugin's baseline count, so our patch_locks() above restores
+        # the count to 1 which is exactly the plugin's expected state.
 
 
 # ---------------------------------------------------------------------------
