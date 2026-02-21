@@ -388,6 +388,45 @@ class TestBytecodeIntegration:
         assert result.explanation is not None
         assert "Reproduced" not in result.explanation
 
+    def test_flaky_race_reproduction_rate(self) -> None:
+        """A flaky race (random.random()) should have reproduction rate well below 100%."""
+        import random as stdlib_random
+
+        from frontrun.bytecode import explore_interleavings
+
+        class Counter:
+            def __init__(self) -> None:
+                self.value = 0
+
+            def increment(self) -> None:
+                temp = self.value
+                self.value = temp + 1
+
+        def flaky_invariant(c: Counter) -> bool:
+            if c.value == 2:
+                return True
+            # Bug present, but randomly ignore it ~50% of the time
+            return stdlib_random.random() < 0.5
+
+        result = explore_interleavings(
+            setup=Counter,
+            threads=[lambda c: c.increment(), lambda c: c.increment()],
+            invariant=flaky_invariant,
+            max_attempts=200,
+            max_ops=200,
+            seed=42,
+            reproduce_on_failure=100,
+        )
+
+        assert not result.property_holds
+        assert result.reproduction_attempts == 100
+        # Reproduction rate should be ~50%, certainly not 100% or 0%
+        assert 10 < result.reproduction_successes < 90, (
+            f"Expected ~50% reproduction rate, got {result.reproduction_successes}/100"
+        )
+        assert result.explanation is not None
+        assert "/100" in result.explanation
+
     def test_safe_counter_no_explanation(self) -> None:
         """When no race is found, explanation should be None."""
         import threading
