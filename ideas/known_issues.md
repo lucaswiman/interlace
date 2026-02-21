@@ -14,16 +14,11 @@ module level, which is global mutable state. This creates several problems:
    no scheduler is active, so stdlib code on unmanaged threads works correctly.
 
 2. **Import-time lock creation**: Libraries that create locks at import time
-   (before patching) will hold real locks. **Mitigated**: the
-   ``--frontrun-patch-locks`` pytest flag (default: ``monkey``) calls
-   ``patch_locks()`` in ``pytest_configure`` — before test collection
+   (before patching) will hold real locks. **Mitigated**: the pytest plugin
+   calls ``patch_locks()`` in ``pytest_configure`` — before test collection
    imports any modules — so that module-level ``threading.Lock()`` calls
-   in the code under test create cooperative locks.  For locks created
-   even earlier (e.g. by stdlib modules),
-   ``--frontrun-patch-locks=aggressive`` walks ``gc.get_objects()`` and
-   replaces real lock instances with cooperative wrappers where possible
-   (best-effort: locks in tuples, closures, or C structs cannot be
-   replaced).
+   in the code under test create cooperative locks.  Patching is on by
+   default; disable with ``--no-frontrun-patch-locks``.
 
 ## Random Exploration Lacks Coverage Guarantees (Improved)
 

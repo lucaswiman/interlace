@@ -201,10 +201,10 @@ shadow-stack tracking through `LOAD_ATTR` to identify which object the `acquire`
 is being called on, and `CALL` opcodes don't appear in DPOR's `_process_opcode`
 explicit handling (they fall through to `dis.stack_effect`).
 
-**Verdict:** the gc-based `--frontrun-patch-locks=aggressive` option is simpler,
-works today, and covers the realistic cases. This approach is preserved here as
-a future possibility if someone wants to eliminate global lock patching entirely
-and doesn't mind mass `ctypes` eval-stack surgery.
+**Verdict:** Early monkey-patching via the pytest plugin (on by default) covers
+the realistic cases. This approach is preserved here as a future possibility if
+someone wants to eliminate global lock patching entirely and doesn't mind mass
+`ctypes` eval-stack surgery.
 
 ---
 
@@ -257,10 +257,10 @@ fixes *existing* instances.
    the `__new__` path silently produces broken instances (as happened with
    `_owner` and `_count`).
 
-**Current status:** Implemented as `--frontrun-patch-locks=aggressive` in
-`pytest_plugin.py`. Needs more thought about scoping (which locks to skip),
-recursive wrapping prevention, and whether the coverage gaps make it
-misleading rather than helpful.
+**Current status:** Removed. The gc-scanning code has been deleted from
+`pytest_plugin.py`. The problems above (especially recursive wrapping and
+stdlib lock interference) made it unreliable. Early monkey-patching (now on
+by default) covers the realistic cases without these risks.
 
 ---
 
