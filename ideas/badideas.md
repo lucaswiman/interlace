@@ -159,6 +159,55 @@ globals. Version-sensitive (`PyFrame_LocalsToFast` is CPython-specific). Prefer
 
 ---
 
+## Trace-Time Lock `acquire`/`release` Interception (Lovecraftian Horror)
+
+Instead of monkeypatching `threading.Lock` globally, intercept `lock.acquire()`
+and `lock.release()` calls *inside the trace callback* — the same `sys.settrace`
+/ `sys.monitoring` machinery that already runs for every opcode.
+
+**The idea:** when the tracer sees a `CALL` opcode targeting a bound method like
+`lock.acquire`, replace the blocking call with a cooperative spin-yield loop
+before the real instruction executes. No global mutation, perfectly scoped to
+traced runs, works for locks created at any time.
+
+**Why it doesn't work cleanly:** trace callbacks fire *around* opcodes, not
+*instead of* them. You cannot prevent the real `CALL` instruction from executing.
+Options for working around this, each worse than the last:
+
+1. **Pre-acquire with `lock.acquire(blocking=False)` in the trace callback,**
+   spinning and yielding scheduler turns until it succeeds. Then the real `CALL`
+   instruction's blocking acquire succeeds instantly. But now you've acquired
+   twice — you need to release once to compensate, creating a window where the
+   lock is unheld between your compensating release and the real acquire. Race
+   condition in your race condition detector.
+
+2. **Replace the bound method on the eval stack** before `CALL` executes, using
+   `ctypes` to poke at the frame's value stack. Undocumented, changes across
+   CPython versions, and the eval stack layout differs between 3.10, 3.11, 3.12,
+   3.13, and 3.14. Five layouts to reverse-engineer and maintain.
+
+3. **Swap `f_locals` to point at a wrapper** via PEP 667 / `PyFrame_LocalsToFast`.
+   Only works when the lock is a local variable, not `self._lock.acquire()`.
+
+4. **Use `sys.monitoring` `CALL` events** (3.12+). PEP 669 gives you the callee
+   but no way to replace it or skip the call.
+
+**Where it *could* be useful without the horror:** for DPOR conflict detection
+(not interleaving control), the trace callback could detect `lock.acquire` calls
+and report them to the Rust engine as sync events — improving happens-before
+tracking for real locks without needing to control the interleaving. This is a
+read-only observation, so none of the above problems apply. But it still requires
+shadow-stack tracking through `LOAD_ATTR` to identify which object the `acquire`
+is being called on, and `CALL` opcodes don't appear in DPOR's `_process_opcode`
+explicit handling (they fall through to `dis.stack_effect`).
+
+**Verdict:** the gc-based `--frontrun-patch-locks=aggressive` option is simpler,
+works today, and covers the realistic cases. This approach is preserved here as
+a future possibility if someone wants to eliminate global lock patching entirely
+and doesn't mind mass `ctypes` eval-stack surgery.
+
+---
+
 ## Import Hook Bytecode Rewriting (Long-Term Option)
 
 A standard technique used by coverage.py and crosshair. Register a custom
