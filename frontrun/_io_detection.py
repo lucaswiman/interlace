@@ -93,68 +93,47 @@ _real_socket_recvfrom = socket.socket.recvfrom
 _real_socket_close = socket.socket.close
 
 
-def _traced_connect(self: socket.socket, address: Any) -> None:
-    result = _real_socket_connect(self, address)
+def _report_socket_io(sock: socket.socket, kind: str) -> None:
+    """Report a socket I/O event to the per-thread reporter, if installed."""
     reporter = get_io_reporter()
     if reporter is not None:
-        resource_id = _socket_resource_id(self)
+        resource_id = _socket_resource_id(sock)
         if resource_id is not None:
-            reporter(resource_id, "write")
-    return result  # type: ignore[return-value]
+            reporter(resource_id, kind)
 
 
-def _traced_send(self: socket.socket, data: bytes | bytearray | memoryview, flags: int = 0) -> int:
-    reporter = get_io_reporter()
-    if reporter is not None:
-        resource_id = _socket_resource_id(self)
-        if resource_id is not None:
-            reporter(resource_id, "write")
-    return _real_socket_send(self, data, flags)
+def _make_traced_socket_method(
+    real_method: Callable[..., Any],
+    kind: str,
+    *,
+    report_after: bool = False,
+) -> Callable[..., Any]:
+    """Create a traced wrapper for a ``socket.socket`` method.
+
+    *real_method* is the saved original (e.g. ``_real_socket_send``).
+    *kind* is ``"read"`` or ``"write"``.  When *report_after* is true the
+    report fires after the real call (needed for ``connect``, which must
+    complete before ``getpeername()`` works).
+    """
+
+    def traced(self: socket.socket, *args: Any, **kwargs: Any) -> Any:
+        if not report_after:
+            _report_socket_io(self, kind)
+        result = real_method(self, *args, **kwargs)
+        if report_after:
+            _report_socket_io(self, kind)
+        return result
+
+    return traced
 
 
-def _traced_sendall(self: socket.socket, data: bytes | bytearray | memoryview, flags: int = 0) -> None:
-    reporter = get_io_reporter()
-    if reporter is not None:
-        resource_id = _socket_resource_id(self)
-        if resource_id is not None:
-            reporter(resource_id, "write")
-    return _real_socket_sendall(self, data, flags)
-
-
-def _traced_sendto(self: socket.socket, data: bytes, *args: Any) -> int:
-    reporter = get_io_reporter()
-    if reporter is not None:
-        resource_id = _socket_resource_id(self)
-        if resource_id is not None:
-            reporter(resource_id, "write")
-    return _real_socket_sendto(self, data, *args)
-
-
-def _traced_recv(self: socket.socket, bufsize: int, flags: int = 0) -> bytes:
-    reporter = get_io_reporter()
-    if reporter is not None:
-        resource_id = _socket_resource_id(self)
-        if resource_id is not None:
-            reporter(resource_id, "read")
-    return _real_socket_recv(self, bufsize, flags)
-
-
-def _traced_recv_into(self: socket.socket, buffer: bytearray | memoryview, flags: int = 0) -> int:
-    reporter = get_io_reporter()
-    if reporter is not None:
-        resource_id = _socket_resource_id(self)
-        if resource_id is not None:
-            reporter(resource_id, "read")
-    return _real_socket_recv_into(self, buffer, flags)
-
-
-def _traced_recvfrom(self: socket.socket, bufsize: int, flags: int = 0) -> tuple[bytes, Any]:
-    reporter = get_io_reporter()
-    if reporter is not None:
-        resource_id = _socket_resource_id(self)
-        if resource_id is not None:
-            reporter(resource_id, "read")
-    return _real_socket_recvfrom(self, bufsize, flags)
+_traced_connect = _make_traced_socket_method(_real_socket_connect, "write", report_after=True)
+_traced_send = _make_traced_socket_method(_real_socket_send, "write")
+_traced_sendall = _make_traced_socket_method(_real_socket_sendall, "write")
+_traced_sendto = _make_traced_socket_method(_real_socket_sendto, "write")
+_traced_recv = _make_traced_socket_method(_real_socket_recv, "read")
+_traced_recv_into = _make_traced_socket_method(_real_socket_recv_into, "read")
+_traced_recvfrom = _make_traced_socket_method(_real_socket_recvfrom, "read")
 
 
 # ---------------------------------------------------------------------------
