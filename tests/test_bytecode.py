@@ -198,12 +198,10 @@ def test_explore_finds_counter_race():
 def test_cooperative_locks_prevent_deadlock():
     """Cooperative locks let the scheduler interleave lock-protected code.
 
-    Without cooperative locks, threading.Lock.acquire() blocks in C and
-    never yields back to the trace function, deadlocking the scheduler.
-
-    With cooperative locks (the default), Lock.acquire() is replaced by a
-    spin loop that yields scheduler turns between non-blocking acquire
-    attempts. This lets the lock-holding thread run and release the lock.
+    Lock.acquire() is replaced by a spin loop that yields scheduler turns
+    between non-blocking acquire attempts. This lets the lock-holding thread
+    run and release the lock, preventing the deadlock that would occur if
+    Lock.acquire() blocked in C.
     """
     result = explore_interleavings(
         setup=lambda: SafeCounter(value=0),

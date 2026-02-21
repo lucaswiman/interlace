@@ -9,34 +9,14 @@ instead of real ones.
 Patching is **on by default**.  To disable::
 
     pytest --no-frontrun-patch-locks
-
-On free-threaded Python (3.13t+), global patching is **off by default**
-because zombie daemon threads left by intentional-deadlock tests can
-hold cooperative locks that spin in Python, triggering ``sys.monitoring``
-callbacks during tool-ID teardown/re-registration and causing CPython
-internal mutex deadlocks.  Per-test patching via ``BytecodeShuffler`` /
-``DporBytecodeRunner`` is unaffected because those runners join their
-threads before returning.
 """
 
 from __future__ import annotations
 
-import sysconfig
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import pytest
-
-_FREE_THREADED = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
-
-
-def _should_patch(config: pytest.Config) -> bool:
-    """Return True if global cooperative lock patching should be active."""
-    if config.getoption("--no-frontrun-patch-locks", default=False):
-        return False
-    if _FREE_THREADED:
-        return False
-    return True
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -50,7 +30,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    if not _should_patch(config):
+    if config.getoption("--no-frontrun-patch-locks", default=False):
         return
 
     from frontrun._cooperative import patch_locks
@@ -59,7 +39,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
-    if not _should_patch(config):
+    if config.getoption("--no-frontrun-patch-locks", default=False):
         return
 
     from frontrun._cooperative import unpatch_locks

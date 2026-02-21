@@ -231,7 +231,7 @@ class TestTimeoutAccumulation:
         """With 3 threads, total wait should still be ~timeout, not 3*timeout."""
         schedule = [0] * 10  # very short schedule
         scheduler = OpcodeScheduler(schedule, num_threads=3)
-        runner = BytecodeShuffler(scheduler, cooperative_locks=False)
+        runner = BytecodeShuffler(scheduler)
 
         def hang():
             time.sleep(100)
@@ -250,7 +250,7 @@ class TestTimeoutAccumulation:
         engine = PyDporEngine(num_threads=3)
         execution = engine.begin_execution()
         scheduler = DporScheduler(engine, execution, num_threads=3)
-        runner = DporBytecodeRunner(scheduler, cooperative_locks=False)
+        runner = DporBytecodeRunner(scheduler)
 
         def hang():
             time.sleep(100)

@@ -166,44 +166,6 @@ class BuggyBankWithDeadlock:
             self.lock_b.release()
 
 
-class BuggyBankWithDeadlockBytecode:
-    """
-    Bank with two accounts that can deadlock during transfers.
-
-    Same bug as BuggyBankWithDeadlock: two locks acquired in opposite order.
-    For bytecode-level testing. When run with cooperative_locks=False, real
-    deadlocks will occur (manifesting as TimeoutError, caught by run_with_schedule).
-    The `completed` flag lets the invariant check whether both transfers finished.
-    """
-
-    def __init__(self):
-        self.account_a = 100
-        self.account_b = 100
-        self.lock_a = threading.Lock()
-        self.lock_b = threading.Lock()
-        self.transfer_a_to_b_completed = False
-        self.transfer_b_to_a_completed = False
-
-    def transfer_a_to_b(self, amount):
-        """Transfer from account A to account B. Acquires lock_a then lock_b."""
-        with self.lock_a, self.lock_b:
-            self.account_a -= amount
-            self.account_b += amount
-            self.transfer_a_to_b_completed = True
-
-    def transfer_b_to_a(self, amount):
-        """Transfer from account B to account A. Acquires lock_b then lock_a (opposite order!)."""
-        with self.lock_b, self.lock_a:
-            self.account_b -= amount
-            self.account_a += amount
-            self.transfer_b_to_a_completed = True
-
-    @property
-    def completed(self):
-        """Both transfers completed successfully."""
-        return self.transfer_a_to_b_completed and self.transfer_b_to_a_completed
-
-
 # ============================================================================
 # Bug Class 4: Async Suspension-Point Race
 # ============================================================================
