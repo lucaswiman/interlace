@@ -1,6 +1,9 @@
 """Tests for the frontrun pytest plugin and lock-patching infrastructure."""
 
+import sysconfig
 import threading
+
+import pytest
 
 from frontrun._cooperative import (
     CooperativeLock,
@@ -8,17 +11,23 @@ from frontrun._cooperative import (
     unpatch_locks,
 )
 
+_FREE_THREADED = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+
 # ---------------------------------------------------------------------------
 # patch_locks / unpatch_locks reference counting
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(_FREE_THREADED, reason="Global lock patching disabled on free-threaded Python")
 class TestPatchLocksRefCounting:
     """Test that patch_locks/unpatch_locks reference counting is correct.
 
     The pytest plugin patches locks before collection, so threading.Lock is
     already CooperativeLock when these tests run.  Each test adds its own
     patch_locks/unpatch_locks on top of the plugin's baseline.
+
+    Skipped on free-threaded Python where global patching is disabled to
+    avoid sys.monitoring deadlocks with zombie daemon threads.
     """
 
     def test_plugin_patches_by_default(self):
@@ -51,13 +60,16 @@ class TestPatchLocksRefCounting:
 
     def test_over_unpatch_does_not_corrupt_count(self):
         """Extra unpatches beyond the plugin baseline don't break future patches."""
-        # These are no-ops beyond the plugin's baseline (count won't go below 0)
+        # First unpatch consumes the plugin's baseline (count 1 → 0).
+        # Second unpatch is a no-op (count stays at 0).
         unpatch_locks()
         unpatch_locks()
         # Re-patch
         patch_locks()
         assert threading.Lock is CooperativeLock
-        unpatch_locks()  # balance our patch_locks()
+        # Don't unpatch here — the first unpatch_locks() consumed the
+        # plugin's baseline count, so our patch_locks() above restores
+        # the count to 1 which is exactly the plugin's expected state.
 
 
 # ---------------------------------------------------------------------------
