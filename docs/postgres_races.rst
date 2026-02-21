@@ -124,6 +124,119 @@ Use ``SELECT … FOR UPDATE`` to hold a row-level lock, or raise isolation::
     COMMIT;
 
 
+Race 1b: Lost Update — bytecode fuzzing (``explore_interleavings``)
+---------------------------------------------------------------------
+
+The same race can be found *automatically* by random bytecode-level
+interleaving without writing an explicit schedule.
+
+**How it works**
+
+``explore_interleavings`` generates random opcode-level schedules and runs
+both psycopg2 transactions under scheduler control.  At each Python bytecode
+instruction, the scheduler decides which thread executes next.
+
+psycopg2 releases the GIL during network I/O (libpq sends the query over a
+C-level socket and waits for Postgres).  While one thread is blocked in that
+C call, the other thread can execute Python instructions — including its own
+``cur.execute(SELECT)`` — giving the scheduler real interleaving leverage
+across the SELECT/UPDATE race window even though psycopg2 is a C extension.
+
+The invariant is checked by querying Postgres after both transactions commit.
+A persistent admin connection (autocommit) resets the row to ``balance=1000``
+between attempts; the two transaction connections are reused across all
+attempts to avoid repeated connection-creation overhead.
+
+**Python code**::
+
+    admin = psycopg2.connect(_PG_DSN)
+    admin.autocommit = True
+    conn_a = psycopg2.connect(_PG_DSN)   # reused across all attempts
+    conn_b = psycopg2.connect(_PG_DSN)
+
+    class _State:
+        def __init__(self) -> None:
+            conn_a.rollback()
+            conn_b.rollback()
+            with admin.cursor() as cur:
+                cur.execute("UPDATE accounts SET balance=1000 WHERE name='alice'")
+            self.conn_a = conn_a
+            self.conn_b = conn_b
+
+    def _txn(conn, amount):
+        with conn.cursor() as cur:
+            cur.execute("SELECT balance FROM accounts WHERE name='alice'")
+            old = cur.fetchone()[0]
+            new = old + amount
+        with conn.cursor() as cur2:
+            cur2.execute("UPDATE accounts SET balance=%s WHERE name='alice'", (new,))
+        conn.commit()
+
+    result = explore_interleavings(
+        setup=_State,
+        threads=[
+            lambda s: _txn(s.conn_a, 100),
+            lambda s: _txn(s.conn_b, 200),
+        ],
+        invariant=lambda state: _check_balance(admin) == 1300,
+        max_attempts=50,
+        seed=42,
+        detect_io=False,     # psycopg2 uses C-level sockets; Python socket patch irrelevant
+        deadlock_timeout=15.0,
+        reproduce_on_failure=5,
+    )
+
+**Reproduction trace** (exact program output)::
+
+    ======================================================================
+    Race 1b: Lost Update  (bytecode fuzzing — explore_interleavings + psycopg2)
+    ======================================================================
+
+      Generating random opcode-level schedules and running both psycopg2
+      transactions under controlled interleaving.  Checking final balance
+      after each attempt.  Expected 1300; lost update produces 1200.
+
+      property_holds      : False
+      attempts_explored   : 1
+      counterexample found after 1 attempt(s)  (5/5 reproductions)
+
+      Race condition found after 1 interleavings.
+
+        Race condition involving threads 0, 1.
+
+
+        Thread 1 | postgres_races.py:305     lambda s: _txn(s.conn_b, 200),  [read .conn_b]
+        Thread 0 | postgres_races.py:304     lambda s: _txn(s.conn_a, 100),  [read .conn_a]
+        Thread 0 | postgres_races.py:290     old = cur.fetchone()[0]  [read]
+        Thread 1 | postgres_races.py:290     old = cur.fetchone()[0]  [read]
+
+        Reproduced 5/5 times (100%)
+
+      LOST UPDATE confirmed via bytecode fuzzing.
+      The random schedule interleaved both SELECTs before either UPDATE.
+
+**Reading the trace**
+
+Thread 1 and Thread 0 both appear at ``cur.fetchone()[0]`` — both read the
+balance before either wrote back.  The scheduler interleaved Thread 0's
+``fetchone()`` and Thread 1's ``fetchone()`` in the same window, which is
+exactly the race condition.  The invariant check (final balance ≠ 1300)
+confirms the lost update happened in Postgres.
+
+**Found in 1 attempt, reproduced 5/5 (100%)**
+
+The random schedule happened to interleave the two ``fetchone()`` calls on
+the very first try.  The counterexample schedule is then replayed five times
+and produces the lost update every time.
+
+**Why not DPOR?**
+
+DPOR tracks ``LOAD_ATTR`` / ``STORE_ATTR`` on Python objects.  psycopg2's
+``execute()`` and ``fetchone()`` are C calls that bypass Python attribute
+access — DPOR has no events to drive backtracking from.  Random exploration
+and trace markers both work; DPOR does not.
+
+
 Race 2: Deadlock (lock-ordering cycle)
 -----------------------------------------
 
@@ -254,6 +367,9 @@ Tool selection summary
 +============================+==========================+==========================================+
 | Lost update (data race)    | ``TraceExecutor``        | sys.settrace controls when each          |
 | with real DB connection    | (trace markers)          | psycopg2 execute() fires in Postgres     |
++----------------------------+--------------------------+------------------------------------------+
+| Lost update (data race)    | ``explore_interleavings``| Random opcode schedules interleave       |
+| with real DB connection    | (bytecode fuzzing)       | between psycopg2 calls automatically     |
 +----------------------------+--------------------------+------------------------------------------+
 | Deadlock (lock ordering)   | ``threading.Event``      | Events guarantee the exact lock-order    |
 | with real DB connection    | coordination             | that creates the circular wait           |

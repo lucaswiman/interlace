@@ -52,6 +52,7 @@ import threading
 
 import psycopg2
 
+from frontrun.bytecode import explore_interleavings
 from frontrun.common import Schedule, Step
 from frontrun.trace_markers import TraceExecutor
 
@@ -217,6 +218,126 @@ def demo_lost_update() -> None:
 
 
 # ============================================================================
+# Race 1b: Lost Update — random bytecode-level interleaving (bytecode fuzzing)
+# ============================================================================
+#
+# explore_interleavings generates random opcode-level schedules and runs both
+# psycopg2 transactions under controlled interleaving.  At each Python bytecode
+# instruction, the scheduler decides which thread executes next.
+#
+# psycopg2 releases the GIL during network I/O (libpq sends the query and
+# waits for Postgres over a C-level socket).  While one thread is blocked in
+# that C call, the other can execute Python opcodes — including its own
+# cur.execute(SELECT).  This gives the scheduler real interleaving leverage
+# across the SELECT/UPDATE race window, even though psycopg2 is a C extension.
+#
+# The invariant is checked by querying Postgres after both transactions commit.
+# The setup resets the row to balance=1000 before each attempt using an
+# autocommit admin connection.  The two transaction connections are reused
+# across all attempts to avoid the cost of creating 2×N connections.
+#
+# Why not DPOR here?
+#   DPOR tracks LOAD_ATTR / STORE_ATTR on Python objects.  psycopg2's execute()
+#   and fetchone() are C calls that bypass Python attribute access — DPOR has
+#   no events to drive backtracking from.  Random exploration (this function)
+#   and trace markers (demo_lost_update above) both work; DPOR does not.
+
+
+def demo_lost_update_bytecode_fuzz() -> None:
+    """Find the lost-update race with random bytecode-level interleaving."""
+    print(_SEP)
+    print("Race 1b: Lost Update  (bytecode fuzzing — explore_interleavings + psycopg2)")
+    print(_SEP)
+    print()
+    print("  Generating random opcode-level schedules and running both psycopg2")
+    print("  transactions under controlled interleaving.  Checking final balance")
+    print("  after each attempt.  Expected 1300; lost update produces 1200.")
+    print()
+
+    # Admin connection (autocommit) for data reset between attempts and for
+    # the invariant check.  Two persistent transaction connections are reused
+    # across all attempts so we pay the connection-creation cost only once.
+    admin = psycopg2.connect(_PG_DSN)
+    admin.autocommit = True
+    conn_a = psycopg2.connect(_PG_DSN)
+    conn_b = psycopg2.connect(_PG_DSN)
+    conn_a.autocommit = False
+    conn_b.autocommit = False
+
+    # One-time table setup via the admin connection.
+    with admin.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS accounts")
+        cur.execute("CREATE TABLE accounts (name TEXT PRIMARY KEY, balance INT)")
+        cur.execute("INSERT INTO accounts VALUES ('alice', 1000)")
+
+    class _State:
+        """Per-attempt state: reset the row, expose the reused connections."""
+
+        def __init__(self) -> None:
+            # Roll back any open transaction left by a previous attempt,
+            # then reset the balance to 1000 for a clean slate.
+            conn_a.rollback()
+            conn_b.rollback()
+            with admin.cursor() as cur:
+                cur.execute("UPDATE accounts SET balance=1000 WHERE name='alice'")
+            self.conn_a = conn_a
+            self.conn_b = conn_b
+
+    def _txn(conn: psycopg2.extensions.connection, amount: int) -> None:
+        """READ COMMITTED credit: SELECT balance, add amount, UPDATE — no row lock."""
+        with conn.cursor() as cur:
+            cur.execute("SELECT balance FROM accounts WHERE name='alice'")
+            old = cur.fetchone()[0]
+            new = old + amount
+        with conn.cursor() as cur2:
+            cur2.execute("UPDATE accounts SET balance=%s WHERE name='alice'", (new,))
+        conn.commit()
+
+    def _invariant(state: _State) -> bool:
+        with admin.cursor() as cur:
+            cur.execute("SELECT balance FROM accounts WHERE name='alice'")
+            return cur.fetchone()[0] == 1300  # type: ignore[no-any-return]
+
+    result = explore_interleavings(
+        setup=_State,
+        threads=[
+            lambda s: _txn(s.conn_a, 100),
+            lambda s: _txn(s.conn_b, 200),
+        ],
+        invariant=_invariant,
+        max_attempts=50,
+        seed=42,
+        detect_io=False,  # psycopg2 uses C-level sockets; Python socket patch is irrelevant
+        deadlock_timeout=15.0,  # generous timeout — psycopg2 holds the GIL during C calls
+        timeout_per_run=60.0,
+        reproduce_on_failure=5,
+    )
+
+    admin.close()
+    conn_a.close()
+    conn_b.close()
+
+    print(f"  property_holds      : {result.property_holds}")
+    print(f"  attempts_explored   : {result.num_explored}")
+    if result.counterexample is not None:
+        repro = ""
+        if result.reproduction_attempts:
+            repro = f"  ({result.reproduction_successes}/{result.reproduction_attempts} reproductions)"
+        print(f"  counterexample found after {result.num_explored} attempt(s){repro}")
+    print()
+    if result.explanation:
+        for line in result.explanation.splitlines():
+            print("  " + line)
+        print()
+    if not result.property_holds:
+        print("  LOST UPDATE confirmed via bytecode fuzzing.")
+        print("  The random schedule interleaved both SELECTs before either UPDATE.")
+    else:
+        print("  No lost update found in the explored interleavings.")
+    print()
+
+
+# ============================================================================
 # Race 2: Deadlock (circular row-lock ordering)
 # ============================================================================
 #
@@ -348,4 +469,5 @@ def demo_deadlock() -> None:
 
 if __name__ == "__main__":
     demo_lost_update()
+    demo_lost_update_bytecode_fuzz()
     demo_deadlock()
