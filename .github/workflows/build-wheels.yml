@@ -15,6 +15,7 @@ jobs:
   sdist:
     name: Source distribution
     runs-on: ubuntu-latest
+    if: github.event_name != 'push' && github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +32,7 @@ jobs:
   wheels:
     name: "${{ matrix.label }}"
     runs-on: ${{ matrix.os }}
+    if: github.event_name != 'push' && github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
