@@ -174,7 +174,9 @@ class TestEventFiltering:
 
     def test_removes_site_packages(self):
         events = [
-            PreloadIOEvent("read", "file:/home/user/.venv/lib/python3.10/site-packages/sqlalchemy/__init__.pyc", 3, 1, 1),
+            PreloadIOEvent(
+                "read", "file:/home/user/.venv/lib/python3.10/site-packages/sqlalchemy/__init__.pyc", 3, 1, 1
+            ),
         ]
         filtered = filter_user_io_events(events)
         assert len(filtered) == 0

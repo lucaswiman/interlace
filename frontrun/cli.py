@@ -26,7 +26,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 # Environment variable that signals frontrun is active
 FRONTRUN_ACTIVE_ENV = "FRONTRUN_ACTIVE"
 
