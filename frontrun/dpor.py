@@ -63,6 +63,7 @@ from frontrun._io_detection import (
 )
 from frontrun._trace_format import TraceRecorder, format_trace
 from frontrun._tracing import should_trace_file as _should_trace_file
+from frontrun.cli import require_active as _require_frontrun_env
 
 T = TypeVar("T")
 
@@ -934,7 +935,15 @@ def explore_dpor(
 
     Returns:
         DporResult with exploration statistics and any counterexample found.
+
+    .. note::
+
+       When running under **pytest**, this function requires the
+       ``frontrun`` CLI wrapper (``frontrun pytest ...``) or the
+       ``--frontrun-patch-locks`` flag.  Without it, the test is
+       automatically skipped.
     """
+    _require_frontrun_env("explore_dpor")
     num_threads = len(threads)
     pb = None if preemption_bound is None else preemption_bound
     me = None if max_executions is None else max_executions

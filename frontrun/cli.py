@@ -161,5 +161,38 @@ def is_active() -> bool:
     return os.environ.get(FRONTRUN_ACTIVE_ENV) == "1"
 
 
+def require_active(caller: str) -> None:
+    """Skip or raise if not running under the ``frontrun`` CLI.
+
+    When called under **pytest** (detected via ``_pytest`` in
+    ``sys.modules``), this raises ``pytest.skip`` so the test is
+    reported as skipped with a helpful message.
+
+    When called outside pytest, raises ``RuntimeError``.
+    """
+    if is_active():
+        return
+
+    # Also allow if cooperative patching is explicitly active
+    # (e.g. --frontrun-patch-locks or direct patch_locks() call)
+    from frontrun._cooperative import is_patched
+
+    if is_patched():
+        return
+
+    msg = (
+        f"{caller}() requires the frontrun CLI environment. "
+        "Run your command with: frontrun pytest ... "
+        "or use --frontrun-patch-locks"
+    )
+
+    if "_pytest" in sys.modules:
+        import pytest
+
+        pytest.skip(msg)
+    else:
+        raise RuntimeError(msg)
+
+
 if __name__ == "__main__":
     sys.exit(main())
