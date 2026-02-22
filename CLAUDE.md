@@ -2,6 +2,14 @@
 
 Deterministic concurrency testing library. Three approaches: trace markers (`# frontrun:` comments, line-level `sys.settrace`), random bytecode exploration (opcode-level fuzzing with Hypothesis), and systematic DPOR (Rust engine, shared-memory conflict analysis). First two have async variants. C-level I/O interception via `LD_PRELOAD` library.
 
+## Project layout
+
+- `frontrun/` — Python package (pure Python + compiled `_dpor` extension)
+- `crates/dpor/` — Rust PyO3 DPOR extension (built by maturin → `frontrun/_dpor.so`)
+- `crates/io/` — Rust LD_PRELOAD I/O interception library (built by cargo → `frontrun/libfrontrun_io.so`)
+- `Cargo.toml` — Cargo workspace root (members: `crates/dpor`, `crates/io`)
+- `pyproject.toml` — maturin build backend (builds DPOR extension as `frontrun._dpor`)
+
 ## Environment setup
 
 Use the Makefile to build virtualenvs. Prefer working in the **3.14t** (free-threaded) virtualenv:
@@ -27,4 +35,4 @@ Use the Makefile to build virtualenvs. Prefer working in the **3.14t** (free-thr
 - Python >=3.10, line length 120
 - ruff (E, F, W, I, N, UP, A, C4, ISC, PIE, Q, LOG, PERF), pyright strict
 - Tests: pytest + hypothesis
-- Rust extensions: maturin (PyO3) for DPOR, cargo for LD_PRELOAD library
+- Rust extensions: maturin (PyO3) for DPOR (`crates/dpor/`), cargo for LD_PRELOAD library (`crates/io/`)

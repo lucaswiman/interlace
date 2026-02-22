@@ -39,8 +39,7 @@ def _find_preload_library() -> Path | None:
     Search order:
     1. ``FRONTRUN_PRELOAD_LIB`` environment variable (explicit override)
     2. Next to this Python file (in-tree / editable install)
-    3. Adjacent to the frontrun_dpor extension module
-    4. In the frontrun-io build directory
+    3. In the crates/io build directory (development layout)
     """
     # 1. Explicit override
     env_path = os.environ.get(FRONTRUN_PRELOAD_LIB_ENV)
@@ -55,28 +54,17 @@ def _find_preload_library() -> Path | None:
     else:
         lib_name = "libfrontrun_io.so"
 
-    # 2. Next to this file
+    # 2. Next to this file (installed or copied by build)
     here = Path(__file__).resolve().parent
     candidate = here / lib_name
     if candidate.exists():
         return candidate
 
-    # 3. Next to frontrun_dpor extension
-    try:
-        import frontrun_dpor  # type: ignore[import-untyped]
-
-        dpor_dir = Path(frontrun_dpor.__file__).resolve().parent  # type: ignore[arg-type]
-        candidate = dpor_dir / lib_name
-        if candidate.exists():
-            return candidate
-    except (ImportError, AttributeError, TypeError):
-        pass
-
-    # 4. In the frontrun-io build directory (development layout)
+    # 3. In the crates/io build directory (development layout)
     project_root = here.parent
     for build_dir in [
-        project_root / "frontrun-io" / "target" / "release",
-        project_root / "frontrun-io" / "target" / "debug",
+        project_root / "crates" / "io" / "target" / "release",
+        project_root / "crates" / "io" / "target" / "debug",
         project_root / "target" / "release",
         project_root / "target" / "debug",
     ]:
