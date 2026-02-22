@@ -41,7 +41,7 @@ Putting the two together:
    )
 
    if not result.property_holds:
-       print(f"Bug found after {result.executions_explored} executions")
+       print(f"Bug found after {result.num_explored} executions")
 
 1. DPOR picks an interleaving (based on conflict analysis).
 2. ``setup()`` creates fresh state; the threads run under that interleaving.
@@ -124,7 +124,7 @@ The ``explore_dpor()`` function is the main entry point:
    )
 
    assert not result.property_holds
-   assert result.executions_explored == 2  # only 2 of 6 interleavings needed
+   assert result.num_explored == 2  # only 2 of 6 interleavings needed
 
 **Parameters:**
 
@@ -169,21 +169,22 @@ The ``explore_dpor()`` function is the main entry point:
 Interpreting results
 --------------------
 
-``explore_dpor()`` returns a ``DporResult``:
+``explore_dpor()`` returns an ``InterleavingResult`` (the same type used by
+``explore_interleavings``):
 
 .. code-block:: python
 
    @dataclass
-   class DporResult:
+   class InterleavingResult:
        property_holds: bool                              # True if invariant held everywhere
-       executions_explored: int = 0                      # total interleavings tried
-       counterexample_schedule: list[int] | None = None  # first failing schedule
+       num_explored: int = 0                             # total interleavings tried
+       counterexample: list[int] | None = None           # first failing schedule
        failures: list[tuple[int, list[int]]] = ...       # all (execution_num, schedule) pairs
        explanation: str | None = None                    # human-readable trace of the race
        reproduction_attempts: int = 0                    # number of replay attempts
        reproduction_successes: int = 0                   # how many replays reproduced the failure
 
-``counterexample_schedule`` is a list of thread IDs representing the order in
+``counterexample`` is a list of thread IDs representing the order in
 which threads were scheduled. For example, ``[0, 0, 1, 1]`` means thread 0
 ran for two steps, then thread 1 ran for two steps.
 
@@ -192,7 +193,7 @@ interleaved source lines, the conflict pattern (lost update, write-write, etc.),
 and reproduction statistics. This is the same output for both ``explore_dpor``
 and ``explore_interleavings``.
 
-If ``executions_explored`` is 1, your threads probably don't share any
+If ``num_explored`` is 1, your threads probably don't share any
 state --- the engine saw no conflicts and skipped everything. This is a sign
 that either the test is trivially correct or the shared state is not being
 accessed in a way the tracer can see (e.g. through a C extension).

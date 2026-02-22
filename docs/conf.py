@@ -13,7 +13,7 @@ author = "Frontrun Contributors"
 # The short X.Y version
 version = "0.0"
 # The full version
-release = "0.0.1"
+release = "0.0.2"
 
 # Sphinx extensions
 extensions = [

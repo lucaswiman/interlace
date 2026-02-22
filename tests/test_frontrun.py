@@ -13,4 +13,4 @@ def test_import():
 def test_version():
     """Test that version is set."""
     assert hasattr(frontrun, "__version__")
-    assert frontrun.__version__ == "0.0.1"
+    assert frontrun.__version__ == "0.0.2"
