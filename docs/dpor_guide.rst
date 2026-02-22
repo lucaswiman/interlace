@@ -94,6 +94,11 @@ For these cases, use :doc:`trace markers <approaches>` with explicit
 scheduling instead --- you annotate the points where interleaving matters and
 enumerate the orderings by hand.
 
+Thread functions should also avoid external side effects (writing to files,
+sending network requests, modifying global state outside the ``setup`` object).
+DPOR replays each interleaving from scratch, so side effects from one replay
+will interfere with the next.
+
 
 Basic usage
 -----------
@@ -187,6 +192,11 @@ interleaved source lines, the conflict pattern (lost update, write-write, etc.),
 and reproduction statistics. This is the same output for both ``explore_dpor``
 and ``explore_interleavings``.
 
+If ``executions_explored`` is 1, your threads probably don't share any
+state --- the engine saw no conflicts and skipped everything. This is a sign
+that either the test is trivially correct or the shared state is not being
+accessed in a way the tracer can see (e.g. through a C extension).
+
 
 Example: verifying that a lock fixes a race
 --------------------------------------------
@@ -262,32 +272,3 @@ detected separately:
            invariant=lambda b: b.a + b.b == 200,
        )
        assert not result.property_holds  # total is not conserved without locking
-
-
-Tips
-----
-
-**Keep thread functions short.** Every bytecode instruction is a potential
-scheduling point. Long functions produce deep exploration trees and slow
-things down. Extract the concurrent kernel --- the part that actually touches
-shared state --- and test that.
-
-**Use ``preemption_bound=2`` (the default).** Empirical research shows this
-catches nearly all real bugs. Increasing the bound gives diminishing returns
-and exponentially more executions.
-
-**Use ``max_executions`` in CI.** Even with preemption bounding, the
-exploration can be large. Setting a cap ensures your test suite has a bounded
-runtime. If the cap is hit without finding a bug, the test still provides
-useful (though incomplete) coverage.
-
-**Inspect ``executions_explored``.** If DPOR reports that only 1 execution
-was explored, your threads probably don't share any state --- the engine
-saw no conflicts and skipped everything. This is a sign that either the
-test is correct or the shared state is not being accessed in a way the
-tracer can see (e.g. through a C extension).
-
-**Avoid external side effects in thread functions.** DPOR replays each
-interleaving from scratch. If thread functions write to files, send network
-requests, or modify global state outside the ``setup`` object, replays
-will interfere with each other.
