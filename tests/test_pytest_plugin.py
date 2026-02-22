@@ -16,45 +16,51 @@ from frontrun._cooperative import (
 class TestPatchLocksRefCounting:
     """Test that patch_locks/unpatch_locks reference counting is correct.
 
-    Since the redesign in 399f049, the pytest plugin only patches when
-    running under the ``frontrun`` CLI (FRONTRUN_ACTIVE=1) or with
-    ``--frontrun-patch-locks``.  These tests exercise the ref counting
-    logic directly without relying on the plugin.
+    The pytest plugin patches locks before collection, so threading.Lock is
+    already CooperativeLock when these tests run.  Each test adds its own
+    patch_locks/unpatch_locks on top of the plugin's baseline.
     """
 
-    def test_patch_unpatch_round_trip(self):
-        """A single patch/unpatch pair installs and removes CooperativeLock."""
-        assert threading.Lock is not CooperativeLock
+    def test_plugin_patches_by_default(self):
+        """The pytest plugin has already patched threading.Lock."""
+        assert threading.Lock is CooperativeLock
+
+    def test_extra_patch_unpatch(self):
+        """An extra patch/unpatch pair on top of the plugin's baseline is a no-op."""
         patch_locks()
         try:
             assert threading.Lock is CooperativeLock
         finally:
             unpatch_locks()
-        assert threading.Lock is not CooperativeLock
+        # Still patched — the plugin's patch_locks() call remains.
+        assert threading.Lock is CooperativeLock
 
     def test_nested_patch_unpatch(self):
-        """Multiple patch calls require matching unpatch calls."""
+        """Multiple extra patch calls require matching unpatch calls."""
         patch_locks()
         patch_locks()
         try:
             assert threading.Lock is CooperativeLock
             unpatch_locks()
-            # Still patched — one more patch call remains
+            # Still patched — one more extra + the plugin baseline
             assert threading.Lock is CooperativeLock
         finally:
             unpatch_locks()
-        assert threading.Lock is not CooperativeLock
+        # Still patched — the plugin's baseline remains
+        assert threading.Lock is CooperativeLock
 
     def test_over_unpatch_does_not_corrupt_count(self):
-        """Extra unpatches beyond zero don't break future patches."""
+        """Extra unpatches beyond the plugin baseline don't break future patches."""
+        # First unpatch consumes the plugin's baseline (count 1 → 0).
+        # Second unpatch is a no-op (count stays at 0).
         unpatch_locks()
         unpatch_locks()
         # Re-patch
         patch_locks()
-        try:
-            assert threading.Lock is CooperativeLock
-        finally:
-            unpatch_locks()
+        assert threading.Lock is CooperativeLock
+        # Don't unpatch here — the first unpatch_locks() consumed the
+        # plugin's baseline count, so our patch_locks() above restores
+        # the count to 1 which is exactly the plugin's expected state.
 
 
 # ---------------------------------------------------------------------------

@@ -55,7 +55,7 @@ default-venv: .venv-3.10/activate
 # Pattern rule for running tests with specific Python versions.
 # Builds the Rust DPOR extension and I/O library first.
 test-%: build-dpor-% build-io
-	$(CURDIR)/.venv-$*/bin/pytest $(PYTEST_ARGS)
+	PATH=$(CURDIR)/.venv-$*/bin:$$PATH $(CURDIR)/.venv-$*/bin/frontrun pytest $(PYTEST_ARGS)
 
 # Main test target - runs tests for all Python versions
 test: $(addprefix test-,$(PYTHON_VERSIONS))
