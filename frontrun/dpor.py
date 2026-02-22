@@ -85,8 +85,7 @@ _USE_SYS_MONITORING = _PY_VERSION >= (3, 12)
 # ---------------------------------------------------------------------------
 
 
-# Backwards-compatible alias — explore_dpor now returns InterleavingResult directly.
-DporResult = InterleavingResult
+
 
 
 # ---------------------------------------------------------------------------
@@ -938,7 +937,7 @@ def explore_dpor(
         max_executions=me,
     )
 
-    result = DporResult(property_holds=True)
+    result = InterleavingResult(property_holds=True)
     # Shared lock serialising ALL PyO3 calls to engine/execution objects.
     # On free-threaded Python, PyO3 &mut self borrows panic rather than
     # block when contested, so we need a Python-level lock shared across

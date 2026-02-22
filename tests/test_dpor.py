@@ -17,7 +17,7 @@ import threading
 from frontrun._dpor import PyDporEngine
 
 from frontrun.common import InterleavingResult
-from frontrun.dpor import DporResult, explore_dpor
+from frontrun.dpor import explore_dpor
 
 # ---------------------------------------------------------------------------
 # Low-level Rust engine tests (via PyO3)
@@ -360,7 +360,6 @@ class TestExploreDpor:
         )
 
         assert isinstance(result, InterleavingResult)
-        assert isinstance(result, DporResult)  # DporResult is an alias
         assert isinstance(result.property_holds, bool)
         assert isinstance(result.num_explored, int)
         assert result.num_explored >= 1
