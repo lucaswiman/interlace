@@ -16,6 +16,13 @@
 
  The "database" is modeled as a map from (table, pk) → value.
  Operations are: read(table, pk) and write(table, pk, val).
+
+ Parameter resolution (Algorithm 1.5): operations carry a "resolved"
+ flag.  When resolved=FALSE, the conflict predicates don't know the PK
+ value (even though the database DOES apply the operation to its actual
+ row).  This models parameterized queries like "WHERE id = %s" where
+ placeholder substitution failed.  The conflict predicates must be
+ conservative (assume conflict) in this case.
  ***************************************************************************)
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
@@ -33,12 +40,17 @@ Cells == Tables \X PKs
    -------------------------------------------------------------------------- *)
 
 \* An operation is either a read or a write to a (table, pk) cell.
-ReadOp(t, k)    == [type |-> "read",  table |-> t, pk |-> k, val |-> 0]
-WriteOp(t, k, v) == [type |-> "write", table |-> t, pk |-> k, val |-> v]
+\* "resolved" indicates whether parameter resolution succeeded
+\* (Algorithm 1.5).  When FALSE, the conflict predicates cannot see the
+\* PK value and must be conservative.  The DB semantics still use the
+\* actual PK — the database always knows which row is targeted, even
+\* when the conflict detector doesn't.
+ReadOp(t, k, r)    == [type |-> "read",  table |-> t, pk |-> k, val |-> 0, resolved |-> r]
+WriteOp(t, k, v, r) == [type |-> "write", table |-> t, pk |-> k, val |-> v, resolved |-> r]
 
-\* All possible operations
-AllOps == { ReadOp(t, k) : t \in Tables, k \in PKs }
-    \union { WriteOp(t, k, v) : t \in Tables, k \in PKs, v \in Values }
+\* All possible operations (both resolved and unresolved variants)
+AllOps == { ReadOp(t, k, r) : t \in Tables, k \in PKs, r \in BOOLEAN }
+    \union { WriteOp(t, k, v, r) : t \in Tables, k \in PKs, v \in Values, r \in BOOLEAN }
 
 (* --------------------------------------------------------------------------
    Conflict Predicates (matching Algorithm 1 from SQL_CONFLICT.md)
@@ -52,11 +64,15 @@ TableConflicts(a, b) ==
     /\ a.table = b.table
     /\ (a.type = "write" \/ b.type = "write")
 
-\* Row-level: same table, same pk, at least one write
+\* Row-level: same table, at least one write, AND either:
+\*   - at least one operation has unresolved params → fallback to table-level
+\*   - both resolved → conflict iff same PK
 RowConflicts(a, b) ==
     /\ a.table = b.table
-    /\ a.pk = b.pk
     /\ (a.type = "write" \/ b.type = "write")
+    /\ IF ~a.resolved \/ ~b.resolved
+       THEN TRUE   \* unresolved params → conservative (table-level)
+       ELSE a.pk = b.pk
 
 (* --------------------------------------------------------------------------
    Database Semantics
@@ -175,6 +191,33 @@ NoMissedBugs_Table ==
 NoMissedBugs_Row ==
     (~OrderIndependent) => RowConflicts(opA, opB)
 
+\* INVARIANT 7: UNRESOLVED PARAMETERS ARE SOUND
+\*
+\* When parameter resolution fails for either operation, RowConflicts
+\* falls back to TableConflicts (same table + write → always conflict).
+\* Since TableSoundness already guarantees that table-level is sound,
+\* unresolved parameters cannot cause missed bugs.
+\*
+\* Stated directly: if RowConflicts says "independent" despite one
+\* operation having unresolved params, the orders must still commute.
+\* (In practice, RowConflicts never says "independent" when params are
+\* unresolved — this invariant verifies that.)
+
+UnresolvedParamsSoundness ==
+    ((~opA.resolved \/ ~opB.resolved) /\ ~RowConflicts(opA, opB))
+    => OrderIndependent
+
+\* INVARIANT 8: RESOLVED PARAMS DON'T WEAKEN SOUNDNESS
+\*
+\* Even with resolved parameters, row-level is still sound: if it says
+\* "independent" (different PKs), the operations genuinely commute
+\* in the database.  This is the core payoff — resolution enables
+\* finer-grained independence without sacrificing correctness.
+
+ResolvedParamsSoundness ==
+    (opA.resolved /\ opB.resolved /\ ~RowConflicts(opA, opB))
+    => OrderIndependent
+
 \* Combined
 
 AllInvariants ==
@@ -183,5 +226,7 @@ AllInvariants ==
     /\ RefinementChain
     /\ NoMissedBugs_Table
     /\ NoMissedBugs_Row
+    /\ UnresolvedParamsSoundness
+    /\ ResolvedParamsSoundness
 
 ====

@@ -254,9 +254,182 @@ def parse_sql_access(sql: str) -> tuple[set[str], set[str]]:
 
 ---
 
+## Algorithm 1.5: Parameter Resolution
+
+Phase 2 row-level detection needs the *actual values* from WHERE predicates to determine whether two operations target the same row. But ORM-generated queries are nearly always parameterized:
+
+```sql
+-- What the ORM generates:
+SELECT * FROM users WHERE id = %s          -- psycopg2 (format/pyformat)
+SELECT * FROM users WHERE id = ?           -- sqlite3   (qmark)
+SELECT * FROM users WHERE id = :id         -- cx_Oracle  (named)
+SELECT * FROM users WHERE id = :1          -- oracledb   (numeric)
+```
+
+sqlglot parses `%s` as an identifier, `?` as a placeholder, `:id` as a session variable — none produce `exp.Literal` nodes. So `extract_equality_predicates` returns `[]` and we silently fall back to table-level. The query works, but we lose the row-level precision that Phase 2 is supposed to provide.
+
+**Fix:** Before feeding SQL to `extract_equality_predicates`, substitute placeholders with the actual parameter values passed to `cursor.execute(operation, parameters)`. The resolved SQL is only used for AST analysis — it's never executed.
+
+### 1.5a. Value Conversion
+
+```python
+def _python_to_sql_literal(value: Any) -> str:
+    """Convert a Python value to a SQL literal for AST analysis.
+
+    The result must be syntactically valid SQL that sqlglot can parse.
+    It does NOT need to be safe for execution.
+    """
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return f"X'{bytes(value).hex()}'"
+    # Default: string literal (double internal quotes)
+    s = str(value).replace("'", "''")
+    return f"'{s}'"
+```
+
+### 1.5b. Paramstyle Detection
+
+PEP 249 requires every DBAPI module to expose a `paramstyle` attribute. We read it at patch time and bake it into the `_patched_execute` closure:
+
+| `paramstyle` | Placeholder | Parameters | Drivers |
+|---|---|---|---|
+| `qmark` | `?` | sequence | sqlite3 |
+| `numeric` | `:1`, `:2` | sequence | oracledb |
+| `named` | `:name` | mapping | oracledb |
+| `format` | `%s` | sequence | — |
+| `pyformat` | `%(name)s` | mapping | psycopg2, pymysql |
+
+**Subtlety:** psycopg2 and pymysql declare `paramstyle = "pyformat"` but in practice nearly all queries use `%s` with tuple parameters (plain `format` style). The resolution function detects this from the parameter type: `dict` → try `%(name)s` patterns, sequence → try `%s` patterns. This covers both styles with no driver-specific hacks.
+
+### 1.5c. Resolution Functions
+
+```python
+import re
+
+# Precompiled patterns.  Negative lookbehinds prevent matching escaped
+# sequences (:: in PG casts, %% in psycopg2 literal-percent escapes).
+_RE_QMARK    = re.compile(r"\?")
+_RE_NUMERIC  = re.compile(r":(\d+)")
+_RE_NAMED    = re.compile(r"(?<!:):([A-Za-z_]\w*)")
+_RE_FORMAT   = re.compile(r"(?<!%)%s")
+_RE_PYFORMAT = re.compile(r"(?<!%)%\(([^)]+)\)s")
+
+
+def resolve_parameters(sql: str, parameters: Any, paramstyle: str) -> str:
+    """Substitute parameter placeholders with SQL literal values.
+
+    Supports all five PEP 249 paramstyles.  Returns the original SQL
+    unchanged if resolution fails (wrong paramstyle, missing params, etc.).
+    """
+    if parameters is None:
+        return sql
+    try:
+        if paramstyle == "qmark":
+            return _resolve_positional(sql, parameters, _RE_QMARK)
+        if paramstyle == "numeric":
+            return _resolve_numeric(sql, parameters)
+        if paramstyle == "named":
+            return _resolve_named(sql, parameters)
+        if paramstyle in ("format", "pyformat"):
+            # Detect actual style from parameter type:
+            # dict → %(name)s, sequence → %s
+            if isinstance(parameters, dict):
+                return _resolve_pyformat(sql, parameters)
+            return _resolve_positional(sql, parameters, _RE_FORMAT)
+    except (IndexError, KeyError, TypeError, ValueError):
+        pass
+    return sql
+
+
+def _resolve_positional(sql: str, parameters: Any,
+                         pattern: re.Pattern[str]) -> str:
+    """Replace positional placeholders (? or %s) in left-to-right order."""
+    params = tuple(parameters)
+    idx = 0
+
+    def replacer(m: re.Match[str]) -> str:
+        nonlocal idx
+        if idx >= len(params):
+            return m.group(0)  # more placeholders than params → leave as-is
+        val = _python_to_sql_literal(params[idx])
+        idx += 1
+        return val
+
+    return pattern.sub(replacer, sql)
+
+
+def _resolve_numeric(sql: str, parameters: Any) -> str:
+    """Replace :N placeholders (1-based index)."""
+    params = tuple(parameters)
+
+    def replacer(m: re.Match[str]) -> str:
+        idx = int(m.group(1)) - 1
+        return _python_to_sql_literal(params[idx])
+
+    return _RE_NUMERIC.sub(replacer, sql)
+
+
+def _resolve_named(sql: str, parameters: Any) -> str:
+    """Replace :name placeholders with named parameters."""
+    params = dict(parameters)
+
+    def replacer(m: re.Match[str]) -> str:
+        return _python_to_sql_literal(params[m.group(1)])
+
+    return _RE_NAMED.sub(replacer, sql)
+
+
+def _resolve_pyformat(sql: str, parameters: Any) -> str:
+    """Replace %(name)s placeholders with named parameters."""
+    params = dict(parameters)
+
+    def replacer(m: re.Match[str]) -> str:
+        return _python_to_sql_literal(params[m.group(1)])
+
+    return _RE_PYFORMAT.sub(replacer, sql)
+```
+
+### 1.5d. End-to-End Example
+
+```python
+# psycopg2 (paramstyle="pyformat", but uses %s with tuple params):
+sql = "SELECT * FROM users WHERE id = %s AND region = %s"
+params = (42, "us-east")
+
+resolved = resolve_parameters(sql, params, "pyformat")
+# → "SELECT * FROM users WHERE id = 42 AND region = 'us-east'"
+
+preds = extract_equality_predicates(resolved)
+# → [EqualityPredicate("id", "42"), EqualityPredicate("region", "us-east")]
+
+resource_id = _sql_resource_id("users", preds)
+# → "sql:users:(('id', '42'), ('region', 'us-east'))"
+```
+
+### 1.5e. Limitations
+
+1. **Placeholders inside string literals.** `SELECT * FROM t WHERE name = 'What?' AND id = ?` — the regex matches the `?` inside the string literal too. In practice this doesn't happen: if the SQL has string literals, those values would be parameterized. If it does happen, sqlglot fails to parse the resolved SQL and we fall back to table-level (safe).
+
+2. **`executemany` skips resolution.** `executemany` passes a *sequence* of parameter sets, each potentially targeting a different row. We skip parameter resolution entirely and use table-level (conservative, correct).
+
+3. **Non-standard parameter styles.** Some drivers support styles beyond their declared `paramstyle` (e.g. psycopg3 uses `$1` internally for server-side prepared statements). We only handle the five PEP 249 styles. Unrecognized placeholders pass through unchanged → table-level fallback.
+
+**Complexity:** O(n) regex substitution on the SQL string, plus O(k) for converting k parameter values to literals. Negligible vs. network RTT.
+
+---
+
 ## Algorithm 2: DBAPI Cursor Monkey-Patching
 
 Follows the exact pattern of `_io_detection.py`. Key insight: psycopg2's cursor is a C extension — `cursor.execute` is a C function. We can still monkey-patch at the class level because Python attribute lookup goes through the MRO, and assigning to the class replaces the descriptor.
+
+The `paramstyle` is read from the driver module at patch time and baked into the closure, so each driver uses its native placeholder style automatically.
 
 ```python
 # frontrun/_sql_detection.py
@@ -264,11 +437,10 @@ Follows the exact pattern of `_io_detection.py`. Key insight: psycopg2's cursor 
 import threading
 from frontrun._io_detection import _io_tls, get_io_reporter
 
-_ORIGINAL_EXECUTE: dict[type, Any] = {}
-_ORIGINAL_EXECUTEMANY: dict[type, Any] = {}
+_ORIGINAL_METHODS: dict[tuple[type, str], Any] = {}
 _sql_patched = False
 
-def _make_patched_execute(original):
+def _make_patched_execute(original, paramstyle, *, is_executemany=False):
     """Create a patched execute that intercepts SQL before calling the original."""
 
     def _patched_execute(self, operation, parameters=None, *args, **kwargs):
@@ -279,35 +451,59 @@ def _make_patched_execute(original):
             read_tables, write_tables = parse_sql_access(operation)
             if read_tables or write_tables:
                 reported = True
+                all_tables = read_tables | write_tables
+
+                # Row-level: resolve params → extract predicates for
+                # single-table operations.  Skip for executemany (each
+                # row may have different params) and multi-table queries
+                # (can't attribute columns to tables without aliases).
+                predicates: list[EqualityPredicate] = []
+                if len(all_tables) == 1 and not is_executemany:
+                    if parameters is not None:
+                        resolved = resolve_parameters(
+                            operation, parameters, paramstyle,
+                        )
+                        predicates = extract_equality_predicates(resolved)
+                    else:
+                        predicates = extract_equality_predicates(operation)
+
                 for table in read_tables:
-                    reporter(f"sql:{table}", "read")
+                    reporter(_sql_resource_id(table, predicates), "read")
                 for table in write_tables:
-                    reporter(f"sql:{table}", "write")
+                    reporter(_sql_resource_id(table, predicates), "write")
 
         # Suppress endpoint-level I/O for this call if SQL-level succeeded
         if reported:
+            tid = threading.get_native_id()
             _io_tls._sql_suppress = True
-        try:
+            with _suppress_lock:
+                _suppress_tids.add(tid)
+            try:
+                if parameters is not None:
+                    return original(self, operation, parameters, *args, **kwargs)
+                return original(self, operation, *args, **kwargs)
+            finally:
+                with _suppress_lock:
+                    _suppress_tids.discard(tid)
+                _io_tls._sql_suppress = False
+        else:
             if parameters is not None:
                 return original(self, operation, parameters, *args, **kwargs)
             return original(self, operation, *args, **kwargs)
-        finally:
-            if reported:
-                _io_tls._sql_suppress = False
 
     return _patched_execute
 
 
-# Target drivers: (module_path, class_name, method_name)
+# Target drivers: (module_path, class_name, method_name, paramstyle_module)
 _CURSOR_TARGETS = [
-    ("psycopg2.extensions", "cursor", "execute"),
-    ("psycopg2.extensions", "cursor", "executemany"),
-    ("psycopg.cursor", "Cursor", "execute"),
-    ("psycopg.cursor_async", "AsyncCursor", "execute"),
-    ("sqlite3", "Cursor", "execute"),
-    ("sqlite3", "Cursor", "executemany"),
-    ("pymysql.cursors", "Cursor", "execute"),
-    ("pymysql.cursors", "Cursor", "executemany"),
+    ("psycopg2.extensions", "cursor", "execute", "psycopg2"),
+    ("psycopg2.extensions", "cursor", "executemany", "psycopg2"),
+    ("psycopg.cursor", "Cursor", "execute", "psycopg"),
+    ("psycopg.cursor_async", "AsyncCursor", "execute", "psycopg"),
+    ("sqlite3", "Cursor", "execute", "sqlite3"),
+    ("sqlite3", "Cursor", "executemany", "sqlite3"),
+    ("pymysql.cursors", "Cursor", "execute", "pymysql"),
+    ("pymysql.cursors", "Cursor", "executemany", "pymysql"),
 ]
 
 
@@ -318,14 +514,25 @@ def patch_sql() -> None:
         return
 
     import importlib
-    for module_path, class_name, method_name in _CURSOR_TARGETS:
+    for module_path, class_name, method_name, paramstyle_module in _CURSOR_TARGETS:
         try:
             mod = importlib.import_module(module_path)
             cls = getattr(mod, class_name)
             original = getattr(cls, method_name)
             key = (cls, method_name)
-            _ORIGINAL_EXECUTE[key] = original
-            setattr(cls, method_name, _make_patched_execute(original))
+            if key in _ORIGINAL_METHODS:
+                continue
+
+            # Read paramstyle from the driver module (PEP 249)
+            driver_mod = importlib.import_module(paramstyle_module)
+            paramstyle = getattr(driver_mod, "paramstyle", "format")
+
+            _ORIGINAL_METHODS[key] = original
+            is_many = "executemany" in method_name
+            patched = _make_patched_execute(
+                original, paramstyle, is_executemany=is_many,
+            )
+            setattr(cls, method_name, patched)
         except (ImportError, AttributeError):
             pass  # driver not installed — skip silently
 
@@ -337,9 +544,9 @@ def unpatch_sql() -> None:
     global _sql_patched
     if not _sql_patched:
         return
-    for (cls, method_name), original in _ORIGINAL_EXECUTE.items():
+    for (cls, method_name), original in _ORIGINAL_METHODS.items():
         setattr(cls, method_name, original)
-    _ORIGINAL_EXECUTE.clear()
+    _ORIGINAL_METHODS.clear()
     _sql_patched = False
 ```
 
@@ -782,6 +989,130 @@ class TestCombined:
         assert r == set() and w == set()
 
 
+class TestParameterResolution:
+    def test_qmark(self):
+        resolved = resolve_parameters(
+            "SELECT * FROM users WHERE id = ? AND name = ?",
+            (42, "alice"), "qmark",
+        )
+        assert resolved == "SELECT * FROM users WHERE id = 42 AND name = 'alice'"
+
+    def test_numeric(self):
+        resolved = resolve_parameters(
+            "SELECT * FROM users WHERE id = :1 AND name = :2",
+            (42, "alice"), "numeric",
+        )
+        assert resolved == "SELECT * FROM users WHERE id = 42 AND name = 'alice'"
+
+    def test_named(self):
+        resolved = resolve_parameters(
+            "SELECT * FROM users WHERE id = :id AND name = :name",
+            {"id": 42, "name": "alice"}, "named",
+        )
+        assert resolved == "SELECT * FROM users WHERE id = 42 AND name = 'alice'"
+
+    def test_format(self):
+        resolved = resolve_parameters(
+            "SELECT * FROM users WHERE id = %s AND name = %s",
+            (42, "alice"), "format",
+        )
+        assert resolved == "SELECT * FROM users WHERE id = 42 AND name = 'alice'"
+
+    def test_pyformat_with_dict(self):
+        resolved = resolve_parameters(
+            "SELECT * FROM users WHERE id = %(id)s AND name = %(name)s",
+            {"id": 42, "name": "alice"}, "pyformat",
+        )
+        assert resolved == "SELECT * FROM users WHERE id = 42 AND name = 'alice'"
+
+    def test_pyformat_with_tuple_falls_back_to_format(self):
+        """psycopg2 declares pyformat but commonly uses %s with tuples."""
+        resolved = resolve_parameters(
+            "SELECT * FROM users WHERE id = %s",
+            (42,), "pyformat",
+        )
+        assert resolved == "SELECT * FROM users WHERE id = 42"
+
+    def test_none_becomes_null(self):
+        resolved = resolve_parameters(
+            "UPDATE t SET x = ? WHERE id = ?",
+            (None, 1), "qmark",
+        )
+        assert "NULL" in resolved
+
+    def test_bool_values(self):
+        resolved = resolve_parameters(
+            "SELECT * FROM t WHERE active = ?",
+            (True,), "qmark",
+        )
+        assert "TRUE" in resolved
+
+    def test_string_with_quotes(self):
+        resolved = resolve_parameters(
+            "SELECT * FROM t WHERE name = ?",
+            ("O'Brien",), "qmark",
+        )
+        assert "O''Brien" in resolved  # SQL-escaped single quote
+
+    def test_no_params_returns_unchanged(self):
+        sql = "SELECT * FROM users WHERE id = 1"
+        assert resolve_parameters(sql, None, "qmark") is sql
+
+    def test_missing_param_returns_unchanged(self):
+        """If param lookup fails, return original SQL (table-level fallback)."""
+        sql = "SELECT * FROM users WHERE id = :missing"
+        resolved = resolve_parameters(sql, {"other": 1}, "named")
+        assert resolved == sql
+
+    def test_pg_cast_not_matched_by_named(self):
+        """:: type cast should not be treated as a :name placeholder."""
+        resolved = resolve_parameters(
+            "SELECT id::text FROM users WHERE id = :id",
+            {"id": 42}, "named",
+        )
+        assert "::text" in resolved  # cast preserved
+        assert "42" in resolved       # param resolved
+
+    def test_escaped_percent_not_matched(self):
+        """%%s should not be treated as a %s placeholder."""
+        resolved = resolve_parameters(
+            "SELECT '%%s' FROM users WHERE id = %s",
+            (42,), "format",
+        )
+        assert "%%s" in resolved  # escape preserved
+        assert "42" in resolved    # param resolved
+
+
+class TestParameterizedPredicateExtraction:
+    """End-to-end: resolve params → extract predicates."""
+
+    def test_qmark_select(self):
+        sql = "SELECT * FROM users WHERE id = ?"
+        resolved = resolve_parameters(sql, (42,), "qmark")
+        preds = extract_equality_predicates(resolved)
+        assert preds == [EqualityPredicate("id", "42")]
+
+    def test_format_update(self):
+        sql = "UPDATE accounts SET balance = balance - %s WHERE id = %s"
+        resolved = resolve_parameters(sql, (100, 7), "format")
+        preds = extract_equality_predicates(resolved)
+        assert EqualityPredicate("id", "7") in preds
+
+    def test_named_compound(self):
+        sql = "SELECT * FROM t WHERE id = :id AND region = :region"
+        resolved = resolve_parameters(sql, {"id": 1, "region": "us"}, "named")
+        preds = extract_equality_predicates(resolved)
+        assert EqualityPredicate("id", "1") in preds
+        assert EqualityPredicate("region", "us") in preds
+
+    def test_pyformat_orm_style(self):
+        """Typical ORM: pyformat paramstyle, %s placeholder, tuple params."""
+        sql = "SELECT users.id FROM users WHERE users.id = %s"
+        resolved = resolve_parameters(sql, (42,), "pyformat")
+        preds = extract_equality_predicates(resolved)
+        assert EqualityPredicate("id", "42") in preds
+
+
 class TestPredicateExtraction:
     def test_simple_equality(self):
         preds = extract_equality_predicates("SELECT * FROM users WHERE id = 42")
@@ -864,11 +1195,11 @@ Files:
 
 ### Phase 2: Row-Level Detection
 
-**Goal:** Two threads on the same table but different rows (identified by PK equality predicates) are independent.
+**Goal:** Two threads on the same table but different rows (identified by PK equality predicates) are independent. Parameterized queries are resolved before predicate extraction.
 
 Files:
-- `frontrun/_sql_detection.py` — add ~80 lines (Algorithms 5a-5d)
-- `tests/test_sql_detection.py` — add ~50 lines (predicate tests)
+- `frontrun/_sql_detection.py` — add ~150 lines (Algorithms 1.5, 5a-5d)
+- `tests/test_sql_detection.py` — add ~120 lines (parameter resolution + predicate tests)
 
 ### Phase 3: Wire Protocol Parsing
 
@@ -898,6 +1229,7 @@ Files:
 | Suppress LD_PRELOAD too? | **Yes** | Via `_suppress_tids` shared set (Algorithm 3). Otherwise libpq's `send()` still creates endpoint-level conflicts. |
 | Row-level: z3 or equality-only? | **Equality-only for Phase 2** | Covers the common case (PK lookups). z3 adds a heavy dependency for marginal gain on range predicates. |
 | Transaction boundaries? | **Deferred** | Current model: each SQL statement is an independent access. Good enough for lost-update and write-skew detection. Transaction grouping is Phase 4 work. |
+| Parameterized queries? | **Full substitution** (Algorithm 1.5) | Resolve placeholders with actual values before AST analysis. All five PEP 249 paramstyles supported. Paramstyle read from driver module at patch time. Resolution failure falls back to table-level (safe). |
 
 ---
 
@@ -907,7 +1239,7 @@ Three TLA+ specs in `specs/` verify the core correctness properties of the desig
 
 ### Spec 1: `SqlConflictRefinement.tla` — Static Conflict Rules
 
-Exhaustively checks all combinations of 2 operations x 4 statement types x 2 tables x 2 PK values x {parsed, unparsed} (2,304 states). Verifies 11 invariants:
+Exhaustively checks all combinations of 2 operations x 4 statement types x 2 tables x 2 PK values x {parsed, unparsed} x {params_resolved, params_unresolved} (3,200 states after pruning unreachable combinations via `ValidOps`). Verifies 13 invariants:
 
 | # | Invariant | What it checks |
 |---|-----------|----------------|
@@ -922,10 +1254,14 @@ Exhaustively checks all combinations of 2 operations x 4 statement types x 2 tab
 | 9 | `DifferentRowsIndependent` | Same table + different PK + parsed → no RowConflict |
 | 10 | `SuppressionCorrectness` | Parsed operation always has non-empty AccessKinds |
 | 11 | `ConflictSymmetry` | TableConflict(a,b) = TableConflict(b,a), same for RowConflict |
+| 12 | `UnresolvedParamsFallback` | Unresolved params + same table + write → RowConflict (conservative) |
+| 13 | `ResolvedParamsEnableRowLevel` | Resolved params + same table + different PK → no RowConflict (precise) |
+
+Invariants 12-13 verify Algorithm 1.5 (parameter resolution): failed resolution never claims row-independence (12), while successful resolution enables the finer-grained row-level detection (13).
 
 ### Spec 2: `DporSqlScheduling.tla` — Dynamic Scheduling Soundness
 
-Models an actual database as a map from `(table, pk) → value`. Applies every pair of operations in both orders (A;B vs B;A) and checks:
+Models an actual database as a map from `(table, pk) → value`. Operations carry a `resolved` flag modeling whether parameter resolution succeeded (Algorithm 1.5). Applies every pair of operations in both orders (A;B vs B;A) and checks:
 
 | # | Invariant | What it checks |
 |---|-----------|----------------|
@@ -934,8 +1270,10 @@ Models an actual database as a map from `(table, pk) → value`. Applies every p
 | 3 | `RefinementChain` | RowConflicts ⊆ TableConflicts ⊆ EndpointConflicts |
 | 4 | `NoMissedBugs_Table` | If orders produce different DB states → TableConflicts=TRUE |
 | 5 | `NoMissedBugs_Row` | If orders produce different DB states → RowConflicts=TRUE |
+| 6 | `UnresolvedParamsSoundness` | Unresolved params + RowConflicts=FALSE → orders commute |
+| 7 | `ResolvedParamsSoundness` | Resolved params + RowConflicts=FALSE → orders commute |
 
-Checked with 3 tables x 3 PKs x 4 values = 4,050 states. **Invariant 4 is the critical one**: it proves that if DPOR skips an interleaving (because `TableConflicts=FALSE`), the skipped order cannot produce a different database outcome. This means DPOR will never miss a bug.
+Checked with 2 tables x 2 PKs x 3 values x {resolved, unresolved} = 2,048 states. Invariants 6-7 verify that parameter resolution doesn't weaken soundness: unresolved params conservatively conflict (6 is vacuously true — RowConflicts never says FALSE for unresolved), and resolved params with different PKs are genuinely independent in the database (7).
 
 ### Spec 3: `SuppressionSafety.tla` — Endpoint Suppression
 
@@ -973,6 +1311,8 @@ No invariant violations — the design is correct. Specifically:
 3. **Suppression is safe.** The thread-local `_sql_suppress` flag correctly prevents double-reporting without losing any conflicts, *provided the parser output is correct*. The spec also verifies that parse failure and empty parse results (BEGIN/COMMIT) correctly fall back to endpoint-level.
 
 4. **`NoMissedBugs` is the strongest result.** For any two operations where the execution order matters (different DB states), the conflict detector reports a conflict. This guarantees DPOR will explore the interleaving.
+
+5. **Parameter resolution is safe.** When parameter resolution fails (`resolved=FALSE`), the row-level conflict predicate falls back to table-level (always reports conflict for same-table writes). This is verified by `UnresolvedParamsFallback` (Spec 1) and `UnresolvedParamsSoundness` (Spec 2). When resolution succeeds, the resolved PK values enable genuine row-level independence without sacrificing soundness (`ResolvedParamsEnableRowLevel`, `ResolvedParamsSoundness`).
 
 ---
 

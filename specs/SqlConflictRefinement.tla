@@ -17,10 +17,14 @@
    - Suppression: when SQL parse succeeds, endpoint report is suppressed
    - Parse failure fallback: unparseable SQL falls back to endpoint-level
    - Row-level refinement: same table, different PK → independent
+   - Parameter resolution: parameterized queries (WHERE id = %s) require
+     placeholder substitution before predicate extraction.  When resolution
+     fails, row-level falls back to table-level (pk treated as unknown).
 
  The model checks these invariants across all possible combinations of
  2 threads × {SELECT, INSERT, UPDATE, DELETE} × {table_a, table_b} ×
- {pk=1, pk=2, pk=none} × {parse_success, parse_failure}.
+ {pk=1, pk=2, pk=none} × {parse_success, parse_failure} ×
+ {params_resolved, params_unresolved}.
  ***************************************************************************)
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
@@ -38,14 +42,29 @@ CONSTANTS
 \* A SQL operation issued by a thread.
 \* read_tables:  set of tables read (FROM, JOIN, WHERE scan)
 \* write_tables: set of tables written (INSERT INTO, UPDATE, DELETE FROM)
-\* pk:           primary key predicate value, or 0 if no predicate
+\* pk:           primary key predicate value, or 0 if no predicate / unresolved
 \* parsed:       TRUE if SQL parsing succeeded
+\* param_resolved: TRUE if parameter placeholders were successfully
+\*                 substituted with actual values (Algorithm 1.5).
+\*                 When FALSE, pk is forced to 0 (row-level falls back
+\*                 to table-level).  Covers: parameterized queries with
+\*                 failed resolution, queries with no parameters (trivially
+\*                 resolved), and queries with literal WHERE values.
 SqlOps == [
-    stmt_type  : StmtTypes,
-    table      : Tables,
-    pk         : PKValues \union {0},    \* 0 = no PK predicate (full scan)
-    parsed     : BOOLEAN
+    stmt_type      : StmtTypes,
+    table          : Tables,
+    pk             : PKValues \union {0},    \* 0 = no PK predicate (full scan)
+    parsed         : BOOLEAN,
+    param_resolved : BOOLEAN
 ]
+
+\* Reachable operations: constrain impossible combinations.
+\*   - Can't resolve params if parsing failed
+\*   - Can't have a concrete PK if params weren't resolved
+ValidOps == { o \in SqlOps :
+    /\ (~o.parsed => ~o.param_resolved)
+    /\ (~o.param_resolved => o.pk = 0)
+}
 
 (* --------------------------------------------------------------------------
    Access Kind Classification
@@ -151,8 +170,8 @@ VARIABLES op1, op2, checked
 vars == <<op1, op2, checked>>
 
 Init ==
-    /\ op1 \in SqlOps
-    /\ op2 \in SqlOps
+    /\ op1 \in ValidOps
+    /\ op2 \in ValidOps
     /\ checked = FALSE
 
 \* Single step: check properties and mark done.
@@ -272,6 +291,42 @@ ConflictSymmetry ==
     /\ RowConflict(op1, op2)   = RowConflict(op2, op1)
 
 (* --------------------------------------------------------------------------
+   Parameter Resolution Invariants (Algorithm 1.5)
+   -------------------------------------------------------------------------- *)
+
+\* INVARIANT 12: Unresolved parameters are conservative.
+\*
+\* When parameter resolution fails for either operation, row-level
+\* detection MUST NOT claim row-independence.  It falls back to table-level:
+\* same table + at least one write → conflict, regardless of PK values.
+\*
+\* This guarantees that parameterized queries like
+\*   cursor.execute("UPDATE accounts SET balance = %s WHERE id = %s", (100, 1))
+\* where resolution fails (e.g., unsupported paramstyle) are handled
+\* conservatively — DPOR will explore the interleaving.
+
+UnresolvedParamsFallback ==
+    (op1.parsed /\ op2.parsed
+     /\ (~op1.param_resolved \/ ~op2.param_resolved)
+     /\ SameTable(op1, op2) /\ AtLeastOneWrite(op1, op2))
+    => RowConflict(op1, op2)
+
+\* INVARIANT 13: Resolved parameters enable row-level precision.
+\*
+\* When BOTH operations are parsed AND parameters are resolved,
+\* AND they target different PKs on the same table, row-level
+\* correctly reports them as independent (even if both write).
+\* This is the payoff of parameter resolution.
+
+ResolvedParamsEnableRowLevel ==
+    (op1.parsed /\ op2.parsed
+     /\ op1.param_resolved /\ op2.param_resolved
+     /\ SameTable(op1, op2)
+     /\ op1.pk /= 0 /\ op2.pk /= 0
+     /\ op1.pk /= op2.pk)
+    => (~RowConflict(op1, op2))
+
+(* --------------------------------------------------------------------------
    Exhaustive check: combine all invariants.
    -------------------------------------------------------------------------- *)
 
@@ -287,5 +342,7 @@ AllInvariants ==
     /\ DifferentRowsIndependent
     /\ SuppressionCorrectness
     /\ ConflictSymmetry
+    /\ UnresolvedParamsFallback
+    /\ ResolvedParamsEnableRowLevel
 
 ====
