@@ -1,599 +1,912 @@
-# SQL Resource Conflict Detection for DPOR
+# SQL Resource Conflict Detection — Implementation Plan
 
-## Problem Statement
+## Problem
 
-Frontrun's DPOR engine currently detects conflicts at two granularities:
+All SQL to the same `(host, port)` collapses to a single DPOR `ObjectId`. Two threads doing `INSERT INTO logs` and `SELECT * FROM users` appear to conflict because both produce `send()`/`recv()` to `localhost:5432`. DPOR explores O(n!) interleavings that can never actually race. Similarly, two concurrent `SELECT`s on the same table look like write-write conflicts (because they're both "writes to the socket").
 
-1. **Python object attribute access** — `LOAD_ATTR`/`STORE_ATTR` on `id(obj)`, tracked via the shadow stack.
-2. **I/O endpoint** — `LD_PRELOAD` intercepts `send()`/`recv()` to the same `(host, port)`, reported as a single virtual object.
-
-The endpoint-level granularity lumps *all* SQL operations to the same database into a single conflict domain. Two threads that touch completely independent tables (`INSERT INTO logs ...` vs. `SELECT * FROM users`) appear to conflict, forcing DPOR to explore interleavings that can never actually race. Conversely, it can't distinguish a read (`SELECT`) from a write (`UPDATE`) on the same table — everything is a "write to the socket."
-
-**Goal:** Parse intercepted SQL to derive *table-level* and optionally *row-level* read/write sets, and feed those into the DPOR engine as fine-grained conflict objects. This eliminates spurious interleavings between independent tables and enables read/read independence within the same table.
+**Fix:** Parse SQL at the DBAPI layer, derive per-table `ObjectId`s with correct `AccessKind` (Read/Write), and suppress the coarser endpoint-level reports.
 
 ---
 
-## Prior Art & Ecosystem Survey
-
-### SQL Parsing Libraries
-
-| Library | Language | Strengths | Weaknesses |
-|---------|----------|-----------|------------|
-| [**sqlglot**](https://github.com/tobymao/sqlglot) | Python | Full optimizer pipeline: `qualify_columns`, `qualify_tables`, column lineage via `build_scope`. Handles 31 dialects. Schema-aware: given a schema dict, resolves `SELECT *` and maps unqualified columns to tables. Zero dependencies. | Pure Python — may be slow for per-query hot-path parsing. No built-in read/write classification (must infer from statement type). |
-| [**sqlparse**](https://github.com/andialbrecht/sqlparse) | Python | Lightweight tokenizer/formatter. | No AST — only token streams. Table extraction is fragile ([issue #157](https://github.com/andialbrecht/sqlparse/issues/157)). Cannot resolve column→table without schema. Not suitable for semantic analysis. |
-| [**sqlparser-rs**](https://github.com/apache/datafusion-sqlparser-rs) | Rust | Fast Pratt parser + recursive descent. Rich AST with `Visitor` trait and `visit_relations()` for table extraction. Used by DataFusion, Polars, GlueSQL. Source spans available since v0.53. | Syntax-only — no semantic analysis, no column qualification. Must build read/write set logic ourselves. |
-| [**sqloxide**](https://github.com/wseaton/sqloxide) | Rust+Python | Python bindings for `sqlparser-rs` via PyO3. ~100x faster than `sqlparse`. | Thin wrapper — exposes AST as Python dicts, no semantic helpers. |
-
-**Recommendation:** Use **sqlparser-rs** in the Rust DPOR engine for hot-path parsing (it's already a Rust crate, integrates naturally into `crates/dpor/`). Use **sqlglot** on the Python side for schema-aware analysis, test utilities, and any offline conflict reasoning. Use **sqloxide** if we need fast Python-side parsing without the full sqlglot optimizer.
-
-### Formal Models of Transaction Conflicts
-
-**Adya/Liskov/O'Neil (ICDE 2000)** — ["Generalized Isolation Level Definitions"](http://pmg.csail.mit.edu/papers/icde00.pdf): The gold-standard formalism. Defines three dependency types on a *Direct Serialization Graph* (DSG):
-
-- **WR (write-read / read-dependency):** T2 reads a version written by T1.
-- **WW (write-write / write-dependency):** T2 overwrites a version written by T1.
-- **RW (read-write / anti-dependency):** T2 writes a version that T1 previously read.
-
-Isolation levels are defined as *cycle prohibitions* on subsets of these edges:
-- **Read Committed (PL-2):** No G1 cycles (dirty reads/writes).
-- **Repeatable Read:** No G2-item cycles (non-repeatable reads).
-- **Serializable:** No G2 cycles at all (full DSG acyclicity).
-
-This maps directly onto DPOR's conflict model: a WR or WW dependency means "these two accesses conflict (at least one is a write)," and an RW anti-dependency means "a read depends on writes from other threads." This is exactly what `ObjectState::dependent_accesses` already computes.
-
-**[Elle](https://github.com/jepsen-io/elle)** (Jepsen) — Black-box transactional safety checker. Constructs DSGs from observed histories and detects cycles. Implemented in Clojure. Key insight: Elle works on *list-append* semantics (each value is a list; appends are writes, reads return the list) so it can infer WW/WR/RW edges without instrumentation. We can't use Elle directly (it assumes key-value workloads), but its cycle-detection approach validates our DSG-based model.
-
-**[IsoRel](https://dl.acm.org/doi/10.1145/3728953)** (ACM 2025) — Black-box isolation checker for *relational* DBMSs. Adds two auxiliary columns per table to track which transaction wrote each row and which rows each statement read. Constructs transaction dependency graphs from this instrumentation. Found 48 unique anomalies across MySQL, PostgreSQL, MariaDB, CockroachDB, and TiDB. **Directly relevant** — their SQL instrumentation approach could be adapted for frontrun.
-
-**[TxCheck](https://www.usenix.org/system/files/osdi23-jiang.pdf)** (OSDI 2023) — SQL-level statement instrumentation for black-box isolation testing. Inserts auxiliary SQL to collect execution information. Found 56 bugs across TiDB, MySQL, MariaDB.
-
-**[GRAIL](https://hal.science/hal-04886090v1/document)** (2024) — Uses graph databases to detect isolation violations as anti-patterns in dependency graphs. Expresses anomaly patterns as graph queries.
-
-### Logic Programming & Constraint Solving
-
-| Library | Potential Use |
-|---------|--------------|
-| [**kanren**](https://github.com/pythological/kanren) (Python miniKanren) | Encode conflict rules as relations. Given a set of SQL operations, derive which pairs conflict via relational search. Elegant for expressing "T1 writes table X ∧ T2 reads table X → conflict(T1, T2)." |
-| [**python-constraint**](https://github.com/python-constraint/python-constraint) | CSP solver. Could model "find a schedule where no conflicting operations overlap" as a constraint satisfaction problem. More natural for *generating* conflict-free schedules than for *detecting* conflicts. |
-| [**Alloy**](https://alloytools.org/) | Adya's isolation levels have been [modeled in Alloy](https://surfingcomplexity.blog/2024/11/18/reading-the-generalized-isolation-level-definitions-paper-with-alloy/). Could generate test cases from Alloy models. |
-| [**z3**](https://github.com/Z3Prover/z3) (via z3-py) | SMT solver. Encode WHERE clauses as z3 formulas; two operations on the same table conflict iff their row predicates are *satisfiable simultaneously* (i.e., their row sets can overlap). This is the key insight for row-level conflict detection — see §Row-Level Refinement below. |
-
----
-
-## Design: Three-Layer Conflict Model
+## Architecture Overview
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  Layer 3: Row-Level (predicate intersection via z3/SMT)  │  ← optional, highest precision
-│  "UPDATE accounts WHERE id=1" vs "SELECT WHERE id=2"     │
-│  → independent (disjoint predicates)                      │
-├──────────────────────────────────────────────────────────┤
-│  Layer 2: Table-Level (SQL parsing)                       │  ← primary target
-│  "UPDATE accounts" vs "SELECT users"                      │
-│  → independent (different tables)                         │
-├──────────────────────────────────────────────────────────┤
-│  Layer 1: Endpoint-Level (current LD_PRELOAD)             │  ← baseline, already works
-│  send() to localhost:5432 vs send() to localhost:5432     │
-│  → conflict (same endpoint)                               │
-└──────────────────────────────────────────────────────────┘
+cursor.execute(sql, params)
+    │
+    ├── _patched_execute() intercepts             ← frontrun/_sql_detection.py (new)
+    │     │
+    │     ├── parse_sql_access(sql)               ← sqlglot or regex fast-path
+    │     │     returns (read_tables, write_tables)
+    │     │
+    │     ├── for table in read_tables:
+    │     │     io_reporter(f"sql:{table}", "read")
+    │     ├── for table in write_tables:
+    │     │     io_reporter(f"sql:{table}", "write")
+    │     │
+    │     ├── _io_tls._sql_suppress = True        ← suppress endpoint-level
+    │     ├── original_execute(sql, params)        ← actual DB call
+    │     └── _io_tls._sql_suppress = False
+    │
+    └── socket.send() → LD_PRELOAD send()
+          │
+          ├── _report_socket_io() checks _sql_suppress
+          │     → SKIPPED (sql-level already reported)
+          │
+          └── _PreloadBridge.listener() checks _sql_suppress
+                → SKIPPED
 ```
 
-Higher layers refine lower ones. If table-level parsing succeeds, it replaces endpoint-level for that operation. If row-level analysis is available, it further refines table-level. Fallback is always to the coarser level.
+The io_reporter callback is the *same* one already installed by `_setup_dpor_tls` in `dpor.py:1445`. SQL detection just calls it with `"sql:{table}"` resource IDs instead of `"socket:host:port"`. No changes to the Rust engine or PyO3 bindings are needed — the existing `report_io_access(execution, thread_id, object_key, kind)` interface is sufficient.
 
 ---
 
-## Interception Architecture
+## File-by-File Changes
 
-### Option A: DBAPI Cursor Monkey-Patching (Recommended for MVP)
+### 1. `frontrun/_sql_detection.py` (new file)
 
-Patch `cursor.execute()` at the DBAPI level (PEP 249). Every compliant driver — psycopg2, sqlite3, pymysql, pg8000 — goes through this interface.
+Core module. ~150 lines.
+
+### 2. `frontrun/_io_detection.py` (modify)
+
+Add `_sql_suppress` check to `_report_socket_io` and `_traced_open`.
+
+### 3. `frontrun/dpor.py` (modify)
+
+Call `patch_sql()` / `unpatch_sql()` alongside existing `patch_io()` / `unpatch_io()`.
+
+### 4. `frontrun/bytecode.py` (modify)
+
+Same — call `patch_sql()` / `unpatch_sql()` for the random explorer.
+
+### 5. `pyproject.toml` (modify)
+
+Add `sqlglot` to optional `[sql]` extra; add to integration test extra.
+
+### 6. `tests/test_sql_detection.py` (new file)
+
+Unit tests for the parser (no database needed).
+
+### 7. `tests/test_integration_orm.py` (modify)
+
+Add tests for table-level conflict reduction.
+
+---
+
+## Algorithm 1: SQL Read/Write Set Extraction
+
+Two implementations, chosen at runtime: a regex fast-path for the 90% case (simple single-table statements), and sqlglot for everything else.
+
+### 1a. Regex Fast-Path
+
+```python
+import re
+
+# Precompiled patterns — matches the leading keyword + first table name.
+# Handles optional schema qualification (schema.table) and quoted identifiers.
+_IDENT = r'(?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)'
+_WS = r'[\s\n]+'
+
+_RE_SELECT    = re.compile(rf'\bSELECT\b', re.I)
+_RE_INSERT    = re.compile(rf'\bINSERT{_WS}INTO{_WS}({_IDENT})', re.I)
+_RE_UPDATE    = re.compile(rf'\bUPDATE{_WS}({_IDENT}){_WS}SET\b', re.I)
+_RE_DELETE    = re.compile(rf'\bDELETE{_WS}FROM{_WS}({_IDENT})', re.I)
+_RE_FROM      = re.compile(rf'\bFROM{_WS}({_IDENT})', re.I)
+_RE_JOIN      = re.compile(rf'\bJOIN{_WS}({_IDENT})', re.I)
+
+def _strip_quotes(name: str) -> str:
+    """Remove surrounding quotes/backticks and extract table from schema.table."""
+    if name.startswith(('"', '`')):
+        name = name[1:-1]
+    # Take last component: "public"."users" → users
+    return name.rsplit('.', 1)[-1]
+
+def _regex_parse(sql: str) -> tuple[set[str], set[str]] | None:
+    """Fast-path: extract tables from simple single-statement SQL.
+
+    Returns (read_tables, write_tables) or None if the SQL is too complex
+    (subqueries, CTEs, UNION, MERGE) and needs the full parser.
+    """
+    stripped = sql.strip().rstrip(';').strip()
+
+    # Bail to full parser for complex SQL
+    upper = stripped.upper()
+    if any(kw in upper for kw in ('WITH ', 'UNION', 'INTERSECT', 'EXCEPT', 'MERGE', 'RETURNING')):
+        return None
+
+    read: set[str] = set()
+    write: set[str] = set()
+
+    m_insert = _RE_INSERT.search(stripped)
+    if m_insert:
+        write.add(_strip_quotes(m_insert.group(1)))
+        # Source tables in INSERT ... SELECT ... FROM
+        for m in _RE_FROM.finditer(stripped, m_insert.end()):
+            read.add(_strip_quotes(m.group(1)))
+        return read, write
+
+    m_update = _RE_UPDATE.search(stripped)
+    if m_update:
+        tbl = _strip_quotes(m_update.group(1))
+        write.add(tbl)
+        read.add(tbl)  # WHERE reads the target
+        # Subquery tables in FROM/JOIN (UPDATE ... FROM ... syntax)
+        for m in _RE_FROM.finditer(stripped, m_update.end()):
+            t = _strip_quotes(m.group(1))
+            if t not in write:
+                read.add(t)
+        return read, write
+
+    m_delete = _RE_DELETE.search(stripped)
+    if m_delete:
+        tbl = _strip_quotes(m_delete.group(1))
+        write.add(tbl)
+        read.add(tbl)
+        return read, write
+
+    if _RE_SELECT.search(stripped):
+        for m in _RE_FROM.finditer(stripped):
+            read.add(_strip_quotes(m.group(1)))
+        for m in _RE_JOIN.finditer(stripped):
+            read.add(_strip_quotes(m.group(1)))
+        return read, write
+
+    return None  # unknown statement type → fall through
+```
+
+### 1b. sqlglot Full Parser (Fallback)
+
+```python
+def _sqlglot_parse(sql: str) -> tuple[set[str], set[str]] | None:
+    """Full parser: handles CTEs, subqueries, UNION, MERGE, etc."""
+    try:
+        import sqlglot
+        from sqlglot import exp
+    except ImportError:
+        return None
+
+    try:
+        ast = sqlglot.parse_one(sql)
+    except sqlglot.errors.ParseError:
+        return None  # unparseable → fall back to endpoint-level
+
+    write: set[str] = set()
+    read: set[str] = set()
+
+    if isinstance(ast, exp.Insert):
+        tbl = ast.find(exp.Table)
+        if tbl:
+            write.add(tbl.name)
+        # Source tables (everything after the target)
+        if ast.expression:  # the SELECT source
+            for t in ast.expression.find_all(exp.Table):
+                if t.name not in write:
+                    read.add(t.name)
+        return read, write
+
+    if isinstance(ast, exp.Update):
+        tbl = ast.this
+        if isinstance(tbl, exp.Table):
+            write.add(tbl.name)
+            read.add(tbl.name)
+        for t in ast.find_all(exp.Table):
+            if t.name not in write:
+                read.add(t.name)
+        return read, write
+
+    if isinstance(ast, exp.Delete):
+        tbl = ast.this
+        if isinstance(tbl, exp.Table):
+            write.add(tbl.name)
+            read.add(tbl.name)
+        for t in ast.find_all(exp.Table):
+            if t.name not in write:
+                read.add(t.name)
+        return read, write
+
+    if isinstance(ast, exp.Select):
+        for t in ast.find_all(exp.Table):
+            read.add(t.name)
+        return read, write
+
+    if isinstance(ast, exp.Merge):
+        target = ast.this
+        if isinstance(target, exp.Table):
+            write.add(target.name)
+            read.add(target.name)
+        using = ast.find(exp.Table, bfs=False)
+        # All non-target tables are read sources
+        for t in ast.find_all(exp.Table):
+            if t.name not in write:
+                read.add(t.name)
+        return read, write
+
+    # DDL, GRANT, etc. — conservatively treat as write
+    for t in ast.find_all(exp.Table):
+        write.add(t.name)
+    return read, write
+```
+
+### 1c. Combined Entry Point
+
+```python
+def parse_sql_access(sql: str) -> tuple[set[str], set[str]]:
+    """Extract (read_tables, write_tables) from a SQL statement.
+
+    Uses regex fast-path for simple statements, falls back to sqlglot
+    for complex SQL. Returns empty sets if parsing fails entirely
+    (endpoint-level I/O detection remains as fallback).
+    """
+    # Fast path: covers ~90% of ORM-generated SQL
+    result = _regex_parse(sql)
+    if result is not None:
+        return result
+
+    # Full parser for complex SQL
+    result = _sqlglot_parse(sql)
+    if result is not None:
+        return result
+
+    # Parse failure: return empty sets → endpoint-level fallback
+    return set(), set()
+```
+
+**Complexity:** Regex fast-path is O(n) in SQL length with ~6 regex scans. sqlglot parse_one is O(n) but with higher constant factor (AST construction). Both are negligible vs. network RTT to the database.
+
+---
+
+## Algorithm 2: DBAPI Cursor Monkey-Patching
+
+Follows the exact pattern of `_io_detection.py`. Key insight: psycopg2's cursor is a C extension — `cursor.execute` is a C function. We can still monkey-patch at the class level because Python attribute lookup goes through the MRO, and assigning to the class replaces the descriptor.
 
 ```python
 # frontrun/_sql_detection.py
 
-import functools
-from frontrun._io_detection import _io_tls
+import threading
+from frontrun._io_detection import _io_tls, get_io_reporter
 
-_ORIGINAL_EXECUTE = {}  # driver_class -> original_execute
+_ORIGINAL_EXECUTE: dict[type, Any] = {}
+_ORIGINAL_EXECUTEMANY: dict[type, Any] = {}
+_sql_patched = False
 
-def _patched_execute(self, operation, parameters=None):
-    """Intercept cursor.execute() to extract SQL read/write sets."""
-    reporter = getattr(_io_tls, "sql_reporter", None)
-    if reporter is not None:
-        read_tables, write_tables = parse_sql_access(operation, parameters)
-        for table in read_tables:
-            reporter(f"sql:{table}", "read")
-        for table in write_tables:
-            reporter(f"sql:{table}", "write")
+def _make_patched_execute(original):
+    """Create a patched execute that intercepts SQL before calling the original."""
 
-    original = _ORIGINAL_EXECUTE[type(self)]
-    if parameters is not None:
-        return original(self, operation, parameters)
-    return original(self, operation)
+    def _patched_execute(self, operation, parameters=None, *args, **kwargs):
+        reporter = get_io_reporter()
+        reported = False
+
+        if reporter is not None and isinstance(operation, str):
+            read_tables, write_tables = parse_sql_access(operation)
+            if read_tables or write_tables:
+                reported = True
+                for table in read_tables:
+                    reporter(f"sql:{table}", "read")
+                for table in write_tables:
+                    reporter(f"sql:{table}", "write")
+
+        # Suppress endpoint-level I/O for this call if SQL-level succeeded
+        if reported:
+            _io_tls._sql_suppress = True
+        try:
+            if parameters is not None:
+                return original(self, operation, parameters, *args, **kwargs)
+            return original(self, operation, *args, **kwargs)
+        finally:
+            if reported:
+                _io_tls._sql_suppress = False
+
+    return _patched_execute
 
 
-def install_sql_detection():
-    """Monkey-patch known DBAPI cursor classes."""
+# Target drivers: (module_path, class_name, method_name)
+_CURSOR_TARGETS = [
+    ("psycopg2.extensions", "cursor", "execute"),
+    ("psycopg2.extensions", "cursor", "executemany"),
+    ("psycopg.cursor", "Cursor", "execute"),
+    ("psycopg.cursor_async", "AsyncCursor", "execute"),
+    ("sqlite3", "Cursor", "execute"),
+    ("sqlite3", "Cursor", "executemany"),
+    ("pymysql.cursors", "Cursor", "execute"),
+    ("pymysql.cursors", "Cursor", "executemany"),
+]
+
+
+def patch_sql() -> None:
+    """Monkey-patch DBAPI cursor.execute() for known drivers."""
+    global _sql_patched
+    if _sql_patched:
+        return
+
     import importlib
-
-    TARGETS = {
-        "psycopg2.extensions": "cursor",
-        "psycopg.cursor": "Cursor",
-        "sqlite3": "Cursor",
-        "pymysql.cursors": "Cursor",
-        "pg8000.native": "Connection",  # pg8000 uses conn.run()
-    }
-
-    for module_path, class_name in TARGETS.items():
+    for module_path, class_name, method_name in _CURSOR_TARGETS:
         try:
             mod = importlib.import_module(module_path)
             cls = getattr(mod, class_name)
-            _ORIGINAL_EXECUTE[cls] = cls.execute
-            cls.execute = _patched_execute
+            original = getattr(cls, method_name)
+            key = (cls, method_name)
+            _ORIGINAL_EXECUTE[key] = original
+            setattr(cls, method_name, _make_patched_execute(original))
         except (ImportError, AttributeError):
-            pass  # driver not installed
+            pass  # driver not installed — skip silently
+
+    _sql_patched = True
+
+
+def unpatch_sql() -> None:
+    """Restore original DBAPI cursor methods."""
+    global _sql_patched
+    if not _sql_patched:
+        return
+    for (cls, method_name), original in _ORIGINAL_EXECUTE.items():
+        setattr(cls, method_name, original)
+    _ORIGINAL_EXECUTE.clear()
+    _sql_patched = False
 ```
-
-**Advantages:**
-- Works with any DBAPI-compliant driver.
-- Sees the SQL text *and* parameters before they hit the wire.
-- Naturally per-thread (each thread has its own cursor).
-- Follows the established pattern from `_cooperative.py` (lock patching) and `_io_detection.py` (socket patching).
-
-**Disadvantages:**
-- Doesn't catch raw `connection.exec_driver_sql()` or driver-specific methods.
-- C-extension cursors (psycopg2) may need `sys.setprofile` fallback for method interception.
-
-### Option B: SQLAlchemy Event Hooks
-
-For users already on SQLAlchemy, hook into the engine event system:
-
-```python
-from sqlalchemy import event
-
-@event.listens_for(engine, "before_cursor_execute")
-def _on_execute(conn, cursor, statement, parameters, context, executemany):
-    read_tables, write_tables = parse_sql_access(statement, parameters)
-    # report to DPOR engine...
-```
-
-This is cleaner but SQLAlchemy-specific. Use as a Layer 4 "known library plugin" alongside the generic DBAPI patching.
-
-### Option C: Wire Protocol Parsing (Future)
-
-Parse the PostgreSQL/MySQL wire protocol from the `LD_PRELOAD` `send()` buffer. The SQL text is embedded in the protocol messages:
-
-- **PostgreSQL:** Simple Query message (`'Q'` + int32 length + SQL string).
-- **MySQL:** `COM_QUERY` packet (command byte `0x03` + SQL string).
-
-This catches *everything* including raw libpq calls, but is fragile (prepared statements, binary protocol, SSL) and dialect-specific. Reserve for a future enhancement.
 
 ---
 
-## SQL Parsing: Extracting Read/Write Sets
+## Algorithm 3: Endpoint Suppression
 
-### Statement Classification
-
-| SQL Statement | Read Tables | Write Tables |
-|--------------|-------------|--------------|
-| `SELECT ... FROM t1 JOIN t2 ...` | {t1, t2} | {} |
-| `INSERT INTO t1 SELECT ... FROM t2` | {t2} | {t1} |
-| `UPDATE t1 SET ... WHERE ... (SELECT FROM t2)` | {t1, t2} | {t1} |
-| `DELETE FROM t1 WHERE ... IN (SELECT FROM t2)` | {t1, t2} | {t1} |
-| `CREATE TABLE t1 AS SELECT ... FROM t2` | {t2} | {t1} |
-| `MERGE INTO t1 USING t2 ...` | {t2} | {t1} |
-
-Note: `UPDATE` and `DELETE` *read* their target table (the `WHERE` clause scans rows) in addition to writing it. This matters for conflict detection — a concurrent `SELECT` on the same table has an RW anti-dependency with an `UPDATE`.
-
-### Python-Side: sqlglot
+Modify `_io_detection.py:_report_socket_io` and `_PreloadBridge.listener`:
 
 ```python
-import sqlglot
-from sqlglot import exp
-from sqlglot.optimizer.qualify import qualify
+# In _io_detection.py — modify _report_socket_io:
 
-def parse_sql_access(sql: str, schema: dict | None = None) -> tuple[set[str], set[str]]:
-    """Extract (read_tables, write_tables) from a SQL statement."""
-    try:
-        ast = sqlglot.parse_one(sql)
-    except sqlglot.errors.ParseError:
-        return set(), set()  # unparseable → fall back to endpoint-level
-
-    write_tables: set[str] = set()
-    read_tables: set[str] = set()
-
-    if isinstance(ast, (exp.Insert, exp.Create)):
-        # Target table is written
-        if ast.this and isinstance(ast.this, exp.Table):
-            write_tables.add(ast.this.name)
-        # Source tables (FROM/subquery) are read
-        for table in ast.find_all(exp.Table):
-            if table.name not in write_tables:
-                read_tables.add(table.name)
-
-    elif isinstance(ast, exp.Update):
-        target = ast.this
-        if isinstance(target, exp.Table):
-            write_tables.add(target.name)
-            read_tables.add(target.name)  # WHERE clause reads
-        for table in ast.find_all(exp.Table):
-            if table.name not in write_tables:
-                read_tables.add(table.name)
-
-    elif isinstance(ast, exp.Delete):
-        target = ast.this
-        if isinstance(target, exp.Table):
-            write_tables.add(target.name)
-            read_tables.add(target.name)
-        for table in ast.find_all(exp.Table):
-            if table.name not in write_tables:
-                read_tables.add(table.name)
-
-    elif isinstance(ast, exp.Select):
-        for table in ast.find_all(exp.Table):
-            read_tables.add(table.name)
-
-    else:
-        # DDL, GRANT, etc. — conservatively treat as write to all mentioned tables
-        for table in ast.find_all(exp.Table):
-            write_tables.add(table.name)
-
-    return read_tables, write_tables
+def _report_socket_io(sock: socket.socket, kind: str) -> None:
+    """Report a socket I/O event to the per-thread reporter, if installed."""
+    # Skip if SQL-level detection already reported for this cursor.execute call
+    if getattr(_io_tls, "_sql_suppress", False):
+        return
+    reporter = get_io_reporter()
+    if reporter is not None:
+        resource_id = _socket_resource_id(sock)
+        if resource_id is not None:
+            reporter(resource_id, kind)
 ```
 
-### Rust-Side: sqlparser-rs (in DPOR engine)
+For LD_PRELOAD events (C-level `send()`/`recv()` from libpq), the suppression is trickier because the `_PreloadBridge` listener runs on a *different* thread (the pipe reader). The thread that called `cursor.execute()` has `_sql_suppress=True` in its TLS, but the LD_PRELOAD event arrives on the dispatcher thread.
 
-```rust
-// crates/dpor/src/sql.rs
-
-use sqlparser::ast::*;
-use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::Parser;
-
-pub struct SqlAccess {
-    pub read_tables: Vec<String>,
-    pub write_tables: Vec<String>,
-}
-
-pub fn parse_sql_access(sql: &str) -> Option<SqlAccess> {
-    let dialect = GenericDialect {};
-    let stmts = Parser::parse_sql(&dialect, sql).ok()?;
-    let stmt = stmts.into_iter().next()?;
-
-    let mut read_tables = Vec::new();
-    let mut write_tables = Vec::new();
-
-    match &stmt {
-        Statement::Query(q) => {
-            collect_query_tables(q, &mut read_tables);
-        }
-        Statement::Insert(Insert { table_name, source, .. }) => {
-            write_tables.push(table_name.to_string());
-            if let Some(src) = source {
-                collect_query_tables(src, &mut read_tables);
-            }
-        }
-        Statement::Update { table, selection, from, .. } => {
-            let name = table_factor_name(&table.relation);
-            write_tables.push(name.clone());
-            read_tables.push(name);  // WHERE reads the table
-            if let Some(from) = from {
-                // ... collect FROM tables
-            }
-        }
-        Statement::Delete(Delete { from, selection, .. }) => {
-            for table in from {
-                let name = table_factor_name(&table.relation);
-                write_tables.push(name.clone());
-                read_tables.push(name);
-            }
-        }
-        _ => return None,  // unknown → fall back to endpoint-level
-    }
-
-    Some(SqlAccess { read_tables, write_tables })
-}
-```
-
-The Rust parser runs inside the DPOR engine, so parsing happens in the same process as conflict detection — no IPC overhead. Add `sqlparser = { version = "0.59", features = ["visitor"] }` to `crates/dpor/Cargo.toml`.
-
----
-
-## Integration with DPOR Engine
-
-### New Object ID Scheme
-
-Currently, I/O objects use `hash(resource_key)` as the `ObjectId`. For SQL, derive finer-grained IDs:
+**Solution:** Use the existing `_PreloadBridge._tid_to_dpor` mapping. When `_patched_execute` sets `_sql_suppress`, also store the OS thread ID in a shared set. The bridge listener checks this set:
 
 ```python
-# Python side: report to Rust engine
-def _sql_object_id(table: str, kind: str) -> int:
-    """Derive a stable ObjectId for a SQL table access."""
-    return hash(("sql", table)) & 0xFFFFFFFFFFFFFFFF
-```
+# In _sql_detection.py:
+_suppress_tids: set[int] = set()  # OS thread IDs currently in sql-suppress mode
+_suppress_lock = threading.Lock()  # real lock, not cooperative
 
-```rust
-// Rust side: derive ObjectId
-fn sql_object_id(table: &str) -> ObjectId {
-    use std::hash::{Hash, Hasher};
-    use std::collections::hash_map::DefaultHasher;
-    let mut h = DefaultHasher::new();
-    "sql".hash(&mut h);
-    table.hash(&mut h);
-    h.finish()
-}
-```
-
-### Reporting Flow
-
-```
-Thread A calls cursor.execute("UPDATE accounts SET balance = balance - 100 WHERE id = 1")
-  │
-  ├─ _patched_execute() intercepts
-  ├─ parse_sql_access() → read={"accounts"}, write={"accounts"}
-  ├─ reporter("sql:accounts", "read")   → engine.process_io_access(exec, tid, hash("sql:accounts"), Read)
-  └─ reporter("sql:accounts", "write")  → engine.process_io_access(exec, tid, hash("sql:accounts"), Write)
-
-Thread B calls cursor.execute("SELECT * FROM users WHERE id = 42")
-  │
-  ├─ _patched_execute() intercepts
-  ├─ parse_sql_access() → read={"users"}, write={}
-  └─ reporter("sql:users", "read")      → engine.process_io_access(exec, tid, hash("sql:users"), Read)
-
-Result: Thread A touches "sql:accounts", Thread B touches "sql:users"
-        → INDEPENDENT, DPOR does NOT explore interleavings between them.
-        (Currently: both touch "socket:localhost:5432" → CONFLICT, wasted exploration.)
-```
-
-### Suppressing Endpoint-Level Reports
-
-When SQL-level detection succeeds, suppress the coarser endpoint-level report for the same `send()` call. The `_patched_execute` sets a thread-local flag; the `_io_detection` socket patch checks the flag and skips reporting if SQL-level already reported.
-
-```python
-# In _patched_execute:
-_io_tls._sql_reported = True
+# In _patched_execute, around the original call:
+tid = threading.get_native_id()
+with _suppress_lock:
+    _suppress_tids.add(tid)
 try:
     return original(self, operation, parameters)
 finally:
-    _io_tls._sql_reported = False
+    with _suppress_lock:
+        _suppress_tids.discard(tid)
+    _io_tls._sql_suppress = False
 
-# In _traced_send (socket patch):
-if getattr(_io_tls, "_sql_reported", False):
-    return _real_send(self, data, *args)  # skip endpoint-level report
+# In _PreloadBridge.listener (dpor.py), add early exit:
+def listener(self, event):
+    if not self._active:
+        return
+    if event.kind == "close":
+        return
+    # Skip if this thread's cursor.execute() already reported at SQL level
+    from frontrun._sql_detection import is_tid_suppressed
+    if is_tid_suppressed(event.tid):
+        return
+    # ... existing logic ...
 ```
 
 ---
 
-## Row-Level Refinement via SMT (z3)
+## Algorithm 4: ObjectId Derivation
 
-Table-level conflicts are conservative: two operations on the same table conflict even if they touch disjoint rows. For row-level precision, we can check whether their WHERE predicates can select overlapping rows.
-
-### The Insight
-
-Two SQL operations on the same table **definitely don't conflict** if their row predicates are *unsatisfiable* when conjoined:
-
-```
-Thread A: UPDATE accounts SET balance = 0 WHERE id = 1
-Thread B: SELECT balance FROM accounts WHERE id = 2
-
-Predicate A: id = 1
-Predicate B: id = 2
-Conjunction: id = 1 ∧ id = 2  →  UNSAT  →  NO CONFLICT
-```
-
-### Implementation with z3
+Uses the existing `_make_object_key` function from `dpor.py:569`:
 
 ```python
-from z3 import Int, Solver, sat
+def _make_object_key(obj_id: int, name: Any) -> int:
+    """Create a non-negative u64 object key for the Rust engine."""
+    return hash((obj_id, name)) & 0xFFFFFFFFFFFFFFFF
+```
 
-def predicates_overlap(pred_a: dict, pred_b: dict, schema: dict) -> bool:
-    """Check if two WHERE predicates can select overlapping rows.
+For SQL, the resource_id is `"sql:{table}"`. The io_reporter in `_setup_dpor_tls` already computes:
 
-    pred_a, pred_b: {"column": "op:value"} extracted from SQL WHERE.
-    schema: {"column": "type"} for z3 variable typing.
-    Returns True if overlap is possible (or if analysis fails).
+```python
+object_key = _make_object_key(hash(resource_id), resource_id)
+```
+
+So `"sql:accounts"` and `"sql:users"` get different `ObjectId`s. Two threads on different tables → different `ObjectId`s → no conflict → DPOR skips the interleaving.
+
+Two threads on the same table with one reading and one writing → same `ObjectId` `hash("sql:accounts")`, but one reports `kind="read"` and the other `kind="write"` → the Rust engine's `ObjectState::dependent_accesses` correctly identifies this as a RW conflict → DPOR explores the interleaving.
+
+Two threads both doing `SELECT` on the same table → same `ObjectId`, both `kind="read"` → `dependent_accesses(Read, thread_id)` returns only writes by other threads → no writes → no conflict → DPOR skips.
+
+**This is the key correctness property: the Adya Read/Write classification maps directly to `AccessKind::Read`/`AccessKind::Write`, and `ObjectState::dependent_accesses` implements exactly the right conflict rules.**
+
+---
+
+## Algorithm 5: Row-Level Predicate Extraction (Phase 2)
+
+Extract WHERE clause predicates from the parsed SQL and encode them as part of the ObjectId, enabling two operations on the same table but different rows to be independent.
+
+### 5a. Predicate Extraction via sqlglot
+
+```python
+from sqlglot import exp
+
+@dataclass(frozen=True)
+class EqualityPredicate:
+    """A simple WHERE column = literal predicate."""
+    column: str
+    value: str  # string representation of the literal
+
+def extract_equality_predicates(sql: str) -> list[EqualityPredicate]:
+    """Extract simple equality predicates from a SQL WHERE clause.
+
+    Only extracts conjuncts of the form `column = literal` (ANDed together).
+    Returns empty list for OR, IN, BETWEEN, subqueries, function calls, etc.
     """
-    solver = Solver()
-    z3_vars = {}
+    import sqlglot
+    try:
+        ast = sqlglot.parse_one(sql)
+    except sqlglot.errors.ParseError:
+        return []
 
-    for col, typ in schema.items():
-        if typ in ("int", "integer", "bigint"):
-            z3_vars[col] = Int(col)
-        else:
-            return True  # can't model non-integer types easily → conservative
+    where = ast.find(exp.Where)
+    if where is None:
+        return []
 
-    for pred in (pred_a, pred_b):
-        for col, constraint in pred.items():
-            if col not in z3_vars:
-                return True
-            op, val = constraint.split(":", 1)
-            v = z3_vars[col]
-            if op == "eq":
-                solver.add(v == int(val))
-            elif op == "gt":
-                solver.add(v > int(val))
-            elif op == "lt":
-                solver.add(v < int(val))
-            elif op == "gte":
-                solver.add(v >= int(val))
-            elif op == "lte":
-                solver.add(v <= int(val))
+    predicates: list[EqualityPredicate] = []
+    predicate_expr = where.this
 
-    return solver.check() == sat
+    # Flatten ANDs into individual conjuncts
+    conjuncts: list[exp.Expression]
+    if isinstance(predicate_expr, exp.And):
+        conjuncts = list(predicate_expr.flatten())
+    else:
+        conjuncts = [predicate_expr]
+
+    for conjunct in conjuncts:
+        if not isinstance(conjunct, exp.EQ):
+            continue  # skip non-equality predicates
+        left, right = conjunct.this, conjunct.expression
+        # Normalize: column on left, literal on right
+        if isinstance(left, exp.Column) and isinstance(right, exp.Literal):
+            predicates.append(EqualityPredicate(left.name, right.this))
+        elif isinstance(right, exp.Column) and isinstance(left, exp.Literal):
+            predicates.append(EqualityPredicate(right.name, left.this))
+
+    return predicates
 ```
 
-### When z3 is Worth It
+### 5b. Row-Level ObjectId
 
-- **High-contention single-table workloads** where many threads touch the same table but different rows (e.g., partitioned account operations). Without row-level analysis, DPOR must explore O(n!) interleavings; with it, independent partitions are pruned.
-- **Not worth it** for workloads that already touch different tables (table-level pruning suffices) or for trivial 2-thread scenarios.
-
-### Alternative: Lightweight Predicate Intersection Without z3
-
-For the common case of simple equality predicates on primary keys, we don't need an SMT solver:
+When predicates are available, derive a finer-grained ObjectId that encodes the table *and* the row predicate:
 
 ```python
-def simple_predicate_disjoint(pred_a: dict, pred_b: dict) -> bool:
-    """Fast check: do two equality-predicate sets provably select disjoint rows?"""
-    for col in pred_a:
-        if col in pred_b:
-            a_val = pred_a[col]
-            b_val = pred_b[col]
-            if a_val.startswith("eq:") and b_val.startswith("eq:"):
-                if a_val != b_val:
-                    return True  # Same column, different equality values → disjoint
-    return False  # Can't prove disjoint → conservatively assume overlap
+def sql_row_object_key(table: str, predicates: list[EqualityPredicate]) -> int:
+    """Derive ObjectId from table + WHERE equality predicates.
+
+    If predicates are present, the key includes them — so
+    "UPDATE accounts WHERE id=1" and "SELECT accounts WHERE id=2"
+    get different ObjectIds and are independent.
+
+    If no predicates, falls back to table-level key.
+    """
+    if not predicates:
+        # No predicates → table-level granularity
+        return _make_object_key(hash(f"sql:{table}"), f"sql:{table}")
+
+    # Sort predicates for deterministic hashing
+    pred_key = tuple(sorted((p.column, p.value) for p in predicates))
+    resource_id = f"sql:{table}:{pred_key}"
+    return _make_object_key(hash(resource_id), resource_id)
 ```
 
-This handles the `WHERE id = 1` vs `WHERE id = 2` case without z3's overhead. Fall back to z3 for range predicates and complex expressions.
+### 5c. Soundness: When Row-Level is Safe
+
+Row-level ObjectIds are sound (no missed conflicts) when:
+
+1. The WHERE clause is a conjunction of equalities on the *primary key* columns.
+2. Both operations have complete primary key predicates.
+
+If either operation has no WHERE clause (full table scan), range predicates, OR conditions, or predicates on non-key columns, we must fall back to table-level (conservative, correct).
+
+**Decision function:**
+
+```python
+def can_use_row_level(
+    table: str,
+    predicates_a: list[EqualityPredicate],
+    predicates_b: list[EqualityPredicate],
+    pk_columns: set[str] | None,  # from schema, or None if unknown
+) -> bool:
+    """Can we safely use row-level ObjectIds for these two operations?"""
+    if not predicates_a or not predicates_b:
+        return False  # one has no WHERE → full table scan
+    if pk_columns is None:
+        return False  # unknown schema → conservative
+
+    cols_a = {p.column for p in predicates_a}
+    cols_b = {p.column for p in predicates_b}
+
+    # Both must have equality predicates on ALL primary key columns
+    return pk_columns <= cols_a and pk_columns <= cols_b
+```
+
+### 5d. Row-Level Disjointness (No z3 Needed for Equalities)
+
+When `can_use_row_level` is true, two operations are independent iff their PK predicates select different rows:
+
+```python
+def pk_predicates_disjoint(
+    preds_a: list[EqualityPredicate],
+    preds_b: list[EqualityPredicate],
+) -> bool:
+    """Are two sets of PK equality predicates provably disjoint?
+
+    True if any shared column has different values.
+    E.g., (id=1) vs (id=2) → True (disjoint).
+         (id=1, region='us') vs (id=1, region='eu') → True.
+         (id=1) vs (id=1) → False (same row).
+    """
+    a_map = {p.column: p.value for p in preds_a}
+    b_map = {p.column: p.value for p in preds_b}
+    for col in a_map:
+        if col in b_map and a_map[col] != b_map[col]:
+            return True
+    return False
+```
+
+This is an O(k) check where k = number of PK columns. No SMT solver needed. z3 is only needed for range predicates (`WHERE id > 10` vs `WHERE id < 5`), which can be deferred to a later phase.
 
 ---
 
-## Alternative / Complementary Approaches
+## Algorithm 6: Wire Protocol SQL Extraction (LD_PRELOAD Enhancement)
 
-### Approach: DSG Construction (Elle-style)
+For C-extension drivers (psycopg2 uses libpq, which calls `send()` directly), the DBAPI monkey-patch may not fire. The LD_PRELOAD library already intercepts `send()` buffers. We can parse the PostgreSQL wire protocol to extract SQL:
 
-Instead of per-operation conflict detection, record all SQL operations with their timestamps and thread IDs, then construct a Direct Serialization Graph offline:
+### 6a. PostgreSQL Simple Query Protocol
 
-```python
-@dataclass
-class SqlOperation:
-    thread_id: int
-    timestamp: int  # vector clock position
-    statement_type: str  # SELECT, UPDATE, INSERT, DELETE
-    tables_read: set[str]
-    tables_written: set[str]
-    predicates: dict[str, str]  # column → "op:value"
-
-def build_dsg(operations: list[SqlOperation]) -> nx.DiGraph:
-    """Build Adya-style Direct Serialization Graph."""
-    G = nx.DiGraph()
-    for i, op_a in enumerate(operations):
-        for j, op_b in enumerate(operations):
-            if i >= j or op_a.thread_id == op_b.thread_id:
-                continue
-            # Check for WR, WW, RW dependencies
-            common_written = op_a.tables_written & op_b.tables_written
-            if common_written:
-                G.add_edge(i, j, type="WW")
-            wr = op_a.tables_written & op_b.tables_read
-            if wr:
-                G.add_edge(i, j, type="WR")
-            rw = op_a.tables_read & op_b.tables_written
-            if rw:
-                G.add_edge(i, j, type="RW")
-    return G
+```
+Byte1('Q')        — message type
+Int32             — message length (including self)
+String            — the SQL query text (null-terminated)
 ```
 
-Cycles in the DSG indicate potential isolation anomalies. This is complementary to DPOR's online conflict detection — DPOR explores interleavings, DSG analysis characterizes *what kind* of anomaly was found.
+### 6b. PostgreSQL Extended Query Protocol (Prepared Statements)
 
-### Approach: Datalog / Logic Programming
-
-Express conflict rules declaratively with kanren or a Datalog engine:
-
-```python
-from kanren import run, var, eq, Relation, facts
-
-writes = Relation()
-reads = Relation()
-
-# Populate from parsed SQL:
-facts(writes, ("thread_a", "accounts"), ("thread_b", "accounts"))
-facts(reads, ("thread_a", "accounts"), ("thread_b", "users"))
-
-# Query: which thread pairs conflict?
-t1, t2, table = var(), var(), var()
-conflicts = run(0, (t1, t2, table),
-    writes(t1, table),
-    (reads(t2, table) | writes(t2, table)),
-    neq(t1, t2))
+```
+Parse:    Byte1('P') Int32-len String-name String-query Int16-nparams ...
+Bind:     Byte1('B') Int32-len String-portal String-stmt Int16-nformats ...
+Execute:  Byte1('E') Int32-len String-portal Int32-maxrows
 ```
 
-This is appealing for complex conflict rules (e.g., "thread A writes table X *and* thread B reads table X *through a foreign key from table Y*") but overkill for simple table-level read/write set intersection. Reserve for future "semantic conflict" analysis.
+### 6c. Extraction in Rust (crates/io/)
 
-### Approach: IsoRel-Style Auxiliary Column Instrumentation
+```rust
+// crates/io/src/sql_extract.rs
 
-Instead of parsing SQL from outside, *rewrite* SQL statements to add tracking:
-
-```sql
--- Original:
-UPDATE accounts SET balance = balance - 100 WHERE id = 1;
-
--- Instrumented:
-UPDATE accounts SET balance = balance - 100, _txn_id = 'T42' WHERE id = 1;
--- Also: INSERT INTO _frontrun_audit (txn_id, table_name, op, row_id) VALUES ('T42', 'accounts', 'write', 1);
+/// Extract SQL query text from a PostgreSQL wire protocol buffer.
+/// Returns None if the buffer doesn't contain a recognizable query message.
+pub fn extract_pg_query(buf: &[u8]) -> Option<&str> {
+    if buf.is_empty() {
+        return None;
+    }
+    match buf[0] {
+        b'Q' => {
+            // Simple query: 'Q' + i32 len + null-terminated SQL
+            if buf.len() < 5 {
+                return None;
+            }
+            let len = i32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+            if buf.len() < 1 + len {
+                return None;
+            }
+            let sql_bytes = &buf[5..1 + len - 1]; // exclude null terminator
+            std::str::from_utf8(sql_bytes).ok()
+        }
+        b'P' => {
+            // Parse message: 'P' + i32 len + name(str0) + query(str0) + i16 nparams
+            if buf.len() < 5 {
+                return None;
+            }
+            let len = i32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+            if buf.len() < 1 + len {
+                return None;
+            }
+            let payload = &buf[5..1 + len];
+            // Skip statement name (null-terminated)
+            let name_end = payload.iter().position(|&b| b == 0)?;
+            let query_start = name_end + 1;
+            let remaining = &payload[query_start..];
+            let query_end = remaining.iter().position(|&b| b == 0)?;
+            std::str::from_utf8(&remaining[..query_end]).ok()
+        }
+        _ => None,
+    }
+}
 ```
 
-This is what IsoRel and TxCheck do. It gives *ground truth* about which rows were actually touched (not just which rows *could* be touched based on the WHERE clause). But it's invasive — it modifies the database schema and the SQL statements. Better suited for a dedicated "frontrun audit mode" than for transparent interception.
+Then in the LD_PRELOAD `send()` hook, after intercepting the buffer, attempt SQL extraction. If successful, write SQL-enriched events to the pipe instead of raw socket events. The Python-side `_PreloadBridge.listener` can then parse the SQL and report at table level.
+
+**This is Phase 3 work.** The DBAPI monkey-patching (Phase 1) covers most cases. Wire protocol parsing is only needed for C-extension drivers that bypass the Python DBAPI layer entirely (rare in practice — even psycopg2's `cursor.execute()` goes through the Python method).
 
 ---
 
-## Implementation Plan
+## Integration Points
 
-### Phase 1: Table-Level SQL Conflict Detection (MVP)
+### In `dpor.py` — `explore_dpor()` function
 
-1. **Add `sqlglot` dependency** to `pyproject.toml` (Python-side parsing).
-2. **Add `sqlparser` crate** to `crates/dpor/Cargo.toml` (Rust-side parsing).
-3. **Implement `_sql_detection.py`:**
-   - Monkey-patch DBAPI `cursor.execute()` for known drivers.
-   - Extract SQL text and parameters.
-   - Parse with sqlglot → `(read_tables, write_tables)`.
-   - Report to DPOR engine via existing `io_reporter` callback with `"sql:{table}"` resource keys.
-4. **Implement `sql.rs` in `crates/dpor/`:**
-   - `parse_sql_access(sql: &str) -> Option<SqlAccess>` using sqlparser-rs.
-   - New `process_sql_access` method on `DporEngine` that calls `parse_sql_access` and routes to `process_io_access` with table-derived `ObjectId`s.
-   - Alternatively, keep parsing on the Python side and just report `("sql:accounts", Read/Write)` pairs to the Rust engine — simpler, avoids duplicating parsing logic.
-5. **Suppress endpoint-level reports** when SQL-level succeeds.
-6. **Add integration tests** extending `test_integration_orm.py`:
-   - Two threads updating *the same table* → DPOR finds the interleaving (as today).
-   - Two threads updating *different tables* → DPOR explores only 1 execution (new!).
-   - Mix of reads and writes on the same table → DPOR correctly identifies RW conflicts.
+```python
+# At the top of explore_dpor(), alongside existing patch calls:
+from frontrun._sql_detection import patch_sql, unpatch_sql
 
-### Phase 2: SQLAlchemy Event Integration
+# In the setup block (around line 1640):
+if detect_io:
+    patch_io()
+    patch_sql()  # NEW
 
-7. **Hook `before_cursor_execute`** as a Layer 4 "known library plugin" for SQLAlchemy users.
-8. **Schema-aware parsing** via sqlglot's `qualify_columns()` for resolving ambiguous column references.
+# In the teardown block:
+finally:
+    if detect_io:
+        unpatch_io()
+        unpatch_sql()  # NEW
+```
 
-### Phase 3: Row-Level Predicate Refinement
+### In `dpor.py` — `_setup_dpor_tls()` method
 
-9. **Extract WHERE predicates** from the AST (sqlglot or sqlparser-rs).
-10. **Simple equality check** for `WHERE pk = constant` (fast path, no z3).
-11. **Optional z3 integration** for range predicates and complex expressions.
-12. **New conflict check:** Same table, both operations have WHERE clauses, predicates provably disjoint → independent, skip interleaving.
+No changes needed. The existing `_io_reporter` closure (line 1445) already handles any `resource_id` string. When `_patched_execute` calls `reporter("sql:accounts", "write")`, it flows through the same path:
 
-### Phase 4: DSG Analysis & Anomaly Classification
+```python
+def _io_reporter(resource_id: str, kind: str) -> None:
+    object_key = _make_object_key(hash(resource_id), resource_id)
+    pending: list[tuple[int, str]] = _dpor_tls.pending_io
+    pending.append((object_key, kind))
+```
 
-13. **Record SQL operation history** during DPOR exploration.
-14. **Build DSG** from recorded operations (Adya-style WR/WW/RW edges).
-15. **Classify anomalies:** When DPOR finds a failing interleaving, report *which* isolation anomaly it corresponds to (dirty read, lost update, write skew, etc.).
-16. **Output:** "This interleaving exhibits a G2-item anomaly (write skew) on table `accounts` — thread A read rows {1,2} while thread B updated row {1}."
+The `object_key` is derived from `hash("sql:accounts")` instead of `hash("socket:127.0.0.1:5432")`, giving table-level granularity automatically.
+
+### In `dpor.py` — I/O flush logic (line 377)
+
+No changes needed. The existing flush logic already handles the pending I/O events correctly:
+
+```python
+if _pending_io and getattr(_dpor_tls, "lock_depth", 0) == 0:
+    for _obj_key, _io_kind in _pending_io:
+        with _elock:
+            _engine.report_io_access(_execution, thread_id, _obj_key, _io_kind)
+    _pending_io.clear()
+```
+
+SQL-level events go through `report_io_access` (uses `io_vv`, ignores lock-based happens-before — appropriate for I/O), same as socket events.
+
+### In the Rust engine
+
+**No changes.** The existing `process_io_access` → `ObjectState::record_io_access` → `dependent_accesses` pipeline handles SQL table objects identically to socket objects. The `ObjectId` is just a `u64`; it doesn't know whether it represents a socket or a table.
 
 ---
 
-## Open Questions
+## Correctness Argument
 
-1. **Where to parse — Python or Rust?** Parsing in Python (sqlglot) is simpler to integrate with the monkey-patching layer. Parsing in Rust (sqlparser-rs) is faster and keeps everything in the DPOR engine. Could do both: Python-side for the MVP, Rust-side as an optimization when parsing becomes a bottleneck. Or: Python-side for schema-aware analysis, Rust-side for fast statement classification.
+### Soundness (No missed bugs)
 
-2. **Parameterized queries:** `cursor.execute("SELECT * FROM users WHERE id = %s", (42,))` — the SQL text contains `%s`, not `42`. For table-level detection this doesn't matter (we only need the table name). For row-level predicate analysis, we need to substitute parameters into the WHERE clause before analyzing. This is driver-specific (`%s` for psycopg2, `?` for sqlite3, `:name` for Oracle).
+The system is **sound** (never claims independence when a conflict exists) because:
 
-3. **Prepared statements:** Some drivers send `PREPARE` + `EXECUTE` separately. The SQL text is in `PREPARE`, the parameters in `EXECUTE`. Need to track the `PREPARE` → `EXECUTE` mapping per cursor/connection.
+1. **Parse failure → fallback.** If `parse_sql_access` returns empty sets, the endpoint-level suppression doesn't activate, and the coarser socket-level conflict detection remains in effect.
 
-4. **ORM-generated SQL:** SQLAlchemy generates complex SQL with subqueries, CTEs, and joins. sqlglot handles these well; sqlparse does not. Validate against real SQLAlchemy output for common patterns (session.get, session.query, bulk operations).
+2. **Conservative classification.** UPDATE/DELETE are classified as *both* read and write on their target table. DDL is classified as write to all mentioned tables. Unknown statements return empty sets.
 
-5. **Schema discovery:** For column→table resolution, sqlglot needs the schema. Options: (a) user provides it, (b) query `information_schema` at test setup, (c) infer from `CREATE TABLE` statements if available. For table-level detection, schema isn't needed.
+3. **Table-level is a strict refinement.** Any two SQL operations that touch the same table get the same `ObjectId` and are correctly classified as Read or Write. The only operations that become independent are those on *different* tables — which genuinely cannot conflict at the SQL level.
 
-6. **Transaction boundaries:** The current model treats each SQL statement as an independent access. For transaction-level analysis (e.g., detecting that `BEGIN; SELECT; UPDATE; COMMIT` is an atomic unit), we'd need to track `BEGIN`/`COMMIT`/`ROLLBACK` boundaries and group statements into transactions.
+4. **Row-level requires full PK.** Row-level ObjectIds are only used when both operations have complete primary key equality predicates, guaranteeing that different PK values select provably disjoint rows.
+
+### Completeness (No false positives)
+
+The system reduces false positives (spurious interleavings) but does not eliminate them entirely:
+
+1. **Table-level is conservative.** Two operations on the same table with `WHERE id=1` and `WHERE id=2` are reported as conflicting (table-level), even though they touch different rows. This is fixed by Phase 2 row-level detection.
+
+2. **Cross-table dependencies.** Foreign key relationships are invisible. Thread A inserts into `orders` (references `users.id`), Thread B deletes from `users` — these are classified as independent (different tables), but the FK constraint could cause a real conflict. This is a known limitation; fixing it requires schema-aware analysis.
+
+---
+
+## Test Plan
+
+### Unit Tests (`tests/test_sql_detection.py`)
+
+```python
+class TestRegexParse:
+    def test_select(self):
+        r, w = _regex_parse("SELECT id, name FROM users WHERE id = 1")
+        assert r == {"users"} and w == set()
+
+    def test_insert(self):
+        r, w = _regex_parse("INSERT INTO orders (user_id, amount) VALUES (1, 100)")
+        assert r == set() and w == {"orders"}
+
+    def test_insert_select(self):
+        r, w = _regex_parse("INSERT INTO archive SELECT * FROM orders")
+        assert r == {"orders"} and w == {"archive"}
+
+    def test_update(self):
+        r, w = _regex_parse("UPDATE accounts SET balance = balance - 100 WHERE id = 1")
+        assert r == {"accounts"} and w == {"accounts"}
+
+    def test_delete(self):
+        r, w = _regex_parse("DELETE FROM sessions WHERE expires_at < NOW()")
+        assert r == {"sessions"} and w == {"sessions"}
+
+    def test_join(self):
+        r, w = _regex_parse("SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id")
+        assert r == {"users", "orders"} and w == set()
+
+    def test_cte_falls_through(self):
+        assert _regex_parse("WITH cte AS (SELECT 1) SELECT * FROM cte") is None
+
+    def test_quoted_identifiers(self):
+        r, w = _regex_parse('SELECT * FROM "My Table"')
+        assert r == {"My Table"} and w == set()
+
+    def test_schema_qualified(self):
+        r, w = _regex_parse("SELECT * FROM public.users")
+        assert r == {"users"} and w == set()
+
+
+class TestSqlglotParse:
+    def test_cte(self):
+        r, w = _sqlglot_parse("WITH active AS (SELECT * FROM users WHERE active) SELECT * FROM active")
+        assert "users" in r
+
+    def test_subquery_in_where(self):
+        r, w = _sqlglot_parse("UPDATE accounts SET status = 'closed' WHERE id IN (SELECT account_id FROM expired)")
+        assert "expired" in r and "accounts" in w
+
+    def test_update_from(self):
+        r, w = _sqlglot_parse("UPDATE t1 SET t1.col = t2.col FROM t1 JOIN t2 ON t1.id = t2.id")
+        assert "t2" in r and "t1" in w
+
+
+class TestCombined:
+    def test_simple_uses_regex(self):
+        """Simple statements should not require sqlglot."""
+        r, w = parse_sql_access("SELECT * FROM users")
+        assert r == {"users"}
+
+    def test_complex_uses_sqlglot(self):
+        r, w = parse_sql_access("WITH x AS (SELECT 1) SELECT * FROM x JOIN y ON x.id = y.id")
+        assert "y" in r
+
+    def test_unparseable_returns_empty(self):
+        r, w = parse_sql_access("GIBBERISH NOT SQL")
+        assert r == set() and w == set()
+
+
+class TestPredicateExtraction:
+    def test_simple_equality(self):
+        preds = extract_equality_predicates("SELECT * FROM users WHERE id = 42")
+        assert preds == [EqualityPredicate("id", "42")]
+
+    def test_compound_and(self):
+        preds = extract_equality_predicates("UPDATE t SET x = 1 WHERE id = 1 AND region = 'us'")
+        assert EqualityPredicate("id", "1") in preds
+        assert EqualityPredicate("region", "us") in preds
+
+    def test_or_returns_empty(self):
+        preds = extract_equality_predicates("SELECT * FROM t WHERE id = 1 OR id = 2")
+        assert preds == []  # OR is not a conjunction
+
+
+class TestPredicateDisjointness:
+    def test_different_pk_values(self):
+        a = [EqualityPredicate("id", "1")]
+        b = [EqualityPredicate("id", "2")]
+        assert pk_predicates_disjoint(a, b)
+
+    def test_same_pk_values(self):
+        a = [EqualityPredicate("id", "1")]
+        b = [EqualityPredicate("id", "1")]
+        assert not pk_predicates_disjoint(a, b)
+
+    def test_composite_pk_one_differs(self):
+        a = [EqualityPredicate("id", "1"), EqualityPredicate("region", "us")]
+        b = [EqualityPredicate("id", "1"), EqualityPredicate("region", "eu")]
+        assert pk_predicates_disjoint(a, b)
+```
+
+### Integration Tests (`tests/test_integration_orm.py`)
+
+```python
+class TestOrmSqlConflictDetection:
+    """Verify that SQL-level conflict detection reduces DPOR exploration."""
+
+    def test_different_tables_independent(self, engine):
+        """Two threads writing different tables: DPOR should explore 1 execution."""
+        # Thread A: INSERT INTO table_a
+        # Thread B: INSERT INTO table_b
+        # With SQL detection: independent → 1 execution
+        # Without: same socket → many executions
+
+    def test_same_table_write_write_conflict(self, engine):
+        """Two threads writing same table: DPOR should find the conflict."""
+        # Thread A: UPDATE accounts SET balance = balance - 100 WHERE id = 1
+        # Thread B: UPDATE accounts SET balance = balance + 50 WHERE id = 1
+        # Both write "accounts" → conflict → DPOR explores interleavings
+
+    def test_same_table_read_read_independent(self, engine):
+        """Two threads reading same table: DPOR should explore 1 execution."""
+        # Thread A: SELECT * FROM users WHERE id = 1
+        # Thread B: SELECT * FROM users WHERE id = 2
+        # Both read "users" → no conflict → 1 execution
+
+    def test_read_write_conflict(self, engine):
+        """One reader, one writer on same table: DPOR should find conflict."""
+        # Thread A: SELECT balance FROM accounts WHERE id = 1
+        # Thread B: UPDATE accounts SET balance = 0 WHERE id = 1
+        # RW anti-dependency → conflict
+```
+
+---
+
+## Phased Implementation
+
+### Phase 1: Table-Level Detection (MVP)
+
+**Goal:** Two threads on different tables are independent. Two threads on the same table use correct Read/Write classification.
+
+Files:
+- `frontrun/_sql_detection.py` — new, ~200 lines (Algorithms 1, 2, 3)
+- `frontrun/_io_detection.py` — 3-line change (suppression check)
+- `frontrun/dpor.py` — 4-line change (patch/unpatch calls)
+- `frontrun/bytecode.py` — 4-line change (patch/unpatch calls)
+- `pyproject.toml` — add `sqlglot` to extras
+- `tests/test_sql_detection.py` — new, ~150 lines
+
+### Phase 2: Row-Level Detection
+
+**Goal:** Two threads on the same table but different rows (identified by PK equality predicates) are independent.
+
+Files:
+- `frontrun/_sql_detection.py` — add ~80 lines (Algorithms 5a-5d)
+- `tests/test_sql_detection.py` — add ~50 lines (predicate tests)
+
+### Phase 3: Wire Protocol Parsing
+
+**Goal:** Catch C-level SQL (libpq `send()`) that bypasses DBAPI.
+
+Files:
+- `crates/io/src/sql_extract.rs` — new, ~80 lines (Algorithm 6)
+- `crates/io/src/lib.rs` — integrate SQL extraction into `send()` hook
+
+### Phase 4: Anomaly Classification
+
+**Goal:** When DPOR finds a failing interleaving involving SQL, classify it as a specific isolation anomaly (lost update, write skew, dirty read, etc.).
+
+Files:
+- `frontrun/_sql_anomaly.py` — new, ~200 lines (DSG construction + cycle classification)
+- `frontrun/common.py` — extend `InterleavingResult` with anomaly metadata
+
+---
+
+## Decisions Resolved
+
+| Question | Decision | Rationale |
+|----------|----------|-----------|
+| Parse in Python or Rust? | **Python** (sqlglot + regex) | Parsing happens in `cursor.execute()` which is Python-side. No IPC needed. The Rust engine just sees `ObjectId`s. |
+| sqlparse vs sqlglot? | **sqlglot** (with regex fast-path) | sqlparse can't extract tables from JOINs/subqueries. sqlglot has full AST + column qualification. Regex handles the 90% simple case. |
+| New Rust engine methods? | **No** | Existing `report_io_access(exec, tid, obj_key, kind)` is sufficient. SQL tables are just I/O objects with table-derived `ObjectId`s. |
+| Suppress LD_PRELOAD too? | **Yes** | Via `_suppress_tids` shared set (Algorithm 3). Otherwise libpq's `send()` still creates endpoint-level conflicts. |
+| Row-level: z3 or equality-only? | **Equality-only for Phase 2** | Covers the common case (PK lookups). z3 adds a heavy dependency for marginal gain on range predicates. |
+| Transaction boundaries? | **Deferred** | Current model: each SQL statement is an independent access. Good enough for lost-update and write-skew detection. Transaction grouping is Phase 4 work. |
 
 ---
 
 ## References
 
 - Adya, Liskov, O'Neil. ["Generalized Isolation Level Definitions"](http://pmg.csail.mit.edu/papers/icde00.pdf). ICDE 2000.
-- Berenson, Bernstein, Gray, Melton, O'Neil, O'Neil. ["A Critique of ANSI SQL Isolation Levels"](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/tr-95-51.pdf). SIGMOD 1995.
-- Kingsbury, Alvaro. [Elle: Inferring Isolation Anomalies](https://github.com/jepsen-io/elle). VLDB 2021.
-- Cui et al. [IsoRel: Detecting Isolation Anomalies in Relational DBMSs](https://dl.acm.org/doi/10.1145/3728953). ACM 2025.
+- Berenson et al. ["A Critique of ANSI SQL Isolation Levels"](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/tr-95-51.pdf). SIGMOD 1995.
+- Kingsbury, Alvaro. [Elle](https://github.com/jepsen-io/elle). VLDB 2021.
+- Cui et al. [IsoRel](https://dl.acm.org/doi/10.1145/3728953). ACM 2025.
 - Jiang et al. [TxCheck](https://www.usenix.org/system/files/osdi23-jiang.pdf). OSDI 2023.
-- Mao. [sqlglot: Python SQL Parser and Transpiler](https://github.com/tobymao/sqlglot).
+- Mao. [sqlglot](https://github.com/tobymao/sqlglot).
 - Apache. [datafusion-sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs).
-- Weston. [sqloxide: Python bindings for sqlparser-rs](https://github.com/wseaton/sqloxide).
-- Pythological. [kanren: Logic programming in Python](https://github.com/pythological/kanren).
-- de Moura, Bjørner. [Z3: An Efficient SMT Solver](https://github.com/Z3Prover/z3).
