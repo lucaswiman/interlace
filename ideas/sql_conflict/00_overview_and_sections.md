@@ -88,12 +88,12 @@
 
 | Phase | Goal | Algorithms | Status | Est. Code |
 |-------|------|-----------|--------|-----------|
-| **1** | Table-level detection (MVP) | 1, 2, 3, 4 | ✓ Designed | ~300 lines |
-| **2** | Row-level detection (precision) | 1.5, 5 | ✓ Designed | ~270 lines |
+| **1** | Table-level detection (MVP) | 1, 2, 3, 4 | ⚙ In Progress (1, 2 done; 3, 4 pending) | ~300 lines |
+| **2** | Row-level detection (precision) | 1.5, 5 | ⚙ In Progress (1.5 done; 5 pending) | ~270 lines |
 | **3** | Wire protocol parsing (C-level) | 6 | ✓ Designed | ~80 lines |
 | **4** | Isolation anomaly classification | — | ✓ Designed | ~200 lines |
 
-**Next step:** Implement Phase 1 (table-level detection) as MVP. Phases 2-4 are optional refinements.
+**Next step:** Complete Phase 1 by implementing Algorithm 3 (endpoint suppression in `_io_detection.py`) and Algorithm 4 (ObjectId derivation), then integrate `patch_sql()`/`unpatch_sql()` into `dpor.py` and `bytecode.py`.
 
 ---
 
@@ -124,12 +124,12 @@ Algorithm 6 (Wire Protocol Parsing)
 
 ### Phase 1: Table-Level Detection (MVP)
 
-- [ ] Create `frontrun/_sql_detection.py` (~200 lines)
-  - [ ] Implement Algorithm 1a: `_regex_parse()`
-  - [ ] Implement Algorithm 1b: `_sqlglot_parse()` (with optional sqlglot)
-  - [ ] Implement Algorithm 1c: `parse_sql_access()` combined entry point
-  - [ ] Implement Algorithm 2: `_make_patched_execute()`, `patch_sql()`, `unpatch_sql()`
-  - [ ] Implement Algorithm 3: `_suppress_tids` set + `is_tid_suppressed()`
+- [x] ~~Create `frontrun/_sql_detection.py`~~ → Split into modular files:
+  - [x] Implement Algorithm 1a: `_regex_parse()` → `frontrun/_sql_parsing.py` (173 lines)
+  - [x] Implement Algorithm 1b: `_sqlglot_parse()` (with optional sqlglot) → `frontrun/_sql_parsing.py`
+  - [x] Implement Algorithm 1c: `parse_sql_access()` combined entry point → `frontrun/_sql_parsing.py`
+  - [x] Implement Algorithm 2: `_make_patched_execute()`, `patch_sql()`, `unpatch_sql()` → `frontrun/_sql_cursor.py` (275 lines)
+  - [x] Implement Algorithm 3 (partial): `_suppress_tids` set + `is_tid_suppressed()` → `frontrun/_sql_cursor.py`
 
 - [ ] Modify `frontrun/_io_detection.py` (3 lines)
   - [ ] Add `_sql_suppress` check to `_report_socket_io()`
@@ -144,17 +144,19 @@ Algorithm 6 (Wire Protocol Parsing)
 - [ ] Modify `pyproject.toml`
   - [ ] Add `sqlglot` to optional `[sql]` extra
 
-- [ ] Create `tests/test_sql_detection.py` (~150 lines)
-  - [ ] TestRegexParse (simple SQL patterns)
-  - [ ] TestSqlglotParse (complex SQL patterns)
-  - [ ] TestCombined (integrated entry point)
+- [x] ~~Create `tests/test_sql_detection.py`~~ → Split into modular test files:
+  - [x] TestRegexParse (44 tests) → `tests/test_sql_parsing.py` (514 lines, 91 tests total)
+  - [x] TestSqlglotParse (16 tests, guarded with importorskip) → `tests/test_sql_parsing.py`
+  - [x] TestParseSqlAccess (24 tests) → `tests/test_sql_parsing.py`
+  - [x] TestCursorPatching (77 tests) → `tests/test_sql_cursor.py` (1236 lines)
 
 ### Phase 2: Row-Level Detection
 
-- [ ] Add Algorithm 1.5 to `frontrun/_sql_detection.py` (~150 lines)
-  - [ ] `_python_to_sql_literal()` — value conversion
-  - [ ] `resolve_parameters()` — placeholder substitution (all 5 paramstyles)
-  - [ ] Helper functions: `_resolve_qmark()`, `_resolve_numeric()`, `_resolve_named()`, `_resolve_pyformat()`
+- [x] ~~Add Algorithm 1.5 to `frontrun/_sql_detection.py`~~ → `frontrun/_sql_params.py` (128 lines)
+  - [x] `_python_to_sql_literal()` — value conversion
+  - [x] `resolve_parameters()` — placeholder substitution (all 5 paramstyles)
+  - [x] Helper functions: `_resolve_positional()`, `_resolve_numeric()`, `_resolve_named()`, `_resolve_pyformat()`
+  - [x] Tests: `tests/test_sql_params.py` (856 lines, 123 tests)
 
 - [ ] Add Algorithm 5 to `frontrun/_sql_detection.py` (~100 lines)
   - [ ] `EqualityPredicate` dataclass
@@ -191,16 +193,20 @@ Algorithm 6 (Wire Protocol Parsing)
 
 ## File Map
 
-| File | Location | Lines | Purpose |
-|------|----------|-------|---------|
-| `_sql_detection.py` | `frontrun/` | ~350 | Core SQL parsing + patching + suppression |
-| `test_sql_detection.py` | `tests/` | ~250 | Unit tests for parser + parameter resolution |
-| `_io_detection.py` | `frontrun/` | 3 | Add `_sql_suppress` check |
-| `dpor.py` | `frontrun/` | 4 | Call `patch_sql()` / `unpatch_sql()` |
-| `bytecode.py` | `frontrun/` | 4 | Call `patch_sql()` / `unpatch_sql()` |
-| `pyproject.toml` | root | — | Add `sqlglot` to extras |
-| `sql_extract.rs` | `crates/io/src/` | ~80 | Wire protocol parsing (Phase 3) |
-| `_sql_anomaly.py` | `frontrun/` | ~200 | Anomaly classification (Phase 4) |
+| File | Location | Lines | Status | Purpose |
+|------|----------|-------|--------|---------|
+| `_sql_parsing.py` | `frontrun/` | 173 | ✅ Done | SQL read/write set extraction (regex + sqlglot) |
+| `_sql_params.py` | `frontrun/` | 128 | ✅ Done | Parameter resolution (all 5 PEP 249 paramstyles) |
+| `_sql_cursor.py` | `frontrun/` | 275 | ✅ Done | DBAPI cursor monkey-patching + suppression |
+| `test_sql_parsing.py` | `tests/` | 514 | ✅ Done | 91 tests for SQL parsing |
+| `test_sql_params.py` | `tests/` | 856 | ✅ Done | 123 tests for parameter resolution |
+| `test_sql_cursor.py` | `tests/` | 1236 | ✅ Done | 77 tests for cursor patching |
+| `_io_detection.py` | `frontrun/` | 3 | ⬜ Pending | Add `_sql_suppress` check |
+| `dpor.py` | `frontrun/` | 4 | ⬜ Pending | Call `patch_sql()` / `unpatch_sql()` |
+| `bytecode.py` | `frontrun/` | 4 | ⬜ Pending | Call `patch_sql()` / `unpatch_sql()` |
+| `pyproject.toml` | root | — | ⬜ Pending | Add `sqlglot` to extras |
+| `sql_extract.rs` | `crates/io/src/` | ~80 | ⬜ Phase 3 | Wire protocol parsing |
+| `_sql_anomaly.py` | `frontrun/` | ~200 | ⬜ Phase 4 | Anomaly classification |
 
 ---
 
@@ -241,7 +247,11 @@ Algorithm 6 (Wire Protocol Parsing)
 ## Document History
 
 - **Designed**: 2026-03-03
-- **Status**: Ready for implementation (Phase 1 MVP)
+- **Implementation started**: 2026-03-03
+  - Algorithm 1 (SQL parsing): `frontrun/_sql_parsing.py` — 91 tests passing
+  - Algorithm 1.5 (Parameter resolution): `frontrun/_sql_params.py` — 123 tests passing
+  - Algorithm 2 (Cursor patching): `frontrun/_sql_cursor.py` — 77 tests passing (includes partial Algorithm 3 suppression)
+  - **Note:** Implementation split into separate modules (`_sql_parsing.py`, `_sql_params.py`, `_sql_cursor.py`) instead of a single `_sql_detection.py`. These can be consolidated later if desired.
 - **Verified**: All 3 TLA+ specs pass exhaustive model checking
 - **Last Updated**: 2026-03-03
 
