@@ -1,0 +1,299 @@
+"""SQL isolation anomaly classification for DPOR failing interleavings.
+
+Given the list of TraceEvents from a failing execution, classifies the SQL-level
+concurrency anomaly by building a Dependency Serialization Graph (DSG) and
+detecting cycles whose edge types determine the anomaly kind.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from frontrun._trace_format import TraceEvent
+
+# ---------------------------------------------------------------------------
+# Public data structures
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SqlAnomaly:
+    """A classified SQL isolation anomaly."""
+
+    kind: str  # "lost_update", "write_skew", "dirty_read", "non_repeatable_read", "write_write"
+    summary: str
+    tables: frozenset[str]
+    threads: frozenset[int]
+
+
+# ---------------------------------------------------------------------------
+# Helper: extract SQL events from a trace
+# ---------------------------------------------------------------------------
+
+
+def _extract_sql_events(events: list[TraceEvent]) -> list[tuple[int, str, str, str]]:
+    # Returns (thread_id, resource_id, table_name, access_type) for every SQL IO event.
+    # resource_id is the full key (e.g. "accounts" or "accounts:(('id','1'),)") for
+    # conflict matching; table_name is the bare table for display.
+    result: list[tuple[int, str, str, str]] = []
+    for ev in sorted(events, key=lambda e: e.step_index):
+        if ev.obj_type_name != "IO":
+            continue
+        attr = ev.attr_name or ""
+        if not attr.startswith("sql:"):
+            continue
+        access = ev.access_type
+        if access is None:
+            continue
+        remainder = attr[4:]  # everything after "sql:"
+        table = remainder.split(":")[0]
+        if table:
+            result.append((ev.thread_id, remainder, table, access))
+    return result
+
+
+def _resource_to_table(resource: str) -> str:
+    return resource.split(":")[0]
+
+
+# ---------------------------------------------------------------------------
+# DSG construction
+# ---------------------------------------------------------------------------
+
+# An edge: (from_thread, to_thread, edge_type, resource_id)
+_Edge = tuple[int, int, str, str]
+
+
+def _build_dsg(ops: list[tuple[int, str, str, str]]) -> list[_Edge]:
+    # Build DSG edges. ops is (thread_id, resource_id, table, access_type) in order.
+    # Conflicts are keyed by resource_id (includes row predicates when present).
+    res_thread_ops: dict[str, dict[int, list[tuple[int, str]]]] = {}
+    for idx, (tid, resource, _table, access) in enumerate(ops):
+        res_thread_ops.setdefault(resource, {}).setdefault(tid, []).append((idx, access))
+
+    edges: list[_Edge] = []
+    seen: set[tuple[int, int, str, str]] = set()
+
+    for resource, thread_map in res_thread_ops.items():
+        tids = list(thread_map.keys())
+        for i, ta in enumerate(tids):
+            for tb in tids[i + 1 :]:
+                for idx_a, acc_a in thread_map[ta]:
+                    for idx_b, acc_b in thread_map[tb]:
+                        if idx_a < idx_b:
+                            frm, to, first_acc, second_acc = ta, tb, acc_a, acc_b
+                        else:
+                            frm, to, first_acc, second_acc = tb, ta, acc_b, acc_a
+
+                        if first_acc == "write" and second_acc == "read":
+                            etype = "WR"
+                        elif first_acc == "read" and second_acc == "write":
+                            etype = "RW"
+                        elif first_acc == "write" and second_acc == "write":
+                            etype = "WW"
+                        else:
+                            continue
+
+                        key = (frm, to, etype, resource)
+                        if key not in seen:
+                            seen.add(key)
+                            edges.append(key)
+
+    return edges
+
+
+# ---------------------------------------------------------------------------
+# Cycle detection via DFS
+# ---------------------------------------------------------------------------
+
+
+def _find_cycle(graph: dict[int, list[tuple[int, str, str]]]) -> list[tuple[int, int, str, str]] | None:
+    visited: set[int] = set()
+    rec_stack: list[int] = []
+    on_stack: set[int] = set()  # O(1) membership check for back-edge detection
+    edge_to: dict[int, tuple[int, int, str, str]] = {}
+
+    def dfs(node: int) -> list[tuple[int, int, str, str]] | None:
+        visited.add(node)
+        rec_stack.append(node)
+        on_stack.add(node)
+        for neighbor, etype, resource in graph.get(node, []):
+            edge = (node, neighbor, etype, resource)
+            if neighbor not in visited:
+                edge_to[neighbor] = edge
+                result = dfs(neighbor)
+                if result is not None:
+                    return result
+            elif neighbor in on_stack:
+                cycle_edges: list[tuple[int, int, str, str]] = [edge]
+                idx = rec_stack.index(neighbor)
+                for k in range(idx, len(rec_stack) - 1):
+                    e = edge_to.get(rec_stack[k + 1])
+                    if e is not None and e[0] == rec_stack[k]:
+                        cycle_edges.append(e)
+                return cycle_edges
+        rec_stack.pop()
+        on_stack.discard(node)
+        return None
+
+    for start in sorted(graph.keys()):
+        if start not in visited:
+            result = dfs(start)
+            if result is not None:
+                return result
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Pre-DSG anomaly checks
+# ---------------------------------------------------------------------------
+
+
+def _check_non_repeatable_read(ops: list[tuple[int, str, str, str]]) -> SqlAnomaly | None:
+    # Same thread reads same resource twice with another thread's write in between.
+    for focus_tid in sorted({tid for tid, _, _, _ in ops}):
+        resource_read_positions: dict[str, list[int]] = {}
+        for i, (tid, resource, _table, access) in enumerate(ops):
+            if tid == focus_tid and access == "read":
+                resource_read_positions.setdefault(resource, []).append(i)
+
+        for resource, positions in resource_read_positions.items():
+            if len(positions) < 2:
+                continue
+            first_read, last_read = positions[0], positions[-1]
+            for i, (tid, res, _table, access) in enumerate(ops):
+                if tid != focus_tid and res == resource and access == "write" and first_read < i < last_read:
+                    table = _resource_to_table(resource)
+                    return SqlAnomaly(
+                        kind="non_repeatable_read",
+                        summary=(
+                            f"Non-repeatable read: thread {focus_tid} read table '{table}' twice "
+                            f"but thread {tid} wrote to it in between, changing the result."
+                        ),
+                        tables=frozenset([table]),
+                        threads=frozenset([focus_tid, tid]),
+                    )
+    return None
+
+
+def _check_lost_update(ops: list[tuple[int, str, str, str]]) -> SqlAnomaly | None:
+    # Lost update: two threads both read AND write the same resource.
+    resource_thread_access: dict[str, dict[int, set[str]]] = {}
+    for tid, resource, _table, access in ops:
+        resource_thread_access.setdefault(resource, {}).setdefault(tid, set()).add(access)
+
+    for resource, thread_map in resource_thread_access.items():
+        rw_threads = sorted(tid for tid, accesses in thread_map.items() if "read" in accesses and "write" in accesses)
+        if len(rw_threads) >= 2:
+            table = _resource_to_table(resource)
+            return SqlAnomaly(
+                kind="lost_update",
+                summary=(
+                    f"Lost update on table '{table}': both threads read then wrote the same rows, "
+                    f"so one thread's update overwrote the other's."
+                ),
+                tables=frozenset([table]),
+                threads=frozenset(rw_threads[:2]),
+            )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Anomaly classification
+# ---------------------------------------------------------------------------
+
+
+def classify_sql_anomaly(events: list[TraceEvent]) -> SqlAnomaly | None:
+    """Classify the SQL isolation anomaly visible in *events*.
+
+    Returns None when no SQL events are present or no cross-thread conflict is found.
+    """
+    ops = _extract_sql_events(events)
+    if not ops:
+        return None
+
+    # Need at least two threads to have a conflict
+    if len({tid for tid, _, _, _ in ops}) < 2:
+        return None
+
+    # Pre-DSG checks for patterns that don't require cycle detection
+    nrr = _check_non_repeatable_read(ops)
+    if nrr is not None:
+        return nrr
+
+    lu = _check_lost_update(ops)
+    if lu is not None:
+        return lu
+
+    edges = _build_dsg(ops)
+    if not edges:
+        return None
+
+    # Build adjacency list for cycle detection
+    graph: dict[int, list[tuple[int, str, str]]] = {}
+    for frm, to, etype, resource in edges:
+        graph.setdefault(frm, []).append((to, etype, resource))
+
+    cycle = _find_cycle(graph)
+
+    if cycle is not None:
+        cycle_etypes = {etype for _, _, etype, _ in cycle}
+        cycle_resources = {r for _, _, _, r in cycle}
+        cycle_tables = frozenset(_resource_to_table(r) for r in cycle_resources)
+        cycle_threads = frozenset(n for frm, to, _, _ in cycle for n in (frm, to))
+
+        # Dirty read: WR edge in cycle
+        if "WR" in cycle_etypes:
+            tbl = next(_resource_to_table(r) for _, _, e, r in cycle if e == "WR")
+            return SqlAnomaly(
+                kind="dirty_read",
+                summary=f"Dirty read on table '{tbl}': a thread read data from an uncommitted concurrent write.",
+                tables=frozenset([tbl]),
+                threads=cycle_threads,
+            )
+
+        # Write skew: RW-only cycle across different tables
+        if cycle_etypes == {"RW"} and len(cycle_tables) >= 2:
+            tbls = ", ".join(f"'{t}'" for t in sorted(cycle_tables))
+            return SqlAnomaly(
+                kind="write_skew",
+                summary=(
+                    f"Write skew across tables {tbls}: each thread read a table the other wrote, "
+                    f"making decisions based on a collectively inconsistent snapshot."
+                ),
+                tables=cycle_tables,
+                threads=cycle_threads,
+            )
+
+        # Write-write cycle
+        if cycle_etypes == {"WW"}:
+            tbls = ", ".join(f"'{t}'" for t in sorted(cycle_tables))
+            return SqlAnomaly(
+                kind="write_write",
+                summary=f"Write-write conflict on {tbls}: concurrent writes without coordination.",
+                tables=cycle_tables,
+                threads=cycle_threads,
+            )
+
+    # No cycle — check for single-edge anomalies
+    for frm, to, etype, resource in edges:
+        tbl = _resource_to_table(resource)
+        if etype == "WR":
+            return SqlAnomaly(
+                kind="dirty_read",
+                summary=f"Dirty read: thread {to} read from table '{tbl}' written by thread {frm} before it committed.",
+                tables=frozenset([tbl]),
+                threads=frozenset([frm, to]),
+            )
+
+    for frm, to, etype, resource in edges:
+        tbl = _resource_to_table(resource)
+        if etype == "WW":
+            return SqlAnomaly(
+                kind="write_write",
+                summary=f"Write-write conflict on table '{tbl}': threads {frm} and {to} both wrote concurrently.",
+                tables=frozenset([tbl]),
+                threads=frozenset([frm, to]),
+            )
+
+    return None

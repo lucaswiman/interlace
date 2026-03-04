@@ -426,9 +426,14 @@ class TestSameTableWriteWriteConflict:
         def thread_fn(row_id: int) -> None:
             thread_log = IOLog()
             set_io_reporter(thread_log)
-            conn.execute("INSERT INTO events VALUES (?, 'payload')", (row_id,))
-            with lock:
-                all_writes.extend(r for r, k in thread_log.events if k == "write")
+            try:
+                conn.execute("INSERT INTO events VALUES (?, 'payload')", (row_id,))
+            finally:
+                # Collect events even if sqlite3 raises (e.g. OperationalError
+                # from concurrent access) — the write is reported before the
+                # actual SQL executes.
+                with lock:
+                    all_writes.extend(r for r, k in thread_log.events if k == "write")
 
         threads = [threading.Thread(target=thread_fn, args=(i,)) for i in range(1, 4)]
         for t in threads:

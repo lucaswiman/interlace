@@ -1,0 +1,235 @@
+from __future__ import annotations
+
+from frontrun._sql_anomaly import classify_sql_anomaly
+from frontrun._trace_format import TraceEvent
+
+
+def _sql_event(step: int, tid: int, table: str, kind: str) -> TraceEvent:
+    return TraceEvent(
+        step_index=step,
+        thread_id=tid,
+        filename="<C extension>",
+        lineno=0,
+        function_name="",
+        opcode="IO",
+        access_type=kind,
+        attr_name=f"sql:{table}",
+        obj_type_name="IO",
+    )
+
+
+def _sql_event_row(step: int, tid: int, table: str, row_key: str, kind: str) -> TraceEvent:
+    return TraceEvent(
+        step_index=step,
+        thread_id=tid,
+        filename="<C extension>",
+        lineno=0,
+        function_name="",
+        opcode="IO",
+        access_type=kind,
+        attr_name=f"sql:{table}:{row_key}",
+        obj_type_name="IO",
+    )
+
+
+def _non_sql_event(step: int, tid: int) -> TraceEvent:
+    return TraceEvent(
+        step_index=step,
+        thread_id=tid,
+        filename="test_file.py",
+        lineno=10,
+        function_name="some_func",
+        opcode="LOAD_ATTR",
+        access_type="read",
+        attr_name="value",
+        obj_type_name="Counter",
+    )
+
+
+class TestExtractSqlEvents:
+    def test_filters_to_sql_events_only(self) -> None:
+        # Mix of SQL and non-SQL events; SQL events form a write-write conflict
+        events = [
+            _non_sql_event(0, 0),
+            _sql_event(1, 0, "accounts", "write"),
+            _non_sql_event(2, 1),
+            _sql_event(3, 1, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+
+    def test_extracts_table_from_resource_id(self) -> None:
+        events = [
+            _sql_event(0, 0, "accounts", "read"),
+            _sql_event(1, 1, "accounts", "read"),
+            _sql_event(2, 0, "accounts", "write"),
+            _sql_event(3, 1, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert "accounts" in result.tables
+
+    def test_extracts_table_from_row_level_id(self) -> None:
+        events = [
+            _sql_event_row(0, 0, "accounts", "(('id', '1'),)", "read"),
+            _sql_event_row(1, 1, "accounts", "(('id', '1'),)", "read"),
+            _sql_event_row(2, 0, "accounts", "(('id', '1'),)", "write"),
+            _sql_event_row(3, 1, "accounts", "(('id', '1'),)", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert "accounts" in result.tables
+
+    def test_empty_events_returns_empty(self) -> None:
+        result = classify_sql_anomaly([])
+        assert result is None
+
+
+class TestClassifyLostUpdate:
+    def test_classic_lost_update(self) -> None:
+        events = [
+            _sql_event(0, 0, "accounts", "read"),
+            _sql_event(1, 1, "accounts", "read"),
+            _sql_event(2, 0, "accounts", "write"),
+            _sql_event(3, 1, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert result.kind == "lost_update"
+
+    def test_lost_update_reverse_write_order(self) -> None:
+        events = [
+            _sql_event(0, 0, "accounts", "read"),
+            _sql_event(1, 1, "accounts", "read"),
+            _sql_event(2, 1, "accounts", "write"),
+            _sql_event(3, 0, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert result.kind == "lost_update"
+
+    def test_lost_update_involves_correct_tables(self) -> None:
+        events = [
+            _sql_event(0, 0, "accounts", "read"),
+            _sql_event(1, 1, "accounts", "read"),
+            _sql_event(2, 0, "accounts", "write"),
+            _sql_event(3, 1, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert "accounts" in result.tables
+
+    def test_lost_update_involves_correct_threads(self) -> None:
+        events = [
+            _sql_event(0, 0, "accounts", "read"),
+            _sql_event(1, 1, "accounts", "read"),
+            _sql_event(2, 0, "accounts", "write"),
+            _sql_event(3, 1, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert 0 in result.threads
+        assert 1 in result.threads
+
+
+class TestClassifyWriteSkew:
+    def test_write_skew_different_tables(self) -> None:
+        events = [
+            _sql_event(0, 0, "accounts", "read"),
+            _sql_event(1, 1, "balances", "read"),
+            _sql_event(2, 0, "balances", "write"),
+            _sql_event(3, 1, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert result.kind == "write_skew"
+
+    def test_write_skew_summary_mentions_tables(self) -> None:
+        events = [
+            _sql_event(0, 0, "accounts", "read"),
+            _sql_event(1, 1, "balances", "read"),
+            _sql_event(2, 0, "balances", "write"),
+            _sql_event(3, 1, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert "accounts" in result.summary or "balances" in result.summary
+
+
+class TestClassifyWriteWrite:
+    def test_write_write_no_reads(self) -> None:
+        events = [
+            _sql_event(0, 0, "accounts", "write"),
+            _sql_event(1, 1, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert result.kind == "write_write"
+
+    def test_write_write_correct_tables(self) -> None:
+        events = [
+            _sql_event(0, 0, "accounts", "write"),
+            _sql_event(1, 1, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert "accounts" in result.tables
+
+
+class TestClassifyDirtyRead:
+    def test_dirty_read(self) -> None:
+        events = [
+            _sql_event(0, 0, "accounts", "write"),
+            _sql_event(1, 1, "accounts", "read"),
+            _sql_event(2, 0, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert result.kind in ("dirty_read", "non_repeatable_read", "write_write", "lost_update")
+
+
+class TestClassifyNonRepeatableRead:
+    def test_non_repeatable_read(self) -> None:
+        events = [
+            _sql_event(0, 0, "accounts", "read"),
+            _sql_event(1, 1, "accounts", "write"),
+            _sql_event(2, 0, "accounts", "read"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert result.kind == "non_repeatable_read"
+
+
+class TestNoSqlEvents:
+    def test_no_sql_events_returns_none(self) -> None:
+        events = [
+            _non_sql_event(0, 0),
+            _non_sql_event(1, 1),
+            _non_sql_event(2, 0),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is None
+
+    def test_empty_list_returns_none(self) -> None:
+        result = classify_sql_anomaly([])
+        assert result is None
+
+    def test_single_thread_returns_none(self) -> None:
+        events = [
+            _sql_event(0, 0, "accounts", "read"),
+            _sql_event(1, 0, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is None
+
+
+class TestRowLevelResourceIds:
+    def test_different_rows_same_table(self) -> None:
+        events = [
+            _sql_event_row(0, 0, "accounts", "(('id', '1'),)", "read"),
+            _sql_event_row(1, 1, "accounts", "(('id', '2'),)", "read"),
+            _sql_event_row(2, 0, "accounts", "(('id', '1'),)", "write"),
+            _sql_event_row(3, 1, "accounts", "(('id', '2'),)", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is None
