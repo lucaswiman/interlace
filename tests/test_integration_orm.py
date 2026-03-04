@@ -205,6 +205,11 @@ class TestOrmDpor:
     def test_dpor_finds_lost_update(self, engine) -> None:  # type: ignore[no-untyped-def]
         class _State:
             def __init__(self) -> None:
+                # Dispose the pool so new connections go through the patched
+                # psycopg2.connect (which injects the TracedCursor factory).
+                # explore_dpor() calls patch_sql() before setup(), but the
+                # engine may have pooled connections from before patching.
+                engine.dispose()
                 _reset_row(engine)
 
         def _thread_fn(_state: _State) -> None:
