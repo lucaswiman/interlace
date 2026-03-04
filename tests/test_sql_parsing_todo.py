@@ -766,5 +766,311 @@ class TestYamlTodoFormula:
         pass
 
 
+# =============================================================================
+# ADDITIONAL HIGH-PRIORITY GAPS (Not in original 27 TODOs)
+# =============================================================================
+# Based on: ideas/sql_conflict/ADDITIONAL_SQL_TEST_GAPS.md
+
+
+class TestCorrelatedSubqueriesTodo:
+    """Tests for correlated subqueries with outer table references.
+
+    Expected: Parser should recognize implicit join dependency between outer and inner tables.
+    Current: Treated as independent subquery (may miss conflicts).
+
+    Priority: HIGH (common in production; affects conflict semantics)
+    Phase: 6
+    Effort: ~20 lines + 5 tests
+    """
+
+    @pytest.mark.xfail(reason="Correlated subqueries not recognized")
+    def test_correlated_subquery_in_where(self):
+        """WHERE with correlated subquery should mark outer table dependency."""
+        sql = """
+        SELECT * FROM users u
+        WHERE balance > (SELECT AVG(balance) FROM accounts WHERE user_id = u.id)
+        """
+        r, w = parse_sql_access(sql)
+        assert "users" in r and "accounts" in r
+        # TODO: mark correlation dependency (users ← accounts)
+
+    @pytest.mark.xfail(reason="Correlated subquery in SELECT list not recognized")
+    def test_correlated_subquery_in_select_list(self):
+        """SELECT clause with correlated subquery should mark dependency."""
+        sql = """
+        SELECT u.id, u.name,
+               (SELECT COUNT(*) FROM orders WHERE user_id = u.id) AS order_count
+        FROM users u
+        """
+        r, w = parse_sql_access(sql)
+        assert "users" in r and "orders" in r
+        # TODO: mark correlation in SELECT clause
+
+
+class TestCaseExpressionsTodo:
+    """Tests for CASE expressions affecting predicates.
+
+    Expected: CASE expressions in WHERE/SET should be recognized.
+    Current: Treated as part of WHERE/SET without special handling.
+
+    Priority: HIGH (common in conditional logic)
+    Phase: 6
+    Effort: ~15 lines + 3 tests
+    """
+
+    @pytest.mark.xfail(reason="CASE in WHERE not semantically analyzed")
+    def test_case_in_where_clause(self):
+        """CASE expression in WHERE should be recognized."""
+        sql = """
+        SELECT * FROM orders
+        WHERE CASE WHEN status = 'pending' THEN amount > 100
+                   ELSE amount > 500 END
+        """
+        r, w = parse_sql_access(sql)
+        assert r == {"orders"}
+        # TODO: mark CASE expression presence
+
+    @pytest.mark.xfail(reason="CASE in UPDATE SET not recognized")
+    def test_case_in_update_set(self):
+        """CASE expression in UPDATE SET should be recognized."""
+        sql = """
+        UPDATE accounts SET balance = balance +
+          CASE WHEN type = 'premium' THEN 50 ELSE 10 END
+        WHERE id = ?
+        """
+        r, w = parse_sql_access(sql)
+        assert "accounts" in w and "accounts" in r
+
+
+class TestExistsNotExistsTodo:
+    """Tests for EXISTS / NOT EXISTS subqueries.
+
+    Expected: Parser should recognize existence checks as implicit joins.
+    Current: Subquery tables extracted but correlation not modeled.
+
+    Priority: HIGH (existence checks create dependencies)
+    Phase: 6
+    Effort: ~15 lines + 4 tests
+    """
+
+    @pytest.mark.xfail(reason="EXISTS subquery correlation not recognized")
+    def test_exists_subquery(self):
+        """EXISTS with correlated subquery should mark dependency."""
+        sql = """
+        SELECT * FROM users u
+        WHERE EXISTS (SELECT 1 FROM orders WHERE user_id = u.id)
+        """
+        r, w = parse_sql_access(sql)
+        assert "users" in r and "orders" in r
+        # TODO: mark EXISTS correlation
+
+    @pytest.mark.xfail(reason="NOT EXISTS subquery correlation not recognized")
+    def test_not_exists_subquery(self):
+        """NOT EXISTS should mark existence-based dependency."""
+        sql = """
+        DELETE FROM accounts
+        WHERE NOT EXISTS (SELECT 1 FROM transactions WHERE account_id = accounts.id)
+        """
+        r, w = parse_sql_access(sql)
+        assert "accounts" in w
+        assert "transactions" in r
+
+
+class TestMultipleRowInsertTodo:
+    """Tests for multiple-row INSERT statements.
+
+    Expected: Multiple VALUES rows should be recognized as separate logical inserts.
+    Current: Treated as single bulk insert (correct but loses row granularity).
+
+    Priority: HIGH (common bulk operation)
+    Phase: 6
+    Effort: ~10 lines + 3 tests
+    """
+
+    @pytest.mark.xfail(reason="Multi-row INSERT not split into logical rows")
+    def test_multiple_row_insert_values(self):
+        """INSERT with multiple VALUES rows should be recognized."""
+        sql = """
+        INSERT INTO users (name, email) VALUES
+          ('Alice', 'a@x'),
+          ('Bob', 'b@x'),
+          ('Carol', 'c@x')
+        """
+        r, w = parse_sql_access(sql)
+        assert w == {"users"}
+        # TODO: track row count or list of rows inserted
+
+
+class TestDistinctTodo:
+    """Tests for DISTINCT and DISTINCT ON semantics.
+
+    Expected: DISTINCT should be recognized (affects result set).
+    Current: Treated transparently (correct but loses semantic info).
+
+    Priority: HIGH (affects which rows are returned)
+    Phase: 6
+    Effort: ~10 lines + 2 tests
+    """
+
+    @pytest.mark.xfail(reason="DISTINCT ON (PostgreSQL) not recognized")
+    def test_distinct_on(self):
+        """PostgreSQL DISTINCT ON should be recognized."""
+        sql = """
+        SELECT DISTINCT ON (user_id) * FROM events
+        ORDER BY user_id, created_at DESC
+        """
+        r, w = parse_sql_access(sql)
+        assert r == {"events"}
+        # TODO: mark DISTINCT ON semantics
+
+
+class TestSelfJoinsTodo:
+    """Tests for self-joins and circular dependencies.
+
+    Expected: Same table in multiple roles should be marked with explicit join.
+    Current: Table extracted once (loses join information).
+
+    Priority: HIGH (circular dependencies)
+    Phase: 6
+    Effort: ~15 lines + 3 tests
+    """
+
+    @pytest.mark.xfail(reason="Self-join not recognized as circular dependency")
+    def test_self_join_employees(self):
+        """Self-join for hierarchy (employees + managers) should be marked."""
+        sql = """
+        SELECT a.id, a.name, b.id AS manager_id
+        FROM employees a
+        JOIN employees b ON a.manager_id = b.id
+        """
+        r, w = parse_sql_access(sql)
+        assert r == {"employees"}
+        # TODO: mark as self-join with dependency
+
+    @pytest.mark.xfail(reason="Self-referential FK in UPDATE not marked")
+    def test_self_referential_update(self):
+        """UPDATE on table with self-referential FK should be marked."""
+        sql = """
+        UPDATE categories SET parent_id = ? WHERE id = ?
+        """
+        r, w = parse_sql_access(sql)
+        assert "categories" in r and "categories" in w
+        # TODO: mark as self-referential
+
+
+class TestLimitOffsetTodo:
+    """Tests for LIMIT/OFFSET affecting row selection.
+
+    Expected: LIMIT/OFFSET should be recognized for DELETE/UPDATE.
+    Current: Treated as semantic metadata (correct but imprecise).
+
+    Priority: HIGH (affects which rows are written)
+    Phase: 6
+    Effort: ~20 lines + 4 tests
+    """
+
+    @pytest.mark.xfail(reason="DELETE with LIMIT not recognized")
+    def test_delete_with_limit(self):
+        """DELETE with LIMIT should indicate limited write scope."""
+        sql = """
+        DELETE FROM sessions ORDER BY created_at LIMIT 10
+        """
+        r, w = parse_sql_access(sql)
+        assert "sessions" in w and "sessions" in r
+        # TODO: track LIMIT as write scope limiter
+
+    @pytest.mark.xfail(reason="SELECT with LIMIT/OFFSET not tracked")
+    def test_select_with_limit_offset(self):
+        """SELECT with LIMIT/OFFSET should be recognized."""
+        sql = """
+        SELECT * FROM orders ORDER BY id LIMIT 20 OFFSET 100
+        """
+        r, w = parse_sql_access(sql)
+        assert r == {"orders"}
+        # TODO: track pagination parameters
+
+
+class TestOuterJoinWhereSemanticsToodo:
+    """Tests for WHERE after OUTER JOIN (changes join type semantics).
+
+    Expected: Parser should recognize that WHERE after LEFT JOIN can change semantics to INNER.
+    Current: Treated as standard LEFT JOIN with WHERE.
+
+    Priority: HIGH (subtle but important semantic change)
+    Phase: 6
+    Effort: ~20 lines + 3 tests
+    """
+
+    @pytest.mark.xfail(reason="LEFT JOIN with WHERE semantics not distinguished")
+    def test_left_join_with_where_on_outer_table(self):
+        """WHERE on right table after LEFT JOIN converts to INNER JOIN semantics."""
+        sql = """
+        SELECT * FROM orders o
+        LEFT JOIN users u ON o.user_id = u.id
+        WHERE u.id IS NOT NULL
+        """
+        r, w = parse_sql_access(sql)
+        # Should recognize that WHERE u.id IS NOT NULL makes this effectively INNER
+        assert r == {"orders", "users"}
+        # TODO: mark that WHERE changed join type
+
+
+class TestLateralJoinsTodo:
+    """Tests for PostgreSQL LATERAL joins (dependent subqueries).
+
+    Expected: LATERAL subqueries should be marked as correlated.
+    Current: Would fall through to endpoint-level or be misclassified.
+
+    Priority: MEDIUM-HIGH (PostgreSQL specific)
+    Phase: 6
+    Effort: ~15 lines + 2 tests
+    """
+
+    @pytest.mark.xfail(reason="LATERAL joins not recognized as correlated")
+    def test_lateral_join_with_correlation(self):
+        """LATERAL subquery should be marked as dependent on outer table."""
+        sql = """
+        SELECT * FROM users u,
+        LATERAL (SELECT * FROM orders WHERE user_id = u.id LIMIT 1) o
+        """
+        r, w = parse_sql_access(sql)
+        assert "users" in r and "orders" in r
+        # TODO: mark LATERAL correlation
+
+
+class TestUpsertEdgeCasesTodo:
+    """Tests for advanced UPSERT (INSERT ... ON CONFLICT) scenarios.
+
+    Expected: CONFLICT clauses with WHERE should be recognized for precision.
+    Current: Conservative "always write".
+
+    Priority: MEDIUM-HIGH (conditional writes)
+    Phase: 6
+    Effort: ~25 lines + 6 tests
+    """
+
+    @pytest.mark.xfail(reason="ON CONFLICT DO UPDATE with WHERE not optimized")
+    def test_insert_on_conflict_do_update_with_where(self):
+        """ON CONFLICT DO UPDATE with WHERE should limit write scope."""
+        sql = """
+        INSERT INTO users (id, name) VALUES (?, ?)
+        ON CONFLICT (id) DO UPDATE SET name = ? WHERE is_active = true
+        """
+        r, w = parse_sql_access(sql)
+        assert w == {"users"}
+        # TODO: mark conditional update scope
+
+    @pytest.mark.xfail(reason="ON CONFLICT DO NOTHING optimization missing")
+    def test_insert_on_conflict_do_nothing(self):
+        """ON CONFLICT DO NOTHING is actually only INSERT (no UPDATE)."""
+        sql = """
+        INSERT INTO unique_tokens (token, user_id) VALUES (?, ?)
+        ON CONFLICT (token) DO NOTHING
+        """
+        r, w = parse_sql_access(sql)
+        assert w == {"unique_tokens"}
+        # TODO: mark DO NOTHING as read-only conflict check
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
