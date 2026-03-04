@@ -37,15 +37,11 @@ except ImportError:
 # same package, but guard with try/except for robustness.
 try:
     from frontrun._sql_params import resolve_parameters
-    from frontrun._sql_predicates import EqualityPredicate, extract_equality_predicates
+    from frontrun._sql_predicates import extract_equality_predicates
 except ImportError:
 
     def resolve_parameters(sql: str, parameters: Any, paramstyle: str) -> str:  # type: ignore[misc]
         return sql
-
-    class EqualityPredicate:  # type: ignore[no-redef]
-        column: str
-        value: str
 
     def extract_equality_predicates(sql: str) -> list:  # type: ignore[misc]
         return []
@@ -112,7 +108,7 @@ def _intercept_execute(
             # params) and multi-table queries (can't attribute columns to
             # tables without aliases).
             predicates: list = []
-            if len(all_tables) == 1 and not is_executemany:
+            if len(all_tables) == 1 and not is_executemany and " where " in operation.lower():
                 if parameters is not None:
                     resolved = resolve_parameters(operation, parameters, paramstyle)
                     predicates = extract_equality_predicates(resolved)
@@ -300,11 +296,13 @@ def patch_sql() -> None:
     _patch_sqlite3()
 
     # Pure-Python drivers can be patched directly
-    for module_path, class_name, _paramstyle_module in _PYTHON_CURSOR_TARGETS:
+    for module_path, class_name, paramstyle_module in _PYTHON_CURSOR_TARGETS:
         try:
             mod = importlib.import_module(module_path)
             cls = getattr(mod, class_name)
-            _patch_class_methods(cls, "format")
+            driver_mod = importlib.import_module(paramstyle_module)
+            paramstyle = getattr(driver_mod, "paramstyle", "format")
+            _patch_class_methods(cls, paramstyle)
         except (ImportError, AttributeError):
             pass  # driver not installed — skip silently
 
