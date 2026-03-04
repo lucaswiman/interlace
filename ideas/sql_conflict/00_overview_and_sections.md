@@ -89,11 +89,11 @@
 | Phase | Goal | Algorithms | Status | Est. Code |
 |-------|------|-----------|--------|-----------|
 | **1** | Table-level detection (MVP) | 1, 2, 3, 4 | ✅ Done | ~300 lines |
-| **2** | Row-level detection (precision) | 1.5, 5 | ⚙ In Progress (1.5, 5 done; integration pending) | ~270 lines |
-| **3** | Wire protocol parsing (C-level) | 6 | ✓ Designed | ~80 lines |
+| **2** | Row-level detection (precision) | 1.5, 5 | ✅ Done | ~270 lines |
+| **3** | Wire protocol parsing (C-level) | 6 | ✅ Done | ~210 lines |
 | **4** | Isolation anomaly classification | — | ✓ Designed | ~200 lines |
 
-**Next step:** Integrate Algorithm 5 predicate extraction into the cursor patching execute wrapper (wire row-level ObjectIds into `_intercept_execute`), then add integration tests (`test_integration_orm.py`).
+**Next step:** Phase 4 — Anomaly classification (DSG construction + cycle classification for lost update, write skew, dirty read, etc.).
 
 ---
 
@@ -166,18 +166,20 @@ Algorithm 6 (Wire Protocol Parsing)
   - [x] `pk_predicates_disjoint()` — row disjointness check
   - [x] Tests: `tests/test_sql_predicates.py` (41 tests)
 
-- [ ] Integrate row-level predicates into `_sql_cursor.py` `_intercept_execute()`
-  - [ ] Wire `extract_equality_predicates()` + `pk_predicates_disjoint()` into ObjectId derivation
+- [x] Integrate row-level predicates into `_sql_cursor.py` `_intercept_execute()`
+  - [x] Wire `extract_equality_predicates()` + `resolve_parameters()` + `_sql_resource_id()` into ObjectId derivation
+  - [x] Integration tests: `tests/test_integration_orm.py` (ORM lost-update tests)
 
 ### Phase 3: Wire Protocol Parsing
 
-- [ ] Create `crates/io/src/sql_extract.rs` (~80 lines)
-  - [ ] `extract_pg_query()` — PostgreSQL protocol parsing
-  - [ ] Support Simple Query ('Q') and Parse ('P') messages
+- [x] Create `crates/io/src/sql_extract.rs` (~210 lines)
+  - [x] `extract_pg_query()` — PostgreSQL protocol parsing
+  - [x] Support Simple Query ('Q') and Parse ('P') messages
+  - [x] 16 unit tests
 
-- [ ] Modify `crates/io/src/lib.rs`
-  - [ ] Integrate SQL extraction into `send()` hook
-  - [ ] Write SQL-enriched events to pipe
+- [x] Modify `crates/io/src/lib.rs`
+  - [x] Integrate SQL extraction into `send()` hook (Linux + macOS)
+  - [x] Write SQL-enriched `sql_write` events to pipe when SQL is detected
 
 ### Phase 4: Anomaly Classification (Deferred)
 
@@ -206,7 +208,8 @@ Algorithm 6 (Wire Protocol Parsing)
 | `dpor.py` | `frontrun/` | +6 | ✅ Done | `patch_sql`/`unpatch_sql` + `is_tid_suppressed` in bridge |
 | `bytecode.py` | `frontrun/` | +3 | ✅ Done | `patch_sql`/`unpatch_sql` in BytecodeShuffler |
 | `pyproject.toml` | root | +3 | ✅ Done | Add `sqlglot>=20.0` to `[sql]` extra |
-| `sql_extract.rs` | `crates/io/src/` | ~80 | ⬜ Phase 3 | Wire protocol parsing |
+| `test_integration_orm.py` | `tests/` | ~265 | ✅ Done | ORM lost-update integration tests |
+| `sql_extract.rs` | `crates/io/src/` | ~210 | ✅ Done | Wire protocol parsing (16 tests) |
 | `_sql_anomaly.py` | `frontrun/` | ~200 | ⬜ Phase 4 | Anomaly classification |
 
 ---

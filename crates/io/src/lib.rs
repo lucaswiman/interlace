@@ -31,6 +31,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Mutex;
 
+mod sql_extract;
+
 #[cfg(not(target_os = "macos"))]
 use libc::{c_char, RTLD_NEXT};
 #[cfg(not(target_os = "macos"))]
@@ -507,6 +509,21 @@ fn report_io(fd: c_int, kind: &str) {
     log_event(kind, &resource, fd);
 }
 
+/// Try to extract SQL from a PostgreSQL wire-protocol `send()` buffer.
+/// Reports a `sql_write` event if SQL is found, otherwise falls back
+/// to the standard `report_io(fd, "write")` path.
+///
+/// # Safety
+/// `buf` must point to at least `len` valid bytes.
+unsafe fn report_send_buf(fd: c_int, buf: *const c_void, len: size_t) {
+    let buf_slice = std::slice::from_raw_parts(buf as *const u8, len);
+    if let Some(sql) = sql_extract::extract_pg_query(buf_slice) {
+        log_event("sql_write", sql, fd);
+    } else {
+        report_io(fd, "write");
+    }
+}
+
 fn log_event(kind: &str, resource: &str, fd: c_int) {
     #[cfg(target_os = "macos")]
     let pid = unsafe { raw_syscall::getpid() };
@@ -792,7 +809,7 @@ mod linux_intercept {
         };
 
         ensure_fd_mapped(fd);
-        report_io(fd, "write");
+        report_send_buf(fd, buf, len);
         real(fd, buf, len, flags)
     }
 
@@ -1097,7 +1114,7 @@ mod macos_intercept {
     ) -> ssize_t {
         if READY.load(Ordering::Acquire) {
             ensure_fd_mapped(fd);
-            report_io(fd, "write");
+            report_send_buf(fd, buf, len);
         }
         raw_syscall::send(fd, buf, len, flags)
     }
