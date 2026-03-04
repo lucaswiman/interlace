@@ -41,3 +41,158 @@ Implementation split into modular files (original plan called for single `_sql_d
 Files:
 - `frontrun/_sql_anomaly.py` — new, ~200 lines (DSG construction + cycle classification)
 - `frontrun/common.py` — extend `InterleavingResult` with anomaly metadata
+
+---
+
+## Phase 5+: Advanced SQL Features (TODO)
+
+### TODO: SELECT FOR UPDATE & Lock Semantics (Phase 5)
+**Priority:** Medium (common in ORMs using explicit locking)
+**Scope:**
+- Extract `FOR UPDATE` / `FOR SHARE` intent in `_sql_parsing.py`
+- Return `lock_intent: Literal['NONE', 'UPDATE', 'SHARE']` from `parse_sql_access()`
+- Modify `_sql_cursor.py` to track lock ownership per ObjectId
+- Update DPOR suppression logic: exclusive lock blocks all, shared lock blocks exclusives
+
+**Estimated effort:** ~50 lines + 20 tests
+
+**Files to modify:**
+- `frontrun/_sql_parsing.py` — add `lock_intent` to return tuple
+- `frontrun/_sql_cursor.py` — track lock acquisition/release per ObjectId
+- `tests/test_sql_parsing.py` — add tests for `SELECT FOR UPDATE` / `FOR SHARE`
+
+---
+
+### TODO: LOCK TABLE Statement (Phase 5)
+**Priority:** Low (rarely used in Python applications)
+**Scope:**
+- Extend regex fast-path to detect `LOCK TABLE ... IN ... MODE`
+- Parse table name + lock mode (EXCLUSIVE, SHARED, etc.)
+- Integrate with lock semantics from Phase 5
+
+**Estimated effort:** ~30 lines + 15 tests
+
+**Files to modify:**
+- `frontrun/_sql_parsing.py` — add `LOCK TABLE` detection + parsing
+- `tests/test_sql_parsing.py` — add tests for LOCK TABLE variants
+
+---
+
+### TODO: Advisory Lock Detection (Phase 5)
+**Priority:** Low-Medium (PostgreSQL-specific, used in some applications)
+**Scope:**
+- Extend `crates/io/src/sql_extract.rs` to recognize advisory lock function calls
+- Parse function name + lock ID from PostgreSQL protocol
+- Map advisory lock IDs to DPOR ObjectIds: `advisory_lock:{lock_id}`
+- Integrate with lock semantics from Phase 5
+
+**Estimated effort:** ~100 lines (Rust) + 30 tests
+
+**Files to modify:**
+- `crates/io/src/sql_extract.rs` — add advisory lock parsing
+- `crates/io/src/lib.rs` — emit `advisory_lock:{id}` as ObjectId
+- `tests/` — add integration tests with `pg_advisory_lock()`
+
+---
+
+### TODO: UNION / INTERSECT / EXCEPT Optimization (Phase 5)
+**Priority:** Low (easy to implement, low impact)
+**Scope:**
+- Add explicit handlers for `exp.Union`, `exp.Intersect`, `exp.Except` in `_sqlglot_parse()`
+- Recognize as read-only compositions (all branches are selects)
+- Return all tables from all branches as reads (not writes)
+
+**Estimated effort:** ~20 lines + 8 tests
+
+**Files to modify:**
+- `frontrun/_sql_parsing.py` — add `Union` / `Intersect` / `Except` handlers
+- `tests/test_sql_parsing.py` — add tests for set operations
+
+---
+
+### TODO: Cross-Table Foreign Key Analysis (Phase 6)
+**Priority:** Medium (affects multi-table transactions)
+**Scope:**
+- Schema introspection: query `information_schema.referential_constraints` (PostgreSQL, MySQL) or equivalent
+- Build FK dependency graph on first connection: `{orders → users, shipments → orders}`
+- Cache in thread-local storage
+- At conflict detection: if Op1 touches T1, Op2 touches T2, and path T1 → T2 exists, mark as dependent
+
+**Estimated effort:** ~150 lines + 25 tests
+
+**Files to modify:**
+- `frontrun/_sql_cursor.py` — add schema introspection + FK caching
+- `frontrun/dpor.py` — integrate FK dependencies into conflict detection
+- `tests/test_integration_orm.py` — add FK-related test cases
+
+---
+
+### TODO: Transaction Grouping (Phase 6)
+**Priority:** Medium (optimization, improves search space)
+**Scope:**
+- Track `BEGIN` / `START TRANSACTION` / `COMMIT` / `ROLLBACK` / `SAVEPOINT`
+- Group SQL operations into transaction-level ObjectIds
+- Modify DPOR suppression to suppress entire transactions atomically
+- Requires changes to DPOR engine (grouping logic)
+
+**Estimated effort:** ~80 lines (Python) + 20 tests + Rust engine changes
+
+**Files to modify:**
+- `frontrun/_sql_cursor.py` — add transaction boundary tracking
+- `crates/dpor/src/engine.rs` — add transaction-level grouping
+- `tests/test_integration_orm.py` — add transaction-specific tests
+
+---
+
+### TODO: Stored Procedure Analysis (Phase 7, Low Priority)
+**Priority:** Very Low (rare in Python; most code uses direct SQL)
+**Scope:**
+- Intercept `CREATE PROCEDURE` / `CREATE FUNCTION` statements
+- Parse their bodies and extract table access
+- Cache: `{sp_name → {read_tables, write_tables}}`
+- At `CALL` or function invocation, use cached access instead of endpoint-level
+
+**Estimated effort:** ~200 lines + 40 tests
+
+**Challenge:** Dynamic SQL in procedures (string concatenation) is opaque; may require heuristics or user hints.
+
+---
+
+### TODO: Temporal Table Support (Phase 7, Very Low Priority)
+**Priority:** Very Low (rare; specialized SQL)
+**Scope:**
+- Detect `FOR SYSTEM_TIME` clauses in SELECT
+- Extract temporal predicate (`AS OF`, `BETWEEN`, `ALL`, etc.)
+- Add temporal dimension to ObjectIds: `table:pk:time_bucket`
+- Conflict detection: historical queries don't conflict with current writes
+
+**Estimated effort:** ~40 lines + 10 tests
+
+---
+
+### TODO: Generated & Computed Columns (Phase 7, Very Low Priority)
+**Priority:** Very Low (informational only; minimal impact)
+**Scope:**
+- Schema introspection: query `information_schema.columns` for `GENERATED` clause
+- Mark computed columns in ObjectId derivation
+- Exclude from row-level predicate matching (can't be set by user)
+
+**Estimated effort:** ~30 lines + 5 tests
+
+---
+
+## Summary: TODO Effort & Priority
+
+| Phase | Task | Priority | Effort | Impact | Status |
+|-------|------|----------|--------|--------|--------|
+| 5 | SELECT FOR UPDATE semantics | 🟡 Medium | 50 lines + 20 tests | Correct lock modeling | **TODO** |
+| 5 | LOCK TABLE statement | 🔴 Low | 30 lines + 15 tests | Rare; explicit locking | **TODO** |
+| 5 | Advisory lock detection | 🟡 Low-Medium | 100 lines (Rust) + 30 tests | PostgreSQL-specific | **TODO** |
+| 5 | UNION/INTERSECT/EXCEPT | 🔴 Low | 20 lines + 8 tests | Easy; low impact | **TODO** |
+| 6 | Foreign key dependencies | 🟡 Medium | 150 lines + 25 tests | Multi-table correctness | **TODO** |
+| 6 | Transaction grouping | 🟡 Medium | 80 lines + 20 tests | Search space optimization | **TODO** |
+| 7 | Stored procedures | 🔴 Very Low | 200 lines + 40 tests | Rare in Python ORMs | **TODO** |
+| 7 | Temporal tables | 🔴 Very Low | 40 lines + 10 tests | Specialized SQL | **TODO** |
+| 7 | Computed columns | 🔴 Very Low | 30 lines + 5 tests | Informational | **TODO** |
+
+**Legend:** 🟢 High-impact | 🟡 Medium-impact | 🔴 Low-impact
