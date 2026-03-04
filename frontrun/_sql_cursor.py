@@ -123,12 +123,27 @@ def _make_traced_cursor_class(base_cursor_cls: type) -> type:
 
 
 def _make_traced_sqlite3_connection_class() -> type:
-    """Return a sqlite3.Connection subclass whose cursor() uses TracedCursor."""
+    """Return a sqlite3.Connection subclass whose cursor() uses TracedCursor.
+
+    On Python 3.14+, ``Connection.execute()`` creates cursors in C without
+    calling ``self.cursor()``, so we must also override ``execute`` and
+    ``executemany`` to route through the traced cursor.
+    """
     _traced_cursor_cls = _make_traced_cursor_class(sqlite3.Cursor)
 
     class TracedConnection(sqlite3.Connection):
         def cursor(self, factory: type = _traced_cursor_cls) -> sqlite3.Cursor:  # type: ignore[override]
             return super().cursor(factory)
+
+        def execute(self, sql: Any, parameters: Any = (), /) -> sqlite3.Cursor:  # type: ignore[override]
+            cur = self.cursor()
+            cur.execute(sql, parameters)
+            return cur
+
+        def executemany(self, sql: Any, parameters: Any = (), /) -> sqlite3.Cursor:  # type: ignore[override]
+            cur = self.cursor()
+            cur.executemany(sql, parameters)
+            return cur
 
     TracedConnection.__name__ = "TracedConnection"
     TracedConnection.__qualname__ = "TracedConnection"
