@@ -1,0 +1,128 @@
+"""SQL parameter resolution for all five PEP 249 paramstyles.
+
+Substitutes placeholder markers (``?``, ``:name``, ``%s``, etc.) with SQL
+literal representations of the corresponding Python values.  The resolved
+SQL is used only for AST analysis (predicate extraction) — it is never
+sent to a database.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# Value conversion
+# ---------------------------------------------------------------------------
+
+
+def _python_to_sql_literal(value: Any) -> str:
+    """Convert a Python value to a SQL literal for AST analysis.
+
+    The result must be syntactically valid SQL that sqlglot can parse.
+    It does NOT need to be safe for execution.
+    """
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return f"X'{bytes(value).hex()}'"
+    # Default: string literal (double internal quotes)
+    s = str(value).replace("'", "''")
+    return f"'{s}'"
+
+
+# ---------------------------------------------------------------------------
+# Precompiled placeholder patterns
+# ---------------------------------------------------------------------------
+
+# Negative lookbehinds prevent matching escaped sequences
+# (:: in PG casts, %% in psycopg2 literal-percent escapes).
+_RE_QMARK = re.compile(r"\?")
+_RE_NUMERIC = re.compile(r":(\d+)")
+_RE_NAMED = re.compile(r"(?<!:):([A-Za-z_]\w*)")
+_RE_FORMAT = re.compile(r"(?<!%)%s")
+_RE_PYFORMAT = re.compile(r"(?<!%)%\(([^)]+)\)s")
+
+
+# ---------------------------------------------------------------------------
+# Resolution functions
+# ---------------------------------------------------------------------------
+
+
+def resolve_parameters(sql: str, parameters: Any, paramstyle: str) -> str:
+    """Substitute parameter placeholders with SQL literal values.
+
+    Supports all five PEP 249 paramstyles.  Returns the original SQL
+    unchanged if resolution fails (wrong paramstyle, missing params, etc.).
+    """
+    if parameters is None:
+        return sql
+    try:
+        if paramstyle == "qmark":
+            return _resolve_positional(sql, parameters, _RE_QMARK)
+        if paramstyle == "numeric":
+            return _resolve_numeric(sql, parameters)
+        if paramstyle == "named":
+            return _resolve_named(sql, parameters)
+        if paramstyle in ("format", "pyformat"):
+            # Detect actual style from parameter type:
+            # dict → %(name)s, sequence → %s
+            if isinstance(parameters, dict):
+                return _resolve_pyformat(sql, parameters)
+            return _resolve_positional(sql, parameters, _RE_FORMAT)
+    except (IndexError, KeyError, TypeError, ValueError):
+        pass
+    return sql
+
+
+def _resolve_positional(sql: str, parameters: Any, pattern: re.Pattern[str]) -> str:
+    """Replace positional placeholders (? or %s) in left-to-right order."""
+    params = tuple(parameters)
+    idx = 0
+
+    def replacer(m: re.Match[str]) -> str:
+        nonlocal idx
+        if idx >= len(params):
+            return m.group(0)  # more placeholders than params → leave as-is
+        val = _python_to_sql_literal(params[idx])
+        idx += 1
+        return val
+
+    return pattern.sub(replacer, sql)
+
+
+def _resolve_numeric(sql: str, parameters: Any) -> str:
+    """Replace :N placeholders (1-based index)."""
+    params = tuple(parameters)
+
+    def replacer(m: re.Match[str]) -> str:
+        idx = int(m.group(1)) - 1
+        return _python_to_sql_literal(params[idx])
+
+    return _RE_NUMERIC.sub(replacer, sql)
+
+
+def _resolve_named(sql: str, parameters: Any) -> str:
+    """Replace :name placeholders with named parameters."""
+    params = dict(parameters)
+
+    def replacer(m: re.Match[str]) -> str:
+        return _python_to_sql_literal(params[m.group(1)])
+
+    return _RE_NAMED.sub(replacer, sql)
+
+
+def _resolve_pyformat(sql: str, parameters: Any) -> str:
+    """Replace %(name)s placeholders with named parameters."""
+    params = dict(parameters)
+
+    def replacer(m: re.Match[str]) -> str:
+        return _python_to_sql_literal(params[m.group(1)])
+
+    return _RE_PYFORMAT.sub(replacer, sql)
