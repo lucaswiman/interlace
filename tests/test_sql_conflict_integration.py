@@ -110,7 +110,7 @@ def _make_db_with_tables(*table_names: str) -> sqlite3.Connection:
     Each table is a simple ``(id INTEGER PRIMARY KEY, value INTEGER)`` schema.
     Must be called after ``patch_sql()`` so the connection is traced.
     """
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     # Use the raw cursor execute to avoid polluting event logs during setup.
     orig_execute = sqlite3.Cursor.execute
     cur = conn.cursor()
@@ -139,10 +139,10 @@ class TestDifferentTablesIndependent:
         set_io_reporter(log)
         patch_sql()
 
-        conn_a = sqlite3.connect(":memory:")
+        conn_a = sqlite3.connect(":memory:", check_same_thread=False)
         conn_a.execute("CREATE TABLE accounts (id INTEGER, balance INTEGER)")
 
-        conn_b = sqlite3.connect(":memory:")
+        conn_b = sqlite3.connect(":memory:", check_same_thread=False)
         conn_b.execute("CREATE TABLE products (id INTEGER, stock INTEGER)")
 
         log.clear()
@@ -202,10 +202,10 @@ class TestDifferentTablesIndependent:
         shared_results: dict[str, list[tuple[str, str]]] = {"a": [], "b": []}
         lock = threading.Lock()
 
-        conn_a = sqlite3.connect(":memory:")
+        conn_a = sqlite3.connect(":memory:", check_same_thread=False)
         conn_a.execute("CREATE TABLE orders (id INTEGER, total INTEGER)")
 
-        conn_b = sqlite3.connect(":memory:")
+        conn_b = sqlite3.connect(":memory:", check_same_thread=False)
         conn_b.execute("CREATE TABLE inventory (id INTEGER, qty INTEGER)")
 
         def thread_a() -> None:
@@ -246,10 +246,10 @@ class TestDifferentTablesIndependent:
         """Real SQL executes correctly in both threads with no interference."""
         patch_sql()
 
-        conn_a = sqlite3.connect(":memory:")
+        conn_a = sqlite3.connect(":memory:", check_same_thread=False)
         conn_a.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
 
-        conn_b = sqlite3.connect(":memory:")
+        conn_b = sqlite3.connect(":memory:", check_same_thread=False)
         conn_b.execute("CREATE TABLE sessions (id INTEGER PRIMARY KEY, token TEXT)")
 
         errors: list[Exception] = []
@@ -316,7 +316,7 @@ class TestSameTableWriteWriteConflict:
         """Both threads INSERT into the same table → both report sql:items write."""
         patch_sql()
 
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
         conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
 
         results: dict[str, list[tuple[str, str]]] = {"a": [], "b": []}
@@ -367,7 +367,7 @@ class TestSameTableWriteWriteConflict:
         """Both threads UPDATE the same table → shared resource ID sql:counters."""
         patch_sql()
 
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
         orig_execute = sqlite3.Cursor.execute
         cur = conn.cursor()
         orig_execute(cur, "CREATE TABLE counters (id INTEGER PRIMARY KEY, val INTEGER)")
@@ -417,7 +417,7 @@ class TestSameTableWriteWriteConflict:
         """Two writes to the same table produce identical resource IDs — a conflict."""
         patch_sql()
 
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
         conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, data TEXT)")
 
         all_writes: list[str] = []
@@ -446,7 +446,7 @@ class TestSameTableWriteWriteConflict:
         """Both threads DELETE from the same table report write to sql:logs."""
         patch_sql()
 
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
         orig_execute = sqlite3.Cursor.execute
         cur = conn.cursor()
         orig_execute(cur, "CREATE TABLE logs (id INTEGER PRIMARY KEY, msg TEXT)")
@@ -503,7 +503,7 @@ class TestSameTableReadReadIndependent:
         """Both threads SELECT from the same table → both report sql:products read."""
         patch_sql()
 
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
         conn.execute("CREATE TABLE products (id INTEGER, name TEXT, price REAL)")
         conn.execute("INSERT INTO products VALUES (1, 'Widget', 9.99)")
         conn.execute("INSERT INTO products VALUES (2, 'Gadget', 19.99)")
@@ -555,7 +555,7 @@ class TestSameTableReadReadIndependent:
         """Read-only threads see correct data despite concurrent access."""
         patch_sql()
 
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
         conn.execute("CREATE TABLE catalog (id INTEGER PRIMARY KEY, item TEXT)")
         conn.execute("INSERT INTO catalog VALUES (1, 'alpha')")
         conn.execute("INSERT INTO catalog VALUES (2, 'beta')")
@@ -594,7 +594,7 @@ class TestSameTableReadReadIndependent:
         """Many concurrent readers all report read access — same resource, no conflict."""
         patch_sql()
 
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
         conn.execute("CREATE TABLE stats (id INTEGER, count INTEGER)")
         conn.execute("INSERT INTO stats VALUES (1, 42)")
         conn.commit()
@@ -644,7 +644,7 @@ class TestReadWriteConflict:
         """Reader and writer both report the same resource ID — they conflict."""
         patch_sql()
 
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
         conn.execute("CREATE TABLE balances (id INTEGER PRIMARY KEY, amount INTEGER)")
         conn.execute("INSERT INTO balances VALUES (1, 1000)")
         conn.commit()
@@ -687,7 +687,7 @@ class TestReadWriteConflict:
         """Reader and writer share the resource ID — DPOR would see a conflict."""
         patch_sql()
 
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
         conn.execute("CREATE TABLE queue (id INTEGER PRIMARY KEY, task TEXT, done INTEGER)")
         conn.execute("INSERT INTO queue VALUES (1, 'process_a', 0)")
         conn.execute("INSERT INTO queue VALUES (2, 'process_b', 0)")
@@ -736,7 +736,7 @@ class TestReadWriteConflict:
         """INSERT and SELECT on the same table both report the same table resource."""
         patch_sql()
 
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
         conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT)")
         conn.execute("INSERT INTO messages VALUES (1, 'hello')")
         conn.commit()
@@ -785,7 +785,7 @@ class TestReadWriteConflict:
         """Reader and writer execute correctly — no data corruption from patching."""
         patch_sql()
 
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
         conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value INTEGER)")
         conn.execute("INSERT INTO config VALUES ('threshold', 100)")
         conn.commit()
@@ -847,7 +847,7 @@ class TestMultiTableResourceIds:
         log = IOLog()
         set_io_reporter(log)
 
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
         conn.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT)")
         conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER, amount REAL)")
         conn.execute("INSERT INTO customers VALUES (1, 'Alice')")
@@ -873,13 +873,13 @@ class TestMultiTableResourceIds:
         """
         patch_sql()
 
-        conn_a = sqlite3.connect(":memory:")
+        conn_a = sqlite3.connect(":memory:", check_same_thread=False)
         conn_a.execute("CREATE TABLE users (id INTEGER, name TEXT)")
         conn_a.execute("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount REAL)")
         conn_a.execute("INSERT INTO users VALUES (1, 'Alice')")
         conn_a.execute("INSERT INTO orders VALUES (1, 1, 99.0)")
 
-        conn_b = sqlite3.connect(":memory:")
+        conn_b = sqlite3.connect(":memory:", check_same_thread=False)
         conn_b.execute("CREATE TABLE orders (id INTEGER, user_id INTEGER, amount REAL)")
         conn_b.execute("CREATE TABLE shipments (id INTEGER, order_id INTEGER, status TEXT)")
         conn_b.execute("INSERT INTO orders VALUES (1, 1, 99.0)")
@@ -938,7 +938,7 @@ class TestMultiTableResourceIds:
         """Parameterized INSERT statements report the same table resource regardless of row values."""
         patch_sql()
 
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
         conn.execute("CREATE TABLE audit (id INTEGER PRIMARY KEY, action TEXT, ts INTEGER)")
 
         all_write_resources: list[str] = []

@@ -68,7 +68,7 @@ def is_tid_suppressed(tid: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _sql_resource_id(table: str, predicates: list) -> str:
+def _sql_resource_id(table: str, predicates: list[Any]) -> str:
     """Build a resource ID from table name and optional predicates."""
     if not predicates:
         return f"sql:{table}"
@@ -107,7 +107,7 @@ def _intercept_execute(
             # operations.  Skip for executemany (each row may have different
             # params) and multi-table queries (can't attribute columns to
             # tables without aliases).
-            predicates: list = []
+            predicates: list[Any] = []
             if len(all_tables) == 1 and not is_executemany and " where " in operation.lower():
                 if parameters is not None:
                     resolved = resolve_parameters(operation, parameters, paramstyle)
@@ -167,11 +167,15 @@ def _make_traced_cursor_class(base_cursor_cls: type, paramstyle: str = "format")
 
         def execute(self, operation: Any, parameters: Any = None, /, **kwargs: Any) -> Any:  # type: ignore[override]
             original = _ORIGINAL_METHODS.get(_execute_key, base_cursor_cls.execute)
-            return _intercept_execute(original, self, operation, parameters, is_executemany=False, paramstyle=self._cursor_paramstyle)
+            return _intercept_execute(
+                original, self, operation, parameters, is_executemany=False, paramstyle=self._cursor_paramstyle
+            )
 
         def executemany(self, operation: Any, parameters: Any = None, /, **kwargs: Any) -> Any:  # type: ignore[override]
             original = _ORIGINAL_METHODS.get(_executemany_key, base_cursor_cls.executemany)
-            return _intercept_execute(original, self, operation, parameters, is_executemany=True, paramstyle=self._cursor_paramstyle)
+            return _intercept_execute(
+                original, self, operation, parameters, is_executemany=True, paramstyle=self._cursor_paramstyle
+            )
 
     TracedCursor.__name__ = f"Traced{base_cursor_cls.__name__}"
     TracedCursor.__qualname__ = f"Traced{base_cursor_cls.__qualname__}"
@@ -267,7 +271,9 @@ def _patch_class_methods(cls: type, paramstyle: str) -> None:
             _is_executemany = mname == "executemany"
 
             def _patched(self: Any, operation: Any, parameters: Any = None, *args: Any, **kwargs: Any) -> Any:
-                return _intercept_execute(orig, self, operation, parameters, is_executemany=_is_executemany, paramstyle=ps)
+                return _intercept_execute(
+                    orig, self, operation, parameters, is_executemany=_is_executemany, paramstyle=ps
+                )
 
             _patched.__name__ = mname
             return _patched
