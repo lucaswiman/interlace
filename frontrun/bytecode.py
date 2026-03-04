@@ -53,6 +53,7 @@ from frontrun._io_detection import (
     set_io_reporter,
     unpatch_io,
 )
+from frontrun._sql_cursor import patch_sql, unpatch_sql
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import should_trace_file as _should_trace_file
@@ -221,11 +222,13 @@ class BytecodeShuffler:
         if not self.detect_io:
             return
         patch_io()
+        patch_sql()
         self._io_patched = True
 
     def _unpatch_io(self):
         """Restore original socket and open implementations."""
         if self._io_patched:
+            unpatch_sql()
             unpatch_io()
             self._io_patched = False
 

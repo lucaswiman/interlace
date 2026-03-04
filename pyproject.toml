@@ -59,6 +59,9 @@ dev = [
     "ruff>=0.1.0",
     "pyright>=1.1.0",
 ]
+sql = [
+    "sqlglot>=20.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
