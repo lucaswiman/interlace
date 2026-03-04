@@ -59,12 +59,45 @@ Row-level predicate extraction (Algorithm 5). ~100 lines.
 - `pk_predicates_disjoint()` — O(k) check for different PK values on shared columns
 - Tests: `tests/test_sql_predicates.py` (~230 lines, 41 tests)
 
+## Completed (2026-03-04, cont.)
+
+### `frontrun/_sql_cursor.py` (modify) — ✅
+
+Integrated row-level predicate extraction into `_intercept_execute()`:
+- Added imports for `resolve_parameters` and `extract_equality_predicates` (with try/except fallbacks)
+- Added `_sql_resource_id()` helper to build resource IDs with optional predicates
+- Extended `_intercept_execute()` with `is_executemany` and `paramstyle` keyword args
+- For single-table non-executemany queries: resolves parameters → extracts predicates → includes in resource ID
+- Updated `_make_traced_cursor_class()` to accept and propagate `paramstyle`
+- Updated all patching functions to pass correct paramstyle (qmark for sqlite3, pyformat for psycopg2, format for pymysql)
+
+### `tests/test_integration_orm.py` (new file) — ✅
+
+ORM lost-update integration tests (~265 lines). Requires SQLAlchemy + PostgreSQL.
+- `TestOrmTraceMarkers` — deterministic reproduction via trace markers
+- `TestOrmBytecodeExploration` — automatic detection via random bytecode schedules
+- `TestOrmDpor` — systematic exploration via DPOR + LD_PRELOAD
+- `TestOrmNaiveThreading` — demonstrates intermittent nature of the race
+
+### `crates/io/src/sql_extract.rs` (new file) — ✅
+
+PostgreSQL wire protocol SQL extraction (~210 lines, Algorithm 6).
+- `extract_pg_query()` — parses Simple Query ('Q') and Parse ('P') messages
+- 16 unit tests covering: valid messages, truncated headers/bodies, invalid UTF-8, non-query messages
+
+### `crates/io/src/lib.rs` (modify) — ✅
+
+Integrated SQL extraction into send() hook.
+- Added `mod sql_extract;` declaration
+- Linux `send()` hook: try SQL extraction before `report_io()`, emit `sql_write` event if SQL found
+- macOS `frontrun_send()` hook: same logic
+
 ## Remaining
 
-### `frontrun/_sql_cursor.py` (modify) — ⬜
+### `frontrun/_sql_anomaly.py` (new file) — ⬜ Phase 4
 
-Integrate row-level predicate extraction into `_intercept_execute()` to derive finer-grained ObjectIds when WHERE predicates are available.
+DSG construction + cycle classification for isolation anomaly detection.
 
-### `tests/test_integration_orm.py` (modify) — ⬜
+### `frontrun/common.py` (modify) — ⬜ Phase 4
 
-Add tests for table-level conflict reduction with real ORM/database.
+Extend `InterleavingResult` with anomaly metadata.

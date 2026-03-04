@@ -16,27 +16,23 @@ Implementation split into modular files (original plan called for single `_sql_d
 - `tests/test_sql_parsing.py` — ✅ 514 lines (91 tests)
 - `tests/test_sql_cursor.py` — ✅ 1236 lines (77 tests)
 
-## Phase 2: Row-Level Detection — ⚙ In Progress
+## Phase 2: Row-Level Detection — ✅ Done
 
 **Goal:** Two threads on the same table but different rows (identified by PK equality predicates) are independent. Parameterized queries are resolved before predicate extraction.
 
-Done:
 - `frontrun/_sql_params.py` — ✅ 128 lines (Algorithm 1.5: parameter resolution, all 5 PEP 249 paramstyles)
 - `frontrun/_sql_predicates.py` — ✅ ~100 lines (Algorithm 5: `EqualityPredicate`, `extract_equality_predicates()`, `can_use_row_level()`, `pk_predicates_disjoint()`)
+- `frontrun/_sql_cursor.py` — ✅ updated `_intercept_execute()` with row-level predicate integration (`resolve_parameters` + `extract_equality_predicates` + `_sql_resource_id`)
 - `tests/test_sql_params.py` — ✅ 856 lines (123 tests)
 - `tests/test_sql_predicates.py` — ✅ ~230 lines (41 tests)
+- `tests/test_integration_orm.py` — ✅ ~265 lines (ORM lost-update integration tests: trace markers, bytecode exploration, DPOR, naive threading)
 
-Remaining:
-- Integration of predicate extraction into cursor patching's `_intercept_execute` (wire row-level ObjectIds)
-- Integration tests (`tests/test_integration_orm.py`)
-
-## Phase 3: Wire Protocol Parsing
+## Phase 3: Wire Protocol Parsing — ✅ Done
 
 **Goal:** Catch C-level SQL (libpq `send()`) that bypasses DBAPI.
 
-Files:
-- `crates/io/src/sql_extract.rs` — new, ~80 lines (Algorithm 6)
-- `crates/io/src/lib.rs` — integrate SQL extraction into `send()` hook
+- `crates/io/src/sql_extract.rs` — ✅ ~210 lines (Algorithm 6: `extract_pg_query()` for Simple Query 'Q' and Parse 'P' messages, 16 unit tests)
+- `crates/io/src/lib.rs` — ✅ integrated SQL extraction into `send()` hook (both Linux LD_PRELOAD and macOS DYLD_INSERT_LIBRARIES)
 
 ## Phase 4: Anomaly Classification
 

@@ -33,6 +33,24 @@ except ImportError:
         return set(), set()
 
 
+# Try to import row-level predicate helpers.  These are always present in the
+# same package, but guard with try/except for robustness.
+try:
+    from frontrun._sql_params import resolve_parameters
+    from frontrun._sql_predicates import EqualityPredicate, extract_equality_predicates
+except ImportError:
+
+    def resolve_parameters(sql: str, parameters: Any, paramstyle: str) -> str:  # type: ignore[misc]
+        return sql
+
+    class EqualityPredicate:  # type: ignore[no-redef]
+        column: str
+        value: str
+
+    def extract_equality_predicates(sql: str) -> list:  # type: ignore[misc]
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Suppression infrastructure
 # ---------------------------------------------------------------------------
@@ -54,11 +72,31 @@ def is_tid_suppressed(tid: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _intercept_execute(original_method: Any, self: Any, operation: Any, parameters: Any = None) -> Any:
+def _sql_resource_id(table: str, predicates: list) -> str:
+    """Build a resource ID from table name and optional predicates."""
+    if not predicates:
+        return f"sql:{table}"
+    pred_key = tuple(sorted((p.column, p.value) for p in predicates))
+    return f"sql:{table}:{pred_key}"
+
+
+def _intercept_execute(
+    original_method: Any,
+    self: Any,
+    operation: Any,
+    parameters: Any = None,
+    *,
+    is_executemany: bool = False,
+    paramstyle: str = "format",
+) -> Any:
     """Intercept a single execute/executemany call.
 
     Parses *operation*, reports table accesses to the per-thread reporter,
     activates suppression, then delegates to *original_method*.
+
+    When *is_executemany* is False and the query touches exactly one table,
+    resolves *parameters* and extracts row-level equality predicates so that
+    the reported resource ID is finer-grained than plain ``sql:<table>``.
     """
     reporter = get_io_reporter()
     reported = False
@@ -67,10 +105,24 @@ def _intercept_execute(original_method: Any, self: Any, operation: Any, paramete
         read_tables, write_tables = parse_sql_access(operation)
         if read_tables or write_tables:
             reported = True
+            all_tables = read_tables | write_tables
+
+            # Row-level: resolve params → extract predicates for single-table
+            # operations.  Skip for executemany (each row may have different
+            # params) and multi-table queries (can't attribute columns to
+            # tables without aliases).
+            predicates: list = []
+            if len(all_tables) == 1 and not is_executemany:
+                if parameters is not None:
+                    resolved = resolve_parameters(operation, parameters, paramstyle)
+                    predicates = extract_equality_predicates(resolved)
+                else:
+                    predicates = extract_equality_predicates(operation)
+
             for table in read_tables:
-                reporter(f"sql:{table}", "read")
+                reporter(_sql_resource_id(table, predicates), "read")
             for table in write_tables:
-                reporter(f"sql:{table}", "write")
+                reporter(_sql_resource_id(table, predicates), "write")
 
     if reported:
         tid = threading.get_native_id()
@@ -96,26 +148,34 @@ def _intercept_execute(original_method: Any, self: Any, operation: Any, paramete
 # ---------------------------------------------------------------------------
 
 
-def _make_traced_cursor_class(base_cursor_cls: type) -> type:
+def _make_traced_cursor_class(base_cursor_cls: type, paramstyle: str = "format") -> type:
     """Return a subclass of *base_cursor_cls* that intercepts execute calls.
 
     The original methods are looked up from ``_ORIGINAL_METHODS`` at call time
     rather than captured at class creation.  This allows tests to swap out the
     stored original (e.g. to install a spy) and have the traced cursor pick up
     the new value transparently.
+
+    *paramstyle* is the PEP 249 paramstyle for the driver (e.g. ``"qmark"``
+    for sqlite3, ``"pyformat"`` for psycopg2, ``"format"`` for pymysql).
+    It is stored as a class attribute so that ``_intercept_execute`` can
+    resolve parameters before extracting row-level predicates.
     """
 
     _execute_key = (base_cursor_cls, "execute")
     _executemany_key = (base_cursor_cls, "executemany")
+    _paramstyle = paramstyle
 
     class TracedCursor(base_cursor_cls):  # type: ignore[valid-type]
+        _cursor_paramstyle: str = _paramstyle
+
         def execute(self, operation: Any, parameters: Any = None, /, **kwargs: Any) -> Any:  # type: ignore[override]
             original = _ORIGINAL_METHODS.get(_execute_key, base_cursor_cls.execute)
-            return _intercept_execute(original, self, operation, parameters)
+            return _intercept_execute(original, self, operation, parameters, is_executemany=False, paramstyle=self._cursor_paramstyle)
 
         def executemany(self, operation: Any, parameters: Any = None, /, **kwargs: Any) -> Any:  # type: ignore[override]
             original = _ORIGINAL_METHODS.get(_executemany_key, base_cursor_cls.executemany)
-            return _intercept_execute(original, self, operation, parameters)
+            return _intercept_execute(original, self, operation, parameters, is_executemany=True, paramstyle=self._cursor_paramstyle)
 
     TracedCursor.__name__ = f"Traced{base_cursor_cls.__name__}"
     TracedCursor.__qualname__ = f"Traced{base_cursor_cls.__qualname__}"
@@ -129,7 +189,7 @@ def _make_traced_sqlite3_connection_class() -> type:
     calling ``self.cursor()``, so we must also override ``execute`` and
     ``executemany`` to route through the traced cursor.
     """
-    _traced_cursor_cls = _make_traced_cursor_class(sqlite3.Cursor)
+    _traced_cursor_cls = _make_traced_cursor_class(sqlite3.Cursor, paramstyle="qmark")
 
     class TracedConnection(sqlite3.Connection):
         def cursor(self, factory: type = _traced_cursor_cls) -> sqlite3.Cursor:  # type: ignore[override]
@@ -173,7 +233,7 @@ def _patch_sqlite3() -> None:
     """Patch sqlite3.connect to inject TracedConnection factory."""
     orig_connect = sqlite3.connect
     traced_conn_cls = _make_traced_sqlite3_connection_class()
-    traced_cursor_cls = _make_traced_cursor_class(sqlite3.Cursor)
+    traced_cursor_cls = _make_traced_cursor_class(sqlite3.Cursor, paramstyle="qmark")
 
     def patched_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
         if "factory" not in kwargs:
@@ -207,14 +267,16 @@ def _patch_class_methods(cls: type, paramstyle: str) -> None:
         _ORIGINAL_METHODS[key] = original
         _orig = original
 
-        def _make_patched(orig: Any, mname: str) -> Any:
+        def _make_patched(orig: Any, mname: str, ps: str) -> Any:
+            _is_executemany = mname == "executemany"
+
             def _patched(self: Any, operation: Any, parameters: Any = None, *args: Any, **kwargs: Any) -> Any:
-                return _intercept_execute(orig, self, operation, parameters)
+                return _intercept_execute(orig, self, operation, parameters, is_executemany=_is_executemany, paramstyle=ps)
 
             _patched.__name__ = mname
             return _patched
 
-        setattr(cls, method_name, _make_patched(original, method_name))
+        setattr(cls, method_name, _make_patched(original, method_name, paramstyle))
         _PATCHES.append((cls, method_name, original))
 
 
@@ -252,7 +314,7 @@ def patch_sql() -> None:
         import psycopg2.extensions as _pg2ext  # type: ignore[import-untyped]
 
         orig_cursor_cls = _pg2ext.cursor
-        traced_cursor = _make_traced_cursor_class(orig_cursor_cls)
+        traced_cursor = _make_traced_cursor_class(orig_cursor_cls, paramstyle="pyformat")
         orig_connect = _pg2mod.connect
 
         def _make_pg2_connect(orig: Any, cursor_cls: type) -> Any:
