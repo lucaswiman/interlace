@@ -86,8 +86,8 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str]] | None:
 def _sqlglot_parse(sql: str) -> tuple[set[str], set[str]] | None:
     """Full parser: handles CTEs, subqueries, UNION, MERGE, etc."""
     try:
-        import sqlglot
-        from sqlglot import exp
+        import sqlglot  # type: ignore[import-untyped]
+        from sqlglot import exp  # type: ignore[import-untyped]
     except ImportError:
         return None
 

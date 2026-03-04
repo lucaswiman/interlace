@@ -231,34 +231,28 @@ def patch_sql() -> None:
         except (ImportError, AttributeError):
             pass  # driver not installed — skip silently
 
-    # psycopg2 / psycopg3: patch via connection_factory / cursor_factory if available
-    for driver, connect_mod, conn_factory_param in [
-        ("psycopg2", "psycopg2", "connection_factory"),
-        ("psycopg", "psycopg", "connection_class"),
-    ]:
-        try:
-            mod = importlib.import_module(driver)
-            # Try to get the cursor class and subclass it
-            if driver == "psycopg2":
-                import psycopg2.extensions as _pg2ext  # type: ignore[import-untyped]
+    # psycopg2: patch via cursor_factory injection into connect()
+    try:
+        import psycopg2 as _pg2mod  # type: ignore[import-untyped]
+        import psycopg2.extensions as _pg2ext  # type: ignore[import-untyped]
 
-                orig_cursor_cls = _pg2ext.cursor
-                traced_cursor = _make_traced_cursor_class(orig_cursor_cls)
-                orig_connect = mod.connect
+        orig_cursor_cls = _pg2ext.cursor
+        traced_cursor = _make_traced_cursor_class(orig_cursor_cls)
+        orig_connect = _pg2mod.connect
 
-                def _make_pg2_connect(orig: Any, cursor_cls: type) -> Any:
-                    def patched_connect(*args: Any, **kwargs: Any) -> Any:
-                        kwargs.setdefault("cursor_factory", cursor_cls)
-                        return orig(*args, **kwargs)
+        def _make_pg2_connect(orig: Any, cursor_cls: type) -> Any:
+            def patched_connect(*args: Any, **kwargs: Any) -> Any:
+                kwargs.setdefault("cursor_factory", cursor_cls)
+                return orig(*args, **kwargs)
 
-                    return patched_connect
+            return patched_connect
 
-                mod.connect = _make_pg2_connect(orig_connect, traced_cursor)
-                _PATCHES.append((mod, "connect", orig_connect))
-                _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
-                _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
-        except (ImportError, AttributeError):
-            pass
+        setattr(_pg2mod, "connect", _make_pg2_connect(orig_connect, traced_cursor))
+        _PATCHES.append((_pg2mod, "connect", orig_connect))
+        _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
+        _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
+    except (ImportError, AttributeError):
+        pass
 
     _sql_patched = True
 
