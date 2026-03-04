@@ -59,6 +59,7 @@ from frontrun._io_detection import (
     uninstall_io_profile,
     unpatch_io,
 )
+from frontrun._sql_anomaly import classify_sql_anomaly
 from frontrun._sql_cursor import is_tid_suppressed, patch_sql, unpatch_sql
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
@@ -1789,6 +1790,8 @@ def explore_dpor(
                         reproduction_attempts=result.reproduction_attempts,
                         reproduction_successes=result.reproduction_successes,
                     )
+                if result.sql_anomaly is None:
+                    result.sql_anomaly = classify_sql_anomaly(recorder.events)
                 if stop_on_first:
                     # Clear cache before returning
                     with _INSTR_CACHE_LOCK:

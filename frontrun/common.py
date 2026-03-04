@@ -1,6 +1,12 @@
 """Shared data structures for frontrun."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from frontrun._sql_anomaly import SqlAnomaly
 
 
 @dataclass
@@ -69,6 +75,9 @@ class InterleavingResult:
             was re-run to test reproducibility.  0 if no counterexample.
         reproduction_successes: How many of those re-runs reproduced the
             invariant violation.
+        sql_anomaly: Classified SQL isolation anomaly (if any SQL I/O events
+            were recorded).  A :class:`~frontrun._sql_anomaly.SqlAnomaly`
+            instance, or None if the failure did not involve SQL.
     """
 
     property_holds: bool
@@ -79,6 +88,7 @@ class InterleavingResult:
     explanation: str | None = None
     reproduction_attempts: int = 0
     reproduction_successes: int = 0
+    sql_anomaly: SqlAnomaly | None = None
 
     def __repr__(self) -> str:
         ce = self.counterexample
