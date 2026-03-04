@@ -92,8 +92,11 @@
 | **2** | Row-level detection (precision) | 1.5, 5 | ✅ Done | ~270 lines |
 | **3** | Wire protocol parsing (C-level) | 6 | ✅ Done | ~210 lines |
 | **4** | Isolation anomaly classification | — | ✓ Designed | ~200 lines |
+| **5+** | Advanced SQL features (TODOs) | SELECT FOR UPDATE, locks, unions, etc. | 📋 Documented | ~500+ lines |
 
-**Next step:** Phase 4 — Anomaly classification (DSG construction + cycle classification for lost update, write skew, dirty read, etc.).
+**Next steps:**
+- Phase 4 — Anomaly classification (DSG construction + cycle classification for lost update, write skew, dirty read, etc.)
+- See [13_phased_implementation.md](13_phased_implementation.md#phase-5-advanced-sql-features-todo) for Phase 5+ TODOs documenting known limitations and unimplemented features.
 
 ---
 

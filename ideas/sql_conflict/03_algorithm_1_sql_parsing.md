@@ -177,3 +177,340 @@ def parse_sql_access(sql: str) -> tuple[set[str], set[str]]:
 ```
 
 **Complexity:** Regex fast-path is O(n) in SQL length with ~6 regex scans. sqlglot parse_one is O(n) but with higher constant factor (AST construction). Both are negligible vs. network RTT to the database.
+
+---
+
+## Known Limitations & TODOs
+
+### TODO: SELECT FOR UPDATE / FOR SHARE Locking Semantics
+**Issue:** The parser extracts tables from `SELECT ... FOR UPDATE`, but the locking intent is not semantically modeled. Currently:
+```sql
+SELECT * FROM users WHERE id = 1 FOR UPDATE;
+SELECT * FROM users WHERE id = 1;  -- treated identically
+```
+Both are parsed as reads on `users`. The `FOR UPDATE` clause indicates exclusive row-level locking, which guarantees serialization of concurrent access on that row — but DPOR does not track this.
+
+**Impact:**
+- False positives: Two concurrent `SELECT ... FOR UPDATE` on the same row are reported as conflicting (correctly, but for wrong reason — it's the lock, not the read)
+- Missed optimization: Could suppress threads via lock intent rather than just table/row access
+
+**Fix:**
+- Add optional `lock_intent: Literal['NONE', 'UPDATE', 'SHARE']` to the return tuple of `parse_sql_access()`
+- Post-process in `_sql_cursor.py`: if `lock_intent == 'UPDATE'`, mark the operation with exclusive lock semantics
+- Modify DPOR conflict logic: exclusive lock on row R blocks all other access (read/write) to R, including other locks
+- Tests: Add `test_select_for_update_lock_semantics()`, `test_select_for_share_lock_semantics()`
+
+**Estimated effort:** ~50 lines + 20 tests
+
+---
+
+### TODO: LOCK TABLE Statement Support
+**Issue:** PostgreSQL and other databases support:
+```sql
+LOCK TABLE users IN EXCLUSIVE MODE;
+LOCK TABLE orders IN SHARE MODE;
+```
+These are DDL statements, currently not parsed:
+- Regex fast-path: returns `None` (bails to sqlglot)
+- sqlglot: catches as unrecognized AST node → conservative "all tables write" (overly pessimistic)
+
+**Impact:**
+- False positives: `LOCK TABLE` followed by unrelated operations are reported as conflicting
+- No semantic understanding of lock mode (EXCLUSIVE vs SHARE)
+
+**Fix:**
+- Extend regex fast-path to detect `LOCK TABLE` keyword
+- Parse lock mode + table name
+- Return tuple with lock semantics: `(set(), set(), lock_statement: Dict[str, LockMode])`
+- Integrate with DPOR: lock on table T suppresses all threads except holder
+
+**Estimated effort:** ~30 lines + 15 tests
+
+---
+
+### TODO: Advisory Locks (PostgreSQL, MySQL)
+**Issue:** Advisory locks are function calls, not SQL DML/DDL:
+```python
+cursor.execute("SELECT pg_advisory_lock(12345)")
+cursor.execute("SELECT pg_advisory_xact_lock(12345)")
+cursor.execute("DO $$ BEGIN ... PERFORM pg_advisory_lock(...) END $$")
+```
+These are NOT parsed by the SQL parser (they're valid SQL but not data access statements). Instead, they rely on C-level I/O interception via LD_PRELOAD (`crates/io/src/lib.rs`):
+- PostgreSQL wire protocol parsing detects the query string but not the function semantics
+- Falls back to socket-level (endpoint-level) conflict detection
+
+**Impact:**
+- Advisory locks are only tracked at the socket level, not at lock-identity level
+- Two threads with different advisory lock IDs are still reported as conflicting (no per-lock-ID tracking)
+- Lost-update detection may be imprecise if code uses advisory locks instead of explicit row locks
+
+**Fix:**
+- Extract advisory lock IDs from PostgreSQL wire protocol parsing in `crates/io/src/lib.rs`
+- Add parsing for `pg_advisory_lock(id)`, `pg_advisory_xact_lock(id)`, `pg_advisory_shared_lock(id)`, etc.
+- Map lock IDs to ObjectIds in DPOR: `advisory_lock:12345`
+- Modify suppression logic: if advisory lock acquired on ID, suppress others
+- Challenge: Transaction scope vs statement scope (xact vs non-xact variants)
+
+**Estimated effort:** ~100 lines (Rust) + 30 tests
+
+---
+
+### TODO: Union Handling Overly Conservative
+**Issue:** UNION queries fall through to sqlglot, which produces a `Union` AST node. The current fallback logic treats all tables as writes:
+```python
+if isinstance(ast, exp.Union):
+    # Current: conservative fallback
+    for t in ast.find_all(exp.Table):
+        write.add(t.name)
+```
+
+**Example:**
+```sql
+SELECT id FROM users WHERE status = 'active'
+UNION
+SELECT id FROM archived_users WHERE migrated = true;
+```
+Currently: Both `users` and `archived_users` → *writes* (wrong!)
+Correct: Both → *reads*
+
+**Impact:**
+- False positives: UNIONs with multiple read sources reported as conflicting with any write to those tables
+
+**Fix:**
+- Add `exp.Union` handler to recognize that UNION is a read-only composition
+- Visit each select branch, mark all tables as reads
+- Distinguish from `INSERT ... UNION ...` (where target is write)
+- Add tests for: UNION of selects, EXCEPT, INTERSECT
+
+**Estimated effort:** ~20 lines + 8 tests
+
+---
+
+### TODO: Cross-Table Foreign Key Dependencies
+**Issue:** Schema relationships are invisible to the parser:
+```sql
+-- Thread A:
+INSERT INTO orders (user_id, amount) VALUES (42, 100);
+
+-- Thread B:
+DELETE FROM users WHERE id = 42;  -- FK constraint violated!
+```
+Parser sees: Thread A writes `orders`, Thread B writes `users` → independent.
+But if FK `orders.user_id → users.id` exists, Thread B's DELETE fails (constraint violation).
+
+**Impact:**
+- False negatives (missed conflicts): Two threads operating on related tables are reported independent, but FK constraints create real conflicts
+- Limited to multi-table workloads with foreign keys
+
+**Fix (Phase 4):**
+- Add schema introspection: query `information_schema.referential_constraints` (or equivalent for other DBs)
+- Build FK dependency graph: `{orders → users, shipments → orders}` etc.
+- At conflict detection time: if Op1 touches table T1 and Op2 touches table T2, and T1 → T2 via FK, classify as conflicting
+- Cache FK graph in DPOR tls (per-connection)
+- Add tests: ORM relationships, Alembic migrations with FKs
+
+**Estimated effort:** ~150 lines + 25 tests
+
+---
+
+### TODO: Transaction Boundaries Not Tracked
+**Issue:** Current model treats each SQL statement independently:
+```python
+# Thread A:
+cursor.execute("BEGIN")
+cursor.execute("SELECT * FROM accounts WHERE id = 1")  # read
+cursor.execute("UPDATE accounts SET balance = ...")     # write
+cursor.execute("COMMIT")
+
+# Thread B:
+cursor.execute("BEGIN")
+cursor.execute("SELECT * FROM accounts WHERE id = 1")  # read
+cursor.execute("UPDATE accounts SET balance = ...")     # write
+cursor.execute("COMMIT")
+```
+DPOR sees 4 separate operations with potential interleavings. In reality, the `BEGIN...COMMIT` bundle is atomic.
+
+**Impact:**
+- Explosion of search space: unnecessary interleavings between statements in committed transactions
+- Missed optimization: can suppress threads as a group during transaction
+
+**Fix (Phase 4):**
+- Track transaction open/close via `cursor.execute("BEGIN")`, `cursor.execute("COMMIT")`, `cursor.execute("ROLLBACK")`
+- Group SQL operations into transaction-level ObjectIds: `tx:1`, `tx:2`
+- Modify DPOR suppression: suppress entire transaction at once
+- Add tests: explicit transactions, savepoints, nested transactions
+
+**Estimated effort:** ~80 lines + 20 tests
+
+---
+
+### TODO: Temporal Tables & System Versioning
+**Issue:** Some databases (PostgreSQL, MySQL 8.0+) support temporal/versioned tables:
+```sql
+CREATE TABLE users (
+  id INT PRIMARY KEY,
+  name VARCHAR,
+  valid_from TIMESTAMP GENERATED ALWAYS AS ROW START,
+  valid_to TIMESTAMP GENERATED ALWAYS AS ROW END,
+  FOR SYSTEM_TIME BETWEEN valid_from AND valid_to
+) WITH SYSTEM VERSIONING;
+
+SELECT * FROM users FOR SYSTEM_TIME AS OF '2024-01-01';
+```
+The parser treats these as regular table access, unaware of the time-dimension semantics.
+
+**Impact:**
+- False positives: Queries at different "times" are reported as conflicting, even if they select disjoint time windows
+- Rarely used, but valid in some applications
+
+**Fix:**
+- Add `FOR SYSTEM_TIME` clause parsing
+- Extract temporal predicate: `AS OF '2024-01-01'`, `BETWEEN`, `ALL`, `VERSIONED BETWEEN`
+- Add temporal dimension to row-level ObjectIds: `table:pk:time_bucket`
+- Match against concurrent writes (which write to current `now()`, not historical times)
+
+**Estimated effort:** ~40 lines + 10 tests (low priority)
+
+---
+
+### TODO: Generated/Computed Columns
+**Issue:** Some ORMs and databases use computed columns:
+```sql
+CREATE TABLE orders (
+  id INT PRIMARY KEY,
+  qty INT,
+  unit_price DECIMAL,
+  total DECIMAL GENERATED ALWAYS AS (qty * unit_price)
+);
+```
+When `total` is updated, the actual SQL does not include `total = ...` (it's computed). Parser should be aware.
+
+**Impact:**
+- Minimal: row-level predicate extraction might incorrectly assume `total` is user-settable
+
+**Fix:**
+- Schema introspection: fetch `GENERATED` clause for all columns
+- Mark computed columns in ObjectId derivation (informational only)
+- Ignore computed columns in row-level predicate matching
+
+**Estimated effort:** ~30 lines + 5 tests (low priority)
+
+---
+
+### TODO: RETURNING Clause with Multiple Tables
+**Issue:** PostgreSQL `RETURNING` in `UPDATE...FROM`:
+```sql
+UPDATE orders SET status = 'shipped' FROM shipments
+WHERE orders.id = shipments.order_id
+RETURNING orders.id, shipments.id;
+```
+The `RETURNING` clause lists outputs but doesn't affect read/write semantics. However, some ORMs use `RETURNING` to fetch results.
+
+**Impact:**
+- Minimal: current handler correctly identifies `orders` (write) + `shipments` (read)
+- `RETURNING` doesn't change the classification
+
+**Fix:**
+- Already handled: `_regex_parse` bails on `RETURNING`, sqlglot handles it correctly
+- Add test for `RETURNING` with multi-table UPDATE
+
+**Estimated effort:** ~5 lines + 2 tests
+
+---
+
+### TODO: Window Functions & Partitioning
+**Issue:** Window functions reference tables but have implicit grouping semantics:
+```sql
+SELECT id, name, ROW_NUMBER() OVER (PARTITION BY dept_id ORDER BY salary DESC) AS rank
+FROM employees;
+```
+Parser extracts `employees` as a read, which is correct, but the PARTITION BY semantics are invisible.
+
+**Impact:**
+- Minimal: row-level detection would be overly conservative (all rows involved in window function are interdependent)
+
+**Fix:**
+- Recognize `OVER (PARTITION BY ...)` clauses
+- If window function present, fall back to table-level (not row-level)
+- Mark in ObjectId: `table:window_function` to distinguish from regular table access
+
+**Estimated effort:** ~20 lines + 3 tests (low priority)
+
+---
+
+### TODO: Prepared Statements & Caching
+**Issue:** When using prepared statements with parameter placeholders, different parameter values can affect row-level conflict detection:
+```python
+stmt = cursor.prepare("SELECT * FROM users WHERE id = ? FOR UPDATE")
+cursor.execute(stmt, (1,))  # locks row 1
+cursor.execute(stmt, (2,))  # locks row 2 — independent!
+```
+Current implementation resolves parameters at execute-time, which is correct. However, caching the resolved ObjectId across multiple executions of the same prepared statement with different parameters could miss conflicts.
+
+**Impact:**
+- Minimal: current implementation resolves at execute-time, no caching issue
+- Potential issue if future optimization adds ObjectId caching
+
+**Fix:**
+- Ensure `_sql_cursor.py` resolves parameters fresh for each `execute()` call
+- Add test: repeated prepared statement execution with different parameters
+- Document in `_sql_params.py`: never cache ObjectIds across executions
+
+**Estimated effort:** ~10 lines + 3 tests
+
+---
+
+### TODO: Stored Procedures & Dynamic SQL
+**Issue:** Stored procedures and dynamic SQL (`EXECUTE`, `PREPARE`, PL/pgSQL, T-SQL) are opaque:
+```sql
+CALL sp_update_user(1, 'new_name');  -- Rust calls unknown SQL inside
+EXECUTE 'SELECT * FROM ' || table_name;  -- table_name determined at runtime
+```
+Parser cannot determine which tables are accessed without executing the procedure.
+
+**Impact:**
+- False negatives: Stored procedures are treated as endpoint-level (socket) I/O, not table-level
+- Missing optimization: stored proc calls could expose table access via introspection
+
+**Fix (Advanced):**
+- Intercept stored procedure definitions and parse their SQL bodies
+- Cache computed table access sets: `sp_update_user → {users:write}`
+- At call-site, substitute cached access instead of endpoint-level
+
+**Estimated effort:** ~200 lines + 40 tests (very low priority, high complexity)
+
+---
+
+### TODO: Multi-Dialect SQL Differences
+**Issue:** The parser must handle SQL from multiple dialects (PostgreSQL, MySQL, SQLite, etc.), but some syntax differs:
+- PostgreSQL: `RETURNING`, `ON CONFLICT`, `FOR UPDATE SKIP LOCKED`
+- MySQL: `ON DUPLICATE KEY UPDATE`, `SELECT ... INTO @var`
+- SQLite: `AUTOINCREMENT`, `INSERT OR REPLACE`
+
+**Impact:**
+- Parse failures for dialect-specific syntax → fallback to endpoint-level
+
+**Fix:**
+- Extend sqlglot dialect support: already handles 30+ dialects
+- Add integration tests for each supported dialect
+- Document supported dialects in README
+
+**Estimated effort:** ~0 lines (sqlglot already handles) + 30 tests
+
+---
+
+### TODO: Performance Optimization: Regex Pattern Precompilation
+**Issue:** Current regex patterns are compiled at module load time, which is good. However, the patterns could be optimized:
+- `_IDENT` pattern is complex; could use a simpler DFA-based approach
+- Multiple passes over the SQL string (6 regex scans) could be combined into a single state machine
+
+**Impact:**
+- Minimal: regex overhead is negligible vs. network RTT
+- Readable code is more important than micro-optimization
+
+**Fix (Optimization, not required):**
+- Profile regex performance on large SQL strings (>100 KB)
+- Consider Rust regex engine via PyO3 if needed
+- Benchmark: regex fast-path vs sqlglot on typical ORM SQL
+
+**Estimated effort:** ~50 lines + benchmarks (low priority)
