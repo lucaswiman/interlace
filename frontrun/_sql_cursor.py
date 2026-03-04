@@ -1,0 +1,275 @@
+"""DBAPI cursor monkey-patching for SQL-level conflict detection.
+
+Intercepts ``cursor.execute()`` and ``cursor.executemany()`` calls to
+extract table-level read/write sets from SQL statements.  Reports each
+table as a separate resource to the I/O reporter, suppressing the
+coarser endpoint-level socket I/O reports.
+
+Follows the same monkey-patching pattern as ``_io_detection.py``.
+
+Implementation note: C-extension cursor types (sqlite3.Cursor, psycopg2
+cursor) are immutable and cannot be patched directly via ``setattr``.
+Instead, we patch the ``connect()`` function of each driver module to
+inject a traced connection/cursor factory subclass.  For pure-Python
+drivers like pymysql, direct class patching is used as a fallback.
+"""
+
+from __future__ import annotations
+
+import importlib
+import sqlite3
+import threading
+from typing import Any
+
+from frontrun._io_detection import _io_tls, get_io_reporter
+
+# Try to import parse_sql_access from the parsing module.
+# Falls back to a no-op if the module isn't available yet.
+try:
+    from frontrun._sql_parsing import parse_sql_access
+except ImportError:
+
+    def parse_sql_access(sql: str) -> tuple[set[str], set[str]]:  # type: ignore[misc]
+        return set(), set()
+
+
+# ---------------------------------------------------------------------------
+# Suppression infrastructure
+# ---------------------------------------------------------------------------
+
+# OS thread IDs currently inside a patched execute call.
+# The LD_PRELOAD bridge listener checks this to skip endpoint-level reports.
+_suppress_tids: set[int] = set()
+_suppress_lock = threading.Lock()  # Real lock (not cooperative)
+
+
+def is_tid_suppressed(tid: int) -> bool:
+    """Check if a thread ID is currently suppressed (for LD_PRELOAD bridge)."""
+    with _suppress_lock:
+        return tid in _suppress_tids
+
+
+# ---------------------------------------------------------------------------
+# Core interception logic
+# ---------------------------------------------------------------------------
+
+
+def _intercept_execute(original_method: Any, self: Any, operation: Any, parameters: Any = None) -> Any:
+    """Intercept a single execute/executemany call.
+
+    Parses *operation*, reports table accesses to the per-thread reporter,
+    activates suppression, then delegates to *original_method*.
+    """
+    reporter = get_io_reporter()
+    reported = False
+
+    if reporter is not None and isinstance(operation, str):
+        read_tables, write_tables = parse_sql_access(operation)
+        if read_tables or write_tables:
+            reported = True
+            for table in read_tables:
+                reporter(f"sql:{table}", "read")
+            for table in write_tables:
+                reporter(f"sql:{table}", "write")
+
+    if reported:
+        tid = threading.get_native_id()
+        _io_tls._sql_suppress = True  # type: ignore[attr-defined]
+        with _suppress_lock:
+            _suppress_tids.add(tid)
+        try:
+            if parameters is not None:
+                return original_method(self, operation, parameters)
+            return original_method(self, operation)
+        finally:
+            with _suppress_lock:
+                _suppress_tids.discard(tid)
+            _io_tls._sql_suppress = False  # type: ignore[attr-defined]
+    else:
+        if parameters is not None:
+            return original_method(self, operation, parameters)
+        return original_method(self, operation)
+
+
+# ---------------------------------------------------------------------------
+# Traced cursor/connection subclasses (created dynamically per driver)
+# ---------------------------------------------------------------------------
+
+
+def _make_traced_cursor_class(base_cursor_cls: type) -> type:
+    """Return a subclass of *base_cursor_cls* that intercepts execute calls.
+
+    The original methods are looked up from ``_ORIGINAL_METHODS`` at call time
+    rather than captured at class creation.  This allows tests to swap out the
+    stored original (e.g. to install a spy) and have the traced cursor pick up
+    the new value transparently.
+    """
+
+    _execute_key = (base_cursor_cls, "execute")
+    _executemany_key = (base_cursor_cls, "executemany")
+
+    class TracedCursor(base_cursor_cls):  # type: ignore[valid-type]
+        def execute(self, operation: Any, parameters: Any = None, /, **kwargs: Any) -> Any:  # type: ignore[override]
+            original = _ORIGINAL_METHODS.get(_execute_key, base_cursor_cls.execute)
+            return _intercept_execute(original, self, operation, parameters)
+
+        def executemany(self, operation: Any, parameters: Any = None, /, **kwargs: Any) -> Any:  # type: ignore[override]
+            original = _ORIGINAL_METHODS.get(_executemany_key, base_cursor_cls.executemany)
+            return _intercept_execute(original, self, operation, parameters)
+
+    TracedCursor.__name__ = f"Traced{base_cursor_cls.__name__}"
+    TracedCursor.__qualname__ = f"Traced{base_cursor_cls.__qualname__}"
+    return TracedCursor
+
+
+def _make_traced_sqlite3_connection_class() -> type:
+    """Return a sqlite3.Connection subclass whose cursor() uses TracedCursor."""
+    _traced_cursor_cls = _make_traced_cursor_class(sqlite3.Cursor)
+
+    class TracedConnection(sqlite3.Connection):
+        def cursor(self, factory: type = _traced_cursor_cls) -> sqlite3.Cursor:  # type: ignore[override]
+            return super().cursor(factory)
+
+    TracedConnection.__name__ = "TracedConnection"
+    TracedConnection.__qualname__ = "TracedConnection"
+    return TracedConnection
+
+
+# ---------------------------------------------------------------------------
+# Global patching state
+# ---------------------------------------------------------------------------
+
+_sql_patched = False
+
+# Stores (module, attribute_name, original_value) for each patched site
+_PATCHES: list[tuple[Any, str, Any]] = []
+
+# Expose a dict-like view keyed by (class, method_name) for test introspection.
+# For the factory-based approach we store the original connect function here.
+_ORIGINAL_METHODS: dict[tuple[type, str], Any] = {}
+
+
+# ---------------------------------------------------------------------------
+# sqlite3 patching
+# ---------------------------------------------------------------------------
+
+
+def _patch_sqlite3() -> None:
+    """Patch sqlite3.connect to inject TracedConnection factory."""
+    orig_connect = sqlite3.connect
+    traced_conn_cls = _make_traced_sqlite3_connection_class()
+    traced_cursor_cls = _make_traced_cursor_class(sqlite3.Cursor)
+
+    def patched_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        if "factory" not in kwargs:
+            kwargs["factory"] = traced_conn_cls
+        return orig_connect(*args, **kwargs)
+
+    sqlite3.connect = patched_connect  # type: ignore[assignment]
+    _PATCHES.append((sqlite3, "connect", orig_connect))
+    # Expose for tests via _ORIGINAL_METHODS — key by (cursor_class, method_name)
+    _ORIGINAL_METHODS[(sqlite3.Cursor, "execute")] = sqlite3.Cursor.execute
+    _ORIGINAL_METHODS[(sqlite3.Cursor, "executemany")] = sqlite3.Cursor.executemany
+    # Also expose the traced subclasses for inspection
+    _ORIGINAL_METHODS[(traced_cursor_cls, "_traced_execute")] = traced_cursor_cls.execute
+    _ORIGINAL_METHODS[(traced_cursor_cls, "_traced_executemany")] = traced_cursor_cls.executemany
+
+
+# ---------------------------------------------------------------------------
+# Generic Python-class patching (for pure-Python drivers)
+# ---------------------------------------------------------------------------
+
+
+def _patch_class_methods(cls: type, paramstyle: str) -> None:
+    """Directly patch execute/executemany on a Python cursor class."""
+    for method_name in ("execute", "executemany"):
+        original = getattr(cls, method_name, None)
+        if original is None:
+            continue
+        key = (cls, method_name)
+        if key in _ORIGINAL_METHODS:
+            continue
+        _ORIGINAL_METHODS[key] = original
+        _orig = original
+
+        def _make_patched(orig: Any, mname: str) -> Any:
+            def _patched(self: Any, operation: Any, parameters: Any = None, *args: Any, **kwargs: Any) -> Any:
+                return _intercept_execute(orig, self, operation, parameters)
+
+            _patched.__name__ = mname
+            return _patched
+
+        setattr(cls, method_name, _make_patched(original, method_name))
+        _PATCHES.append((cls, method_name, original))
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+# Drivers to attempt patching via direct class method replacement (pure Python)
+_PYTHON_CURSOR_TARGETS: list[tuple[str, str, str]] = [
+    ("pymysql.cursors", "Cursor", "pymysql"),
+]
+
+
+def patch_sql() -> None:
+    """Monkey-patch DBAPI cursor.execute() for known drivers."""
+    global _sql_patched  # noqa: PLW0603
+    if _sql_patched:
+        return
+
+    # sqlite3 requires factory-injection approach
+    _patch_sqlite3()
+
+    # Pure-Python drivers can be patched directly
+    for module_path, class_name, _paramstyle_module in _PYTHON_CURSOR_TARGETS:
+        try:
+            mod = importlib.import_module(module_path)
+            cls = getattr(mod, class_name)
+            _patch_class_methods(cls, "format")
+        except (ImportError, AttributeError):
+            pass  # driver not installed — skip silently
+
+    # psycopg2 / psycopg3: patch via connection_factory / cursor_factory if available
+    for driver, connect_mod, conn_factory_param in [
+        ("psycopg2", "psycopg2", "connection_factory"),
+        ("psycopg", "psycopg", "connection_class"),
+    ]:
+        try:
+            mod = importlib.import_module(driver)
+            # Try to get the cursor class and subclass it
+            if driver == "psycopg2":
+                import psycopg2.extensions as _pg2ext  # type: ignore[import-untyped]
+
+                orig_cursor_cls = _pg2ext.cursor
+                traced_cursor = _make_traced_cursor_class(orig_cursor_cls)
+                orig_connect = mod.connect
+
+                def _make_pg2_connect(orig: Any, cursor_cls: type) -> Any:
+                    def patched_connect(*args: Any, **kwargs: Any) -> Any:
+                        kwargs.setdefault("cursor_factory", cursor_cls)
+                        return orig(*args, **kwargs)
+
+                    return patched_connect
+
+                mod.connect = _make_pg2_connect(orig_connect, traced_cursor)
+                _PATCHES.append((mod, "connect", orig_connect))
+                _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
+                _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
+        except (ImportError, AttributeError):
+            pass
+
+    _sql_patched = True
+
+
+def unpatch_sql() -> None:
+    """Restore original DBAPI cursor methods and connect functions."""
+    global _sql_patched  # noqa: PLW0603
+    if not _sql_patched:
+        return
+    for obj, attr, original in _PATCHES:
+        setattr(obj, attr, original)
+    _PATCHES.clear()
+    _ORIGINAL_METHODS.clear()
+    _sql_patched = False
