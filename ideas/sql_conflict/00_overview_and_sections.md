@@ -88,12 +88,12 @@
 
 | Phase | Goal | Algorithms | Status | Est. Code |
 |-------|------|-----------|--------|-----------|
-| **1** | Table-level detection (MVP) | 1, 2, 3, 4 | ⚙ In Progress (1, 2 done; 3, 4 pending) | ~300 lines |
-| **2** | Row-level detection (precision) | 1.5, 5 | ⚙ In Progress (1.5 done; 5 pending) | ~270 lines |
+| **1** | Table-level detection (MVP) | 1, 2, 3, 4 | ✅ Done | ~300 lines |
+| **2** | Row-level detection (precision) | 1.5, 5 | ⚙ In Progress (1.5, 5 done; integration pending) | ~270 lines |
 | **3** | Wire protocol parsing (C-level) | 6 | ✓ Designed | ~80 lines |
 | **4** | Isolation anomaly classification | — | ✓ Designed | ~200 lines |
 
-**Next step:** Complete Phase 1 by implementing Algorithm 3 (endpoint suppression in `_io_detection.py`) and Algorithm 4 (ObjectId derivation), then integrate `patch_sql()`/`unpatch_sql()` into `dpor.py` and `bytecode.py`.
+**Next step:** Integrate Algorithm 5 predicate extraction into the cursor patching execute wrapper (wire row-level ObjectIds into `_intercept_execute`), then add integration tests (`test_integration_orm.py`).
 
 ---
 
@@ -131,18 +131,19 @@ Algorithm 6 (Wire Protocol Parsing)
   - [x] Implement Algorithm 2: `_make_patched_execute()`, `patch_sql()`, `unpatch_sql()` → `frontrun/_sql_cursor.py` (275 lines)
   - [x] Implement Algorithm 3 (partial): `_suppress_tids` set + `is_tid_suppressed()` → `frontrun/_sql_cursor.py`
 
-- [ ] Modify `frontrun/_io_detection.py` (3 lines)
-  - [ ] Add `_sql_suppress` check to `_report_socket_io()`
+- [x] Modify `frontrun/_io_detection.py` (+3 lines)
+  - [x] Add `_sql_suppress` check to `_report_socket_io()`
 
-- [ ] Modify `frontrun/dpor.py` (4 lines)
-  - [ ] Import `patch_sql` / `unpatch_sql`
-  - [ ] Call in `explore_dpor()` setup/teardown
+- [x] Modify `frontrun/dpor.py` (+6 lines)
+  - [x] Import `patch_sql` / `unpatch_sql` / `is_tid_suppressed`
+  - [x] Call `patch_sql()` / `unpatch_sql()` in `DporBytecodeRunner._patch_io()` / `_unpatch_io()`
+  - [x] Add `is_tid_suppressed()` check in `_PreloadBridge.listener()`
 
-- [ ] Modify `frontrun/bytecode.py` (4 lines)
-  - [ ] Call `patch_sql()` / `unpatch_sql()` for random explorer
+- [x] Modify `frontrun/bytecode.py` (+3 lines)
+  - [x] Call `patch_sql()` / `unpatch_sql()` in `BytecodeShuffler._patch_io()` / `_unpatch_io()`
 
-- [ ] Modify `pyproject.toml`
-  - [ ] Add `sqlglot` to optional `[sql]` extra
+- [x] Modify `pyproject.toml`
+  - [x] Add `sqlglot>=20.0` to optional `[sql]` extra
 
 - [x] ~~Create `tests/test_sql_detection.py`~~ → Split into modular test files:
   - [x] TestRegexParse (44 tests) → `tests/test_sql_parsing.py` (514 lines, 91 tests total)
@@ -158,17 +159,15 @@ Algorithm 6 (Wire Protocol Parsing)
   - [x] Helper functions: `_resolve_positional()`, `_resolve_numeric()`, `_resolve_named()`, `_resolve_pyformat()`
   - [x] Tests: `tests/test_sql_params.py` (856 lines, 123 tests)
 
-- [ ] Add Algorithm 5 to `frontrun/_sql_detection.py` (~100 lines)
-  - [ ] `EqualityPredicate` dataclass
-  - [ ] `extract_equality_predicates()` — WHERE clause parsing
-  - [ ] `can_use_row_level()` — decision function
-  - [ ] `pk_predicates_disjoint()` — row disjointness check
+- [x] ~~Add Algorithm 5 to `frontrun/_sql_detection.py`~~ → `frontrun/_sql_predicates.py` (~100 lines)
+  - [x] `EqualityPredicate` dataclass
+  - [x] `extract_equality_predicates()` — WHERE clause parsing
+  - [x] `can_use_row_level()` — decision function
+  - [x] `pk_predicates_disjoint()` — row disjointness check
+  - [x] Tests: `tests/test_sql_predicates.py` (41 tests)
 
-- [ ] Add tests to `tests/test_sql_detection.py` (~120 lines)
-  - [ ] TestParameterResolution (all paramstyles)
-  - [ ] TestParameterizedPredicateExtraction (end-to-end)
-  - [ ] TestPredicateExtraction (WHERE clause parsing)
-  - [ ] TestPredicateDisjointness (row-level independence)
+- [ ] Integrate row-level predicates into `_sql_cursor.py` `_intercept_execute()`
+  - [ ] Wire `extract_equality_predicates()` + `pk_predicates_disjoint()` into ObjectId derivation
 
 ### Phase 3: Wire Protocol Parsing
 
@@ -201,10 +200,12 @@ Algorithm 6 (Wire Protocol Parsing)
 | `test_sql_parsing.py` | `tests/` | 514 | ✅ Done | 91 tests for SQL parsing |
 | `test_sql_params.py` | `tests/` | 856 | ✅ Done | 123 tests for parameter resolution |
 | `test_sql_cursor.py` | `tests/` | 1236 | ✅ Done | 77 tests for cursor patching |
-| `_io_detection.py` | `frontrun/` | 3 | ⬜ Pending | Add `_sql_suppress` check |
-| `dpor.py` | `frontrun/` | 4 | ⬜ Pending | Call `patch_sql()` / `unpatch_sql()` |
-| `bytecode.py` | `frontrun/` | 4 | ⬜ Pending | Call `patch_sql()` / `unpatch_sql()` |
-| `pyproject.toml` | root | — | ⬜ Pending | Add `sqlglot` to extras |
+| `_sql_predicates.py` | `frontrun/` | ~100 | ✅ Done | Row-level predicate extraction (Algorithm 5) |
+| `test_sql_predicates.py` | `tests/` | ~230 | ✅ Done | 41 tests for predicate extraction + disjointness |
+| `_io_detection.py` | `frontrun/` | +3 | ✅ Done | Add `_sql_suppress` check to `_report_socket_io` |
+| `dpor.py` | `frontrun/` | +6 | ✅ Done | `patch_sql`/`unpatch_sql` + `is_tid_suppressed` in bridge |
+| `bytecode.py` | `frontrun/` | +3 | ✅ Done | `patch_sql`/`unpatch_sql` in BytecodeShuffler |
+| `pyproject.toml` | root | +3 | ✅ Done | Add `sqlglot>=20.0` to `[sql]` extra |
 | `sql_extract.rs` | `crates/io/src/` | ~80 | ⬜ Phase 3 | Wire protocol parsing |
 | `_sql_anomaly.py` | `frontrun/` | ~200 | ⬜ Phase 4 | Anomaly classification |
 
@@ -252,8 +253,13 @@ Algorithm 6 (Wire Protocol Parsing)
   - Algorithm 1.5 (Parameter resolution): `frontrun/_sql_params.py` — 123 tests passing
   - Algorithm 2 (Cursor patching): `frontrun/_sql_cursor.py` — 77 tests passing (includes partial Algorithm 3 suppression)
   - **Note:** Implementation split into separate modules (`_sql_parsing.py`, `_sql_params.py`, `_sql_cursor.py`) instead of a single `_sql_detection.py`. These can be consolidated later if desired.
+- **Phase 1 completed + Phase 2 predicates**: 2026-03-04
+  - Algorithm 3 (Endpoint suppression): `_io_detection.py` `_sql_suppress` check + `_PreloadBridge.listener` `is_tid_suppressed` check
+  - Algorithm 4 (ObjectId derivation): no new code — uses existing `_make_object_key` via `sql:{table}` resource IDs
+  - Phase 1 integration: `dpor.py` and `bytecode.py` call `patch_sql()`/`unpatch_sql()`; `pyproject.toml` adds `[sql]` extra
+  - Algorithm 5 (Row-level predicates): `frontrun/_sql_predicates.py` — 41 tests passing
 - **Verified**: All 3 TLA+ specs pass exhaustive model checking
-- **Last Updated**: 2026-03-03
+- **Last Updated**: 2026-03-04
 
 ---
 
