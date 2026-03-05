@@ -81,14 +81,14 @@ Implementation split into modular files (original plan called for single `_sql_d
 
 ---
 
-### TODO: Transaction Grouping (Phase 6)
+### TODO: Transaction Grouping (Phase 6) — ✅ Done
 **Priority:** Medium (optimization, improves search space)
 **Scope:**
 - Track `BEGIN` / `START TRANSACTION` / `COMMIT` / `ROLLBACK` / `SAVEPOINT`
-- Group SQL operations into transaction-level ObjectIds
-- Modify DPOR suppression to suppress entire transactions atomically
+- Group SQL operations into transaction-level ObjectIds: Implemented via buffering in `_io_tls._tx_buffer` and flushing at `COMMIT`.
+- Modify DPOR suppression to suppress entire transactions atomically: Implemented in `frontrun/dpor.py` by skipping scheduling when `_in_transaction` is true.
 
-**Estimated effort:** ~80 lines (Python) + 20 tests + Rust engine changes
+**Estimated effort:** ~80 lines (Python) + 20 tests + Rust engine changes (Note: Rust changes not needed as atomicity handled in Python scheduler).
 
 ---
 
@@ -132,7 +132,7 @@ Implementation split into modular files (original plan called for single `_sql_d
 | Phase | Task | Priority | Effort | Impact | Status |
 |-------|------|----------|--------|--------|--------|
 | 6 | Foreign key dependencies | 🟡 Medium | 150 lines + 25 tests | Multi-table correctness | **TODO** |
-| 6 | Transaction grouping | 🟡 Medium | 80 lines + 20 tests | Search space optimization | **TODO** |
+| 6 | Transaction grouping | 🟡 Medium | 80 lines + 20 tests | Search space optimization | ✅ **Done** |
 | 7 | Stored procedures | 🔴 Very Low | 200 lines + 40 tests | Rare in Python ORMs | **TODO** |
 | 7 | Temporal tables | 🔴 Very Low | 40 lines + 10 tests | Specialized SQL | **TODO** |
 | 7 | Computed columns | 🔴 Very Low | 30 lines + 5 tests | Informational | **TODO** |

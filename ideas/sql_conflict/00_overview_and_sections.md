@@ -95,7 +95,7 @@
 | **5+** | Advanced SQL features (TODOs) | SELECT FOR UPDATE, locks, unions, etc. | ✅ Done | ~500+ lines |
 
 **Next steps:**
-- Phase 6 — Foreign keys and Transaction grouping (DSG construction improvements)
+- Phase 6 — Foreign keys (DSG construction improvements)
 - See [13_phased_implementation.md](13_phased_implementation.md#phase-5-advanced-sql-features-todo) for remaining TODOs.
 
 ---

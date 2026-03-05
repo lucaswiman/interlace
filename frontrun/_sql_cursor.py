@@ -30,8 +30,8 @@ try:
     from frontrun._sql_parsing import parse_sql_access
 except ImportError:
 
-    def parse_sql_access(sql: str) -> tuple[set[str], set[str], str | None]:  # type: ignore[misc]
-        return set(), set(), None
+    def parse_sql_access(sql: str) -> tuple[set[str], set[str], str | None, str | None]:  # type: ignore[misc]
+        return set(), set(), None, None
 
 
 # Try to import row-level predicate helpers.  These are always present in the
@@ -109,20 +109,61 @@ def _intercept_execute(
     When *is_executemany* is False and the query touches exactly one table,
     resolves *parameters* and extracts row-level equality predicates so that
     the reported resource ID is finer-grained than plain ``sql:<table>``.
+
+    Implements transaction grouping: when a transaction is active (BEGIN
+    detected), I/O reports are buffered in TLS and only flushed when COMMIT is
+    called.  ROLLBACK clears the buffer.  SAVEPOINTs and ROLLBACK TO SAVEPOINT
+    are supported via buffer truncation.
     """
     reporter = get_io_reporter()
     reported = False
 
     if reporter is not None and isinstance(operation, str):
-        read_tables, write_tables, lock_intent = parse_sql_access(operation)
+        read_tables, write_tables, lock_intent, tx_op = parse_sql_access(operation)
+
+        # 1. Handle Transaction Control Operations
+        if tx_op:
+            reported = True  # Suppress endpoint I/O for TX control too
+            if tx_op == "BEGIN":
+                _io_tls._in_transaction = True
+                _io_tls._tx_buffer = []
+                _io_tls._tx_savepoints = {}
+            elif tx_op == "COMMIT":
+                _io_tls._in_transaction = False
+                buffer = getattr(_io_tls, "_tx_buffer", [])
+                for res_id, kind in buffer:
+                    reporter(res_id, kind)
+                _io_tls._tx_buffer = []
+                _io_tls._tx_savepoints = {}
+            elif tx_op == "ROLLBACK":
+                _io_tls._in_transaction = False
+                _io_tls._tx_buffer = []
+                _io_tls._tx_savepoints = {}
+            elif tx_op.startswith("SAVEPOINT:"):
+                name = tx_op.split(":", 1)[1]
+                savepoints = getattr(_io_tls, "_tx_savepoints", {})
+                buffer = getattr(_io_tls, "_tx_buffer", [])
+                savepoints[name] = len(buffer)
+                _io_tls._tx_savepoints = savepoints
+            elif tx_op.startswith("ROLLBACK_TO:"):
+                name = tx_op.split(":", 1)[1]
+                savepoints = getattr(_io_tls, "_tx_savepoints", {})
+                if name in savepoints:
+                    idx = savepoints[name]
+                    buffer = getattr(_io_tls, "_tx_buffer", [])
+                    _io_tls._tx_buffer = buffer[:idx]
+            elif tx_op.startswith("RELEASE:"):
+                name = tx_op.split(":", 1)[1]
+                savepoints = getattr(_io_tls, "_tx_savepoints", {})
+                savepoints.pop(name, None)
+
+        # 2. Handle Data Access Operations
         if read_tables or write_tables:
             reported = True
             all_tables = read_tables | write_tables
+            in_tx = getattr(_io_tls, "_in_transaction", False)
 
-            # Row-level: resolve params → extract predicates for single-table
-            # operations.  Skip for executemany (each row may have different
-            # params) and multi-table queries (can't attribute columns to
-            # tables without aliases).
+            # Row-level predicate extraction
             predicates: list[Any] = []
             if len(all_tables) == 1 and not is_executemany:
                 if parameters is not None:
@@ -131,13 +172,22 @@ def _intercept_execute(
                 else:
                     predicates = extract_equality_predicates(operation)
 
+            def report_or_buffer(table: str, kind: str) -> None:
+                res_id = _sql_resource_id(table, predicates)
+                if in_tx:
+                    if not hasattr(_io_tls, "_tx_buffer"):
+                        _io_tls._tx_buffer = []
+                    _io_tls._tx_buffer.append((res_id, kind))
+                else:
+                    reporter(res_id, kind)
+
             for table in read_tables:
                 # SELECT FOR UPDATE is both read and write to create conflicts.
                 # SHARE locks are treated as reads (they don't block other shares).
                 kind = "write" if lock_intent == "UPDATE" else "read"
-                reporter(_sql_resource_id(table, predicates), kind)
+                report_or_buffer(table, kind)
             for table in write_tables:
-                reporter(_sql_resource_id(table, predicates), "write")
+                report_or_buffer(table, "write")
 
     if reported:
         with _suppress_endpoint_io():
