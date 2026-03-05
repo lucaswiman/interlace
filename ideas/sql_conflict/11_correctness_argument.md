@@ -22,38 +22,15 @@ The system reduces false positives (spurious interleavings) but does not elimina
 
 ---
 
-## Known Limitations & TODOs
+## Remaining Gaps & TODOs
 
-### TODO: SELECT FOR UPDATE / FOR SHARE Locking Not Modeled
-**Soundness impact:** None (sound but overly pessimistic)
-**Completeness impact:** False positives for lock-contended rows
+### TODO: Cross-Table Foreign Key Dependencies
+**Soundness impact:** None (sound)
+**Completeness impact:** False negatives (missed conflicts)
 
-Two concurrent operations with locking intent are reported as conflicting based on table/row access, but the actual serialization guarantee from `FOR UPDATE` is not modeled:
-```sql
--- Thread A: SELECT * FROM users WHERE id = 1 FOR UPDATE → exclusive lock on row 1
--- Thread B: SELECT * FROM users WHERE id = 1 FOR UPDATE → blocks until A releases
-```
-DPOR reports conflict (correct conclusion), but for the wrong reason (read vs read, not lock vs lock).
+Foreign key relationships are invisible. Thread A inserts into `orders` (references `users.id`), Thread B deletes from `users` — these are classified as independent (different tables), but the FK constraint could cause a real conflict. This is a known limitation; fixing it requires schema-aware analysis.
 
-**Mitigation:** Row-level predicate detection (Phase 2) ensures different rows are independent; same-row locking is conservative but correct.
-
-**Future fix:** Algorithm 1a could extract `lock_intent` from SQL AST, allowing DPOR to track lock ownership explicitly.
-
----
-
-### TODO: Advisory Lock Semantics Not Tracked
-**Soundness impact:** None (falls back to endpoint-level)
-**Completeness impact:** False positives for different advisory lock IDs
-
-Advisory locks are function calls, not SQL DML:
-```python
-cursor.execute("SELECT pg_advisory_lock(?)", (lock_id,))
-```
-These are detected only at the socket level (LD_PRELOAD), not at the lock-ID level. Two threads acquiring different advisory lock IDs are still reported as conflicting because the system doesn't see the lock-ID parameter.
-
-**Mitigation:** Wire protocol parsing (`crates/io/src/lib.rs`) attempts to extract SQL from PostgreSQL wire protocol, but function semantics are opaque.
-
-**Future fix:** Extend wire protocol parser to recognize advisory lock function calls and extract lock IDs, enabling per-lock-ID suppression.
+**Future fix (Phase 6):** Add schema introspection to build a FK dependency graph and integrate it into conflict detection.
 
 ---
 

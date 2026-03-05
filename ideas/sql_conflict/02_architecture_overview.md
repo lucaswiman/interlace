@@ -38,9 +38,6 @@ This implementation has comprehensive coverage of common SQL DML operations but 
 
 | Feature | Why Deferred | Impact | Workaround |
 |---------|--------------|--------|-----------|
-| **SELECT FOR UPDATE / FOR SHARE** | Locking intent not semantically tracked | Conservative but correct; row-level predicates handle same-row cases | Phase 5 TODO |
-| **Advisory locks** | Function calls, not SQL DML | Only socket-level detection; different lock IDs reported as conflicting | Phase 5 TODO |
-| **LOCK TABLE** | DDL not implemented | Falls back to endpoint-level | Phase 5 TODO |
 | **Foreign key constraints** | Schema introspection not implemented | Cross-table dependencies invisible (false negatives) | Phase 6 TODO |
 | **Transaction boundaries** | Statement-level granularity sufficient for most cases | Unnecessary interleavings explored (search space explosion) | Phase 6 TODO |
 | **Stored procedures** | Dynamic SQL opaque | Treated as endpoint-level I/O | Phase 7 TODO |
@@ -53,5 +50,5 @@ This implementation has comprehensive coverage of common SQL DML operations but 
 ## Roadmap
 
 - **Phase 1-3** (✅ Done): Table-level, row-level, wire protocol SQL detection
-- **Phase 4** (📋 Designed): Isolation anomaly classification
-- **Phase 5+** (📋 Documented): Advanced SQL features — see [13_phased_implementation.md#phase-5-advanced-sql-features-todo](13_phased_implementation.md#phase-5-advanced-sql-features-todo)
+- **Phase 4-5** (✅ Done): Isolation anomaly classification and advanced features
+- **Phase 6+** (📋 Documented): Further improvements — see [13_phased_implementation.md#phase-6-further-improvements-todo](13_phased_implementation.md#phase-6-further-improvements-todo)
