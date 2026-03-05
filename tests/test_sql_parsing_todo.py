@@ -603,7 +603,6 @@ class TestMultiDialectTodo:
     Note: sqlglot already handles most dialects. These tests verify edge cases.
     """
 
-    @pytest.mark.xfail(reason="MySQL INSERT OR REPLACE not optimized")
     def test_mysql_insert_or_replace(self):
         """MySQL INSERT ... ON DUPLICATE KEY UPDATE should be recognized."""
         sql = "INSERT INTO users (id, name) VALUES (?, ?) ON DUPLICATE KEY UPDATE name = VALUES(name)"
@@ -611,14 +610,12 @@ class TestMultiDialectTodo:
         assert w == {"users"}
         # Expected: recognize as INSERT with possible UPDATE (writes only)
 
-    @pytest.mark.xfail(reason="SQLite INSERT OR REPLACE not optimized")
     def test_sqlite_insert_or_replace(self):
         """SQLite INSERT OR REPLACE should be recognized."""
         sql = "INSERT OR REPLACE INTO accounts (id, balance) VALUES (?, ?)"
         r, w = parse_sql_access(sql)
         assert w == {"accounts"}
 
-    @pytest.mark.xfail(reason="PostgreSQL ON CONFLICT not optimized")
     def test_postgres_on_conflict(self):
         """PostgreSQL INSERT ... ON CONFLICT should be recognized."""
         sql = "INSERT INTO users (id, name) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET name = ?"
