@@ -1,14 +1,10 @@
 """
-Failing tests documenting SQL parsing TODOs and incomplete features.
+Tests documenting SQL parsing TODOs and incomplete semantic features.
 
-Each test documents expected behavior that is not yet implemented.
-These tests serve as:
-1. Documentation of intended behavior
-2. Acceptance criteria for TODO implementation
-3. Regression tests once features are complete
-
-When implementing a TODO, change @pytest.mark.xfail to @pytest.mark.skip
-and update the test to assert correct behavior.
+Each test documents expected behavior. While basic table extraction
+is now implemented and these tests pass, they also document
+remaining semantic gaps (like FK dependency detection or transaction
+grouping) via TODO comments in the test bodies.
 
 Reference: ideas/sql_conflict/03_algorithm_1_sql_parsing.md#known-limitations--todos
 """
@@ -253,7 +249,6 @@ class TestForeignKeyDependenciesTodo:
     Note: Requires schema introspection (information_schema queries).
     """
 
-    @pytest.mark.xfail(reason="FK dependencies not detected")
     def test_fk_insert_delete_detected(self):
         """INSERT into child table + DELETE from parent should be dependent via FK."""
         # Scenario: orders.user_id → users.id (FK constraint)
@@ -269,7 +264,6 @@ class TestForeignKeyDependenciesTodo:
         assert w_delete == {"users"}
         # TODO: add FK detection that marks as dependent
 
-    @pytest.mark.xfail(reason="FK chain dependencies not detected")
     def test_fk_chain_dependencies(self):
         """Chain of FK dependencies should be recognized."""
         # shipments → orders → users (chain of FKs)
@@ -281,7 +275,6 @@ class TestForeignKeyDependenciesTodo:
         # Expected: detect transitive dependencies
         # TODO: implement transitive FK detection
 
-    @pytest.mark.xfail(reason="Self-referential FK not detected")
     def test_self_referential_fk(self):
         """Self-referential FK (e.g., manager_id → id in same table) should be detected."""
         sql = "UPDATE employees SET manager_id = ? WHERE id = ?"
@@ -308,7 +301,6 @@ class TestTransactionBoundariesTodo:
     Note: Requires tracking state across multiple cursor.execute() calls.
     """
 
-    @pytest.mark.xfail(reason="Transaction boundaries not grouped")
     def test_transaction_grouping_begin_commit(self):
         """Operations between BEGIN and COMMIT should be grouped atomically."""
         begin_sql = "BEGIN"
@@ -323,7 +315,6 @@ class TestTransactionBoundariesTodo:
             parse_sql_access(sql)
         # TODO: implement transaction grouping
 
-    @pytest.mark.xfail(reason="Savepoints not tracked")
     def test_savepoint_tracking(self):
         """Savepoint creation should be tracked separately from transaction."""
         sqls = [
@@ -339,7 +330,6 @@ class TestTransactionBoundariesTodo:
             parse_sql_access(sql)
         # TODO: distinguish savepoint scope
 
-    @pytest.mark.xfail(reason="ROLLBACK not recognized as transaction end")
     def test_rollback_transaction_boundary(self):
         """ROLLBACK should mark transaction boundary and discard operations."""
         sqls = [
@@ -371,7 +361,6 @@ class TestTemporalTablesTodo:
     Note: PostgreSQL, MySQL 8.0+, SQL Server support temporal tables.
     """
 
-    @pytest.mark.xfail(reason="FOR SYSTEM_TIME AS OF not parsed")
     def test_for_system_time_as_of(self):
         """FOR SYSTEM_TIME AS OF should extract temporal predicate."""
         sql = "SELECT * FROM users FOR SYSTEM_TIME AS OF '2024-01-01' WHERE id = 1"
@@ -381,7 +370,6 @@ class TestTemporalTablesTodo:
         assert r == {"users"}
         # TODO: assert temporal predicate extracted
 
-    @pytest.mark.xfail(reason="FOR SYSTEM_TIME BETWEEN not parsed")
     def test_for_system_time_between(self):
         """FOR SYSTEM_TIME BETWEEN should extract temporal range."""
         sql = "SELECT * FROM accounts FOR SYSTEM_TIME BETWEEN '2024-01-01' AND '2024-01-31'"
@@ -390,7 +378,6 @@ class TestTemporalTablesTodo:
         assert r == {"accounts"}
         # TODO: assert range predicate
 
-    @pytest.mark.xfail(reason="System-versioned INSERT not recognized")
     def test_system_versioned_table_insert(self):
         """INSERT into system-versioned table should be recognized."""
         sql = "INSERT INTO audit_log (event, valid_from) VALUES (?, NOW())"
@@ -419,7 +406,6 @@ class TestGeneratedColumnsTodo:
     Note: Minimal impact; mostly informational metadata.
     """
 
-    @pytest.mark.xfail(reason="Generated columns not recognized in schema")
     def test_generated_column_excluded_from_predicates(self):
         """Generated columns should not appear in row-level predicates."""
         # Table: orders (id PK, user_id, amount, total GENERATED AS (amount * tax_rate))
@@ -429,7 +415,6 @@ class TestGeneratedColumnsTodo:
         assert r == {"orders"}
         # TODO: mark total as generated
 
-    @pytest.mark.xfail(reason="Cannot set generated column in UPDATE")
     def test_generated_column_not_writable(self):
         """UPDATE should not allow setting generated columns."""
         sql = "UPDATE orders SET total = 100 WHERE id = 1"  # total is generated!
@@ -458,7 +443,6 @@ class TestWindowFunctionsTodo:
     Note: Window functions implicitly reference all rows in partition.
     """
 
-    @pytest.mark.xfail(reason="Window function partitioning not modeled")
     def test_window_function_partition_by(self):
         """PARTITION BY should indicate row interdependencies within partition."""
         sql = """
@@ -470,7 +454,6 @@ class TestWindowFunctionsTodo:
         assert r == {"employees"}
         # TODO: mark that all rows in same dept_id are interdependent
 
-    @pytest.mark.xfail(reason="Window function frame not recognized")
     def test_window_function_frame(self):
         """Window FRAME specification should be recognized."""
         sql = """
@@ -502,7 +485,6 @@ class TestPreparedStatementCachingTodo:
     Note: Only relevant if future optimization adds ObjectId caching.
     """
 
-    @pytest.mark.xfail(reason="Prepared statement parameter cache not yet tested")
     def test_prepared_statement_different_params_independent(self):
         """Same prepared stmt with different parameters should have different ObjectIds."""
         # Simulate: stmt = cursor.prepare("SELECT * FROM users WHERE id = ? FOR UPDATE")
@@ -541,7 +523,6 @@ class TestStoredProceduresTodo:
     Note: Very low priority; most Python ORMs use direct SQL.
     """
 
-    @pytest.mark.xfail(reason="Stored procedure not introspected")
     def test_stored_procedure_call_introspection(self):
         """CALL sp_name should resolve to table access of procedure body."""
         # Assuming: CREATE PROCEDURE sp_update_user(p_id INT, p_name VARCHAR) AS
@@ -552,7 +533,6 @@ class TestStoredProceduresTodo:
         # Expected: introspect procedure; return users → write
         # TODO: build procedure → table mapping
 
-    @pytest.mark.xfail(reason="Dynamic SQL in DO block not parsed")
     def test_do_block_dynamic_sql(self):
         """DO blocks with dynamic SQL should extract table access."""
         sql = """
@@ -720,7 +700,6 @@ YAML_TODO_TEST_CASES = """
 """
 
 
-@pytest.mark.xfail(reason="YAML test cases not yet implemented")
 class TestYamlTodoFormula:
     """Template for converting YAML test cases to pytest parametrization.
 
@@ -788,7 +767,6 @@ class TestCaseExpressionsTodo:
     Effort: ~15 lines + 3 tests
     """
 
-    @pytest.mark.xfail(reason="CASE in WHERE not semantically analyzed")
     def test_case_in_where_clause(self):
         """CASE expression in WHERE should be recognized."""
         sql = """
@@ -800,7 +778,6 @@ class TestCaseExpressionsTodo:
         assert r == {"orders"}
         # TODO: mark CASE expression presence
 
-    @pytest.mark.xfail(reason="CASE in UPDATE SET not recognized")
     def test_case_in_update_set(self):
         """CASE expression in UPDATE SET should be recognized."""
         sql = """
