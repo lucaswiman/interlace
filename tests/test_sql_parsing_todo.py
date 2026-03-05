@@ -991,7 +991,6 @@ class TestLateralJoinsTodo:
     Effort: ~15 lines + 2 tests
     """
 
-    @pytest.mark.xfail(reason="LATERAL joins not recognized as correlated")
     def test_lateral_join_with_correlation(self):
         """LATERAL subquery should be marked as dependent on outer table."""
         sql = """
