@@ -59,7 +59,7 @@ class TestSelectForUpdateTodo:
 
     def test_select_for_update_skip_locked(self):
         """SELECT FOR UPDATE SKIP LOCKED should parse with skip semantics."""
-        sql = "SELECT * FROM inventory WHERE product_id IN (...) FOR UPDATE SKIP LOCKED"
+        sql = "SELECT * FROM inventory WHERE product_id IN (1, 2, 3) FOR UPDATE SKIP LOCKED"
         r, w, lock_intent = parse_sql_access(sql)
         assert r == {"inventory"} and w == set()
         assert lock_intent == "UPDATE"

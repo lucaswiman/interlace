@@ -46,8 +46,12 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None] | None:
     upper = stripped.upper()
     if any(kw in upper for kw in (
         "WITH ", "UNION", "INTERSECT", "EXCEPT", "MERGE", "RETURNING",
-        "SELECT", "EXISTS", "IN ("
+        "EXISTS", "IN ("
     )):
+        return None
+
+    # Subqueries in DELETE or UPDATE (SELECT appearing after the first keyword)
+    if not stripped.lower().startswith("select") and "SELECT" in upper:
         return None
 
     read: set[str] = set()
@@ -131,13 +135,18 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str], str | None] | None:
     if isinstance(ast, exp.Select):
         lock = ast.find(exp.Lock)
         if lock:
-            kind = lock.args.get("kind")
-            if kind:
-                kind_upper = str(kind).upper()
-                if "UPDATE" in kind_upper:
-                    lock_intent = "UPDATE"
-                elif "SHARE" in kind_upper:
-                    lock_intent = "SHARE"
+            if lock.args.get("update"):
+                lock_intent = "UPDATE"
+            elif lock.args.get("share"):
+                lock_intent = "SHARE"
+            else:
+                kind = lock.args.get("kind")
+                if kind:
+                    kind_upper = str(kind).upper()
+                    if "UPDATE" in kind_upper:
+                        lock_intent = "UPDATE"
+                    elif "SHARE" in kind_upper:
+                        lock_intent = "SHARE"
 
     if isinstance(ast, exp.Insert):
         tbl = ast.find(exp.Table)
