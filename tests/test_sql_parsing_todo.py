@@ -759,7 +759,6 @@ class TestCorrelatedSubqueriesTodo:
     Effort: ~20 lines + 5 tests
     """
 
-    @pytest.mark.xfail(reason="Correlated subqueries not recognized")
     def test_correlated_subquery_in_where(self):
         """WHERE with correlated subquery should mark outer table dependency."""
         sql = """
@@ -770,7 +769,6 @@ class TestCorrelatedSubqueriesTodo:
         assert "users" in r and "accounts" in r
         # TODO: mark correlation dependency (users ← accounts)
 
-    @pytest.mark.xfail(reason="Correlated subquery in SELECT list not recognized")
     def test_correlated_subquery_in_select_list(self):
         """SELECT clause with correlated subquery should mark dependency."""
         sql = """
