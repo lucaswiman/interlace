@@ -1013,7 +1013,6 @@ class TestUpsertEdgeCasesTodo:
     Effort: ~25 lines + 6 tests
     """
 
-    @pytest.mark.xfail(reason="ON CONFLICT DO UPDATE with WHERE not optimized")
     def test_insert_on_conflict_do_update_with_where(self):
         """ON CONFLICT DO UPDATE with WHERE should limit write scope."""
         sql = """
@@ -1024,7 +1023,6 @@ class TestUpsertEdgeCasesTodo:
         assert w == {"users"}
         # TODO: mark conditional update scope
 
-    @pytest.mark.xfail(reason="ON CONFLICT DO NOTHING optimization missing")
     def test_insert_on_conflict_do_nothing(self):
         """ON CONFLICT DO NOTHING is actually only INSERT (no UPDATE)."""
         sql = """
