@@ -81,34 +81,30 @@ class TestLockTableTodo:
     Current: Falls back to endpoint-level (conservative "all tables write").
     """
 
-    @pytest.mark.xfail(reason="LOCK TABLE statement not yet parsed")
     def test_lock_table_exclusive(self):
         """LOCK TABLE ... IN EXCLUSIVE MODE should be recognized."""
         sql = "LOCK TABLE users IN EXCLUSIVE MODE"
-        # Expected API:
-        # read, write, lock_type = parse_sql_access_with_locks(sql)
-        # assert read == set()
-        # assert write == set()
-        # assert lock_type == ("users", "EXCLUSIVE")
-        r, w, _ = parse_sql_access(sql)
-        # Currently falls back to endpoint-level
-        # TODO: assert recognizes lock statement
+        r, w, lock_intent = parse_sql_access(sql)
+        assert r == set()
+        assert w == {"users"}
+        assert lock_intent == "UPDATE"
 
-    @pytest.mark.xfail(reason="LOCK TABLE SHARE mode not yet parsed")
     def test_lock_table_share(self):
         """LOCK TABLE ... IN SHARE MODE should be recognized."""
         sql = "LOCK TABLE orders IN SHARE MODE"
-        r, w, _ = parse_sql_access(sql)
-        # TODO: assert lock extracted with mode "SHARE"
+        r, w, lock_intent = parse_sql_access(sql)
+        assert r == set()
+        assert w == {"orders"}
+        assert lock_intent == "SHARE"
 
-    @pytest.mark.xfail(reason="LOCK TABLE IN ROW EXCLUSIVE MODE not yet parsed")
     def test_lock_table_row_exclusive(self):
         """LOCK TABLE ... IN ROW EXCLUSIVE MODE should be recognized."""
         sql = "LOCK TABLE inventory IN ROW EXCLUSIVE MODE"
-        r, w, _ = parse_sql_access(sql)
-        # TODO: assert lock mode == "ROW EXCLUSIVE"
+        r, w, lock_intent = parse_sql_access(sql)
+        assert r == set()
+        assert w == {"inventory"}
+        assert lock_intent == "UPDATE"
 
-    @pytest.mark.xfail(reason="Multiple LOCK TABLE statements not yet parsed")
     def test_lock_multiple_tables(self):
         """Multiple LOCK TABLE statements should be parsed in sequence."""
         sqls = [
@@ -116,9 +112,9 @@ class TestLockTableTodo:
             "LOCK TABLE orders IN SHARE MODE",
         ]
         # Expected: parse and track all locks
-        for sql in sqls:
-            parse_sql_access(sql)
-        # TODO: assert lock tracking
+        results = [parse_sql_access(sql) for sql in sqls]
+        assert results[0] == (set(), {"users"}, "UPDATE")
+        assert results[1] == (set(), {"orders"}, "SHARE")
 
 
 # =============================================================================

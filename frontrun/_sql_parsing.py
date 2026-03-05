@@ -22,6 +22,8 @@ _RE_FROM = re.compile(rf"\bFROM{_WS}({_IDENT})", re.I)
 _RE_JOIN = re.compile(rf"\bJOIN{_WS}({_IDENT})", re.I)
 _RE_FOR_UPDATE = re.compile(r"\bFOR" + _WS + r"UPDATE\b", re.I)
 _RE_FOR_SHARE = re.compile(r"\bFOR" + _WS + r"SHARE\b", re.I)
+_RE_LOCK_TABLE = re.compile(rf"\bLOCK{_WS}TABLE{_WS}({_IDENT})", re.I)
+_RE_LOCK_MODE = re.compile(rf"\bIN{_WS}(.+){_WS}MODE\b", re.I)
 
 
 def _strip_quotes(name: str) -> str:
@@ -48,6 +50,20 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None] | None:
     read: set[str] = set()
     write: set[str] = set()
     lock_intent: str | None = None
+
+    m_lock = _RE_LOCK_TABLE.search(stripped)
+    if m_lock:
+        tbl = _strip_quotes(m_lock.group(1))
+        # Treat LOCK TABLE as an exclusive write by default for safety.
+        # This ensures it conflicts with all other accesses.
+        lock_intent = "UPDATE"
+        m_mode = _RE_LOCK_MODE.search(stripped)
+        if m_mode:
+            mode = m_mode.group(1).upper()
+            if "SHARE" in mode and "EXCLUSIVE" not in mode:
+                lock_intent = "SHARE"
+        write.add(tbl)
+        return read, write, lock_intent
 
     if _RE_FOR_UPDATE.search(stripped):
         lock_intent = "UPDATE"
