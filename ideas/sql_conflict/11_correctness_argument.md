@@ -34,23 +34,14 @@ Foreign key relationships are invisible. Thread A inserts into `orders` (referen
 
 ---
 
-### TODO: Transaction Boundaries Ignored
-**Soundness impact:** None (sound)
-**Completeness impact:** Explosion of search space
+### ~~TODO: Transaction Boundaries Ignored~~ ✅ Done
 
-DPOR treats each SQL statement independently, missing the atomicity guarantee of transactions:
-```python
-# Thread A:
-cursor.execute("BEGIN")
-cursor.execute("SELECT * FROM accounts WHERE id = 1")
-cursor.execute("UPDATE accounts SET balance = ...")
-cursor.execute("COMMIT")
-```
-DPOR explores all interleavings of the 4 statements. In reality, the entire transaction is atomic, and only commit/rollback points are observable to other threads.
-
-**Mitigation:** For read-committed isolation, this is conservative but correct (interleavings within a transaction don't cause anomalies).
-
-**Future fix (Phase 4):** Track transaction boundaries (BEGIN/COMMIT/ROLLBACK) and group SQL operations into transaction-level ObjectIds.
+Transaction grouping is now implemented:
+- BEGIN → buffer I/O reports in `_io_tls._tx_buffer`
+- COMMIT → flush buffer to reporter
+- ROLLBACK → discard buffer
+- SAVEPOINT/ROLLBACK TO → partial rollback via buffer truncation
+- DPOR scheduler skips interleaving when `_in_transaction` is True
 
 ---
 

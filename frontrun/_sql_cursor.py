@@ -38,7 +38,7 @@ except ImportError:
 # same package, but guard with try/except for robustness.
 try:
     from frontrun._sql_params import resolve_parameters
-    from frontrun._sql_predicates import extract_equality_predicates
+    from frontrun._sql_predicates import expand_predicate_rows, extract_equality_predicates
 except ImportError:
 
     def resolve_parameters(sql: str, parameters: Any, paramstyle: str) -> str:  # type: ignore[misc]
@@ -46,6 +46,9 @@ except ImportError:
 
     def extract_equality_predicates(sql: str) -> list:  # type: ignore[misc]
         return []
+
+    def expand_predicate_rows(preds: list) -> list[list] | None:  # type: ignore[misc]
+        return [preds] if preds else None
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +110,8 @@ def _intercept_execute(
     activates suppression, then delegates to *original_method*.
 
     When *is_executemany* is False and the query touches exactly one table,
-    resolves *parameters* and extracts row-level equality predicates so that
+    resolves *parameters* and extracts row-level predicates (equality and
+    IN-lists) so that
     the reported resource ID is finer-grained than plain ``sql:<table>``.
 
     Implements transaction grouping: when a transaction is active (BEGIN
@@ -163,23 +167,28 @@ def _intercept_execute(
             all_tables = read_tables | write_tables
             in_tx = getattr(_io_tls, "_in_transaction", False)
 
-            # Row-level predicate extraction
-            predicates: list[Any] = []
+            # Row-level predicate extraction (equality + IN-lists)
+            pred_rows: list[list[Any]] = [[]]  # default: one report, no predicates (table-level)
             if len(all_tables) == 1 and not is_executemany:
                 if parameters is not None:
                     resolved = resolve_parameters(operation, parameters, paramstyle)
-                    predicates = extract_equality_predicates(resolved)
+                    preds = extract_equality_predicates(resolved)
                 else:
-                    predicates = extract_equality_predicates(operation)
+                    preds = extract_equality_predicates(operation)
+                if preds:
+                    expanded = expand_predicate_rows(preds)
+                    if expanded is not None:
+                        pred_rows = expanded
 
             def report_or_buffer(table: str, kind: str) -> None:
-                res_id = _sql_resource_id(table, predicates)
-                if in_tx:
-                    if not hasattr(_io_tls, "_tx_buffer"):
-                        _io_tls._tx_buffer = []
-                    _io_tls._tx_buffer.append((res_id, kind))
-                else:
-                    reporter(res_id, kind)
+                for row_preds in pred_rows:
+                    res_id = _sql_resource_id(table, row_preds)
+                    if in_tx:
+                        if not hasattr(_io_tls, "_tx_buffer"):
+                            _io_tls._tx_buffer = []
+                        _io_tls._tx_buffer.append((res_id, kind))
+                    else:
+                        reporter(res_id, kind)
 
             for table in read_tables:
                 # SELECT FOR UPDATE is both read and write to create conflicts.
@@ -198,7 +207,6 @@ def _intercept_execute(
         if parameters is not None:
             return original_method(self, operation, parameters)
         return original_method(self, operation)
-
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +303,6 @@ def _patch_sqlite3() -> None:
     """Patch sqlite3.connect to inject TracedConnection factory."""
     orig_connect = sqlite3.connect
     traced_conn_cls = _make_traced_sqlite3_connection_class()
-    traced_cursor_cls = _make_traced_cursor_class(sqlite3.Cursor, paramstyle="qmark")
 
     def patched_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
         if "factory" not in kwargs:
@@ -307,9 +314,6 @@ def _patch_sqlite3() -> None:
     # Expose for tests via _ORIGINAL_METHODS — key by (cursor_class, method_name)
     _ORIGINAL_METHODS[(sqlite3.Cursor, "execute")] = sqlite3.Cursor.execute
     _ORIGINAL_METHODS[(sqlite3.Cursor, "executemany")] = sqlite3.Cursor.executemany
-    # Also expose the traced subclasses for inspection
-    _ORIGINAL_METHODS[(traced_cursor_cls, "_traced_execute")] = traced_cursor_cls.execute
-    _ORIGINAL_METHODS[(traced_cursor_cls, "_traced_executemany")] = traced_cursor_cls.executemany
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +331,6 @@ def _patch_class_methods(cls: type, paramstyle: str) -> None:
         if key in _ORIGINAL_METHODS:
             continue
         _ORIGINAL_METHODS[key] = original
-        _orig = original
 
         def _make_patched(orig: Any, mname: str, ps: str) -> Any:
             _is_executemany = mname == "executemany"

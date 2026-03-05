@@ -16,7 +16,9 @@ sqlglot = pytest.importorskip("sqlglot")
 
 from frontrun._sql_predicates import (
     EqualityPredicate,
+    InListPredicate,
     can_use_row_level,
+    expand_predicate_rows,
     extract_equality_predicates,
     pk_predicates_disjoint,
 )
@@ -66,9 +68,38 @@ class TestExtractEqualityPredicates:
         preds = extract_equality_predicates("SELECT * FROM t WHERE id > 5")
         assert preds == []
 
-    def test_in_clause_skipped(self):
+    def test_in_clause_extracted(self):
         preds = extract_equality_predicates("SELECT * FROM t WHERE id IN (1, 2, 3)")
+        assert len(preds) == 1
+        assert isinstance(preds[0], InListPredicate)
+        assert preds[0].column == "id"
+        assert preds[0].values == frozenset({"1", "2", "3"})
+
+    def test_in_clause_single_value(self):
+        preds = extract_equality_predicates("SELECT * FROM t WHERE id IN (42)")
+        assert len(preds) == 1
+        assert isinstance(preds[0], InListPredicate)
+        assert preds[0].values == frozenset({"42"})
+
+    def test_in_clause_with_strings(self):
+        preds = extract_equality_predicates("SELECT * FROM t WHERE status IN ('active', 'pending')")
+        assert len(preds) == 1
+        assert isinstance(preds[0], InListPredicate)
+        assert preds[0].column == "status"
+        assert preds[0].values == frozenset({"active", "pending"})
+
+    def test_in_clause_with_subquery_skipped(self):
+        """IN with subquery is not a literal list — should be skipped."""
+        preds = extract_equality_predicates("SELECT * FROM t WHERE id IN (SELECT id FROM other)")
         assert preds == []
+
+    def test_in_clause_mixed_with_equality(self):
+        preds = extract_equality_predicates("SELECT * FROM t WHERE region = 'us' AND id IN (1, 2)")
+        assert len(preds) == 2
+        assert EqualityPredicate("region", "us") in preds
+        in_pred = [p for p in preds if isinstance(p, InListPredicate)][0]
+        assert in_pred.column == "id"
+        assert in_pred.values == frozenset({"1", "2"})
 
     def test_between_skipped(self):
         preds = extract_equality_predicates("SELECT * FROM t WHERE id BETWEEN 1 AND 10")
@@ -119,6 +150,56 @@ class TestExtractEqualityPredicates:
         """Table-qualified column (t.id) should extract just the column name."""
         preds = extract_equality_predicates("SELECT * FROM t WHERE t.id = 42")
         assert preds == [EqualityPredicate("id", "42")]
+
+
+# ---------------------------------------------------------------------------
+# expand_predicate_rows
+# ---------------------------------------------------------------------------
+
+
+class TestExpandPredicateRows:
+    def test_equalities_only(self):
+        preds = [EqualityPredicate("id", "1"), EqualityPredicate("region", "us")]
+        rows = expand_predicate_rows(preds)
+        assert rows == [preds]
+
+    def test_empty_predicates(self):
+        assert expand_predicate_rows([]) is None
+
+    def test_single_in_list(self):
+        preds = [InListPredicate("id", frozenset({"1", "2", "3"}))]
+        rows = expand_predicate_rows(preds)
+        assert rows is not None
+        assert len(rows) == 3
+        values = {rows[i][0].value for i in range(3)}
+        assert values == {"1", "2", "3"}
+
+    def test_in_list_with_equality(self):
+        preds = [EqualityPredicate("region", "us"), InListPredicate("id", frozenset({"1", "2"}))]
+        rows = expand_predicate_rows(preds)
+        assert rows is not None
+        assert len(rows) == 2
+        for row in rows:
+            assert EqualityPredicate("region", "us") in row
+            assert len(row) == 2
+
+    def test_two_in_lists_cross_product(self):
+        preds = [
+            InListPredicate("id", frozenset({"1", "2"})),
+            InListPredicate("region", frozenset({"us", "eu"})),
+        ]
+        rows = expand_predicate_rows(preds)
+        assert rows is not None
+        assert len(rows) == 4  # 2 x 2
+
+    def test_large_in_list_returns_none(self):
+        """IN-list cross product exceeding _MAX_EXPANSION returns None (table-level fallback)."""
+        preds = [
+            InListPredicate("id", frozenset(str(i) for i in range(10))),
+            InListPredicate("region", frozenset(str(i) for i in range(10))),
+        ]
+        # 10 x 10 = 100 > _MAX_EXPANSION (64)
+        assert expand_predicate_rows(preds) is None
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +298,32 @@ class TestPkPredicatesDisjoint:
 
     def test_both_empty(self):
         assert not pk_predicates_disjoint([], [])
+
+    def test_in_list_disjoint(self):
+        a = [InListPredicate("id", frozenset({"1", "2", "3"}))]
+        b = [InListPredicate("id", frozenset({"4", "5", "6"}))]
+        assert pk_predicates_disjoint(a, b)
+
+    def test_in_list_overlapping(self):
+        a = [InListPredicate("id", frozenset({"1", "2", "3"}))]
+        b = [InListPredicate("id", frozenset({"3", "4", "5"}))]
+        assert not pk_predicates_disjoint(a, b)
+
+    def test_in_list_vs_equality_disjoint(self):
+        a = [InListPredicate("id", frozenset({"1", "2", "3"}))]
+        b = [EqualityPredicate("id", "4")]
+        assert pk_predicates_disjoint(a, b)
+
+    def test_in_list_vs_equality_overlapping(self):
+        a = [InListPredicate("id", frozenset({"1", "2", "3"}))]
+        b = [EqualityPredicate("id", "2")]
+        assert not pk_predicates_disjoint(a, b)
+
+    def test_in_list_composite_pk(self):
+        """Different id sets but same region — disjoint on id."""
+        a = [InListPredicate("id", frozenset({"1", "2"})), EqualityPredicate("region", "us")]
+        b = [InListPredicate("id", frozenset({"3", "4"})), EqualityPredicate("region", "us")]
+        assert pk_predicates_disjoint(a, b)
 
 
 # ---------------------------------------------------------------------------

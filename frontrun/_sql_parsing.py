@@ -62,11 +62,11 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None] 
         if m:
             return set(), set(), None, f"ROLLBACK_TO:{m.group(2)}"
         return set(), set(), None, "ROLLBACK"
-    if _RE_TX_SAVEPOINT.search(stripped):
-        m = _RE_TX_SAVEPOINT.search(stripped)
+    m = _RE_TX_SAVEPOINT.search(stripped)
+    if m:
         return set(), set(), None, f"SAVEPOINT:{m.group(1)}"
-    if _RE_TX_RELEASE.search(stripped):
-        m = _RE_TX_RELEASE.search(stripped)
+    m = _RE_TX_RELEASE.search(stripped)
+    if m:
         return set(), set(), None, f"RELEASE:{m.group(2)}"
 
     # Bail to full parser for complex SQL
