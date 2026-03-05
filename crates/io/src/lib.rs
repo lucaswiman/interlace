@@ -399,8 +399,8 @@ impl FdMap {
     }
 }
 
-static FD_MAP: std::sync::LazyLock<Mutex<FdMap>> =
-    std::sync::LazyLock::new(|| Mutex::new(FdMap::new()));
+static FD_MAP: once_cell::sync::Lazy<Mutex<FdMap>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(FdMap::new()));
 
 // ---------------------------------------------------------------------------
 // Pipe-based event transport (FRONTRUN_IO_FD)
