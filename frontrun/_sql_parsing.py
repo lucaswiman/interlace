@@ -20,6 +20,7 @@ _RE_UPDATE = re.compile(rf"\bUPDATE{_WS}({_IDENT}){_WS}SET\b", re.I)
 _RE_DELETE = re.compile(rf"\bDELETE{_WS}FROM{_WS}({_IDENT})", re.I)
 _RE_FROM = re.compile(rf"\bFROM{_WS}({_IDENT})", re.I)
 _RE_JOIN = re.compile(rf"\bJOIN{_WS}({_IDENT})", re.I)
+_RE_LITERAL = re.compile(r"'[^']*'")
 _RE_FOR_UPDATE = re.compile(r"\bFOR" + _WS + r"UPDATE\b", re.I)
 _RE_FOR_SHARE = re.compile(r"\bFOR" + _WS + r"SHARE\b", re.I)
 _RE_LOCK_TABLE = re.compile(rf"\bLOCK{_WS}TABLE{_WS}({_IDENT})", re.I)
@@ -51,7 +52,7 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None] | None:
         return None
 
     # Subqueries in DELETE or UPDATE (SELECT appearing after the first keyword)
-    if not stripped.lower().startswith("select") and "SELECT" in upper:
+    if not any(stripped.lower().startswith(kw) for kw in ("select", "insert")) and "SELECT" in upper:
         return None
 
     # Function calls (advisory locks etc) — bail to sqlglot
@@ -59,17 +60,21 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None] | None:
         if any(kw in stripped.lower() for kw in ("pg_advisory", "get_lock")):
             return None
 
+    # Strip literals to avoid false positives (e.g. " FROM " inside a string)
+    # Replacing with space to preserve offsets if needed (though not needed yet)
+    no_literals = _RE_LITERAL.sub(" ", stripped)
+
     read: set[str] = set()
     write: set[str] = set()
     lock_intent: str | None = None
 
-    m_lock = _RE_LOCK_TABLE.search(stripped)
+    m_lock = _RE_LOCK_TABLE.search(no_literals)
     if m_lock:
         tbl = _strip_quotes(m_lock.group(1))
         # Treat LOCK TABLE as an exclusive write by default for safety.
         # This ensures it conflicts with all other accesses.
         lock_intent = "UPDATE"
-        m_mode = _RE_LOCK_MODE.search(stripped)
+        m_mode = _RE_LOCK_MODE.search(no_literals)
         if m_mode:
             mode = m_mode.group(1).upper()
             if "SHARE" in mode and "EXCLUSIVE" not in mode:
@@ -77,42 +82,42 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None] | None:
         write.add(tbl)
         return read, write, lock_intent
 
-    if _RE_FOR_UPDATE.search(stripped):
+    if _RE_FOR_UPDATE.search(no_literals):
         lock_intent = "UPDATE"
-    elif _RE_FOR_SHARE.search(stripped):
+    elif _RE_FOR_SHARE.search(no_literals):
         lock_intent = "SHARE"
 
-    m_insert = _RE_INSERT.search(stripped)
+    m_insert = _RE_INSERT.search(no_literals)
     if m_insert:
         write.add(_strip_quotes(m_insert.group(1)))
         # Source tables in INSERT ... SELECT ... FROM
-        for m in _RE_FROM.finditer(stripped, m_insert.end()):
+        for m in _RE_FROM.finditer(no_literals, m_insert.end()):
             read.add(_strip_quotes(m.group(1)))
         return read, write, lock_intent
 
-    m_update = _RE_UPDATE.search(stripped)
+    m_update = _RE_UPDATE.search(no_literals)
     if m_update:
         tbl = _strip_quotes(m_update.group(1))
         write.add(tbl)
         read.add(tbl)  # WHERE reads the target
         # Subquery tables in FROM/JOIN (UPDATE ... FROM ... syntax)
-        for m in _RE_FROM.finditer(stripped, m_update.end()):
+        for m in _RE_FROM.finditer(no_literals, m_update.end()):
             t = _strip_quotes(m.group(1))
             if t not in write:
                 read.add(t)
         return read, write, lock_intent
 
-    m_delete = _RE_DELETE.search(stripped)
+    m_delete = _RE_DELETE.search(no_literals)
     if m_delete:
         tbl = _strip_quotes(m_delete.group(1))
         write.add(tbl)
         read.add(tbl)
         return read, write, lock_intent
 
-    if _RE_SELECT.search(stripped):
-        for m in _RE_FROM.finditer(stripped):
+    if _RE_SELECT.search(no_literals):
+        for m in _RE_FROM.finditer(no_literals):
             read.add(_strip_quotes(m.group(1)))
-        for m in _RE_JOIN.finditer(stripped):
+        for m in _RE_JOIN.finditer(no_literals):
             read.add(_strip_quotes(m.group(1)))
         return read, write, lock_intent
 
