@@ -135,6 +135,11 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str]] | None:
             read.add(t.name)
         return read, write
 
+    if isinstance(ast, (exp.Union, exp.Intersect, exp.Except)):
+        for t in ast.find_all(exp.Table):
+            read.add(t.name)
+        return read, write
+
     if isinstance(ast, exp.Merge):
         target = ast.this
         if isinstance(target, exp.Table):

@@ -214,27 +214,22 @@ class TestUnionOptimizationTodo:
     Current: Conservative fallback treats all tables as writes.
     """
 
-    @pytest.mark.xfail(reason="UNION incorrectly treats all tables as writes")
     def test_union_select_should_be_reads_not_writes(self):
         """UNION of two SELECT should extract all tables as reads."""
         sql = "SELECT id FROM users UNION SELECT id FROM archived_users"
         r, w = parse_sql_access(sql)
-        # Currently: w == {"users", "archived_users"}  (wrong!)
         # Expected: r == {"users", "archived_users"}, w == set()
         assert "users" in r and "archived_users" in r
         assert w == set(), "UNION reads should not be classified as writes"
 
-    @pytest.mark.xfail(reason="INTERSECT incorrectly treats tables as writes")
     def test_intersect_should_be_reads(self):
         """INTERSECT of two SELECT should extract reads only."""
         sql = "SELECT id FROM users INTERSECT SELECT id FROM admins"
         r, w = parse_sql_access(sql)
-        # Currently: both → writes (wrong!)
         # Expected: both → reads
         assert "users" in r and "admins" in r
         assert w == set()
 
-    @pytest.mark.xfail(reason="EXCEPT incorrectly treats tables as writes")
     def test_except_should_be_reads(self):
         """EXCEPT of two SELECT should extract reads only."""
         sql = "SELECT id FROM all_users EXCEPT SELECT id FROM banned_users"
@@ -242,7 +237,6 @@ class TestUnionOptimizationTodo:
         assert "all_users" in r and "banned_users" in r
         assert w == set()
 
-    @pytest.mark.xfail(reason="UNION ALL not yet optimized")
     def test_union_all_should_be_reads(self):
         """UNION ALL (without deduplication) should still be read-only."""
         sql = "SELECT * FROM orders UNION ALL SELECT * FROM archived_orders"
@@ -250,7 +244,6 @@ class TestUnionOptimizationTodo:
         assert "orders" in r and "archived_orders" in r
         assert w == set()
 
-    @pytest.mark.xfail(reason="INSERT ... UNION incorrectly classifies target as read")
     def test_insert_union_target_is_write(self):
         """INSERT with UNION source should correctly identify target as write."""
         sql = "INSERT INTO summary SELECT * FROM users UNION SELECT * FROM archived_users"
