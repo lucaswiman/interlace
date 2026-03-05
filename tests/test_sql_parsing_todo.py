@@ -905,7 +905,6 @@ class TestSelfJoinsTodo:
     Effort: ~15 lines + 3 tests
     """
 
-    @pytest.mark.xfail(reason="Self-join not recognized as circular dependency")
     def test_self_join_employees(self):
         """Self-join for hierarchy (employees + managers) should be marked."""
         sql = """
@@ -917,7 +916,6 @@ class TestSelfJoinsTodo:
         assert r == {"employees"}
         # TODO: mark as self-join with dependency
 
-    @pytest.mark.xfail(reason="Self-referential FK in UPDATE not marked")
     def test_self_referential_update(self):
         """UPDATE on table with self-referential FK should be marked."""
         sql = """
