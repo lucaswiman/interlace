@@ -937,7 +937,6 @@ class TestLimitOffsetTodo:
     Effort: ~20 lines + 4 tests
     """
 
-    @pytest.mark.xfail(reason="DELETE with LIMIT not recognized")
     def test_delete_with_limit(self):
         """DELETE with LIMIT should indicate limited write scope."""
         sql = """
@@ -947,7 +946,6 @@ class TestLimitOffsetTodo:
         assert "sessions" in w and "sessions" in r
         # TODO: track LIMIT as write scope limiter
 
-    @pytest.mark.xfail(reason="SELECT with LIMIT/OFFSET not tracked")
     def test_select_with_limit_offset(self):
         """SELECT with LIMIT/OFFSET should be recognized."""
         sql = """
