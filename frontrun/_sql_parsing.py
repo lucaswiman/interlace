@@ -54,6 +54,11 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None] | None:
     if not stripped.lower().startswith("select") and "SELECT" in upper:
         return None
 
+    # Function calls (advisory locks etc) — bail to sqlglot
+    if "(" in stripped and not stripped.lower().startswith("insert"):
+        if any(kw in stripped.lower() for kw in ("pg_advisory", "get_lock")):
+            return None
+
     read: set[str] = set()
     write: set[str] = set()
     lock_intent: str | None = None
@@ -147,6 +152,25 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str], str | None] | None:
                         lock_intent = "UPDATE"
                     elif "SHARE" in kind_upper:
                         lock_intent = "SHARE"
+
+    # Advisory locks (PostgreSQL, MySQL)
+    for call in ast.find_all(exp.Anonymous):
+        name = call.this.lower()
+        if name in ("pg_advisory_lock", "pg_advisory_xact_lock",
+                    "pg_advisory_lock_shared", "pg_advisory_xact_lock_shared",
+                    "get_lock"):
+            # Extract lock ID/name if it's a literal
+            if call.expressions:
+                arg = call.expressions[0]
+                if isinstance(arg, exp.Literal):
+                    lock_id = arg.this
+                else:
+                    lock_id = "?"
+                write.add(f"advisory_lock:{lock_id}")
+                if "shared" in name:
+                    lock_intent = "SHARE"
+                else:
+                    lock_intent = "UPDATE"
 
     if isinstance(ast, exp.Insert):
         tbl = ast.find(exp.Table)

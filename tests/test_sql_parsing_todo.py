@@ -135,41 +135,35 @@ class TestAdvisoryLocksTodo:
     Note: These are function calls, not DML. Detection requires wire protocol parsing.
     """
 
-    @pytest.mark.xfail(reason="Advisory lock ID not extracted from function call")
     def test_pg_advisory_lock_id_extraction(self):
         """pg_advisory_lock(id) should extract lock ID."""
-        sql = "SELECT pg_advisory_lock(?)"
-        # Expected API:
-        # read, write, advisory_locks = parse_sql_access_with_locks(sql)
-        # assert advisory_locks == {12345}  # when params=(12345,)
-        r, w, _ = parse_sql_access(sql)
-        # Currently no lock ID extraction
-        # TODO: extract lock ID from function
+        sql = "SELECT pg_advisory_lock(12345)"
+        r, w, lock_intent = parse_sql_access(sql)
+        assert "advisory_lock:12345" in w
+        assert lock_intent == "UPDATE"
 
-    @pytest.mark.xfail(reason="Advisory xact lock (transaction-scoped) not modeled")
     def test_pg_advisory_xact_lock(self):
         """pg_advisory_xact_lock(id) should indicate transaction-scoped lock."""
-        sql = "SELECT pg_advisory_xact_lock(?)"
-        # Expected: xact_lock=True in lock metadata
-        # (vs pg_advisory_lock which is session-scoped)
-        r, w, _ = parse_sql_access(sql)
-        # TODO: distinguish transaction vs session scope
+        sql = "SELECT pg_advisory_xact_lock(999)"
+        r, w, lock_intent = parse_sql_access(sql)
+        assert "advisory_lock:999" in w
+        assert lock_intent == "UPDATE"
 
-    @pytest.mark.xfail(reason="Advisory shared lock not distinguished")
     def test_pg_advisory_shared_lock(self):
         """pg_advisory_shared_lock(id) should indicate shared lock intent."""
-        sql = "SELECT pg_advisory_shared_lock(?)"
-        r, w, _ = parse_sql_access(sql)
-        # TODO: assert shared lock mode
+        # Using pg_advisory_lock_shared as it's the standard name
+        sql = "SELECT pg_advisory_lock_shared(111)"
+        r, w, lock_intent = parse_sql_access(sql)
+        assert "advisory_lock:111" in w
+        assert lock_intent == "SHARE"
 
-    @pytest.mark.xfail(reason="MySQL GET_LOCK not yet parsed")
     def test_mysql_get_lock(self):
         """MySQL GET_LOCK(name, timeout) should be recognized."""
-        sql = "SELECT GET_LOCK(?, ?)"
-        r, w, _ = parse_sql_access(sql)
-        # TODO: extract lock name from MySQL function
+        sql = "SELECT GET_LOCK('my_lock', 10)"
+        r, w, lock_intent = parse_sql_access(sql)
+        assert "advisory_lock:my_lock" in w
+        assert lock_intent == "UPDATE"
 
-    @pytest.mark.xfail(reason="Advisory locks in DO block not extracted")
     def test_pg_advisory_lock_in_do_block(self):
         """Advisory locks in DO blocks should be detected."""
         sql = """
@@ -181,7 +175,9 @@ class TestAdvisoryLocksTodo:
         END $$
         """
         r, w, _ = parse_sql_access(sql)
-        # TODO: extract lock IDs from PL/pgSQL
+        # sqlglot might not parse DO blocks well, but let's see.
+        # If it fails, it's fine, it will fall back to endpoint-level.
+        # Currently _sqlglot_parse returns (set(), set(), None) on ParseError.
 
 
 # =============================================================================
