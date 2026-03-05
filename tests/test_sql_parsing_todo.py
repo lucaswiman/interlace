@@ -859,7 +859,6 @@ class TestMultipleRowInsertTodo:
     Effort: ~10 lines + 3 tests
     """
 
-    @pytest.mark.xfail(reason="Multi-row INSERT not split into logical rows")
     def test_multiple_row_insert_values(self):
         """INSERT with multiple VALUES rows should be recognized."""
         sql = """
