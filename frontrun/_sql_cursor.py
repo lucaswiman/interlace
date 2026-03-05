@@ -200,7 +200,6 @@ def _intercept_execute(
         return original_method(self, operation)
 
 
-
 # ---------------------------------------------------------------------------
 # Traced cursor/connection subclasses (created dynamically per driver)
 # ---------------------------------------------------------------------------
@@ -295,7 +294,6 @@ def _patch_sqlite3() -> None:
     """Patch sqlite3.connect to inject TracedConnection factory."""
     orig_connect = sqlite3.connect
     traced_conn_cls = _make_traced_sqlite3_connection_class()
-    traced_cursor_cls = _make_traced_cursor_class(sqlite3.Cursor, paramstyle="qmark")
 
     def patched_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
         if "factory" not in kwargs:
@@ -307,9 +305,6 @@ def _patch_sqlite3() -> None:
     # Expose for tests via _ORIGINAL_METHODS — key by (cursor_class, method_name)
     _ORIGINAL_METHODS[(sqlite3.Cursor, "execute")] = sqlite3.Cursor.execute
     _ORIGINAL_METHODS[(sqlite3.Cursor, "executemany")] = sqlite3.Cursor.executemany
-    # Also expose the traced subclasses for inspection
-    _ORIGINAL_METHODS[(traced_cursor_cls, "_traced_execute")] = traced_cursor_cls.execute
-    _ORIGINAL_METHODS[(traced_cursor_cls, "_traced_executemany")] = traced_cursor_cls.executemany
 
 
 # ---------------------------------------------------------------------------

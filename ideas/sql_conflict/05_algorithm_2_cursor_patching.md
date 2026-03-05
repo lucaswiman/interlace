@@ -1,124 +1,108 @@
 # Algorithm 2: DBAPI Cursor Monkey-Patching
 
-Follows the exact pattern of `_io_detection.py`. Key insight: psycopg2's cursor is a C extension — `cursor.execute` is a C function. We can still monkey-patch at the class level because Python attribute lookup goes through the MRO, and assigning to the class replaces the descriptor.
+Uses **factory injection** for C-extension cursors (sqlite3, psycopg2) and **direct class patching** for pure-Python drivers (pymysql). Key insight: C-extension cursor classes cannot be monkey-patched with `setattr`, so we subclass them and inject the subclass via `connect()` factory arguments.
 
-The `paramstyle` is read from the driver module at patch time and baked into the closure, so each driver uses its native placeholder style automatically.
+The `paramstyle` is read from the driver module at patch time and baked into the traced cursor class, so each driver uses its native placeholder style automatically.
+
+## Core Interception Logic
 
 ```python
-# frontrun/_sql_detection.py
+# frontrun/_sql_cursor.py
 
-import threading
-from frontrun._io_detection import _io_tls, get_io_reporter
+def _intercept_execute(
+    original_method, self, operation, parameters=None,
+    *, is_executemany=False, paramstyle="format",
+):
+    """Intercept a single execute/executemany call.
 
-_ORIGINAL_METHODS: dict[tuple[type, str], Any] = {}
-_sql_patched = False
+    1. parse_sql_access(operation) → (read_tables, write_tables, lock_intent, tx_op)
+    2. Handle transaction control (BEGIN/COMMIT/ROLLBACK/SAVEPOINT)
+    3. Resolve parameters → extract row-level predicates
+    4. Report table accesses (or buffer if in transaction)
+    5. Suppress endpoint-level I/O during original call
+    """
+    reporter = get_io_reporter()
+    if reporter is not None and isinstance(operation, str):
+        read_tables, write_tables, lock_intent, tx_op = parse_sql_access(operation)
 
-def _make_patched_execute(original, paramstyle, *, is_executemany=False):
-    """Create a patched execute that intercepts SQL before calling the original."""
+        # Transaction grouping: buffer reports during transactions
+        if tx_op == "BEGIN":
+            _io_tls._in_transaction = True
+            _io_tls._tx_buffer = []
+            _io_tls._tx_savepoints = {}
+        elif tx_op == "COMMIT":
+            _io_tls._in_transaction = False
+            for res_id, kind in _io_tls._tx_buffer:
+                reporter(res_id, kind)
+            # ... clear buffer
+        elif tx_op == "ROLLBACK":
+            _io_tls._in_transaction = False
+            # ... discard buffer
+        elif tx_op.startswith("SAVEPOINT:"):
+            # Record buffer position for partial rollback
+        elif tx_op.startswith("ROLLBACK_TO:"):
+            # Truncate buffer to savepoint position
 
-    def _patched_execute(self, operation, parameters=None, *args, **kwargs):
-        reporter = get_io_reporter()
-        reported = False
+        # Row-level predicates (single-table, non-executemany only)
+        if len(all_tables) == 1 and not is_executemany:
+            resolved = resolve_parameters(operation, parameters, paramstyle)
+            predicates = extract_equality_predicates(resolved)
 
-        if reporter is not None and isinstance(operation, str):
-            read_tables, write_tables = parse_sql_access(operation)
-            if read_tables or write_tables:
-                reported = True
-                all_tables = read_tables | write_tables
+        for table in read_tables:
+            kind = "write" if lock_intent == "UPDATE" else "read"
+            report_or_buffer(table, kind)
+        for table in write_tables:
+            report_or_buffer(table, "write")
 
-                # Row-level: resolve params → extract predicates for
-                # single-table operations.  Skip for executemany (each
-                # row may have different params) and multi-table queries
-                # (can't attribute columns to tables without aliases).
-                predicates: list[EqualityPredicate] = []
-                if len(all_tables) == 1 and not is_executemany:
-                    if parameters is not None:
-                        resolved = resolve_parameters(
-                            operation, parameters, paramstyle,
-                        )
-                        predicates = extract_equality_predicates(resolved)
-                    else:
-                        predicates = extract_equality_predicates(operation)
+    # Suppress endpoint-level I/O
+    with _suppress_endpoint_io():
+        return original_method(self, operation, parameters)
+```
 
-                for table in read_tables:
-                    reporter(_sql_resource_id(table, predicates), "read")
-                for table in write_tables:
-                    reporter(_sql_resource_id(table, predicates), "write")
+## Patching Strategies
 
-        # Suppress endpoint-level I/O for this call if SQL-level succeeded
-        if reported:
-            tid = threading.get_native_id()
-            _io_tls._sql_suppress = True
-            with _suppress_lock:
-                _suppress_tids.add(tid)
-            try:
-                if parameters is not None:
-                    return original(self, operation, parameters, *args, **kwargs)
-                return original(self, operation, *args, **kwargs)
-            finally:
-                with _suppress_lock:
-                    _suppress_tids.discard(tid)
-                _io_tls._sql_suppress = False
-        else:
-            if parameters is not None:
-                return original(self, operation, parameters, *args, **kwargs)
-            return original(self, operation, *args, **kwargs)
+### sqlite3 — Factory Injection
 
-    return _patched_execute
+C-extension cursors (`sqlite3.Cursor`) cannot be monkey-patched with `setattr`. Instead:
 
+1. Create `TracedCursor(sqlite3.Cursor)` subclass with overridden `execute`/`executemany`
+2. Create `TracedConnection(sqlite3.Connection)` subclass whose `cursor()` returns `TracedCursor`
+3. On Python 3.14+, also override `Connection.execute`/`executemany` (C-level fast path bypasses `cursor()`)
+4. Patch `sqlite3.connect` to inject `TracedConnection` as the `factory` kwarg
 
-# Target drivers: (module_path, class_name, method_name, paramstyle_module)
-_CURSOR_TARGETS = [
-    ("psycopg2.extensions", "cursor", "execute", "psycopg2"),
-    ("psycopg2.extensions", "cursor", "executemany", "psycopg2"),
-    ("psycopg.cursor", "Cursor", "execute", "psycopg"),
-    ("psycopg.cursor_async", "AsyncCursor", "execute", "psycopg"),
-    ("sqlite3", "Cursor", "execute", "sqlite3"),
-    ("sqlite3", "Cursor", "executemany", "sqlite3"),
-    ("pymysql.cursors", "Cursor", "execute", "pymysql"),
-    ("pymysql.cursors", "Cursor", "executemany", "pymysql"),
-]
+### psycopg2 — Cursor Factory Injection
 
+Similar to sqlite3: create `TracedCursor(psycopg2.extensions.cursor)` and patch `psycopg2.connect` to set `cursor_factory=TracedCursor`.
 
-def patch_sql() -> None:
-    """Monkey-patch DBAPI cursor.execute() for known drivers."""
-    global _sql_patched
-    if _sql_patched:
-        return
+### pymysql — Direct Class Patching
 
-    import importlib
-    for module_path, class_name, method_name, paramstyle_module in _CURSOR_TARGETS:
-        try:
-            mod = importlib.import_module(module_path)
-            cls = getattr(mod, class_name)
-            original = getattr(cls, method_name)
-            key = (cls, method_name)
-            if key in _ORIGINAL_METHODS:
-                continue
+Pure-Python driver: directly replace `pymysql.cursors.Cursor.execute` and `executemany` with wrapped versions.
 
-            # Read paramstyle from the driver module (PEP 249)
-            driver_mod = importlib.import_module(paramstyle_module)
-            paramstyle = getattr(driver_mod, "paramstyle", "format")
+## Key Functions
 
-            _ORIGINAL_METHODS[key] = original
-            is_many = "executemany" in method_name
-            patched = _make_patched_execute(
-                original, paramstyle, is_executemany=is_many,
-            )
-            setattr(cls, method_name, patched)
-        except (ImportError, AttributeError):
-            pass  # driver not installed — skip silently
+```python
+patch_sql() -> None         # Monkey-patch all known DBAPI drivers
+unpatch_sql() -> None       # Restore original implementations
+is_tid_suppressed(tid: int) -> bool  # Check thread suppression (for LD_PRELOAD bridge)
+```
 
-    _sql_patched = True
+## Suppression Infrastructure
 
+```python
+_suppress_tids: set[int] = set()  # OS thread IDs currently in sql-suppress mode
+_suppress_lock = threading.Lock()  # real lock, not cooperative
 
-def unpatch_sql() -> None:
-    """Restore original DBAPI cursor methods."""
-    global _sql_patched
-    if not _sql_patched:
-        return
-    for (cls, method_name), original in _ORIGINAL_METHODS.items():
-        setattr(cls, method_name, original)
-    _ORIGINAL_METHODS.clear()
-    _sql_patched = False
+@contextlib.contextmanager
+def _suppress_endpoint_io():
+    """Context manager: suppress endpoint I/O for current thread."""
+    tid = threading.get_native_id()
+    _io_tls._sql_suppress = True
+    with _suppress_lock:
+        _suppress_tids.add(tid)
+    try:
+        yield
+    finally:
+        with _suppress_lock:
+            _suppress_tids.discard(tid)
+        _io_tls._sql_suppress = False
 ```

@@ -1,6 +1,6 @@
 # Test Plan
 
-## Unit Tests (`tests/test_sql_detection.py`)
+## Unit Tests (`tests/test_sql_parsing.py`, `tests/test_sql_cursor.py`, etc.)
 
 ```python
 class TestRegexParse:

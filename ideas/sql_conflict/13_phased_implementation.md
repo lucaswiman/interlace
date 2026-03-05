@@ -6,8 +6,8 @@
 
 Implementation split into modular files (original plan called for single `_sql_detection.py`):
 
-- `frontrun/_sql_parsing.py` — ✅ 173 lines (Algorithm 1: regex + sqlglot parsing)
-- `frontrun/_sql_cursor.py` — ✅ 275 lines (Algorithm 2: cursor patching + partial Algorithm 3: suppression)
+- `frontrun/_sql_parsing.py` — ✅ ~290 lines (Algorithm 1: regex + sqlglot parsing + lock intent + tx control)
+- `frontrun/_sql_cursor.py` — ✅ ~410 lines (Algorithm 2: cursor patching + suppression + transaction grouping)
 - `frontrun/_io_detection.py` — ✅ +3 lines (Algorithm 3: `_sql_suppress` check in `_report_socket_io`)
 - `frontrun/dpor.py` — ✅ +6 lines (import + `patch_sql`/`unpatch_sql` + `is_tid_suppressed` in `_PreloadBridge.listener`)
 - `frontrun/bytecode.py` — ✅ +3 lines (`patch_sql`/`unpatch_sql` in `BytecodeShuffler._patch_io`/`_unpatch_io`)

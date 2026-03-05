@@ -2,6 +2,11 @@
 
 Two implementations, chosen at runtime: a regex fast-path for the 90% case (simple single-table statements), and sqlglot for everything else.
 
+All functions return a 4-tuple: `(read_tables, write_tables, lock_intent, tx_op)`.
+
+- `lock_intent`: `"UPDATE"` | `"SHARE"` | `None` — for SELECT FOR UPDATE/SHARE and LOCK TABLE
+- `tx_op`: `"BEGIN"` | `"COMMIT"` | `"ROLLBACK"` | `"SAVEPOINT:{name}"` | `"ROLLBACK_TO:{name}"` | `"RELEASE:{name}"` | `None`
+
 ## 1a. Regex Fast-Path
 
 ```python
@@ -10,153 +15,69 @@ import re
 # Precompiled patterns — matches the leading keyword + first table name.
 # Handles optional schema qualification (schema.table) and quoted identifiers.
 _IDENT = r'(?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)'
-_WS = r'[\s\n]+'
+_WS = r"[\s\n]+"
 
-_RE_SELECT    = re.compile(rf'\bSELECT\b', re.I)
-_RE_INSERT    = re.compile(rf'\bINSERT{_WS}INTO{_WS}({_IDENT})', re.I)
-_RE_UPDATE    = re.compile(rf'\bUPDATE{_WS}({_IDENT}){_WS}SET\b', re.I)
-_RE_DELETE    = re.compile(rf'\bDELETE{_WS}FROM{_WS}({_IDENT})', re.I)
-_RE_FROM      = re.compile(rf'\bFROM{_WS}({_IDENT})', re.I)
-_RE_JOIN      = re.compile(rf'\bJOIN{_WS}({_IDENT})', re.I)
+_RE_SELECT    = re.compile(r"\bSELECT\b", re.I)
+_RE_INSERT    = re.compile(rf"\bINSERT{_WS}INTO{_WS}({_IDENT})", re.I)
+_RE_UPDATE    = re.compile(rf"\bUPDATE{_WS}({_IDENT}){_WS}SET\b", re.I)
+_RE_DELETE    = re.compile(rf"\bDELETE{_WS}FROM{_WS}({_IDENT})", re.I)
+_RE_FROM      = re.compile(rf"\bFROM{_WS}({_IDENT})", re.I)
+_RE_JOIN      = re.compile(rf"\bJOIN{_WS}({_IDENT})", re.I)
+_RE_LITERAL   = re.compile(r"'[^']*'")
+_RE_FOR_UPDATE = re.compile(r"\bFOR" + _WS + r"UPDATE\b", re.I)
+_RE_FOR_SHARE  = re.compile(r"\bFOR" + _WS + r"SHARE\b", re.I)
+_RE_LOCK_TABLE = re.compile(rf"\bLOCK{_WS}TABLE{_WS}({_IDENT})", re.I)
+_RE_LOCK_MODE  = re.compile(rf"\bIN{_WS}(.+){_WS}MODE\b", re.I)
+_RE_TX_BEGIN      = re.compile(r"^\s*(BEGIN|START\s+TRANSACTION|...)\b", re.I)
+_RE_TX_COMMIT     = re.compile(r"^\s*(COMMIT|END|...)\b", re.I)
+_RE_TX_ROLLBACK   = re.compile(r"^\s*ROLLBACK\b", re.I)
+_RE_TX_SAVEPOINT  = re.compile(r"^\s*SAVEPOINT\s+(\w+)\b", re.I)
+_RE_TX_RELEASE    = re.compile(r"^\s*RELEASE\s+(SAVEPOINT\s+)?(\w+)\b", re.I)
+_RE_TX_ROLLBACK_TO = re.compile(r"^\s*ROLLBACK\s+TO\s+(SAVEPOINT\s+)?(\w+)\b", re.I)
+```
 
-def _strip_quotes(name: str) -> str:
-    """Remove surrounding quotes/backticks and extract table from schema.table."""
-    if name.startswith(('"', '`')):
-        name = name[1:-1]
-    # Take last component: "public"."users" → users
-    return name.rsplit('.', 1)[-1]
+**Key additions vs. original design:**
 
-def _regex_parse(sql: str) -> tuple[set[str], set[str]] | None:
+1. **Transaction control detection** — BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE, ROLLBACK TO are detected first and return `tx_op` (no tables).
+2. **Literal stripping** — `_RE_LITERAL.sub(" ", stripped)` removes string literals before regex matching, preventing false positives from SQL like `WHERE name = 'FROM table'`.
+3. **Lock intent detection** — FOR UPDATE, FOR SHARE, LOCK TABLE with mode detection.
+4. **Extended bail-out** — now bails to sqlglot for `EXISTS`, `IN (`, subqueries in DELETE/UPDATE, and advisory lock functions in addition to WITH/UNION/INTERSECT/EXCEPT/MERGE/RETURNING.
+
+```python
+def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None] | None:
     """Fast-path: extract tables from simple single-statement SQL.
 
-    Returns (read_tables, write_tables) or None if the SQL is too complex
-    (subqueries, CTEs, UNION, MERGE) and needs the full parser.
+    Returns (read_tables, write_tables, lock_intent, tx_op) or None if the SQL
+    is too complex and needs the full parser.
     """
-    stripped = sql.strip().rstrip(';').strip()
-
-    # Bail to full parser for complex SQL
-    upper = stripped.upper()
-    if any(kw in upper for kw in ('WITH ', 'UNION', 'INTERSECT', 'EXCEPT', 'MERGE', 'RETURNING')):
-        return None
-
-    read: set[str] = set()
-    write: set[str] = set()
-
-    m_insert = _RE_INSERT.search(stripped)
-    if m_insert:
-        write.add(_strip_quotes(m_insert.group(1)))
-        # Source tables in INSERT ... SELECT ... FROM
-        for m in _RE_FROM.finditer(stripped, m_insert.end()):
-            read.add(_strip_quotes(m.group(1)))
-        return read, write
-
-    m_update = _RE_UPDATE.search(stripped)
-    if m_update:
-        tbl = _strip_quotes(m_update.group(1))
-        write.add(tbl)
-        read.add(tbl)  # WHERE reads the target
-        # Subquery tables in FROM/JOIN (UPDATE ... FROM ... syntax)
-        for m in _RE_FROM.finditer(stripped, m_update.end()):
-            t = _strip_quotes(m.group(1))
-            if t not in write:
-                read.add(t)
-        return read, write
-
-    m_delete = _RE_DELETE.search(stripped)
-    if m_delete:
-        tbl = _strip_quotes(m_delete.group(1))
-        write.add(tbl)
-        read.add(tbl)
-        return read, write
-
-    if _RE_SELECT.search(stripped):
-        for m in _RE_FROM.finditer(stripped):
-            read.add(_strip_quotes(m.group(1)))
-        for m in _RE_JOIN.finditer(stripped):
-            read.add(_strip_quotes(m.group(1)))
-        return read, write
-
-    return None  # unknown statement type → fall through
+    # Transaction control checked first
+    # Bail-out for: WITH, UNION, INTERSECT, EXCEPT, MERGE, RETURNING, EXISTS, IN (
+    # Also bails for subqueries in DELETE/UPDATE and advisory lock functions
+    # Strips string literals before table extraction
+    # Detects LOCK TABLE ... IN ... MODE
+    # Detects FOR UPDATE / FOR SHARE
+    ...
 ```
 
 ## 1b. sqlglot Full Parser (Fallback)
 
 ```python
-def _sqlglot_parse(sql: str) -> tuple[set[str], set[str]] | None:
+def _sqlglot_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None] | None:
     """Full parser: handles CTEs, subqueries, UNION, MERGE, etc."""
-    try:
-        import sqlglot
-        from sqlglot import exp
-    except ImportError:
-        return None
-
-    try:
-        ast = sqlglot.parse_one(sql)
-    except sqlglot.errors.ParseError:
-        return None  # unparseable → fall back to endpoint-level
-
-    write: set[str] = set()
-    read: set[str] = set()
-
-    if isinstance(ast, exp.Insert):
-        tbl = ast.find(exp.Table)
-        if tbl:
-            write.add(tbl.name)
-        # Source tables (everything after the target)
-        if ast.expression:  # the SELECT source
-            for t in ast.expression.find_all(exp.Table):
-                if t.name not in write:
-                    read.add(t.name)
-        return read, write
-
-    if isinstance(ast, exp.Update):
-        tbl = ast.this
-        if isinstance(tbl, exp.Table):
-            write.add(tbl.name)
-            read.add(tbl.name)
-        for t in ast.find_all(exp.Table):
-            if t.name not in write:
-                read.add(t.name)
-        return read, write
-
-    if isinstance(ast, exp.Delete):
-        tbl = ast.this
-        if isinstance(tbl, exp.Table):
-            write.add(tbl.name)
-            read.add(tbl.name)
-        for t in ast.find_all(exp.Table):
-            if t.name not in write:
-                read.add(t.name)
-        return read, write
-
-    if isinstance(ast, exp.Select):
-        for t in ast.find_all(exp.Table):
-            read.add(t.name)
-        return read, write
-
-    if isinstance(ast, exp.Merge):
-        target = ast.this
-        if isinstance(target, exp.Table):
-            write.add(target.name)
-            read.add(target.name)
-        using = ast.find(exp.Table, bfs=False)
-        # All non-target tables are read sources
-        for t in ast.find_all(exp.Table):
-            if t.name not in write:
-                read.add(t.name)
-        return read, write
-
-    # DDL, GRANT, etc. — conservatively treat as write
-    for t in ast.find_all(exp.Table):
-        write.add(t.name)
-    return read, write
 ```
+
+**Key additions vs. original design:**
+
+1. **Transaction control** — handles `exp.Transaction` (BEGIN), `exp.Commit`, `exp.Rollback`
+2. **Lock intent** — extracts `exp.Lock` node from SELECT for FOR UPDATE/SHARE
+3. **Advisory locks** — recognizes `pg_advisory_lock`, `pg_advisory_xact_lock`, `pg_advisory_lock_shared`, `pg_advisory_xact_lock_shared`, `get_lock` function calls. Extracts lock ID from literal arguments. Maps to `advisory_lock:{lock_id}` in write set.
+4. **UNION/INTERSECT/EXCEPT** — handled as read-only compositions, collecting all tables from all branches.
 
 ## 1c. Combined Entry Point
 
 ```python
-def parse_sql_access(sql: str) -> tuple[set[str], set[str]]:
-    """Extract (read_tables, write_tables) from a SQL statement.
+def parse_sql_access(sql: str) -> tuple[set[str], set[str], str | None, str | None]:
+    """Extract (read_tables, write_tables, lock_intent, tx_op) from a SQL statement.
 
     Uses regex fast-path for simple statements, falls back to sqlglot
     for complex SQL. Returns empty sets if parsing fails entirely
@@ -173,10 +94,10 @@ def parse_sql_access(sql: str) -> tuple[set[str], set[str]]:
         return result
 
     # Parse failure: return empty sets → endpoint-level fallback
-    return set(), set()
+    return set(), set(), None, None
 ```
 
-**Complexity:** Regex fast-path is O(n) in SQL length with ~6 regex scans. sqlglot parse_one is O(n) but with higher constant factor (AST construction). Both are negligible vs. network RTT to the database.
+**Complexity:** Regex fast-path is O(n) in SQL length with ~8 regex scans (more than original due to lock/tx patterns). sqlglot parse_one is O(n) but with higher constant factor (AST construction). Both are negligible vs. network RTT to the database.
 
 ---
 
@@ -198,7 +119,7 @@ But if FK `orders.user_id → users.id` exists, Thread B's DELETE fails (constra
 - False negatives (missed conflicts): Two threads operating on related tables are reported independent, but FK constraints create real conflicts
 - Limited to multi-table workloads with foreign keys
 
-**Fix (Phase 4):**
+**Fix (Phase 6):**
 - Add schema introspection: query `information_schema.referential_constraints` (or equivalent for other DBs)
 - Build FK dependency graph: `{orders → users, shipments → orders}` etc.
 - At conflict detection time: if Op1 touches table T1 and Op2 touches table T2, and T1 → T2 via FK, classify as conflicting
@@ -209,34 +130,15 @@ But if FK `orders.user_id → users.id` exists, Thread B's DELETE fails (constra
 
 ---
 
-### TODO: Transaction Boundaries Not Tracked
-**Issue:** Current model treats each SQL statement independently:
-```python
-# Thread A:
-cursor.execute("BEGIN")
-cursor.execute("SELECT * FROM accounts WHERE id = 1")  # read
-cursor.execute("UPDATE accounts SET balance = ...")     # write
-cursor.execute("COMMIT")
-
-# Thread B:
-cursor.execute("BEGIN")
-cursor.execute("SELECT * FROM accounts WHERE id = 1")  # read
-cursor.execute("UPDATE accounts SET balance = ...")     # write
-cursor.execute("COMMIT")
-```
-DPOR sees 4 separate operations with potential interleavings. In reality, the `BEGIN...COMMIT` bundle is atomic.
-
-**Impact:**
-- Explosion of search space: unnecessary interleavings between statements in committed transactions
-- Missed optimization: can suppress threads as a group during transaction
-
-**Fix (Phase 4):**
-- Track transaction open/close via `cursor.execute("BEGIN")`, `cursor.execute("COMMIT")`, `cursor.execute("ROLLBACK")`
-- Group SQL operations into transaction-level ObjectIds: `tx:1`, `tx:2`
-- Modify DPOR suppression: suppress entire transaction at once
-- Add tests: explicit transactions, savepoints, nested transactions
-
-**Estimated effort:** ~80 lines + 20 tests
+### ~~TODO: Transaction Boundaries Not Tracked~~ ✅ Done
+Transaction grouping is now implemented in `_sql_cursor.py` via `_intercept_execute()`:
+- `BEGIN` → sets `_io_tls._in_transaction = True`, initializes buffer
+- `COMMIT` → flushes buffered I/O reports to reporter
+- `ROLLBACK` → discards buffer
+- `SAVEPOINT` → records buffer position for partial rollback
+- `ROLLBACK TO` → truncates buffer to savepoint position
+- `RELEASE` → removes savepoint marker
+- DPOR scheduler skips interleaving within transactions via `_in_transaction` flag
 
 ---
 
@@ -398,7 +300,7 @@ Parser cannot determine which tables are accessed without executing the procedur
 ### TODO: Performance Optimization: Regex Pattern Precompilation
 **Issue:** Current regex patterns are compiled at module load time, which is good. However, the patterns could be optimized:
 - `_IDENT` pattern is complex; could use a simpler DFA-based approach
-- Multiple passes over the SQL string (6 regex scans) could be combined into a single state machine
+- Multiple passes over the SQL string (~8 regex scans) could be combined into a single state machine
 
 **Impact:**
 - Minimal: regex overhead is negligible vs. network RTT

@@ -1,26 +1,53 @@
 # Integration Points
 
-## In `dpor.py` — `explore_dpor()` function
+## In `dpor.py` — `DporBytecodeRunner._patch_io()` / `_unpatch_io()`
 
 ```python
-# At the top of explore_dpor(), alongside existing patch calls:
-from frontrun._sql_detection import patch_sql, unpatch_sql
+from frontrun._sql_cursor import patch_sql, unpatch_sql, is_tid_suppressed
+from frontrun._sql_anomaly import classify_sql_anomaly
 
-# In the setup block (around line 1640):
-if detect_io:
-    patch_io()
-    patch_sql()  # NEW
+# In _patch_io():
+patch_sql()
 
-# In the teardown block:
-finally:
-    if detect_io:
-        unpatch_io()
-        unpatch_sql()  # NEW
+# In _unpatch_io():
+unpatch_sql()
+```
+
+## In `dpor.py` — `_PreloadBridge.listener()`
+
+```python
+# Skip if this thread's cursor.execute() already reported at SQL level
+from frontrun._sql_cursor import is_tid_suppressed
+if is_tid_suppressed(event.tid):
+    return
+```
+
+## In `dpor.py` — `DporScheduler._report_and_wait()`
+
+Transaction atomicity: when `_io_tls._in_transaction` is True, the scheduler skips scheduling (does not yield to other threads). This ensures all SQL operations within a `BEGIN...COMMIT` block appear as atomic.
+
+## In `dpor.py` — Result processing
+
+```python
+if result.sql_anomaly is None:
+    result.sql_anomaly = classify_sql_anomaly(recorder.events)
+```
+
+## In `bytecode.py` — `BytecodeShuffler._patch_io()` / `_unpatch_io()`
+
+```python
+from frontrun._sql_cursor import patch_sql, unpatch_sql
+
+# In _patch_io():
+patch_sql()
+
+# In _unpatch_io():
+unpatch_sql()
 ```
 
 ## In `dpor.py` — `_setup_dpor_tls()` method
 
-No changes needed. The existing `_io_reporter` closure (line 1445) already handles any `resource_id` string. When `_patched_execute` calls `reporter("sql:accounts", "write")`, it flows through the same path:
+No changes needed. The existing `_io_reporter` closure already handles any `resource_id` string. When `_intercept_execute` calls `reporter("sql:accounts", "write")`, it flows through the same path:
 
 ```python
 def _io_reporter(resource_id: str, kind: str) -> None:
@@ -30,20 +57,6 @@ def _io_reporter(resource_id: str, kind: str) -> None:
 ```
 
 The `object_key` is derived from `hash("sql:accounts")` instead of `hash("socket:127.0.0.1:5432")`, giving table-level granularity automatically.
-
-## In `dpor.py` — I/O flush logic (line 377)
-
-No changes needed. The existing flush logic already handles the pending I/O events correctly:
-
-```python
-if _pending_io and getattr(_dpor_tls, "lock_depth", 0) == 0:
-    for _obj_key, _io_kind in _pending_io:
-        with _elock:
-            _engine.report_io_access(_execution, thread_id, _obj_key, _io_kind)
-    _pending_io.clear()
-```
-
-SQL-level events go through `report_io_access` (uses `io_vv`, ignores lock-based happens-before — appropriate for I/O), same as socket events.
 
 ## In the Rust engine
 
