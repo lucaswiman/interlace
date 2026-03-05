@@ -1,6 +1,6 @@
 """SQL statement parsing for read/write table extraction.
 
-Provides ``parse_sql_access(sql)`` which returns ``(read_tables, write_tables)``
+Provides ``parse_sql_access(sql)`` which returns ``(read_tables, write_tables, lock_intent)``
 for conflict detection. Uses a regex fast-path for simple statements and falls
 back to sqlglot for complex SQL (CTEs, subqueries, UNION, etc.).
 """
@@ -20,6 +20,8 @@ _RE_UPDATE = re.compile(rf"\bUPDATE{_WS}({_IDENT}){_WS}SET\b", re.I)
 _RE_DELETE = re.compile(rf"\bDELETE{_WS}FROM{_WS}({_IDENT})", re.I)
 _RE_FROM = re.compile(rf"\bFROM{_WS}({_IDENT})", re.I)
 _RE_JOIN = re.compile(rf"\bJOIN{_WS}({_IDENT})", re.I)
+_RE_FOR_UPDATE = re.compile(r"\bFOR" + _WS + r"UPDATE\b", re.I)
+_RE_FOR_SHARE = re.compile(r"\bFOR" + _WS + r"SHARE\b", re.I)
 
 
 def _strip_quotes(name: str) -> str:
@@ -30,11 +32,11 @@ def _strip_quotes(name: str) -> str:
     return name.rsplit(".", 1)[-1]
 
 
-def _regex_parse(sql: str) -> tuple[set[str], set[str]] | None:
+def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None] | None:
     """Fast-path: extract tables from simple single-statement SQL.
 
-    Returns (read_tables, write_tables) or None if the SQL is too complex
-    (subqueries, CTEs, UNION, MERGE) and needs the full parser.
+    Returns (read_tables, write_tables, lock_intent) or None if the SQL is too
+    complex (subqueries, CTEs, UNION, MERGE) and needs the full parser.
     """
     stripped = sql.strip().rstrip(";").strip()
 
@@ -45,6 +47,12 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str]] | None:
 
     read: set[str] = set()
     write: set[str] = set()
+    lock_intent: str | None = None
+
+    if _RE_FOR_UPDATE.search(stripped):
+        lock_intent = "UPDATE"
+    elif _RE_FOR_SHARE.search(stripped):
+        lock_intent = "SHARE"
 
     m_insert = _RE_INSERT.search(stripped)
     if m_insert:
@@ -52,7 +60,7 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str]] | None:
         # Source tables in INSERT ... SELECT ... FROM
         for m in _RE_FROM.finditer(stripped, m_insert.end()):
             read.add(_strip_quotes(m.group(1)))
-        return read, write
+        return read, write, lock_intent
 
     m_update = _RE_UPDATE.search(stripped)
     if m_update:
@@ -64,26 +72,26 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str]] | None:
             t = _strip_quotes(m.group(1))
             if t not in write:
                 read.add(t)
-        return read, write
+        return read, write, lock_intent
 
     m_delete = _RE_DELETE.search(stripped)
     if m_delete:
         tbl = _strip_quotes(m_delete.group(1))
         write.add(tbl)
         read.add(tbl)
-        return read, write
+        return read, write, lock_intent
 
     if _RE_SELECT.search(stripped):
         for m in _RE_FROM.finditer(stripped):
             read.add(_strip_quotes(m.group(1)))
         for m in _RE_JOIN.finditer(stripped):
             read.add(_strip_quotes(m.group(1)))
-        return read, write
+        return read, write, lock_intent
 
     return None  # unknown statement type → fall through
 
 
-def _sqlglot_parse(sql: str) -> tuple[set[str], set[str]] | None:
+def _sqlglot_parse(sql: str) -> tuple[set[str], set[str], str | None] | None:
     """Full parser: handles CTEs, subqueries, UNION, MERGE, etc."""
     try:
         import sqlglot  # type: ignore[import-untyped]
@@ -98,6 +106,19 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str]] | None:
 
     write: set[str] = set()
     read: set[str] = set()
+    lock_intent: str | None = None
+
+    # Extract lock intent from SELECT
+    if isinstance(ast, exp.Select):
+        lock = ast.find(exp.Lock)
+        if lock:
+            kind = lock.args.get("kind")
+            if kind:
+                kind_upper = str(kind).upper()
+                if "UPDATE" in kind_upper:
+                    lock_intent = "UPDATE"
+                elif "SHARE" in kind_upper:
+                    lock_intent = "SHARE"
 
     if isinstance(ast, exp.Insert):
         tbl = ast.find(exp.Table)
@@ -108,7 +129,7 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str]] | None:
             for t in ast.expression.find_all(exp.Table):
                 if t.name not in write:
                     read.add(t.name)
-        return read, write
+        return read, write, lock_intent
 
     if isinstance(ast, exp.Update):
         tbl = ast.this
@@ -118,7 +139,7 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str]] | None:
         for t in ast.find_all(exp.Table):
             if t.name not in write:
                 read.add(t.name)
-        return read, write
+        return read, write, lock_intent
 
     if isinstance(ast, exp.Delete):
         tbl = ast.this
@@ -128,17 +149,17 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str]] | None:
         for t in ast.find_all(exp.Table):
             if t.name not in write:
                 read.add(t.name)
-        return read, write
+        return read, write, lock_intent
 
     if isinstance(ast, exp.Select):
         for t in ast.find_all(exp.Table):
             read.add(t.name)
-        return read, write
+        return read, write, lock_intent
 
     if isinstance(ast, (exp.Union, exp.Intersect, exp.Except)):
         for t in ast.find_all(exp.Table):
             read.add(t.name)
-        return read, write
+        return read, write, lock_intent
 
     if isinstance(ast, exp.Merge):
         target = ast.this
@@ -149,16 +170,16 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str]] | None:
         for t in ast.find_all(exp.Table):
             if t.name not in write:
                 read.add(t.name)
-        return read, write
+        return read, write, lock_intent
 
     # DDL, GRANT, etc. — conservatively treat as write
     for t in ast.find_all(exp.Table):
         write.add(t.name)
-    return read, write
+    return read, write, lock_intent
 
 
-def parse_sql_access(sql: str) -> tuple[set[str], set[str]]:
-    """Extract (read_tables, write_tables) from a SQL statement.
+def parse_sql_access(sql: str) -> tuple[set[str], set[str], str | None]:
+    """Extract (read_tables, write_tables, lock_intent) from a SQL statement.
 
     Uses regex fast-path for simple statements, falls back to sqlglot
     for complex SQL. Returns empty sets if parsing fails entirely
@@ -175,4 +196,4 @@ def parse_sql_access(sql: str) -> tuple[set[str], set[str]]:
         return result
 
     # Parse failure: return empty sets → endpoint-level fallback
-    return set(), set()
+    return set(), set(), None

@@ -51,38 +51,38 @@ class TestStripQuotes:
 
 class TestRegexParse:
     def test_select(self):
-        r, w = _regex_parse("SELECT id, name FROM users WHERE id = 1")
+        r, w, _ = _regex_parse("SELECT id, name FROM users WHERE id = 1")
         assert r == {"users"} and w == set()
 
     def test_insert(self):
-        r, w = _regex_parse("INSERT INTO orders (user_id, amount) VALUES (1, 100)")
+        r, w, _ = _regex_parse("INSERT INTO orders (user_id, amount) VALUES (1, 100)")
         assert r == set() and w == {"orders"}
 
     def test_insert_select(self):
-        r, w = _regex_parse("INSERT INTO archive SELECT * FROM orders")
+        r, w, _ = _regex_parse("INSERT INTO archive SELECT * FROM orders")
         assert r == {"orders"} and w == {"archive"}
 
     def test_update(self):
-        r, w = _regex_parse("UPDATE accounts SET balance = balance - 100 WHERE id = 1")
+        r, w, _ = _regex_parse("UPDATE accounts SET balance = balance - 100 WHERE id = 1")
         assert r == {"accounts"} and w == {"accounts"}
 
     def test_delete(self):
-        r, w = _regex_parse("DELETE FROM sessions WHERE expires_at < NOW()")
+        r, w, _ = _regex_parse("DELETE FROM sessions WHERE expires_at < NOW()")
         assert r == {"sessions"} and w == {"sessions"}
 
     def test_join(self):
-        r, w = _regex_parse("SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id")
+        r, w, _ = _regex_parse("SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id")
         assert r == {"users", "orders"} and w == set()
 
     def test_cte_falls_through(self):
         assert _regex_parse("WITH cte AS (SELECT 1) SELECT * FROM cte") is None
 
     def test_quoted_identifiers(self):
-        r, w = _regex_parse('SELECT * FROM "My Table"')
+        r, w, _ = _regex_parse('SELECT * FROM "My Table"')
         assert r == {"My Table"} and w == set()
 
     def test_schema_qualified(self):
-        r, w = _regex_parse("SELECT * FROM public.users")
+        r, w, _ = _regex_parse("SELECT * FROM public.users")
         assert r == {"users"} and w == set()
 
     # -----------------------------------------------------------------------
@@ -90,7 +90,7 @@ class TestRegexParse:
     # -----------------------------------------------------------------------
 
     def test_select_no_from(self):
-        r, w = _regex_parse("SELECT 1")
+        r, w, _ = _regex_parse("SELECT 1")
         assert r == set() and w == set()
 
     def test_select_multiple_joins(self):
@@ -100,27 +100,27 @@ class TestRegexParse:
             "JOIN orders o ON u.id = o.user_id "
             "JOIN products p ON o.product_id = p.id"
         )
-        r, w = _regex_parse(sql)
+        r, w, _ = _regex_parse(sql)
         assert r == {"users", "orders", "products"} and w == set()
 
     def test_select_left_join(self):
-        r, w = _regex_parse("SELECT * FROM users u LEFT JOIN profiles p ON u.id = p.user_id")
+        r, w, _ = _regex_parse("SELECT * FROM users u LEFT JOIN profiles p ON u.id = p.user_id")
         assert r == {"users", "profiles"} and w == set()
 
     def test_select_right_join(self):
-        r, w = _regex_parse("SELECT * FROM users u RIGHT JOIN orders o ON u.id = o.user_id")
+        r, w, _ = _regex_parse("SELECT * FROM users u RIGHT JOIN orders o ON u.id = o.user_id")
         assert r == {"users", "orders"} and w == set()
 
     def test_select_inner_join(self):
-        r, w = _regex_parse("SELECT * FROM products p INNER JOIN categories c ON p.cat_id = c.id")
+        r, w, _ = _regex_parse("SELECT * FROM products p INNER JOIN categories c ON p.cat_id = c.id")
         assert r == {"products", "categories"} and w == set()
 
     def test_select_cross_join(self):
-        r, w = _regex_parse("SELECT * FROM users CROSS JOIN roles")
+        r, w, _ = _regex_parse("SELECT * FROM users CROSS JOIN roles")
         assert r == {"users", "roles"} and w == set()
 
     def test_select_mixed_case_keywords(self):
-        r, w = _regex_parse("select * from ORDERS where id = 42")
+        r, w, _ = _regex_parse("select * from ORDERS where id = 42")
         assert r == {"ORDERS"} and w == set()
 
     def test_select_multiline(self):
@@ -131,25 +131,25 @@ class TestRegexParse:
             users u
         WHERE
             u.active = true"""
-        r, w = _regex_parse(sql)
+        r, w, _ = _regex_parse(sql)
         assert r == {"users"} and w == set()
 
     def test_select_extra_whitespace(self):
-        r, w = _regex_parse("SELECT  *   FROM   orders   WHERE   id  =  1")
+        r, w, _ = _regex_parse("SELECT  *   FROM   orders   WHERE   id  =  1")
         assert r == {"orders"} and w == set()
 
     def test_select_with_trailing_semicolon(self):
-        r, w = _regex_parse("SELECT * FROM users;")
+        r, w, _ = _regex_parse("SELECT * FROM users;")
         assert r == {"users"} and w == set()
 
     def test_select_schema_qualified_with_double_quotes(self):
         # The regex _IDENT matches "public" as a quoted identifier; the ".\"users\"" part is not
         # captured as a single token by the regex, so "public" is extracted as the table name.
-        r, w = _regex_parse('SELECT * FROM "public"."users"')
+        r, w, _ = _regex_parse('SELECT * FROM "public"."users"')
         assert w == set() and len(r) > 0
 
     def test_select_backtick_table(self):
-        r, w = _regex_parse("SELECT * FROM `my_table`")
+        r, w, _ = _regex_parse("SELECT * FROM `my_table`")
         assert r == {"my_table"} and w == set()
 
     # -----------------------------------------------------------------------
@@ -157,21 +157,21 @@ class TestRegexParse:
     # -----------------------------------------------------------------------
 
     def test_insert_values_no_read(self):
-        r, w = _regex_parse("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')")
+        r, w, _ = _regex_parse("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')")
         assert r == set() and w == {"users"}
 
     def test_insert_select_with_join(self):
         sql = "INSERT INTO summary SELECT o.id, u.name FROM orders o JOIN users u ON o.user_id = u.id"
-        r, w = _regex_parse(sql)
+        r, w, _ = _regex_parse(sql)
         assert w == {"summary"}
         assert "orders" in r
 
     def test_insert_schema_qualified_target(self):
-        r, w = _regex_parse("INSERT INTO public.events (type) VALUES ('login')")
+        r, w, _ = _regex_parse("INSERT INTO public.events (type) VALUES ('login')")
         assert w == {"events"} and r == set()
 
     def test_insert_backtick_target(self):
-        r, w = _regex_parse("INSERT INTO `session_logs` (user_id) VALUES (1)")
+        r, w, _ = _regex_parse("INSERT INTO `session_logs` (user_id) VALUES (1)")
         assert w == {"session_logs"} and r == set()
 
     # -----------------------------------------------------------------------
@@ -179,22 +179,22 @@ class TestRegexParse:
     # -----------------------------------------------------------------------
 
     def test_update_target_in_both_read_and_write(self):
-        r, w = _regex_parse("UPDATE products SET stock = stock - 1 WHERE id = 5")
+        r, w, _ = _regex_parse("UPDATE products SET stock = stock - 1 WHERE id = 5")
         assert "products" in r and "products" in w
 
     def test_update_from_clause(self):
         sql = "UPDATE orders SET status = 'done' FROM users WHERE orders.user_id = users.id"
-        r, w = _regex_parse(sql)
+        r, w, _ = _regex_parse(sql)
         assert w == {"orders"}
         assert "orders" in r
         assert "users" in r
 
     def test_update_schema_qualified(self):
-        r, w = _regex_parse("UPDATE public.accounts SET balance = 0 WHERE id = 1")
+        r, w, _ = _regex_parse("UPDATE public.accounts SET balance = 0 WHERE id = 1")
         assert "accounts" in w and "accounts" in r
 
     def test_update_mixed_case(self):
-        r, w = _regex_parse("update Users set name = 'Bob' where id = 3")
+        r, w, _ = _regex_parse("update Users set name = 'Bob' where id = 3")
         assert "Users" in w and "Users" in r
 
     # -----------------------------------------------------------------------
@@ -202,15 +202,15 @@ class TestRegexParse:
     # -----------------------------------------------------------------------
 
     def test_delete_no_where(self):
-        r, w = _regex_parse("DELETE FROM old_logs")
+        r, w, _ = _regex_parse("DELETE FROM old_logs")
         assert r == {"old_logs"} and w == {"old_logs"}
 
     def test_delete_schema_qualified(self):
-        r, w = _regex_parse("DELETE FROM archive.events WHERE created_at < '2020-01-01'")
+        r, w, _ = _regex_parse("DELETE FROM archive.events WHERE created_at < '2020-01-01'")
         assert "events" in w and "events" in r
 
     def test_delete_backtick(self):
-        r, w = _regex_parse("DELETE FROM `temp_rows` WHERE expired = 1")
+        r, w, _ = _regex_parse("DELETE FROM `temp_rows` WHERE expired = 1")
         assert r == {"temp_rows"} and w == {"temp_rows"}
 
     # -----------------------------------------------------------------------
@@ -261,7 +261,8 @@ class TestRegexParse:
         # (empty sets) because there's no FROM clause — not None.
         result = _regex_parse("GRANT SELECT ON users TO readonly")
         # Either None (fell through) or empty sets (matched SELECT path with no FROM)
-        assert result is None or result == (set(), set())
+        assert result is None or result == (set(), set(), None)
+
 
 
 # ---------------------------------------------------------------------------
@@ -275,51 +276,49 @@ class TestSqlglotParse:
         pytest.importorskip("sqlglot")
 
     def test_simple_select(self):
-        r, w = _sqlglot_parse("SELECT id FROM users WHERE id = 1")
+        r, w, _ = _sqlglot_parse("SELECT id FROM users WHERE id = 1")
         assert r == {"users"} and w == set()
 
     def test_simple_insert(self):
-        r, w = _sqlglot_parse("INSERT INTO orders (amount) VALUES (99)")
+        r, w, _ = _sqlglot_parse("INSERT INTO orders (amount) VALUES (99)")
         assert r == set() and w == {"orders"}
 
     def test_simple_update(self):
-        r, w = _sqlglot_parse("UPDATE accounts SET balance = 0 WHERE id = 1")
+        r, w, _ = _sqlglot_parse("UPDATE accounts SET balance = 0 WHERE id = 1")
         assert "accounts" in w and "accounts" in r
 
     def test_simple_delete(self):
-        r, w = _sqlglot_parse("DELETE FROM sessions WHERE id = 1")
+        r, w, _ = _sqlglot_parse("DELETE FROM sessions WHERE id = 1")
         assert "sessions" in w and "sessions" in r
 
     def test_cte_select(self):
         sql = "WITH recent AS (SELECT * FROM orders WHERE created > '2024-01-01') SELECT * FROM recent"
-        r, w = _sqlglot_parse(sql)
+        r, w, _ = _sqlglot_parse(sql)
         assert r is not None
         assert "orders" in r and w == set()
 
     def test_cte_multiple(self):
         sql = "WITH a AS (SELECT * FROM t1), b AS (SELECT * FROM t2) SELECT * FROM a JOIN b ON a.id = b.id"
-        r, w = _sqlglot_parse(sql)
+        r, w, _ = _sqlglot_parse(sql)
         assert r is not None
         assert "t1" in r and "t2" in r and w == set()
 
     def test_subquery_in_where(self):
         sql = "SELECT * FROM orders WHERE user_id IN (SELECT id FROM users WHERE active = true)"
-        r, w = _sqlglot_parse(sql)
+        r, w, _ = _sqlglot_parse(sql)
         assert r is not None
         assert "orders" in r and "users" in r and w == set()
 
     def test_union_select(self):
-        # UNION produces a Union AST node, not Select; falls to the DDL/conservative path
-        # which treats all referenced tables as writes.
+        # UNION produces a Union AST node. These are now handled explicitly as reads.
         sql = "SELECT id FROM customers UNION SELECT id FROM vendors"
-        r, w = _sqlglot_parse(sql)
+        r, w, _ = _sqlglot_parse(sql)
         assert r is not None
-        # All tables land in write under the conservative fallback for unrecognised AST nodes
-        assert "customers" in w and "vendors" in w
+        assert "customers" in r and "vendors" in r and w == set()
 
     def test_insert_select_simple(self):
         sql = "INSERT INTO archive SELECT * FROM orders WHERE status = 'closed'"
-        r, w = _sqlglot_parse(sql)
+        r, w, _ = _sqlglot_parse(sql)
         assert r is not None
         assert w == {"archive"}
         assert "orders" in r
@@ -329,14 +328,14 @@ class TestSqlglotParse:
             "INSERT INTO summary (user_id, total) "
             "SELECT u.id, SUM(o.amount) FROM users u JOIN orders o ON u.id = o.user_id GROUP BY u.id"
         )
-        r, w = _sqlglot_parse(sql)
+        r, w, _ = _sqlglot_parse(sql)
         assert r is not None
         assert w == {"summary"}
         assert "users" in r and "orders" in r
 
     def test_update_from_join(self):
         sql = "UPDATE orders SET status = 'shipped' FROM shipments WHERE orders.id = shipments.order_id"
-        r, w = _sqlglot_parse(sql)
+        r, w, _ = _sqlglot_parse(sql)
         assert r is not None
         assert "orders" in w
         assert "shipments" in r
@@ -347,7 +346,7 @@ class TestSqlglotParse:
             "WHEN MATCHED THEN UPDATE SET target.v = source.v "
             "WHEN NOT MATCHED THEN INSERT (id, v) VALUES (source.id, source.v)"
         )
-        r, w = _sqlglot_parse(sql)
+        r, w, _ = _sqlglot_parse(sql)
         assert r is not None
         assert "target" in w
         assert "source" in r
@@ -358,13 +357,13 @@ class TestSqlglotParse:
             "(SELECT user_id FROM orders WHERE product_id IN "
             "(SELECT id FROM products WHERE category = 'tech'))"
         )
-        r, w = _sqlglot_parse(sql)
+        r, w, _ = _sqlglot_parse(sql)
         assert r is not None
         assert "users" in r and "orders" in r and "products" in r and w == set()
 
     def test_select_with_subquery_in_from(self):
         sql = "SELECT sub.total FROM (SELECT SUM(amount) AS total FROM payments) sub"
-        r, w = _sqlglot_parse(sql)
+        r, w, _ = _sqlglot_parse(sql)
         assert r is not None
         assert "payments" in r and w == set()
 
@@ -380,22 +379,23 @@ class TestSqlglotParse:
             "  SELECT c.id, c.parent_id FROM categories c JOIN tree t ON c.parent_id = t.id"
             ") SELECT * FROM tree"
         )
-        r, w = _sqlglot_parse(sql)
+        r, w, _ = _sqlglot_parse(sql)
         assert r is not None
         assert "categories" in r and w == set()
 
     def test_insert_returning(self):
         sql = "INSERT INTO events (type) VALUES ('login') RETURNING id"
-        r, w = _sqlglot_parse(sql)
+        r, w, _ = _sqlglot_parse(sql)
         assert r is not None
         assert "events" in w
 
     def test_delete_with_subquery(self):
         sql = "DELETE FROM orders WHERE user_id IN (SELECT id FROM users WHERE banned = true)"
-        r, w = _sqlglot_parse(sql)
+        r, w, _ = _sqlglot_parse(sql)
         assert r is not None
         assert "orders" in w
         assert "users" in r
+
 
 
 # ---------------------------------------------------------------------------
@@ -405,43 +405,42 @@ class TestSqlglotParse:
 
 class TestParseSqlAccess:
     def test_simple_select(self):
-        r, w = parse_sql_access("SELECT * FROM users")
+        r, w, _ = parse_sql_access("SELECT * FROM users")
         assert r == {"users"} and w == set()
 
     def test_simple_insert(self):
-        r, w = parse_sql_access("INSERT INTO logs (msg) VALUES ('hi')")
+        r, w, _ = parse_sql_access("INSERT INTO logs (msg) VALUES ('hi')")
         assert r == set() and w == {"logs"}
 
     def test_simple_update(self):
-        r, w = parse_sql_access("UPDATE sessions SET active = false WHERE id = 7")
+        r, w, _ = parse_sql_access("UPDATE sessions SET active = false WHERE id = 7")
         assert "sessions" in w and "sessions" in r
 
     def test_simple_delete(self):
-        r, w = parse_sql_access("DELETE FROM temp_tokens WHERE expires < NOW()")
+        r, w, _ = parse_sql_access("DELETE FROM temp_tokens WHERE expires < NOW()")
         assert "temp_tokens" in w and "temp_tokens" in r
 
     def test_join_select(self):
-        r, w = parse_sql_access("SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id")
+        r, w, _ = parse_sql_access("SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id")
         assert "users" in r and "orders" in r and w == set()
 
     def test_insert_select(self):
-        r, w = parse_sql_access("INSERT INTO archive SELECT * FROM orders")
+        r, w, _ = parse_sql_access("INSERT INTO archive SELECT * FROM orders")
         assert "orders" in r and "archive" in w
 
     def test_cte_routed_to_sqlglot(self):
         pytest.importorskip("sqlglot")
         sql = "WITH t AS (SELECT * FROM products) SELECT * FROM t"
-        r, w = parse_sql_access(sql)
+        r, w, _ = parse_sql_access(sql)
         assert "products" in r and w == set()
 
     def test_union_routed_to_sqlglot(self):
         pytest.importorskip("sqlglot")
         # UNION falls through regex fast-path (returns None) and is handled by sqlglot.
-        # sqlglot returns a Union AST node which hits the conservative fallback → writes.
+        # These are now handled explicitly as reads.
         sql = "SELECT id FROM users UNION SELECT id FROM admins"
-        r, w = parse_sql_access(sql)
-        # Both tables are found; under the conservative fallback they appear in write
-        assert "users" in w and "admins" in w
+        r, w, _ = parse_sql_access(sql)
+        assert "users" in r and "admins" in r and w == set()
 
     def test_merge_routed_to_sqlglot(self):
         pytest.importorskip("sqlglot")
@@ -450,39 +449,39 @@ class TestParseSqlAccess:
             "WHEN MATCHED THEN UPDATE SET inventory.qty = inventory.qty + incoming.qty "
             "WHEN NOT MATCHED THEN INSERT (sku, qty) VALUES (incoming.sku, incoming.qty)"
         )
-        r, w = parse_sql_access(sql)
+        r, w, _ = parse_sql_access(sql)
         assert "inventory" in w and "incoming" in r
 
     def test_unparseable_returns_empty_sets(self):
-        r, w = parse_sql_access(";;; GARBAGE SQL ;;;")
+        r, w, _ = parse_sql_access(";;; GARBAGE SQL ;;;")
         assert isinstance(r, set) and isinstance(w, set)
 
     def test_empty_sql_returns_empty_sets(self):
-        r, w = parse_sql_access("")
+        r, w, _ = parse_sql_access("")
         assert r == set() and w == set()
 
     def test_whitespace_only_returns_empty_sets(self):
-        r, w = parse_sql_access("   \n   ")
+        r, w, _ = parse_sql_access("   \n   ")
         assert r == set() and w == set()
 
     def test_case_insensitive_select(self):
-        r, w = parse_sql_access("select * from USERS")
+        r, w, _ = parse_sql_access("select * from USERS")
         assert "USERS" in r and w == set()
 
     def test_case_insensitive_insert(self):
-        r, w = parse_sql_access("insert into Orders (amount) values (50)")
+        r, w, _ = parse_sql_access("insert into Orders (amount) values (50)")
         assert "Orders" in w
 
     def test_case_insensitive_update(self):
-        r, w = parse_sql_access("UPDATE Accounts SET balance = 10 WHERE id = 1")
+        r, w, _ = parse_sql_access("UPDATE Accounts SET balance = 10 WHERE id = 1")
         assert "Accounts" in w
 
     def test_case_insensitive_delete(self):
-        r, w = parse_sql_access("DELETE FROM Sessions WHERE id = 2")
+        r, w, _ = parse_sql_access("DELETE FROM Sessions WHERE id = 2")
         assert "Sessions" in w
 
     def test_trailing_semicolon_stripped(self):
-        r, w = parse_sql_access("SELECT * FROM orders;")
+        r, w, _ = parse_sql_access("SELECT * FROM orders;")
         assert "orders" in r and w == set()
 
     def test_multiple_joins(self):
@@ -492,23 +491,24 @@ class TestParseSqlAccess:
             "JOIN shipments s ON o.id = s.order_id "
             "JOIN products p ON o.product_id = p.id"
         )
-        r, w = parse_sql_access(sql)
+        r, w, _ = parse_sql_access(sql)
         assert {"users", "orders", "shipments", "products"} <= r and w == set()
 
     def test_schema_qualified_table(self):
-        r, w = parse_sql_access("SELECT * FROM public.accounts WHERE id = 1")
+        r, w, _ = parse_sql_access("SELECT * FROM public.accounts WHERE id = 1")
         assert "accounts" in r and w == set()
 
     def test_quoted_table_name(self):
-        r, w = parse_sql_access('SELECT * FROM "My Schema"')
+        r, w, _ = parse_sql_access('SELECT * FROM "My Schema"')
         assert "My Schema" in r and w == set()
 
     def test_returns_sets_not_lists(self):
-        r, w = parse_sql_access("SELECT * FROM users")
+        r, w, _ = parse_sql_access("SELECT * FROM users")
         assert isinstance(r, set) and isinstance(w, set)
 
     def test_complex_subquery_without_sqlglot(self):
         # Even if sqlglot not available, parse_sql_access should return sets
         sql = "WITH cte AS (SELECT 1) SELECT * FROM cte"
-        r, w = parse_sql_access(sql)
+        r, w, _ = parse_sql_access(sql)
         assert isinstance(r, set) and isinstance(w, set)
+

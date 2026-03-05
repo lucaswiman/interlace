@@ -29,8 +29,8 @@ try:
     from frontrun._sql_parsing import parse_sql_access
 except ImportError:
 
-    def parse_sql_access(sql: str) -> tuple[set[str], set[str]]:  # type: ignore[misc]
-        return set(), set()
+    def parse_sql_access(sql: str) -> tuple[set[str], set[str], str | None]:  # type: ignore[misc]
+        return set(), set(), None
 
 
 # Try to import row-level predicate helpers.  These are always present in the
@@ -98,7 +98,7 @@ def _intercept_execute(
     reported = False
 
     if reporter is not None and isinstance(operation, str):
-        read_tables, write_tables = parse_sql_access(operation)
+        read_tables, write_tables, lock_intent = parse_sql_access(operation)
         if read_tables or write_tables:
             reported = True
             all_tables = read_tables | write_tables
@@ -116,7 +116,10 @@ def _intercept_execute(
                     predicates = extract_equality_predicates(operation)
 
             for table in read_tables:
-                reporter(_sql_resource_id(table, predicates), "read")
+                # SELECT FOR UPDATE is both read and write to create conflicts.
+                # SHARE locks are treated as reads (they don't block other shares).
+                kind = "write" if lock_intent == "UPDATE" else "read"
+                reporter(_sql_resource_id(table, predicates), kind)
             for table in write_tables:
                 reporter(_sql_resource_id(table, predicates), "write")
 
