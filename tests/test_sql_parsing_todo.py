@@ -967,7 +967,6 @@ class TestOuterJoinWhereSemanticsToodo:
     Effort: ~20 lines + 3 tests
     """
 
-    @pytest.mark.xfail(reason="LEFT JOIN with WHERE semantics not distinguished")
     def test_left_join_with_where_on_outer_table(self):
         """WHERE on right table after LEFT JOIN converts to INNER JOIN semantics."""
         sql = """
