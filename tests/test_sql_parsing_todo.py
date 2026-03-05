@@ -829,7 +829,6 @@ class TestExistsNotExistsTodo:
     Effort: ~15 lines + 4 tests
     """
 
-    @pytest.mark.xfail(reason="EXISTS subquery correlation not recognized")
     def test_exists_subquery(self):
         """EXISTS with correlated subquery should mark dependency."""
         sql = """
@@ -840,7 +839,6 @@ class TestExistsNotExistsTodo:
         assert "users" in r and "orders" in r
         # TODO: mark EXISTS correlation
 
-    @pytest.mark.xfail(reason="NOT EXISTS subquery correlation not recognized")
     def test_not_exists_subquery(self):
         """NOT EXISTS should mark existence-based dependency."""
         sql = """

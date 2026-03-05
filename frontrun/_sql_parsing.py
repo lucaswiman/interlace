@@ -44,7 +44,10 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None] | None:
 
     # Bail to full parser for complex SQL
     upper = stripped.upper()
-    if any(kw in upper for kw in ("WITH ", "UNION", "INTERSECT", "EXCEPT", "MERGE", "RETURNING")):
+    if any(kw in upper for kw in (
+        "WITH ", "UNION", "INTERSECT", "EXCEPT", "MERGE", "RETURNING",
+        "SELECT", "EXISTS", "IN ("
+    )):
         return None
 
     read: set[str] = set()
