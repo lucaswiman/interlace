@@ -512,3 +512,56 @@ class TestParseSqlAccess:
         r, w, _, _ = parse_sql_access(sql)
         assert isinstance(r, set) and isinstance(w, set)
 
+
+# ---------------------------------------------------------------------------
+# Multi-statement SQL
+# ---------------------------------------------------------------------------
+
+
+class TestMultiStatementSql:
+    @pytest.fixture(autouse=True)
+    def _require_sqlglot(self):
+        pytest.importorskip("sqlglot")
+
+    def test_multi_update(self):
+        sql = "UPDATE accounts SET balance = balance - 100 WHERE id = 1; UPDATE accounts SET balance = balance + 100 WHERE id = 2"
+        r, w, lock, tx = parse_sql_access(sql)
+        assert w == {"accounts"}
+        assert "accounts" in r
+
+    def test_multi_different_tables(self):
+        sql = "UPDATE table_a SET x=1; UPDATE table_b SET x=2"
+        r, w, lock, tx = parse_sql_access(sql)
+        assert w == {"table_a", "table_b"}
+        assert "table_a" in r and "table_b" in r
+
+    def test_mixed_read_write(self):
+        sql = "SELECT * FROM users; UPDATE accounts SET active=true"
+        r, w, lock, tx = parse_sql_access(sql)
+        assert "users" in r
+        assert "accounts" in r
+        assert "accounts" in w
+
+    def test_lock_intent_merge(self):
+        sql = "SELECT * FROM users FOR UPDATE; SELECT * FROM accounts FOR SHARE"
+        r, w, lock, tx = parse_sql_access(sql)
+        assert lock == "UPDATE"
+        assert r == {"users", "accounts"}
+
+    def test_lock_intent_merge_reverse(self):
+        sql = "SELECT * FROM accounts FOR SHARE; SELECT * FROM users"
+        r, w, lock, tx = parse_sql_access(sql)
+        assert lock == "SHARE"
+        assert r == {"users", "accounts"}
+
+    def test_tx_ops(self):
+        sql = "BEGIN; UPDATE accounts SET x=1"
+        r, w, lock, tx = parse_sql_access(sql)
+        assert tx == "BEGIN"
+        assert "accounts" in w
+
+    def test_multi_tx_ops(self):
+        sql = "BEGIN; UPDATE accounts SET x=1; COMMIT"
+        r, w, lock, tx = parse_sql_access(sql)
+        assert tx == "COMMIT"  # returns last tx_op
+        assert "accounts" in w

@@ -52,6 +52,11 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None] 
     stripped = sql.strip().rstrip(";").strip()
     upper = stripped.upper()
 
+    # Strip literals to avoid false positives (e.g. " FROM " inside a string)
+    no_literals = _RE_LITERAL.sub(" ", stripped)
+    if ";" in no_literals:
+        return None
+
     # Transaction control - check before other patterns
     if _RE_TX_BEGIN.search(stripped):
         return set(), set(), None, "BEGIN"
@@ -84,9 +89,6 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None] 
     if "(" in stripped and not stripped.lower().startswith("insert"):
         if any(kw in stripped.lower() for kw in ("pg_advisory", "get_lock")):
             return None
-
-    # Strip literals to avoid false positives (e.g. " FROM " inside a string)
-    no_literals = _RE_LITERAL.sub(" ", stripped)
 
     read: set[str] = set()
     write: set[str] = set()
@@ -157,115 +159,132 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None
         return None
 
     try:
-        ast = sqlglot.parse_one(sql)
+        expressions = sqlglot.parse(sql)
     except sqlglot.errors.ParseError:
         return None  # unparseable → fall back to endpoint-level
 
-    write: set[str] = set()
-    read: set[str] = set()
-    lock_intent: str | None = None
-    tx_op: str | None = None
+    if not expressions:
+        return None
 
-    # Transaction control
-    if isinstance(ast, exp.Transaction):
-        return read, write, lock_intent, "BEGIN"
-    if isinstance(ast, exp.Commit):
-        return read, write, lock_intent, "COMMIT"
-    if isinstance(ast, exp.Rollback):
-        return read, write, lock_intent, "ROLLBACK"
+    all_write: set[str] = set()
+    all_read: set[str] = set()
+    all_lock_intent: str | None = None
+    all_tx_op: str | None = None
 
-    # Extract lock intent from SELECT
-    if isinstance(ast, exp.Select):
-        lock = ast.find(exp.Lock)
-        if lock:
-            if lock.args.get("update"):
-                lock_intent = "UPDATE"
-            elif lock.args.get("share"):
-                lock_intent = "SHARE"
-            else:
-                kind = lock.args.get("kind")
-                if kind:
-                    kind_upper = str(kind).upper()
-                    if "UPDATE" in kind_upper:
+    def _merge_lock_intent(a: str | None, b: str | None) -> str | None:
+        if a == "UPDATE" or b == "UPDATE":
+            return "UPDATE"
+        if a == "SHARE" or b == "SHARE":
+            return "SHARE"
+        return None
+
+    for ast in expressions:
+        if ast is None:
+            continue
+            
+        write: set[str] = set()
+        read: set[str] = set()
+        lock_intent: str | None = None
+        tx_op: str | None = None
+
+        # Transaction control
+        if isinstance(ast, exp.Transaction):
+            tx_op = "BEGIN"
+        elif isinstance(ast, exp.Commit):
+            tx_op = "COMMIT"
+        elif isinstance(ast, exp.Rollback):
+            tx_op = "ROLLBACK"
+        else:
+            # Extract lock intent from SELECT
+            if isinstance(ast, exp.Select):
+                lock = ast.find(exp.Lock)
+                if lock:
+                    if lock.args.get("update"):
                         lock_intent = "UPDATE"
-                    elif "SHARE" in kind_upper:
+                    else:
+                        # sqlglot might not have "share" key, but if it's a Lock and not update,
+                        # it's usually a share lock in dialects that support it.
                         lock_intent = "SHARE"
+                        # Extra check for some versions/dialects
+                        kind = lock.args.get("kind")
+                        if kind:
+                            kind_upper = str(kind).upper()
+                            if "UPDATE" in kind_upper:
+                                lock_intent = "UPDATE"
+                            elif "SHARE" in kind_upper:
+                                lock_intent = "SHARE"
 
-    # Advisory locks (PostgreSQL, MySQL)
-    for call in ast.find_all(exp.Anonymous):
-        name = call.this.lower()
-        if name in ("pg_advisory_lock", "pg_advisory_xact_lock",
-                    "pg_advisory_lock_shared", "pg_advisory_xact_lock_shared",
-                    "get_lock"):
-            # Extract lock ID/name if it's a literal
-            if call.expressions:
-                arg = call.expressions[0]
-                if isinstance(arg, exp.Literal):
-                    lock_id = arg.this
-                else:
-                    lock_id = "?"
-                write.add(f"advisory_lock:{lock_id}")
-                if "shared" in name:
-                    lock_intent = "SHARE"
-                else:
-                    lock_intent = "UPDATE"
+            # Advisory locks (PostgreSQL, MySQL)
+            for call in ast.find_all(exp.Anonymous):
+                name = call.this.lower()
+                if name in ("pg_advisory_lock", "pg_advisory_xact_lock",
+                            "pg_advisory_lock_shared", "pg_advisory_xact_lock_shared",
+                            "get_lock"):
+                    # Extract lock ID/name if it's a literal
+                    if call.expressions:
+                        arg = call.expressions[0]
+                        if isinstance(arg, exp.Literal):
+                            lock_id = arg.this
+                        else:
+                            lock_id = "?"
+                        write.add(f"advisory_lock:{lock_id}")
+                        if "shared" in name:
+                            lock_intent = _merge_lock_intent(lock_intent, "SHARE")
+                        else:
+                            lock_intent = _merge_lock_intent(lock_intent, "UPDATE")
 
-    if isinstance(ast, exp.Insert):
-        tbl = ast.find(exp.Table)
-        if tbl:
-            write.add(tbl.name)
-        # Source tables (everything after the target)
-        if ast.expression:  # the SELECT source
-            for t in ast.expression.find_all(exp.Table):
-                if t.name not in write:
+            if isinstance(ast, exp.Insert):
+                tbl = ast.find(exp.Table)
+                if tbl:
+                    write.add(tbl.name)
+                # Source tables (everything after the target)
+                if ast.expression:  # the SELECT source
+                    for t in ast.expression.find_all(exp.Table):
+                        if t.name not in write:
+                            read.add(t.name)
+            elif isinstance(ast, exp.Update):
+                tbl = ast.this
+                if isinstance(tbl, exp.Table):
+                    write.add(tbl.name)
+                    read.add(tbl.name)
+                for t in ast.find_all(exp.Table):
+                    if t.name not in write:
+                        read.add(t.name)
+            elif isinstance(ast, exp.Delete):
+                tbl = ast.this
+                if isinstance(tbl, exp.Table):
+                    write.add(tbl.name)
+                    read.add(tbl.name)
+                for t in ast.find_all(exp.Table):
+                    if t.name not in write:
+                        read.add(t.name)
+            elif isinstance(ast, exp.Select):
+                for t in ast.find_all(exp.Table):
                     read.add(t.name)
-        return read, write, lock_intent, None
+            elif isinstance(ast, (exp.Union, exp.Intersect, exp.Except)):
+                for t in ast.find_all(exp.Table):
+                    read.add(t.name)
+            elif isinstance(ast, exp.Merge):
+                target = ast.this
+                if isinstance(target, exp.Table):
+                    write.add(target.name)
+                    read.add(target.name)
+                # All non-target tables are read sources
+                for t in ast.find_all(exp.Table):
+                    if t.name not in write:
+                        read.add(t.name)
+            else:
+                # DDL, GRANT, etc. — conservatively treat as write
+                for t in ast.find_all(exp.Table):
+                    write.add(t.name)
 
-    if isinstance(ast, exp.Update):
-        tbl = ast.this
-        if isinstance(tbl, exp.Table):
-            write.add(tbl.name)
-            read.add(tbl.name)
-        for t in ast.find_all(exp.Table):
-            if t.name not in write:
-                read.add(t.name)
-        return read, write, lock_intent, None
+        all_read.update(read)
+        all_write.update(write)
+        all_lock_intent = _merge_lock_intent(all_lock_intent, lock_intent)
+        if tx_op:
+            all_tx_op = tx_op  # Take the last tx_op or any? usually only one makes sense
 
-    if isinstance(ast, exp.Delete):
-        tbl = ast.this
-        if isinstance(tbl, exp.Table):
-            write.add(tbl.name)
-            read.add(tbl.name)
-        for t in ast.find_all(exp.Table):
-            if t.name not in write:
-                read.add(t.name)
-        return read, write, lock_intent, None
-
-    if isinstance(ast, exp.Select):
-        for t in ast.find_all(exp.Table):
-            read.add(t.name)
-        return read, write, lock_intent, None
-
-    if isinstance(ast, (exp.Union, exp.Intersect, exp.Except)):
-        for t in ast.find_all(exp.Table):
-            read.add(t.name)
-        return read, write, lock_intent, None
-
-    if isinstance(ast, exp.Merge):
-        target = ast.this
-        if isinstance(target, exp.Table):
-            write.add(target.name)
-            read.add(target.name)
-        # All non-target tables are read sources
-        for t in ast.find_all(exp.Table):
-            if t.name not in write:
-                read.add(t.name)
-        return read, write, lock_intent, None
-
-    # DDL, GRANT, etc. — conservatively treat as write
-    for t in ast.find_all(exp.Table):
-        write.add(t.name)
-    return read, write, lock_intent, None
+    return all_read, all_write, all_lock_intent, all_tx_op
 
 
 def parse_sql_access(sql: str) -> tuple[set[str], set[str], str | None, str | None]:

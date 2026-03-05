@@ -170,15 +170,8 @@ Implementation split into modular files (original plan called for single `_sql_d
 
 ---
 
-### TODO: Multi-Statement SQL Strings (Phase 7, Low Priority)
-**Priority:** Low (rare in ORM-generated SQL; mainly manual `cursor.execute()`)
-**Scope:**
-- Current parser strips trailing `;` and parses only the first statement
-- `cursor.execute("INSERT INTO a ...; DELETE FROM b ...")` only reports `a`
-- Need to split on `;` (respecting string literals) and parse each statement
-- Report union of all table accesses
-
-**Estimated effort:** ~30 lines + 10 tests
+### TODO: Multi-Statement SQL Strings (Phase 7) — ✅ Done
+**Priority:** Low (handled by splitting and parsing all statements in `_sqlglot_parse`)
 
 ---
 
@@ -233,7 +226,7 @@ If range predicate support becomes important, a lightweight interval-arithmetic 
 | 7 | Temporal tables | 🔴 Very Low | 40 lines + 10 tests | Specialized SQL | **TODO** |
 | 7 | Computed columns | 🔴 Very Low | 30 lines + 5 tests | Informational | **TODO** |
 | 7 | Connection pooling awareness | 🔴 Low | 40 lines + 10 tests | Pool state leakage | **TODO** |
-| 7 | Multi-statement SQL strings | 🔴 Low | 30 lines + 10 tests | Manual SQL only | **TODO** |
+| 7 | Multi-statement SQL strings | 🔴 Low | 30 lines + 10 tests | Manual SQL only | ✅ **Done** |
 | 7 | Phantom read detection | 🔴 Low | 50 lines + 15 tests | Blocked on range predicates | **TODO** |
 
 **Legend:** 🟢 High-impact | 🟡 Medium-impact | 🔴 Low-impact

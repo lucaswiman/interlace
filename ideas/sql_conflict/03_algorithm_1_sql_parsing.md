@@ -195,7 +195,7 @@ When `total` is updated, the actual SQL does not include `total = ...` (it's com
 
 ---
 
-### TODO: RETURNING Clause with Multiple Tables
+### TODO: RETURNING Clause with Multiple Tables — ✅ Done
 **Issue:** PostgreSQL `RETURNING` in `UPDATE...FROM`:
 ```sql
 UPDATE orders SET status = 'shipped' FROM shipments
@@ -204,15 +204,9 @@ RETURNING orders.id, shipments.id;
 ```
 The `RETURNING` clause lists outputs but doesn't affect read/write semantics. However, some ORMs use `RETURNING` to fetch results.
 
-**Impact:**
-- Minimal: current handler correctly identifies `orders` (write) + `shipments` (read)
-- `RETURNING` doesn't change the classification
-
 **Fix:**
-- Already handled: `_regex_parse` bails on `RETURNING`, sqlglot handles it correctly
-- Add test for `RETURNING` with multi-table UPDATE
-
-**Estimated effort:** ~5 lines + 2 tests
+- Already handled: `_regex_parse` bails on `RETURNING`, sqlglot handles it correctly.
+- Added test for `RETURNING` with multi-table UPDATE.
 
 ---
 
