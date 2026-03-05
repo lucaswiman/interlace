@@ -868,15 +868,12 @@ class TestMultipleRowInsertTodo:
     """Tests for multiple-row INSERT statements.
 
     Expected: Multiple VALUES rows should be recognized as separate logical inserts.
-    Current: Treated as single bulk insert (correct but loses row granularity).
-
-    Priority: HIGH (common bulk operation)
-    Phase: 6
-    Effort: ~10 lines + 3 tests
+    Current: Handled via extract_row_level_access() which extracts each row's values.
     """
 
     def test_multiple_row_insert_values(self):
         """INSERT with multiple VALUES rows should be recognized."""
+        from frontrun._sql_predicates import extract_row_level_access, EqualityPredicate
         sql = """
         INSERT INTO users (name, email) VALUES
           ('Alice', 'a@x'),
@@ -885,7 +882,13 @@ class TestMultipleRowInsertTodo:
         """
         r, w, _, _ = parse_sql_access(sql)
         assert w == {"users"}
-        # TODO: track row count or list of rows inserted
+        
+        rows = extract_row_level_access(sql)
+        assert rows is not None
+        assert len(rows) == 3
+        assert rows[0] == [EqualityPredicate("name", "Alice"), EqualityPredicate("email", "a@x")]
+        assert rows[1] == [EqualityPredicate("name", "Bob"), EqualityPredicate("email", "b@x")]
+        assert rows[2] == [EqualityPredicate("name", "Carol"), EqualityPredicate("email", "c@x")]
 
 
 class TestDistinctTodo:

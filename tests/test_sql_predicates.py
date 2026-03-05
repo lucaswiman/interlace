@@ -20,8 +20,49 @@ from frontrun._sql_predicates import (
     can_use_row_level,
     expand_predicate_rows,
     extract_equality_predicates,
+    extract_row_level_access,
     pk_predicates_disjoint,
 )
+
+# ---------------------------------------------------------------------------
+# extract_row_level_access
+# ---------------------------------------------------------------------------
+
+
+class TestExtractRowLevelAccess:
+    def test_insert_single_row(self):
+        sql = "INSERT INTO users (id, name) VALUES (1, 'alice')"
+        rows = extract_row_level_access(sql)
+        assert rows == [[EqualityPredicate("id", "1"), EqualityPredicate("name", "alice")]]
+
+    def test_insert_multiple_rows(self):
+        sql = "INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob')"
+        rows = extract_row_level_access(sql)
+        assert len(rows) == 2
+        assert rows[0] == [EqualityPredicate("id", "1"), EqualityPredicate("name", "alice")]
+        assert rows[1] == [EqualityPredicate("id", "2"), EqualityPredicate("name", "bob")]
+
+    def test_insert_with_expressions_skips_columns(self):
+        """Columns with non-literal values (like NOW()) are skipped in row predicates."""
+        sql = "INSERT INTO users (id, created_at) VALUES (1, NOW())"
+        rows = extract_row_level_access(sql)
+        assert rows == [[EqualityPredicate("id", "1")]]
+
+    def test_insert_without_columns_returns_none(self):
+        """INSERT without explicit column list cannot be mapped to predicates."""
+        sql = "INSERT INTO users VALUES (1, 'alice')"
+        assert extract_row_level_access(sql) is None
+
+    def test_where_clause_equality(self):
+        sql = "SELECT * FROM users WHERE id = 1"
+        rows = extract_row_level_access(sql)
+        assert rows == [[EqualityPredicate("id", "1")]]
+
+    def test_where_clause_in_list(self):
+        sql = "SELECT * FROM users WHERE id IN (1, 2)"
+        rows = extract_row_level_access(sql)
+        assert rows == [[EqualityPredicate("id", "1")], [EqualityPredicate("id", "2")]]
+
 
 # ---------------------------------------------------------------------------
 # extract_equality_predicates

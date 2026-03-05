@@ -182,6 +182,15 @@ Implementation split into modular files (original plan called for single `_sql_d
 
 ---
 
+### TODO: Multiple Row INSERT (Phase 6) — ✅ Done
+**Priority:** High (common bulk operation)
+**Scope:**
+- Recognize INSERT with multiple VALUES rows
+- Extract each row's values into separate predicate sets
+- Implemented via `extract_row_level_access()` which handles `exp.Values` AST nodes.
+
+---
+
 ### TODO: Phantom Read Detection in Anomaly Classifier (Phase 7)
 **Priority:** Low (phantoms require range predicates, currently table-level)
 **Scope:**

@@ -38,17 +38,14 @@ except ImportError:
 # same package, but guard with try/except for robustness.
 try:
     from frontrun._sql_params import resolve_parameters
-    from frontrun._sql_predicates import expand_predicate_rows, extract_equality_predicates
+    from frontrun._sql_predicates import extract_row_level_access
 except ImportError:
 
     def resolve_parameters(sql: str, parameters: Any, paramstyle: str) -> str:  # type: ignore[misc]
         return sql
 
-    def extract_equality_predicates(sql: str) -> list:  # type: ignore[misc]
-        return []
-
-    def expand_predicate_rows(preds: list) -> list[list] | None:  # type: ignore[misc]
-        return [preds] if preds else None
+    def extract_row_level_access(sql: str) -> list[list[Any]] | None:  # type: ignore[misc]
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -167,18 +164,16 @@ def _intercept_execute(
             all_tables = read_tables | write_tables
             in_tx = getattr(_io_tls, "_in_transaction", False)
 
-            # Row-level predicate extraction (equality + IN-lists)
+            # Row-level predicate extraction (WHERE equality, IN-lists, and INSERT VALUES)
             pred_rows: list[list[Any]] = [[]]  # default: one report, no predicates (table-level)
             if len(all_tables) == 1 and not is_executemany:
                 if parameters is not None:
                     resolved = resolve_parameters(operation, parameters, paramstyle)
-                    preds = extract_equality_predicates(resolved)
+                    rows = extract_row_level_access(resolved)
                 else:
-                    preds = extract_equality_predicates(operation)
-                if preds:
-                    expanded = expand_predicate_rows(preds)
-                    if expanded is not None:
-                        pred_rows = expanded
+                    rows = extract_row_level_access(operation)
+                if rows is not None:
+                    pred_rows = rows
 
             def report_or_buffer(table: str, kind: str) -> None:
                 for row_preds in pred_rows:

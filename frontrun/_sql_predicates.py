@@ -72,6 +72,16 @@ def extract_equality_predicates(sql: str) -> list[Predicate]:
     except sqlglot.errors.ParseError:
         return []
 
+    return _extract_from_ast(ast)
+
+
+def _extract_from_ast(ast: Any) -> list[Predicate]:
+    """Internal helper to extract predicates from a parsed AST."""
+    try:
+        from sqlglot import exp
+    except ImportError:
+        return []
+
     where = ast.find(exp.Where)
     if where is None:
         return []
@@ -113,6 +123,64 @@ def extract_equality_predicates(sql: str) -> list[Predicate]:
                 predicates.append(InListPredicate(col.name, frozenset(values)))
 
     return predicates
+
+
+def extract_row_level_access(sql: str) -> list[list[EqualityPredicate]] | None:
+    """Extract row-level access patterns from a SQL statement.
+
+    Handles:
+    - SELECT/UPDATE/DELETE with WHERE clauses (via ``extract_equality_predicates``)
+    - INSERT INTO ... VALUES (...) with multiple rows.
+
+    Returns a list of rows, where each row is a list of :class:`EqualityPredicate`
+    representing column values for that row. Returns ``None`` if row-level
+    access could not be extracted (falls back to table-level).
+    """
+    try:
+        import sqlglot
+        from sqlglot import exp
+    except ImportError:
+        return None
+
+    try:
+        ast = sqlglot.parse_one(sql)
+    except sqlglot.errors.ParseError:
+        return None
+
+    # 1. Handle INSERT INTO ... VALUES (...)
+    if isinstance(ast, exp.Insert) and isinstance(ast.expression, exp.Values):
+        # Extract columns from Schema if available
+        if isinstance(ast.this, exp.Schema):
+            columns = [c.name for c in ast.this.expressions]
+        else:
+            # Table without explicit columns — cannot reliably map values to columns
+            return None
+
+        rows: list[list[EqualityPredicate]] = []
+        for tuple_expr in ast.expression.expressions:
+            if not isinstance(tuple_expr, exp.Tuple):
+                continue
+            if len(tuple_expr.expressions) != len(columns):
+                continue
+
+            row_preds: list[EqualityPredicate] = []
+            for col, val_expr in zip(columns, tuple_expr.expressions):
+                if isinstance(val_expr, exp.Literal):
+                    row_preds.append(EqualityPredicate(col, val_expr.this))
+                else:
+                    # Non-literal (e.g. function call NOW()) — skip this column for row-level
+                    pass
+            if row_preds:
+                rows.append(row_preds)
+
+        return rows if rows else None
+
+    # 2. Handle WHERE clauses (SELECT, UPDATE, DELETE)
+    preds = _extract_from_ast(ast)
+    if preds:
+        return expand_predicate_rows(preds)
+
+    return None
 
 
 def expand_predicate_rows(preds: list[Predicate]) -> list[list[EqualityPredicate]] | None:
