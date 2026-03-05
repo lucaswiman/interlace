@@ -322,7 +322,6 @@ def _patch_class_methods(cls: type, paramstyle: str) -> None:
         if key in _ORIGINAL_METHODS:
             continue
         _ORIGINAL_METHODS[key] = original
-        _orig = original
 
         def _make_patched(orig: Any, mname: str, ps: str) -> Any:
             _is_executemany = mname == "executemany"
