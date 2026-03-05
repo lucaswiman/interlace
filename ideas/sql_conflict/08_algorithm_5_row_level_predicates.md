@@ -4,6 +4,8 @@ Extract WHERE clause predicates from the parsed SQL and encode them as part of t
 
 ## 5a. Predicate Extraction via sqlglot
 
+Extracts two predicate types from AND-conjuncts in WHERE clauses:
+
 ```python
 from sqlglot import exp
 
@@ -13,85 +15,78 @@ class EqualityPredicate:
     column: str
     value: str  # string representation of the literal
 
-def extract_equality_predicates(sql: str) -> list[EqualityPredicate]:
-    """Extract simple equality predicates from a SQL WHERE clause.
+@dataclass(frozen=True)
+class InListPredicate:
+    """A WHERE column IN (v1, v2, ...) predicate."""
+    column: str
+    values: frozenset[str]
 
-    Only extracts conjuncts of the form `column = literal` (ANDed together).
-    Returns empty list for OR, IN, BETWEEN, subqueries, function calls, etc.
+Predicate = EqualityPredicate | InListPredicate
+
+def extract_equality_predicates(sql: str) -> list[Predicate]:
+    """Extract equality and IN-list predicates from a SQL WHERE clause.
+
+    Extracts conjuncts (ANDed together) of these forms:
+    - column = literal → EqualityPredicate
+    - column IN (lit1, lit2, ...) → InListPredicate
+
+    Returns empty list for OR, BETWEEN, subqueries, function calls, etc.
+    IN-lists with non-literal values or exceeding _MAX_IN_LIST_SIZE (32)
+    are skipped (falls back to table-level).
     """
-    import sqlglot
-    try:
-        ast = sqlglot.parse_one(sql)
-    except sqlglot.errors.ParseError:
-        return []
-
-    where = ast.find(exp.Where)
-    if where is None:
-        return []
-
-    predicates: list[EqualityPredicate] = []
-    predicate_expr = where.this
-
-    # Flatten ANDs into individual conjuncts
-    conjuncts: list[exp.Expression]
-    if isinstance(predicate_expr, exp.And):
-        conjuncts = list(predicate_expr.flatten())
-    else:
-        conjuncts = [predicate_expr]
-
-    for conjunct in conjuncts:
-        if not isinstance(conjunct, exp.EQ):
-            continue  # skip non-equality predicates
-        left, right = conjunct.this, conjunct.expression
-        # Normalize: column on left, literal on right
-        if isinstance(left, exp.Column) and isinstance(right, exp.Literal):
-            predicates.append(EqualityPredicate(left.name, right.this))
-        elif isinstance(right, exp.Column) and isinstance(left, exp.Literal):
-            predicates.append(EqualityPredicate(right.name, left.this))
-
-    return predicates
 ```
 
-## 5b. Row-Level ObjectId
+## 5b. Predicate Expansion for Resource IDs
 
-When predicates are available, derive a finer-grained ObjectId that encodes the table *and* the row predicate:
+IN-list predicates must be expanded into per-row resource IDs for the DPOR scheduler. The scheduler uses ObjectId equality for conflict detection, so each row an operation touches needs its own report.
 
 ```python
-def sql_row_object_key(table: str, predicates: list[EqualityPredicate]) -> int:
-    """Derive ObjectId from table + WHERE equality predicates.
+def expand_predicate_rows(
+    preds: list[Predicate],
+) -> list[list[EqualityPredicate]] | None:
+    """Expand IN-list predicates into per-row equality predicate sets.
 
-    If predicates are present, the key includes them — so
-    "UPDATE accounts WHERE id=1" and "SELECT accounts WHERE id=2"
-    get different ObjectIds and are independent.
+    WHERE id = 1           → [[(id, 1)]]
+    WHERE id IN (1, 2)     → [[(id, 1)], [(id, 2)]]
+    WHERE id IN (1, 2) AND region = 'us'
+        → [[(region, us), (id, 1)], [(region, us), (id, 2)]]
 
-    If no predicates, falls back to table-level key.
+    Returns None if expansion would exceed _MAX_EXPANSION (64),
+    in which case the caller falls back to table-level.
     """
-    if not predicates:
-        # No predicates → table-level granularity
-        return _make_object_key(hash(f"sql:{table}"), f"sql:{table}")
+```
 
-    # Sort predicates for deterministic hashing
-    pred_key = tuple(sorted((p.column, p.value) for p in predicates))
-    resource_id = f"sql:{table}:{pred_key}"
-    return _make_object_key(hash(resource_id), resource_id)
+In `_intercept_execute`, each expanded row generates a separate `reporter()` call:
+
+```python
+pred_rows: list[list[Any]] = [[]]  # default: table-level (one report, no predicates)
+if preds:
+    expanded = expand_predicate_rows(preds)
+    if expanded is not None:
+        pred_rows = expanded
+
+for row_preds in pred_rows:
+    res_id = _sql_resource_id(table, row_preds)
+    reporter(res_id, kind)
 ```
 
 ## 5c. Soundness: When Row-Level is Safe
 
 Row-level ObjectIds are sound (no missed conflicts) when:
 
-1. The WHERE clause is a conjunction of equalities on the *primary key* columns.
+1. The WHERE clause is a conjunction of equalities/IN-lists on the *primary key* columns.
 2. Both operations have complete primary key predicates.
+3. IN-lists are expanded into per-row reports (each value gets its own ObjectId).
 
-If either operation has no WHERE clause (full table scan), range predicates, OR conditions, or predicates on non-key columns, we must fall back to table-level (conservative, correct).
+If either operation has no WHERE clause (full table scan), range predicates, OR conditions, or predicates on non-key columns, we fall back to table-level (conservative, correct).
 
 **Decision function:**
 
 ```python
 def can_use_row_level(
     table: str,
-    predicates_a: list[EqualityPredicate],
-    predicates_b: list[EqualityPredicate],
+    predicates_a: list[Predicate],
+    predicates_b: list[Predicate],
     pk_columns: set[str] | None,  # from schema, or None if unknown
 ) -> bool:
     """Can we safely use row-level ObjectIds for these two operations?"""
@@ -103,32 +98,44 @@ def can_use_row_level(
     cols_a = {p.column for p in predicates_a}
     cols_b = {p.column for p in predicates_b}
 
-    # Both must have equality predicates on ALL primary key columns
+    # Both must have predicates on ALL primary key columns
     return pk_columns <= cols_a and pk_columns <= cols_b
 ```
 
-## 5d. Row-Level Disjointness (No z3 Needed for Equalities)
+## 5d. Row-Level Disjointness (No z3 Needed)
 
-When `can_use_row_level` is true, two operations are independent iff their PK predicates select different rows:
+When `can_use_row_level` is true, two operations are independent iff their value sets for any shared PK column are disjoint:
 
 ```python
 def pk_predicates_disjoint(
-    preds_a: list[EqualityPredicate],
-    preds_b: list[EqualityPredicate],
+    preds_a: list[Predicate],
+    preds_b: list[Predicate],
 ) -> bool:
-    """Are two sets of PK equality predicates provably disjoint?
+    """Are two sets of PK predicates provably disjoint?
 
-    True if any shared column has different values.
-    E.g., (id=1) vs (id=2) → True (disjoint).
-         (id=1, region='us') vs (id=1, region='eu') → True.
-         (id=1) vs (id=1) → False (same row).
+    Handles both EqualityPredicate (single value) and InListPredicate (set).
+    True if any shared column's value sets are disjoint.
+
+    (id=1)              vs (id=2)              → True
+    (id IN (1,2,3))     vs (id IN (4,5,6))     → True
+    (id IN (1,2,3))     vs (id=2)              → False (2 overlaps)
+    (id=1)              vs (id=1)              → False (same row)
     """
-    a_map = {p.column: p.value for p in preds_a}
-    b_map = {p.column: p.value for p in preds_b}
+    def _values_set(preds):
+        m = {}
+        for p in preds:
+            if isinstance(p, EqualityPredicate):
+                m.setdefault(p.column, set()).add(p.value)
+            elif isinstance(p, InListPredicate):
+                m.setdefault(p.column, set()).update(p.values)
+        return m
+
+    a_map = _values_set(preds_a)
+    b_map = _values_set(preds_b)
     for col in a_map:
-        if col in b_map and a_map[col] != b_map[col]:
+        if col in b_map and a_map[col].isdisjoint(b_map[col]):
             return True
     return False
 ```
 
-This is an O(k) check where k = number of PK columns. No SMT solver needed. z3 is only needed for range predicates (`WHERE id > 10` vs `WHERE id < 5`), which can be deferred to a later phase.
+This is an O(k) check where k = number of PK columns. No SMT solver needed — equality lookups and IN-lists are handled by simple set disjointness. See [13_phased_implementation.md#design-note-why-not-z3smt-for-row-level-conflicts](13_phased_implementation.md#design-note-why-not-z3smt-for-row-level-conflicts) for the full rationale on why z3 is not used.
