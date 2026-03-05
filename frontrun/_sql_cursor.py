@@ -16,10 +16,11 @@ drivers like pymysql, direct class patching is used as a fallback.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import sqlite3
 import threading
-from typing import Any
+from typing import Any, Generator
 
 from frontrun._io_detection import _io_tls, get_io_reporter
 
@@ -55,6 +56,21 @@ except ImportError:
 # The LD_PRELOAD bridge listener checks this to skip endpoint-level reports.
 _suppress_tids: set[int] = set()
 _suppress_lock = threading.Lock()  # Real lock (not cooperative)
+
+
+@contextlib.contextmanager
+def _suppress_endpoint_io() -> Generator[None, None, None]:
+    """Temporarily suppress endpoint-level I/O for the current thread."""
+    tid = threading.get_native_id()
+    _io_tls._sql_suppress = True
+    with _suppress_lock:
+        _suppress_tids.add(tid)
+    try:
+        yield
+    finally:
+        with _suppress_lock:
+            _suppress_tids.discard(tid)
+        _io_tls._sql_suppress = False
 
 
 def is_tid_suppressed(tid: int) -> bool:
@@ -108,7 +124,7 @@ def _intercept_execute(
             # params) and multi-table queries (can't attribute columns to
             # tables without aliases).
             predicates: list[Any] = []
-            if len(all_tables) == 1 and not is_executemany and " where " in operation.lower():
+            if len(all_tables) == 1 and not is_executemany:
                 if parameters is not None:
                     resolved = resolve_parameters(operation, parameters, paramstyle)
                     predicates = extract_equality_predicates(resolved)
@@ -124,22 +140,15 @@ def _intercept_execute(
                 reporter(_sql_resource_id(table, predicates), "write")
 
     if reported:
-        tid = threading.get_native_id()
-        _io_tls._sql_suppress = True  # type: ignore[attr-defined]
-        with _suppress_lock:
-            _suppress_tids.add(tid)
-        try:
+        with _suppress_endpoint_io():
             if parameters is not None:
                 return original_method(self, operation, parameters)
             return original_method(self, operation)
-        finally:
-            with _suppress_lock:
-                _suppress_tids.discard(tid)
-            _io_tls._sql_suppress = False  # type: ignore[attr-defined]
     else:
         if parameters is not None:
             return original_method(self, operation, parameters)
         return original_method(self, operation)
+
 
 
 # ---------------------------------------------------------------------------
