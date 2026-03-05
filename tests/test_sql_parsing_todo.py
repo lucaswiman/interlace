@@ -883,7 +883,6 @@ class TestDistinctTodo:
     Effort: ~10 lines + 2 tests
     """
 
-    @pytest.mark.xfail(reason="DISTINCT ON (PostgreSQL) not recognized")
     def test_distinct_on(self):
         """PostgreSQL DISTINCT ON should be recognized."""
         sql = """
