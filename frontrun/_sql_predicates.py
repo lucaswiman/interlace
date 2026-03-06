@@ -23,6 +23,7 @@ rather than an SMT solver like z3 because:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 # Maximum number of values in an IN-list before falling back to table-level.
 _MAX_IN_LIST_SIZE = 32
@@ -50,7 +51,7 @@ class InListPredicate:
 Predicate = EqualityPredicate | InListPredicate
 
 
-def extract_equality_predicates(sql: str) -> list[Predicate]:
+def extract_equality_predicates(sql: str, *, ast: Any | None = None) -> list[Predicate]:
     """Extract equality and IN-list predicates from a SQL WHERE clause.
 
     Extracts conjuncts (ANDed together) of these forms:
@@ -60,7 +61,13 @@ def extract_equality_predicates(sql: str) -> list[Predicate]:
     Returns empty list for OR, BETWEEN, subqueries, function calls, etc.
     IN-lists with non-literal values or exceeding :data:`_MAX_IN_LIST_SIZE`
     are skipped (falls back to table-level).
+
+    If *ast* is provided (a pre-parsed sqlglot AST), it is used directly
+    instead of re-parsing *sql*.
     """
+    if ast is not None:
+        return _extract_from_ast(ast)
+
     try:
         import sqlglot  # type: ignore[import-untyped]
         from sqlglot import errors as sqlglot_errors  # type: ignore[import-untyped]
@@ -68,11 +75,11 @@ def extract_equality_predicates(sql: str) -> list[Predicate]:
         return []
 
     try:
-        ast = sqlglot.parse_one(sql)
+        parsed = sqlglot.parse_one(sql)
     except sqlglot_errors.ParseError:
         return []
 
-    return _extract_from_ast(ast)
+    return _extract_from_ast(parsed)
 
 
 def _extract_from_ast(ast: object) -> list[Predicate]:
@@ -127,7 +134,7 @@ def _extract_from_ast(ast: object) -> list[Predicate]:
     return predicates
 
 
-def extract_row_level_access(sql: str) -> list[list[EqualityPredicate]] | None:
+def extract_row_level_access(sql: str, *, ast: Any | None = None) -> list[list[EqualityPredicate]] | None:
     """Extract row-level access patterns from a SQL statement.
 
     Handles:
@@ -137,18 +144,25 @@ def extract_row_level_access(sql: str) -> list[list[EqualityPredicate]] | None:
     Returns a list of rows, where each row is a list of :class:`EqualityPredicate`
     representing column values for that row. Returns ``None`` if row-level
     access could not be extracted (falls back to table-level).
+
+    If *ast* is provided (a pre-parsed sqlglot AST), it is used directly
+    instead of re-parsing *sql*.
     """
     try:
-        import sqlglot  # type: ignore[import-untyped]
-        from sqlglot import errors as sqlglot_errors  # type: ignore[import-untyped]
         from sqlglot import exp  # type: ignore[import-untyped]
     except ImportError:
         return None
 
-    try:
-        ast = sqlglot.parse_one(sql)
-    except sqlglot_errors.ParseError:
-        return None
+    if ast is None:
+        try:
+            import sqlglot  # type: ignore[import-untyped]
+            from sqlglot import errors as sqlglot_errors  # type: ignore[import-untyped]
+        except ImportError:
+            return None
+        try:
+            ast = sqlglot.parse_one(sql)
+        except sqlglot_errors.ParseError:
+            return None
 
     # 1. Handle INSERT INTO ... VALUES (...)
     if isinstance(ast, exp.Insert) and isinstance(ast.expression, exp.Values):

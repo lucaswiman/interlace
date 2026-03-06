@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from frontrun._sql_parsing import parse_sql_access
+from frontrun._sql_parsing import LockIntent, parse_sql_access
 
 # =============================================================================
 # TODO: SELECT FOR UPDATE / FOR SHARE Locking Semantics
@@ -34,30 +34,30 @@ class TestSelectForUpdateTodo:
     def test_select_for_update_extracts_lock_intent(self):
         """SELECT FOR UPDATE should indicate exclusive lock."""
         sql = "SELECT * FROM users WHERE id = 1 FOR UPDATE"
-        r, w, lock_intent, _, _ = parse_sql_access(sql)
+        r, w, lock_intent, *_ = parse_sql_access(sql)
         assert r == {"users"} and w == set()
-        assert lock_intent == "UPDATE"
+        assert lock_intent is LockIntent.UPDATE
 
     def test_select_for_share_extracts_lock_intent(self):
         """SELECT FOR SHARE should indicate shared lock."""
         sql = "SELECT * FROM accounts WHERE user_id = ? FOR SHARE"
-        r, w, lock_intent, _, _ = parse_sql_access(sql)
+        r, w, lock_intent, *_ = parse_sql_access(sql)
         assert r == {"accounts"} and w == set()
-        assert lock_intent == "SHARE"
+        assert lock_intent is LockIntent.SHARE
 
     def test_select_for_update_nowait(self):
         """SELECT FOR UPDATE NOWAIT should parse lock with no-wait semantics."""
         sql = "SELECT * FROM orders WHERE id = ? FOR UPDATE NOWAIT"
-        r, w, lock_intent, _, _ = parse_sql_access(sql)
+        r, w, lock_intent, *_ = parse_sql_access(sql)
         assert r == {"orders"} and w == set()
-        assert lock_intent == "UPDATE"
+        assert lock_intent is LockIntent.UPDATE
 
     def test_select_for_update_skip_locked(self):
         """SELECT FOR UPDATE SKIP LOCKED should parse with skip semantics."""
         sql = "SELECT * FROM inventory WHERE product_id IN (1, 2, 3) FOR UPDATE SKIP LOCKED"
-        r, w, lock_intent, _, _ = parse_sql_access(sql)
+        r, w, lock_intent, *_ = parse_sql_access(sql)
         assert r == {"inventory"} and w == set()
-        assert lock_intent == "UPDATE"
+        assert lock_intent is LockIntent.UPDATE
 
 
 # =============================================================================
@@ -79,26 +79,26 @@ class TestLockTableTodo:
     def test_lock_table_exclusive(self):
         """LOCK TABLE ... IN EXCLUSIVE MODE should be recognized."""
         sql = "LOCK TABLE users IN EXCLUSIVE MODE"
-        r, w, lock_intent, _, _ = parse_sql_access(sql)
+        r, w, lock_intent, *_ = parse_sql_access(sql)
         assert r == set()
         assert w == {"users"}
-        assert lock_intent == "UPDATE"
+        assert lock_intent is LockIntent.UPDATE
 
     def test_lock_table_share(self):
         """LOCK TABLE ... IN SHARE MODE should be recognized."""
         sql = "LOCK TABLE orders IN SHARE MODE"
-        r, w, lock_intent, _, _ = parse_sql_access(sql)
+        r, w, lock_intent, *_ = parse_sql_access(sql)
         assert r == set()
         assert w == {"orders"}
-        assert lock_intent == "SHARE"
+        assert lock_intent is LockIntent.SHARE
 
     def test_lock_table_row_exclusive(self):
         """LOCK TABLE ... IN ROW EXCLUSIVE MODE should be recognized."""
         sql = "LOCK TABLE inventory IN ROW EXCLUSIVE MODE"
-        r, w, lock_intent, _, _ = parse_sql_access(sql)
+        r, w, lock_intent, *_ = parse_sql_access(sql)
         assert r == set()
         assert w == {"inventory"}
-        assert lock_intent == "UPDATE"
+        assert lock_intent is LockIntent.UPDATE
 
     def test_lock_multiple_tables(self):
         """Multiple LOCK TABLE statements should be parsed in sequence."""
@@ -108,8 +108,10 @@ class TestLockTableTodo:
         ]
         # Expected: parse and track all locks
         results = [parse_sql_access(sql) for sql in sqls]
-        assert results[0] == (set(), {"users"}, "UPDATE", None, None)
-        assert results[1] == (set(), {"orders"}, "SHARE", None, None)
+        assert results[0].read_tables == set() and results[0].write_tables == {"users"}
+        assert results[0].lock_intent is LockIntent.UPDATE
+        assert results[1].read_tables == set() and results[1].write_tables == {"orders"}
+        assert results[1].lock_intent is LockIntent.SHARE
 
 
 # =============================================================================
@@ -133,31 +135,31 @@ class TestAdvisoryLocksTodo:
     def test_pg_advisory_lock_id_extraction(self):
         """pg_advisory_lock(id) should extract lock ID."""
         sql = "SELECT pg_advisory_lock(12345)"
-        r, w, lock_intent, _, _ = parse_sql_access(sql)
+        r, w, lock_intent, *_ = parse_sql_access(sql)
         assert "advisory_lock:12345" in w
-        assert lock_intent == "UPDATE"
+        assert lock_intent is LockIntent.UPDATE
 
     def test_pg_advisory_xact_lock(self):
         """pg_advisory_xact_lock(id) should indicate transaction-scoped lock."""
         sql = "SELECT pg_advisory_xact_lock(999)"
-        r, w, lock_intent, _, _ = parse_sql_access(sql)
+        r, w, lock_intent, *_ = parse_sql_access(sql)
         assert "advisory_lock:999" in w
-        assert lock_intent == "UPDATE"
+        assert lock_intent is LockIntent.UPDATE
 
     def test_pg_advisory_shared_lock(self):
         """pg_advisory_shared_lock(id) should indicate shared lock intent."""
         # Using pg_advisory_lock_shared as it's the standard name
         sql = "SELECT pg_advisory_lock_shared(111)"
-        r, w, lock_intent, _, _ = parse_sql_access(sql)
+        r, w, lock_intent, *_ = parse_sql_access(sql)
         assert "advisory_lock:111" in w
-        assert lock_intent == "SHARE"
+        assert lock_intent is LockIntent.SHARE
 
     def test_mysql_get_lock(self):
         """MySQL GET_LOCK(name, timeout) should be recognized."""
         sql = "SELECT GET_LOCK('my_lock', 10)"
-        r, w, lock_intent, _, _ = parse_sql_access(sql)
+        r, w, lock_intent, *_ = parse_sql_access(sql)
         assert "advisory_lock:my_lock" in w
-        assert lock_intent == "UPDATE"
+        assert lock_intent is LockIntent.UPDATE
 
     def test_pg_advisory_lock_in_do_block(self):
         """Advisory locks in DO blocks should be detected."""
@@ -169,7 +171,7 @@ class TestAdvisoryLocksTodo:
             PERFORM pg_advisory_unlock(1);
         END $$
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         # sqlglot might not parse DO blocks well, but let's see.
         # If it fails, it's fine, it will fall back to endpoint-level.
         # Currently _sqlglot_parse returns (set(), set(), None) on ParseError.
@@ -194,7 +196,7 @@ class TestUnionOptimizationTodo:
     def test_union_select_should_be_reads_not_writes(self):
         """UNION of two SELECT should extract all tables as reads."""
         sql = "SELECT id FROM users UNION SELECT id FROM archived_users"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         # Expected: r == {"users", "archived_users"}, w == set()
         assert "users" in r and "archived_users" in r
         assert w == set(), "UNION reads should not be classified as writes"
@@ -202,7 +204,7 @@ class TestUnionOptimizationTodo:
     def test_intersect_should_be_reads(self):
         """INTERSECT of two SELECT should extract reads only."""
         sql = "SELECT id FROM users INTERSECT SELECT id FROM admins"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         # Expected: both → reads
         assert "users" in r and "admins" in r
         assert w == set()
@@ -210,21 +212,21 @@ class TestUnionOptimizationTodo:
     def test_except_should_be_reads(self):
         """EXCEPT of two SELECT should extract reads only."""
         sql = "SELECT id FROM all_users EXCEPT SELECT id FROM banned_users"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert "all_users" in r and "banned_users" in r
         assert w == set()
 
     def test_union_all_should_be_reads(self):
         """UNION ALL (without deduplication) should still be read-only."""
         sql = "SELECT * FROM orders UNION ALL SELECT * FROM archived_orders"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert "orders" in r and "archived_orders" in r
         assert w == set()
 
     def test_insert_union_target_is_write(self):
         """INSERT with UNION source should correctly identify target as write."""
         sql = "INSERT INTO summary SELECT * FROM users UNION SELECT * FROM archived_users"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         # Expected: summary → write, users + archived_users → read
         assert w == {"summary"}
         assert "users" in r and "archived_users" in r
@@ -254,8 +256,8 @@ class TestForeignKeyDependenciesTodo:
         insert_sql = "INSERT INTO orders (user_id, amount) VALUES (?, ?)"
         delete_sql = "DELETE FROM users WHERE id = ?"
 
-        r_insert, w_insert, _, _, _ = parse_sql_access(insert_sql)
-        r_delete, w_delete, _, _, _ = parse_sql_access(delete_sql)
+        r_insert, w_insert, *_ = parse_sql_access(insert_sql)
+        r_delete, w_delete, *_ = parse_sql_access(delete_sql)
 
         # Currently: independent (different tables)
         # Expected: should be marked dependent via FK
@@ -266,9 +268,9 @@ class TestForeignKeyDependenciesTodo:
     def test_fk_chain_dependencies(self):
         """Chain of FK dependencies should be recognized."""
         # shipments → orders → users (chain of FKs)
-        r1, w1, _, _, _ = parse_sql_access("DELETE FROM users WHERE id = ?")
-        r2, w2, _, _, _ = parse_sql_access("DELETE FROM orders WHERE user_id = ?")
-        r3, w3, _, _, _ = parse_sql_access("DELETE FROM shipments WHERE order_id = ?")
+        r1, w1, *_ = parse_sql_access("DELETE FROM users WHERE id = ?")
+        r2, w2, *_ = parse_sql_access("DELETE FROM orders WHERE user_id = ?")
+        r3, w3, *_ = parse_sql_access("DELETE FROM shipments WHERE order_id = ?")
 
         # Currently: all independent
         # Expected: detect transitive dependencies
@@ -277,7 +279,7 @@ class TestForeignKeyDependenciesTodo:
     def test_self_referential_fk(self):
         """Self-referential FK (e.g., manager_id → id in same table) should be detected."""
         sql = "UPDATE employees SET manager_id = ? WHERE id = ?"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         # Same table, same column involved; should recognize self-reference
         # TODO: detect self-referential constraints
 
@@ -424,7 +426,7 @@ class TestTemporalTablesTodo:
     def test_for_system_time_as_of(self):
         """FOR SYSTEM_TIME AS OF should extract temporal predicate."""
         sql = "SELECT * FROM users FOR SYSTEM_TIME AS OF '2024-01-01' WHERE id = 1"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         # Expected: extract temporal bounds for conflict analysis
         # (historical read shouldn't conflict with current writes)
         assert r == {"users"}
@@ -433,7 +435,7 @@ class TestTemporalTablesTodo:
     def test_for_system_time_between(self):
         """FOR SYSTEM_TIME BETWEEN should extract temporal range."""
         sql = "SELECT * FROM accounts FOR SYSTEM_TIME BETWEEN '2024-01-01' AND '2024-01-31'"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         # Expected: temporal range extracted
         assert r == {"accounts"}
         # TODO: assert range predicate
@@ -441,7 +443,7 @@ class TestTemporalTablesTodo:
     def test_system_versioned_table_insert(self):
         """INSERT into system-versioned table should be recognized."""
         sql = "INSERT INTO audit_log (event, valid_from) VALUES (?, NOW())"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         # System-versioned tables auto-manage time dimension
         assert w == {"audit_log"}
         # TODO: mark as system-versioned
@@ -470,7 +472,7 @@ class TestGeneratedColumnsTodo:
         """Generated columns should not appear in row-level predicates."""
         # Table: orders (id PK, user_id, amount, total GENERATED AS (amount * tax_rate))
         sql = "SELECT * FROM orders WHERE id = ? AND total > ?"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         # Expected: recognize 'total' as computed (read-only)
         assert r == {"orders"}
         # TODO: mark total as generated
@@ -478,7 +480,7 @@ class TestGeneratedColumnsTodo:
     def test_generated_column_not_writable(self):
         """UPDATE should not allow setting generated columns."""
         sql = "UPDATE orders SET total = 100 WHERE id = 1"  # total is generated!
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         # This is a malformed query (should error at DB)
         # Parser should recognize total is computed
         # TODO: validate generated columns
@@ -510,7 +512,7 @@ class TestWindowFunctionsTodo:
                RANK() OVER (PARTITION BY dept_id ORDER BY salary DESC) AS rank
         FROM employees
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert r == {"employees"}
         # TODO: mark that all rows in same dept_id are interdependent
 
@@ -521,7 +523,7 @@ class TestWindowFunctionsTodo:
                AVG(salary) OVER (ORDER BY salary ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS rolling_avg
         FROM employees
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert r == {"employees"}
         # TODO: mark window frame
 
@@ -552,11 +554,11 @@ class TestPreparedStatementCachingTodo:
 
         # Execute with param 1
         params_1 = (1,)
-        r1, w1, _, _, _ = parse_sql_access(sql)  # params not passed in this API
+        r1, w1, *_ = parse_sql_access(sql)  # params not passed in this API
 
         # Execute with param 2
         params_2 = (2,)
-        r2, w2, _, _, _ = parse_sql_access(sql)
+        r2, w2, *_ = parse_sql_access(sql)
 
         # Both parse same way currently; need param-aware API
         # Expected: row-level ObjectIds differ
@@ -588,7 +590,7 @@ class TestStoredProceduresTodo:
         # Assuming: CREATE PROCEDURE sp_update_user(p_id INT, p_name VARCHAR) AS
         #   UPDATE users SET name = p_name WHERE id = p_id;
         sql = "CALL sp_update_user(?, ?)"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         # Currently: opaque (endpoint-level)
         # Expected: introspect procedure; return users → write
         # TODO: build procedure → table mapping
@@ -603,7 +605,7 @@ class TestStoredProceduresTodo:
             EXECUTE 'DELETE FROM ' || v_table_name || ' WHERE status = ''cancelled''';
         END $$
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         # Currently: unknown
         # Expected: recognize 'orders' from concatenation (hard problem!)
         # TODO: dynamic SQL analysis
@@ -628,20 +630,20 @@ class TestMultiDialectTodo:
     def test_mysql_insert_or_replace(self):
         """MySQL INSERT ... ON DUPLICATE KEY UPDATE should be recognized."""
         sql = "INSERT INTO users (id, name) VALUES (?, ?) ON DUPLICATE KEY UPDATE name = VALUES(name)"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert w == {"users"}
         # Expected: recognize as INSERT with possible UPDATE (writes only)
 
     def test_sqlite_insert_or_replace(self):
         """SQLite INSERT OR REPLACE should be recognized."""
         sql = "INSERT OR REPLACE INTO accounts (id, balance) VALUES (?, ?)"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert w == {"accounts"}
 
     def test_postgres_on_conflict(self):
         """PostgreSQL INSERT ... ON CONFLICT should be recognized."""
         sql = "INSERT INTO users (id, name) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET name = ?"
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert w == {"users"}
         # Expected: recognize as write (upsert)
 
@@ -799,7 +801,7 @@ class TestCorrelatedSubqueriesTodo:
         SELECT * FROM users u
         WHERE balance > (SELECT AVG(balance) FROM accounts WHERE user_id = u.id)
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert "users" in r and "accounts" in r
         # TODO: mark correlation dependency (users ← accounts)
 
@@ -810,7 +812,7 @@ class TestCorrelatedSubqueriesTodo:
                (SELECT COUNT(*) FROM orders WHERE user_id = u.id) AS order_count
         FROM users u
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert "users" in r and "orders" in r
         # TODO: mark correlation in SELECT clause
 
@@ -833,7 +835,7 @@ class TestCaseExpressionsTodo:
         WHERE CASE WHEN status = 'pending' THEN amount > 100
                    ELSE amount > 500 END
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert r == {"orders"}
         # TODO: mark CASE expression presence
 
@@ -844,7 +846,7 @@ class TestCaseExpressionsTodo:
           CASE WHEN type = 'premium' THEN 50 ELSE 10 END
         WHERE id = ?
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert "accounts" in w and "accounts" in r
 
 
@@ -865,7 +867,7 @@ class TestExistsNotExistsTodo:
         SELECT * FROM users u
         WHERE EXISTS (SELECT 1 FROM orders WHERE user_id = u.id)
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert "users" in r and "orders" in r
         # TODO: mark EXISTS correlation
 
@@ -875,7 +877,7 @@ class TestExistsNotExistsTodo:
         DELETE FROM accounts
         WHERE NOT EXISTS (SELECT 1 FROM transactions WHERE account_id = accounts.id)
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert "accounts" in w
         assert "transactions" in r
 
@@ -897,7 +899,7 @@ class TestMultipleRowInsertTodo:
           ('Bob', 'b@x'),
           ('Carol', 'c@x')
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert w == {"users"}
 
         rows = extract_row_level_access(sql)
@@ -925,7 +927,7 @@ class TestDistinctTodo:
         SELECT DISTINCT ON (user_id) * FROM events
         ORDER BY user_id, created_at DESC
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert r == {"events"}
         # TODO: mark DISTINCT ON semantics
 
@@ -948,7 +950,7 @@ class TestSelfJoinsTodo:
         FROM employees a
         JOIN employees b ON a.manager_id = b.id
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert r == {"employees"}
         # TODO: mark as self-join with dependency
 
@@ -957,7 +959,7 @@ class TestSelfJoinsTodo:
         sql = """
         UPDATE categories SET parent_id = ? WHERE id = ?
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert "categories" in r and "categories" in w
         # TODO: mark as self-referential
 
@@ -978,7 +980,7 @@ class TestLimitOffsetTodo:
         sql = """
         DELETE FROM sessions ORDER BY created_at LIMIT 10
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert "sessions" in w and "sessions" in r
         # TODO: track LIMIT as write scope limiter
 
@@ -987,7 +989,7 @@ class TestLimitOffsetTodo:
         sql = """
         SELECT * FROM orders ORDER BY id LIMIT 20 OFFSET 100
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert r == {"orders"}
         # TODO: track pagination parameters
 
@@ -1010,7 +1012,7 @@ class TestOuterJoinWhereSemanticsToodo:
         LEFT JOIN users u ON o.user_id = u.id
         WHERE u.id IS NOT NULL
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         # Should recognize that WHERE u.id IS NOT NULL makes this effectively INNER
         assert r == {"orders", "users"}
         # TODO: mark that WHERE changed join type
@@ -1033,7 +1035,7 @@ class TestLateralJoinsTodo:
         SELECT * FROM users u,
         LATERAL (SELECT * FROM orders WHERE user_id = u.id LIMIT 1) o
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert "users" in r and "orders" in r
         # TODO: mark LATERAL correlation
 
@@ -1055,7 +1057,7 @@ class TestUpsertEdgeCasesTodo:
         INSERT INTO users (id, name) VALUES (?, ?)
         ON CONFLICT (id) DO UPDATE SET name = ? WHERE is_active = true
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert w == {"users"}
         # TODO: mark conditional update scope
 
@@ -1065,7 +1067,7 @@ class TestUpsertEdgeCasesTodo:
         INSERT INTO unique_tokens (token, user_id) VALUES (?, ?)
         ON CONFLICT (token) DO NOTHING
         """
-        r, w, _, _, _ = parse_sql_access(sql)
+        r, w, *_ = parse_sql_access(sql)
         assert w == {"unique_tokens"}
         # TODO: mark DO NOTHING as read-only conflict check
 
