@@ -477,6 +477,19 @@ def patch_sql() -> None:
     _sql_patched = True
 
 
+def reset_connection_state() -> None:
+    """Clear per-thread SQL transaction state.
+
+    Call this when a connection is returned to a connection pool to prevent
+    stale ``_in_transaction`` / ``_tx_buffer`` / ``_tx_savepoints`` state
+    from leaking across logical sessions.  Safe to call even when no
+    transaction is active (it's a no-op in that case).
+    """
+    for attr in ("_in_transaction", "_tx_buffer", "_tx_savepoints"):
+        if hasattr(_io_tls, attr):
+            delattr(_io_tls, attr)
+
+
 def unpatch_sql() -> None:
     """Restore original DBAPI cursor methods and connect functions."""
     global _sql_patched  # noqa: PLW0603

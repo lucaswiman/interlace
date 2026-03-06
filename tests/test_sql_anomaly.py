@@ -223,6 +223,68 @@ class TestNoSqlEvents:
         assert result is None
 
 
+class TestClassifyPhantomRead:
+    def test_phantom_read_insert_between_reads(self) -> None:
+        """Thread 0 reads different tables; thread 1 does write-only INSERT on orders.
+
+        NRR check fires first for same-resource read-write-read patterns, so
+        phantom detection only triggers when NRR doesn't match (write by a
+        thread that never reads the table).
+        """
+        # Thread 0 reads 'orders' at two different rows (row-level IDs differ)
+        # Thread 1 inserts a new row (write-only, never reads 'orders')
+        # NRR uses resource_id matching, so table-level read + table-level write + table-level read
+        # will match NRR first.  To test phantom, we need NRR to NOT match.
+        # Use row-level resource IDs where the two reads don't match the write resource:
+        events = [
+            _sql_event_row(0, 0, "orders", "set_a", "read"),   # Thread 0 reads set A
+            _sql_event(1, 1, "orders", "write"),                # Thread 1 inserts (table-level write)
+            _sql_event_row(2, 0, "orders", "set_a", "read"),   # Thread 0 re-reads set A
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        # NRR checks same resource_id: "orders:set_a" read-write-read.
+        # The write is at "orders" (table-level), not "orders:set_a", so NRR doesn't match.
+        # Phantom fires because thread 1 only writes, never reads 'orders'.
+        assert result.kind == "phantom_read"
+        assert "orders" in result.tables
+
+    def test_phantom_vs_non_repeatable_read(self) -> None:
+        """When writer also reads the table, it's non-repeatable read (not phantom)."""
+        events = [
+            _sql_event(0, 0, "accounts", "read"),
+            _sql_event(1, 1, "accounts", "write"),  # UPDATE by thread 1 (also reads)
+            _sql_event(2, 1, "accounts", "read"),   # thread 1 reads (shows it's an UPDATE)
+            _sql_event(3, 0, "accounts", "read"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert result.kind == "non_repeatable_read"
+
+    def test_no_phantom_single_read(self) -> None:
+        """Thread reads table only once — no phantom possible."""
+        events = [
+            _sql_event(0, 0, "orders", "read"),
+            _sql_event(1, 1, "orders", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        # Only one read, so phantom can't fire. It'll be dirty_read or write-related.
+        if result is not None:
+            assert result.kind != "phantom_read"
+
+    def test_phantom_read_summary_mentions_table(self) -> None:
+        """Phantom read on table-level resources (NRR matches first for same resource)."""
+        events = [
+            _sql_event_row(0, 0, "products", "all_rows", "read"),
+            _sql_event(1, 1, "products", "write"),  # INSERT (table-level, write-only)
+            _sql_event_row(2, 0, "products", "all_rows", "read"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert result.kind == "phantom_read"
+        assert "products" in result.summary
+
+
 class TestRowLevelResourceIds:
     def test_different_rows_same_table(self) -> None:
         events = [
