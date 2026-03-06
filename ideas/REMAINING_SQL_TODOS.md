@@ -81,14 +81,21 @@ UUIDs.
     For all subsequent operations, report IDs as $ID - S_0$.
     *Risks:* Gaps in sequences, pre-existing data, multiple sequences per table.
 
-3.  **Symbolic ID Tracking:**
+3.  **Automatic Detection (Strict Mode):**
+    DPOR can detect when a resource ID (e.g., `sql:users:(('id', '1'),)`)
+    changes between runs for the same logical step in the execution trace.
+    If detected, throw an informative error message explaining that the
+    test is non-deterministic and needs sequence resetting or PRNG seeding.
+    This can be disabled via `explore_dpor(..., strict_determinism=False)`.
+
+4.  **Symbolic ID Tracking:**
     Intercept the `INSERT` that generates the ID, assign it a symbolic name
     (`$sym1`), and track that value's flow through the Python application.
     *Difficulty:* Requires full taint analysis of Python memory to know that
     variable `user_id` holds the value `1` which corresponds to `$sym1`.
     Extremely hard.
 
-4.  **Heuristic Matching / Anonymization:**
+5.  **Heuristic Matching / Anonymization:**
     If row-level detection sees an integer ID, could it anonymize it?
     No -- `WHERE id = 1` and `WHERE id = 2` *must* conflict if they refer to
     the same row, but *must not* conflict if they refer to different rows.
@@ -97,4 +104,5 @@ UUIDs.
 **Recommendation:**
 Stick to approach #1 (Enforced Determinism) for now. Add a documentation
 section explaining why `TRUNCATE` alone is insufficient for DPOR (unlike
-standard tests where different IDs don't matter).
+standard tests where different IDs don't matter). A sample reproduction
+of this failure can be found in `tests/test_sql_nondeterministic_ids.py`.

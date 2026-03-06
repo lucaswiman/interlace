@@ -1613,6 +1613,7 @@ def explore_dpor(
     deadlock_timeout: float = 5.0,
     reproduce_on_failure: int = 10,
     total_timeout: float | None = None,
+    strict_determinism: bool = True,
 ) -> InterleavingResult:
     """Systematically explore interleavings using DPOR.
 
@@ -1646,6 +1647,10 @@ def explore_dpor(
         total_timeout: Maximum total time in seconds for the entire
             exploration (default None = unlimited).  When exceeded, returns
             results gathered so far.
+        strict_determinism: If True (default), detect when resource IDs
+            (SQL primary keys, UUIDs) change between runs for the same
+            logical step and throw an informative error. Set to False
+            if your test environment has unavoidable non-determinism.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample found.
