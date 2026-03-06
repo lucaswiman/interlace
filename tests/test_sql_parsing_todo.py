@@ -318,6 +318,7 @@ class TestTransactionBoundariesTodo:
 
         class MockCursor:
             pass
+
         cursor = MockCursor()
 
         # BEGIN
@@ -326,11 +327,11 @@ class TestTransactionBoundariesTodo:
 
         # SELECT
         _intercept_execute(mock_orig, cursor, "SELECT * FROM accounts WHERE id = 1")
-        reporter.assert_not_called() # buffered
+        reporter.assert_not_called()  # buffered
 
         # UPDATE
         _intercept_execute(mock_orig, cursor, "UPDATE accounts SET balance = 0 WHERE id = 1")
-        reporter.assert_not_called() # buffered
+        reporter.assert_not_called()  # buffered
 
         # COMMIT
         _intercept_execute(mock_orig, cursor, "COMMIT")
@@ -358,6 +359,7 @@ class TestTransactionBoundariesTodo:
 
         class MockCursor:
             pass
+
         cursor = MockCursor()
 
         _intercept_execute(mock_orig, cursor, "BEGIN")
@@ -390,6 +392,7 @@ class TestTransactionBoundariesTodo:
 
         class MockCursor:
             pass
+
         cursor = MockCursor()
 
         _intercept_execute(mock_orig, cursor, "BEGIN")
@@ -887,6 +890,7 @@ class TestMultipleRowInsertTodo:
     def test_multiple_row_insert_values(self):
         """INSERT with multiple VALUES rows should be recognized."""
         from frontrun._sql_predicates import EqualityPredicate, extract_row_level_access
+
         sql = """
         INSERT INTO users (name, email) VALUES
           ('Alice', 'a@x'),

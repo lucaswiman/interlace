@@ -237,8 +237,12 @@ class TestSameTableWriteWriteConflict:
         t1.join()
         t2.join()
 
-        writes_a = [(r, k) for r, k in results["a"] if (r == "sql:items" or r.startswith("sql:items:")) and k == "write"]
-        writes_b = [(r, k) for r, k in results["b"] if (r == "sql:items" or r.startswith("sql:items:")) and k == "write"]
+        writes_a = [
+            (r, k) for r, k in results["a"] if (r == "sql:items" or r.startswith("sql:items:")) and k == "write"
+        ]
+        writes_b = [
+            (r, k) for r, k in results["b"] if (r == "sql:items" or r.startswith("sql:items:")) and k == "write"
+        ]
 
         assert len(writes_a) >= 1, "Thread A should report a write to sql:items"
         assert len(writes_b) >= 1, "Thread B should report a write to sql:items"
@@ -286,8 +290,12 @@ class TestSameTableWriteWriteConflict:
         resources_b = {r for r, _ in results["b"]}
 
         # Both threads touched the same table → same resource IDs
-        assert any(r == "sql:counters" or r.startswith("sql:counters:") for r in resources_a), f"Thread A resources: {resources_a}"
-        assert any(r == "sql:counters" or r.startswith("sql:counters:") for r in resources_b), f"Thread B resources: {resources_b}"
+        assert any(r == "sql:counters" or r.startswith("sql:counters:") for r in resources_a), (
+            f"Thread A resources: {resources_a}"
+        )
+        assert any(r == "sql:counters" or r.startswith("sql:counters:") for r in resources_b), (
+            f"Thread B resources: {resources_b}"
+        )
 
         # UPDATE reports both read (WHERE clause) and write (SET clause)
         assert any(k == "write" for r, k in results["a"] if r == "sql:counters" or r.startswith("sql:counters:")), (
@@ -453,8 +461,12 @@ class TestSameTableReadReadIndependent:
         t1.join()
         t2.join()
 
-        reads_a = [(r, k) for r, k in results["a"] if (r == "sql:products" or r.startswith("sql:products:")) and k == "read"]
-        reads_b = [(r, k) for r, k in results["b"] if (r == "sql:products" or r.startswith("sql:products:")) and k == "read"]
+        reads_a = [
+            (r, k) for r, k in results["a"] if (r == "sql:products" or r.startswith("sql:products:")) and k == "read"
+        ]
+        reads_b = [
+            (r, k) for r, k in results["b"] if (r == "sql:products" or r.startswith("sql:products:")) and k == "read"
+        ]
 
         assert len(reads_a) >= 1, f"Thread A should report a read from sql:products, got {results['a']}"
         assert len(reads_b) >= 1, f"Thread B should report a read from sql:products, got {results['b']}"
@@ -533,10 +545,18 @@ class TestReadWriteConflict:
         t1.join()
         t2.join()
 
-        reader_reads = [(r, k) for r, k in results["reader"] if (r == "sql:balances" or r.startswith("sql:balances:")) and k == "read"]
+        reader_reads = [
+            (r, k)
+            for r, k in results["reader"]
+            if (r == "sql:balances" or r.startswith("sql:balances:")) and k == "read"
+        ]
         assert len(reader_reads) >= 1, f"Reader should report read from sql:balances, got {results['reader']}"
 
-        writer_writes = [(r, k) for r, k in results["writer"] if (r == "sql:balances" or r.startswith("sql:balances:")) and k == "write"]
+        writer_writes = [
+            (r, k)
+            for r, k in results["writer"]
+            if (r == "sql:balances" or r.startswith("sql:balances:")) and k == "write"
+        ]
         assert len(writer_writes) >= 1, f"Writer should report write to sql:balances, got {results['writer']}"
 
     def test_read_write_conflict_shared_resource_id(self) -> None:
@@ -574,7 +594,9 @@ class TestReadWriteConflict:
 
         queue_events = [(r, k) for r, k in all_events if (r == "sql:queue" or r.startswith("sql:queue:"))]
         resource_ids = {r for r, k in queue_events}
-        assert any(r == "sql:queue" or r.startswith("sql:queue:") for r in resource_ids), f"Expected sql:queue in resources, got {resource_ids}"
+        assert any(r == "sql:queue" or r.startswith("sql:queue:") for r in resource_ids), (
+            f"Expected sql:queue in resources, got {resource_ids}"
+        )
 
 
 class TestSqlMultiStatementHandling:
@@ -614,10 +636,14 @@ class TestSqlMultiStatementHandling:
         t.start()
         t.join()
 
-        select_reads = [k for r, k in results["select"] if (r == "sql:messages" or r.startswith("sql:messages:")) and k == "read"]
+        select_reads = [
+            k for r, k in results["select"] if (r == "sql:messages" or r.startswith("sql:messages:")) and k == "read"
+        ]
         assert len(select_reads) >= 1
 
-        insert_writes = [k for r, k in results["insert"] if (r == "sql:messages" or r.startswith("sql:messages:")) and k == "write"]
+        insert_writes = [
+            k for r, k in results["insert"] if (r == "sql:messages" or r.startswith("sql:messages:")) and k == "write"
+        ]
         assert len(insert_writes) >= 1
 
 

@@ -63,12 +63,13 @@ def extract_equality_predicates(sql: str) -> list[Predicate]:
     """
     try:
         import sqlglot  # type: ignore[import-untyped]
+        from sqlglot import errors as sqlglot_errors  # type: ignore[import-untyped]
     except ImportError:
         return []
 
     try:
         ast = sqlglot.parse_one(sql)
-    except sqlglot.errors.ParseError:
+    except sqlglot_errors.ParseError:
         return []
 
     return _extract_from_ast(ast)
@@ -77,11 +78,13 @@ def extract_equality_predicates(sql: str) -> list[Predicate]:
 def _extract_from_ast(ast: object) -> list[Predicate]:
     """Internal helper to extract predicates from a parsed AST."""
     try:
-        from sqlglot import exp
+        from sqlglot import exp  # type: ignore[import-untyped]
     except ImportError:
         return []
 
-    where = ast.find(exp.Where)
+    if not hasattr(ast, "find"):
+        return []
+    where = ast.find(exp.Where)  # type: ignore[union-attr]
     if where is None:
         return []
 
@@ -136,14 +139,15 @@ def extract_row_level_access(sql: str) -> list[list[EqualityPredicate]] | None:
     access could not be extracted (falls back to table-level).
     """
     try:
-        import sqlglot
-        from sqlglot import exp
+        import sqlglot  # type: ignore[import-untyped]
+        from sqlglot import errors as sqlglot_errors  # type: ignore[import-untyped]
+        from sqlglot import exp  # type: ignore[import-untyped]
     except ImportError:
         return None
 
     try:
         ast = sqlglot.parse_one(sql)
-    except sqlglot.errors.ParseError:
+    except sqlglot_errors.ParseError:
         return None
 
     # 1. Handle INSERT INTO ... VALUES (...)
@@ -271,7 +275,7 @@ def pk_predicates_disjoint(
         for p in preds:
             if isinstance(p, EqualityPredicate):
                 m.setdefault(p.column, set()).add(p.value)
-            elif isinstance(p, InListPredicate):
+            else:
                 m.setdefault(p.column, set()).update(p.values)
         return m
 

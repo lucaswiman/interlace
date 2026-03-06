@@ -264,7 +264,6 @@ class TestRegexParse:
         assert result is None or result == (set(), set(), None)
 
 
-
 # ---------------------------------------------------------------------------
 # _sqlglot_parse — full parser (requires sqlglot)
 # ---------------------------------------------------------------------------
@@ -395,7 +394,6 @@ class TestSqlglotParse:
         assert r is not None
         assert "orders" in w
         assert "users" in r
-
 
 
 # ---------------------------------------------------------------------------

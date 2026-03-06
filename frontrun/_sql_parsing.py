@@ -1,6 +1,6 @@
 """SQL statement parsing for read/write table extraction.
 
-Provides ``parse_sql_access(sql)`` which returns ``(read_tables, write_tables, lock_intent, tx_op, temporal_clauses)``
+Provides ``parse_sql_access(sql)`` which returns a :class:`SqlAccessResult`
 for conflict detection. Uses a regex fast-path for simple statements and falls
 back to sqlglot for complex SQL (CTEs, subqueries, UNION, etc.).
 """
@@ -8,6 +8,18 @@ back to sqlglot for complex SQL (CTEs, subqueries, UNION, etc.).
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
+
+
+class SqlAccessResult(NamedTuple):
+    """Result of parsing a SQL statement for read/write table extraction."""
+
+    read_tables: set[str]
+    write_tables: set[str]
+    lock_intent: str | None
+    tx_op: str | None
+    temporal_clauses: dict[str, str] | None
+
 
 # Precompiled patterns — matches the leading keyword + first table name.
 # Handles optional schema qualification (schema.table) and quoted identifiers.
@@ -41,11 +53,11 @@ def _strip_quotes(name: str) -> str:
     return name.rsplit(".", 1)[-1]
 
 
-def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None, dict[str, str] | None] | None:
+def _regex_parse(sql: str) -> SqlAccessResult | None:
     """Fast-path: extract tables from simple single-statement SQL.
 
-    Returns (read_tables, write_tables, lock_intent, tx_op, temporal_clauses) or None if the SQL
-    is too complex (subqueries, CTEs, UNION, MERGE) and needs the full parser.
+    Returns a :class:`SqlAccessResult` or None if the SQL is too complex
+    (subqueries, CTEs, UNION, MERGE) and needs the full parser.
     """
     stripped = sql.strip().rstrip(";").strip()
 
@@ -56,30 +68,30 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None, 
 
     # Transaction control - check before other patterns (no literal stripping needed)
     if _RE_TX_BEGIN.search(stripped):
-        return set(), set(), None, "BEGIN", None
+        return SqlAccessResult(set(), set(), None, "BEGIN", None)
     if _RE_TX_COMMIT.search(stripped):
-        return set(), set(), None, "COMMIT", None
+        return SqlAccessResult(set(), set(), None, "COMMIT", None)
     if _RE_TX_ROLLBACK.search(stripped):
         m = _RE_TX_ROLLBACK_TO.search(stripped)
         if m:
-            return set(), set(), None, f"ROLLBACK_TO:{m.group(2)}", None
-        return set(), set(), None, "ROLLBACK", None
+            return SqlAccessResult(set(), set(), None, f"ROLLBACK_TO:{m.group(2)}", None)
+        return SqlAccessResult(set(), set(), None, "ROLLBACK", None)
     m = _RE_TX_SAVEPOINT.search(stripped)
     if m:
-        return set(), set(), None, f"SAVEPOINT:{m.group(1)}", None
+        return SqlAccessResult(set(), set(), None, f"SAVEPOINT:{m.group(1)}", None)
     m = _RE_TX_RELEASE.search(stripped)
     if m:
-        return set(), set(), None, f"RELEASE:{m.group(2)}", None
+        return SqlAccessResult(set(), set(), None, f"RELEASE:{m.group(2)}", None)
 
     # Strip literals to avoid false positives (e.g. " FROM " inside a string)
     no_literals = _RE_LITERAL.sub(" ", stripped)
     upper_no_literals = no_literals.upper()
 
     # Bail to full parser for complex SQL
-    if any(kw in upper_no_literals for kw in (
-        "WITH ", "UNION", "INTERSECT", "EXCEPT", "MERGE", "RETURNING",
-        "EXISTS", "IN ("
-    )):
+    if any(
+        kw in upper_no_literals
+        for kw in ("WITH ", "UNION", "INTERSECT", "EXCEPT", "MERGE", "RETURNING", "EXISTS", "IN (")
+    ):
         return None
 
     # FOR SYSTEM_TIME is complex for regex, bail to sqlglot
@@ -123,7 +135,7 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None, 
             if "SHARE" in mode and "EXCLUSIVE" not in mode:
                 lock_intent = "SHARE"
         write.add(tbl)
-        return read, write, lock_intent, None, None
+        return SqlAccessResult(read, write, lock_intent, None, None)
 
     if _RE_FOR_UPDATE.search(no_literals):
         lock_intent = "UPDATE"
@@ -136,7 +148,7 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None, 
         # Source tables in INSERT ... SELECT ... FROM
         for m in _RE_FROM.finditer(no_literals, m_insert.end()):
             read.add(_strip_quotes(m.group(1)))
-        return read, write, lock_intent, None, None
+        return SqlAccessResult(read, write, lock_intent, None, None)
 
     m_update = _RE_UPDATE.search(no_literals)
     if m_update:
@@ -148,21 +160,21 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None, 
             t = _strip_quotes(m.group(1))
             if t not in write:
                 read.add(t)
-        return read, write, lock_intent, None, None
+        return SqlAccessResult(read, write, lock_intent, None, None)
 
     m_delete = _RE_DELETE.search(no_literals)
     if m_delete:
         tbl = _strip_quotes(m_delete.group(1))
         write.add(tbl)
         read.add(tbl)
-        return read, write, lock_intent, None, None
+        return SqlAccessResult(read, write, lock_intent, None, None)
 
     if _RE_SELECT.search(no_literals):
         for m in _RE_FROM.finditer(no_literals):
             read.add(_strip_quotes(m.group(1)))
         for m in _RE_JOIN.finditer(no_literals):
             read.add(_strip_quotes(m.group(1)))
-        return read, write, lock_intent, None, None
+        return SqlAccessResult(read, write, lock_intent, None, None)
 
     return None  # unknown statement type → fall through
 
@@ -176,22 +188,23 @@ def _merge_lock_intent(a: str | None, b: str | None) -> str | None:
     return None
 
 
-def _sqlglot_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None, dict[str, str] | None] | None:
+def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
     """Full parser: handles CTEs, subqueries, UNION, MERGE, etc."""
     try:
         import sqlglot  # type: ignore[import-untyped]
+        from sqlglot import errors as sqlglot_errors  # type: ignore[import-untyped]
         from sqlglot import exp  # type: ignore[import-untyped]
     except ImportError:
         return None
 
     try:
         expressions = sqlglot.parse(sql)
-    except sqlglot.errors.ParseError:
+    except sqlglot_errors.ParseError:
         # Fallback for FOR SYSTEM_TIME if default dialect fails
         if "FOR SYSTEM_TIME" in sql.upper():
             try:
                 expressions = sqlglot.parse(sql, read="tsql")
-            except sqlglot.errors.ParseError:
+            except sqlglot_errors.ParseError:
                 return None
         else:
             return None  # unparseable → fall back to endpoint-level
@@ -244,9 +257,13 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None
             # Advisory locks (PostgreSQL, MySQL)
             for call in ast.find_all(exp.Anonymous):
                 name = call.this.lower()
-                if name in ("pg_advisory_lock", "pg_advisory_xact_lock",
-                            "pg_advisory_lock_shared", "pg_advisory_xact_lock_shared",
-                            "get_lock"):
+                if name in (
+                    "pg_advisory_lock",
+                    "pg_advisory_xact_lock",
+                    "pg_advisory_lock_shared",
+                    "pg_advisory_xact_lock_shared",
+                    "get_lock",
+                ):
                     # Extract lock ID/name if it's a literal
                     if call.expressions:
                         lock_ids: list[str] = []
@@ -321,11 +338,11 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None
         if tx_op:
             all_tx_op = tx_op  # Take the last tx_op or any? usually only one makes sense
 
-    return all_read, all_write, all_lock_intent, all_tx_op, all_temporal
+    return SqlAccessResult(all_read, all_write, all_lock_intent, all_tx_op, all_temporal)
 
 
-def parse_sql_access(sql: str) -> tuple[set[str], set[str], str | None, str | None, dict[str, str] | None]:
-    """Extract (read_tables, write_tables, lock_intent, tx_op, temporal_clauses) from a SQL statement.
+def parse_sql_access(sql: str) -> SqlAccessResult:
+    """Extract table access info from a SQL statement.
 
     Uses regex fast-path for simple statements, falls back to sqlglot
     for complex SQL. Returns empty sets if parsing fails entirely
@@ -342,4 +359,4 @@ def parse_sql_access(sql: str) -> tuple[set[str], set[str], str | None, str | No
         return result
 
     # Parse failure: return empty sets → endpoint-level fallback
-    return set(), set(), None, None, None
+    return SqlAccessResult(set(), set(), None, None, None)

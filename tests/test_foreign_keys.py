@@ -1,4 +1,3 @@
-
 from unittest.mock import Mock, patch
 
 import pytest
@@ -14,6 +13,7 @@ def reporter():
     with patch("frontrun._sql_cursor.get_io_reporter", return_value=m):
         yield m
 
+
 @pytest.fixture(autouse=True)
 def clean_tls():
     # Clear TLS state
@@ -24,6 +24,7 @@ def clean_tls():
     # Restore empty schema to avoid polluting other tests
     register_schema(Schema())
 
+
 def test_fk_dependency_table_level(reporter):
     """Test that writing to a child table implies reading the parent table."""
     # Define Schema: orders.user_id -> users.id
@@ -32,7 +33,8 @@ def test_fk_dependency_table_level(reporter):
     register_schema(schema)
 
     class MockCursor:
-        def execute(self, op, params=None): pass
+        def execute(self, op, params=None):
+            pass
 
     cursor = MockCursor()
 
@@ -54,6 +56,7 @@ def test_fk_dependency_table_level(reporter):
     users_reports = [args for args in calls if "users" in args[0]]
     assert any(kind == "read" for _, kind in users_reports)
 
+
 def test_fk_dependency_row_level(reporter):
     """Test that FK dependency preserves row-level granularity."""
     # Schema: orders.user_id -> users.id
@@ -62,7 +65,9 @@ def test_fk_dependency_row_level(reporter):
     register_schema(schema)
 
     class MockCursor:
-        def execute(self, op, params=None): pass
+        def execute(self, op, params=None):
+            pass
+
     cursor = MockCursor()
 
     # INSERT INTO orders (user_id) VALUES (42)
@@ -85,4 +90,3 @@ def test_fk_dependency_row_level(reporter):
     # We don't assert exact string format as it might change, but check content
     assert "id" in users_reads[0]
     assert "42" in users_reads[0]
-

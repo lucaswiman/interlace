@@ -17,10 +17,11 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class ForeignKey:
     """A foreign key constraint."""
-    table: str          # The child table (referencing)
-    column: str         # The child column
-    ref_table: str      # The parent table (referenced)
-    ref_column: str     # The parent column
+
+    table: str  # The child table (referencing)
+    column: str  # The child column
+    ref_table: str  # The parent table (referenced)
+    ref_column: str  # The parent column
 
 
 @dataclass
@@ -44,13 +45,15 @@ class Schema:
 
 
 # Global singleton for the application schema
-_GLOBAL_SCHEMA = Schema()
+_global_schema: Schema = Schema()
+
 
 def register_schema(schema: Schema) -> None:
     """Set the global schema instance."""
-    global _GLOBAL_SCHEMA
-    _GLOBAL_SCHEMA = schema
+    global _global_schema  # noqa: PLW0603
+    _global_schema = schema
+
 
 def get_schema() -> Schema:
     """Get the current global schema."""
-    return _GLOBAL_SCHEMA
+    return _global_schema
