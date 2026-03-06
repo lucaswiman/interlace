@@ -139,19 +139,19 @@ Implementation split into modular files (original plan called for single `_sql_d
 
 ---
 
-### TODO: Async Driver Support (Phase 6)
+### TODO: Async Driver Support (Phase 6) — ✅ Done
 **Priority:** Medium (async is increasingly standard in Python web frameworks)
 **Scope:**
 - `asyncpg` — PostgreSQL async driver (C-extension, uses binary protocol directly)
 - `aiosqlite` — async wrapper around sqlite3
 - `aiomysql` — async MySQL driver
 - `psycopg.AsyncCursor` — psycopg3 async mode
-- Requires async-aware interception (wrapper must be `async def`)
-- `_suppress_endpoint_io()` context manager needs async variant or must work across await boundaries
+- Implemented via `frontrun/_sql_cursor_async.py` with `_intercept_execute_async()` and per-driver patching
+- Shared `_report_sql_access()` helper extracted from sync `_intercept_execute()` to avoid code duplication
+- `_suppress_endpoint_io()` context manager works across await boundaries (sync context manager, same OS thread)
+- Integrated into `async_bytecode.py` via `detect_sql` parameter on `run_with_schedule()` and `explore_interleavings()`
 
-**Challenge:** asyncpg bypasses DBAPI entirely (uses PostgreSQL binary protocol). May need wire-protocol approach (Algorithm 6) rather than cursor patching.
-
-**Estimated effort:** ~200 lines + 30 tests
+**Estimated effort:** ~200 lines + 33 tests
 
 ---
 
@@ -220,7 +220,7 @@ If range predicate support becomes important, a lightweight interval-arithmetic 
 | 6 | Foreign key dependencies | 🟡 Medium | 150 lines + 25 tests | Multi-table correctness | **TODO** |
 | 6 | Transaction grouping | 🟡 Medium | 80 lines + 20 tests | Search space optimization | ✅ **Done** |
 | 6 | psycopg3 driver support | 🟡 Medium | 80 lines + 15 tests | Modern PostgreSQL driver | ✅ **Done** |
-| 6 | Async driver support | 🟡 Medium | 200 lines + 30 tests | Async web frameworks | **TODO** |
+| 6 | Async driver support | 🟡 Medium | 200 lines + 33 tests | Async web frameworks | ✅ **Done** |
 | 7 | Stored procedures | 🔴 Very Low | 200 lines + 40 tests | Rare in Python ORMs | **TODO** |
 | 7 | Temporal tables | 🔴 Very Low | 40 lines + 10 tests | Specialized SQL | ✅ **Done** |
 | 7 | Computed columns | 🔴 Very Low | 30 lines + 5 tests | Informational | **TODO** |
