@@ -1,6 +1,6 @@
 
-import pytest
 from frontrun._sql_parsing import parse_sql_access
+
 
 class TestTemporalTables:
     """Tests for temporal/system-versioned table support.
@@ -12,7 +12,7 @@ class TestTemporalTables:
         """FOR SYSTEM_TIME AS OF should extract temporal predicate."""
         sql = "SELECT * FROM users FOR SYSTEM_TIME AS OF '2024-01-01' WHERE id = 1"
         r, w, lock, tx, temporal = parse_sql_access(sql)
-        
+
         assert r == {"users"}
         assert w == set()
         assert temporal == {"users": "AS OF '2024-01-01'"}

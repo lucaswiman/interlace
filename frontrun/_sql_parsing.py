@@ -25,9 +25,6 @@ _RE_FOR_UPDATE = re.compile(r"\bFOR" + _WS + r"UPDATE\b", re.I)
 _RE_FOR_SHARE = re.compile(r"\bFOR" + _WS + r"SHARE\b", re.I)
 _RE_LOCK_TABLE = re.compile(rf"\bLOCK{_WS}TABLE{_WS}({_IDENT})", re.I)
 _RE_LOCK_MODE = re.compile(rf"\bIN{_WS}(.+){_WS}MODE\b", re.I)
-_RE_FOR_SYSTEM_TIME = re.compile(r"\bFOR" + _WS + r"SYSTEM_TIME\b", re.I)
-
-
 _RE_TX_BEGIN = re.compile(r"^\s*(BEGIN|START\s+TRANSACTION|SET\s+AUTOCOMMIT\s*=\s*0)\b", re.I)
 _RE_TX_COMMIT = re.compile(r"^\s*(COMMIT|END|SET\s+AUTOCOMMIT\s*=\s*1)\b", re.I)
 _RE_TX_ROLLBACK = re.compile(r"^\s*ROLLBACK\b", re.I)
@@ -51,14 +48,13 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None, 
     is too complex (subqueries, CTEs, UNION, MERGE) and needs the full parser.
     """
     stripped = sql.strip().rstrip(";").strip()
-    upper = stripped.upper()
 
-    no_literals = _RE_LITERAL.sub(" ", stripped)
-    if ";" in no_literals:
+    # Quick multi-statement check (before tx control, avoids regex cost)
+    # Only strip trailing semicolons; interior semicolons indicate multiple statements.
+    if ";" in stripped:
         return None
-    upper_no_literals = no_literals.upper()
 
-    # Transaction control - check before other patterns
+    # Transaction control - check before other patterns (no literal stripping needed)
     if _RE_TX_BEGIN.search(stripped):
         return set(), set(), None, "BEGIN", None
     if _RE_TX_COMMIT.search(stripped):
@@ -75,15 +71,19 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None, 
     if m:
         return set(), set(), None, f"RELEASE:{m.group(2)}", None
 
+    # Strip literals to avoid false positives (e.g. " FROM " inside a string)
+    no_literals = _RE_LITERAL.sub(" ", stripped)
+    upper_no_literals = no_literals.upper()
+
     # Bail to full parser for complex SQL
     if any(kw in upper_no_literals for kw in (
         "WITH ", "UNION", "INTERSECT", "EXCEPT", "MERGE", "RETURNING",
         "EXISTS", "IN ("
     )):
         return None
-        
+
     # FOR SYSTEM_TIME is complex for regex, bail to sqlglot
-    if _RE_FOR_SYSTEM_TIME.search(upper_no_literals):
+    if "SYSTEM_TIME" in upper_no_literals:
         return None
 
     if "USING" in upper_no_literals and "DELETE" in upper_no_literals:
@@ -167,6 +167,15 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None, 
     return None  # unknown statement type → fall through
 
 
+def _merge_lock_intent(a: str | None, b: str | None) -> str | None:
+    """Merge two lock intents, preferring UPDATE over SHARE."""
+    if a == "UPDATE" or b == "UPDATE":
+        return "UPDATE"
+    if a == "SHARE" or b == "SHARE":
+        return "SHARE"
+    return None
+
+
 def _sqlglot_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None, dict[str, str] | None] | None:
     """Full parser: handles CTEs, subqueries, UNION, MERGE, etc."""
     try:
@@ -194,19 +203,12 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None
     all_read: set[str] = set()
     all_lock_intent: str | None = None
     all_tx_op: str | None = None
-    all_temporal: dict[str, str] = {}
-
-    def _merge_lock_intent(a: str | None, b: str | None) -> str | None:
-        if a == "UPDATE" or b == "UPDATE":
-            return "UPDATE"
-        if a == "SHARE" or b == "SHARE":
-            return "SHARE"
-        return None
+    all_temporal: dict[str, str] | None = None
 
     for ast in expressions:
         if ast is None:
             continue
-            
+
         write: set[str] = set()
         read: set[str] = set()
         lock_intent: str | None = None
@@ -272,6 +274,8 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None
                     clause = clause.replace("FOR TIMESTAMP ", "FOR SYSTEM_TIME ")
                     # Extract only the predicate part
                     clause = clause.replace("FOR SYSTEM_TIME ", "").strip()
+                    if all_temporal is None:
+                        all_temporal = {}
                     all_temporal[t.name] = clause
 
             if isinstance(ast, exp.Insert):
@@ -283,15 +287,7 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None
                     for t in ast.expression.find_all(exp.Table):
                         if t.name not in write:
                             read.add(t.name)
-            elif isinstance(ast, exp.Update):
-                tbl = ast.this
-                if isinstance(tbl, exp.Table):
-                    write.add(tbl.name)
-                    read.add(tbl.name)
-                for t in ast.find_all(exp.Table):
-                    if t.name not in write:
-                        read.add(t.name)
-            elif isinstance(ast, exp.Delete):
+            elif isinstance(ast, (exp.Update, exp.Delete)):
                 tbl = ast.this
                 if isinstance(tbl, exp.Table):
                     write.add(tbl.name)

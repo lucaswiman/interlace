@@ -20,7 +20,8 @@ import contextlib
 import importlib
 import sqlite3
 import threading
-from typing import Any, Generator
+from collections.abc import Generator
+from typing import Any
 
 from frontrun._io_detection import _io_tls, get_io_reporter
 from frontrun._schema import get_schema
@@ -39,7 +40,7 @@ except ImportError:
 # same package, but guard with try/except for robustness.
 try:
     from frontrun._sql_params import resolve_parameters
-    from frontrun._sql_predicates import extract_row_level_access, EqualityPredicate
+    from frontrun._sql_predicates import EqualityPredicate, extract_row_level_access
 except ImportError:
 
     def resolve_parameters(sql: str, parameters: Any, paramstyle: str) -> str:  # type: ignore[misc]
@@ -174,6 +175,7 @@ def _intercept_execute(
 
             # Row-level predicate extraction (WHERE equality, IN-lists, and INSERT VALUES)
             pred_rows: list[list[Any]] = [[]]  # default: one report, no predicates (table-level)
+            has_row_level = False
             if len(all_tables) == 1 and not is_executemany:
                 if parameters is not None:
                     resolved = resolve_parameters(operation, parameters, paramstyle)
@@ -182,9 +184,10 @@ def _intercept_execute(
                     rows = extract_row_level_access(operation)
                 if rows is not None:
                     pred_rows = rows
+                    has_row_level = True
 
             def report_or_buffer(table: str, kind: str, rows: list[list[Any]]) -> None:
-                temporal = (temporal_clauses or {}).get(table)
+                temporal = temporal_clauses.get(table) if temporal_clauses else None
                 for row_preds in rows:
                     res_id = _sql_resource_id(table, row_preds, temporal)
                     if in_tx:
@@ -210,7 +213,7 @@ def _intercept_execute(
                     ref_pred_rows: list[list[Any]] = [[]]  # default table-level
 
                     # If we have row-level predicates for the write table
-                    if pred_rows != [[]]:
+                    if has_row_level:
                         mapped_rows = []
                         for row in pred_rows:
                             # Check if row has the FK column
@@ -219,7 +222,7 @@ def _intercept_execute(
                                 if isinstance(pred, EqualityPredicate) and pred.column == fk.column:
                                     fk_val = pred.value
                                     break
-                            
+
                             if fk_val is not None:
                                 mapped_rows.append([EqualityPredicate(fk.ref_column, fk_val)])
                             else:
@@ -227,7 +230,7 @@ def _intercept_execute(
                                 mapped_rows = [[]]
                                 break
                         ref_pred_rows = mapped_rows
-                    
+
                     report_or_buffer(fk.ref_table, "read", ref_pred_rows)
 
             # Report writes
@@ -413,6 +416,13 @@ def patch_sql() -> None:
         except (ImportError, AttributeError):
             pass  # driver not installed — skip silently
 
+    def _make_patched_connect(orig: Any, cursor_cls: type) -> Any:
+        def patched_connect(*args: Any, **kwargs: Any) -> Any:
+            kwargs.setdefault("cursor_factory", cursor_cls)
+            return orig(*args, **kwargs)
+
+        return patched_connect
+
     # psycopg2: patch via cursor_factory injection into connect()
     try:
         import psycopg2 as _pg2mod  # type: ignore[import-untyped]
@@ -421,15 +431,7 @@ def patch_sql() -> None:
         orig_cursor_cls = _pg2ext.cursor
         traced_cursor = _make_traced_cursor_class(orig_cursor_cls, paramstyle="pyformat")
         orig_connect = _pg2mod.connect
-
-        def _make_pg2_connect(orig: Any, cursor_cls: type) -> Any:
-            def patched_connect(*args: Any, **kwargs: Any) -> Any:
-                kwargs.setdefault("cursor_factory", cursor_cls)
-                return orig(*args, **kwargs)
-
-            return patched_connect
-
-        setattr(_pg2mod, "connect", _make_pg2_connect(orig_connect, traced_cursor))
+        setattr(_pg2mod, "connect", _make_patched_connect(orig_connect, traced_cursor))
         _PATCHES.append((_pg2mod, "connect", orig_connect))
         _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
         _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
@@ -444,15 +446,7 @@ def patch_sql() -> None:
         # Psycopg 3 uses 'format' as default paramstyle (client-side)
         traced_cursor = _make_traced_cursor_class(orig_cursor_cls, paramstyle="format")
         orig_connect = _pg3mod.connect
-
-        def _make_pg3_connect(orig: Any, cursor_cls: type) -> Any:
-            def patched_connect(*args: Any, **kwargs: Any) -> Any:
-                kwargs.setdefault("cursor_factory", cursor_cls)
-                return orig(*args, **kwargs)
-
-            return patched_connect
-
-        setattr(_pg3mod, "connect", _make_pg3_connect(orig_connect, traced_cursor))
+        setattr(_pg3mod, "connect", _make_patched_connect(orig_connect, traced_cursor))
         _PATCHES.append((_pg3mod, "connect", orig_connect))
         _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
         _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany

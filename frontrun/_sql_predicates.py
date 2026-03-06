@@ -63,7 +63,6 @@ def extract_equality_predicates(sql: str) -> list[Predicate]:
     """
     try:
         import sqlglot  # type: ignore[import-untyped]
-        from sqlglot import exp  # type: ignore[import-untyped]
     except ImportError:
         return []
 
@@ -75,7 +74,7 @@ def extract_equality_predicates(sql: str) -> list[Predicate]:
     return _extract_from_ast(ast)
 
 
-def _extract_from_ast(ast: Any) -> list[Predicate]:
+def _extract_from_ast(ast: object) -> list[Predicate]:
     """Internal helper to extract predicates from a parsed AST."""
     try:
         from sqlglot import exp

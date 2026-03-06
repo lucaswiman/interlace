@@ -12,7 +12,7 @@ appear independent when they are not.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import ClassVar
+
 
 @dataclass(frozen=True)
 class ForeignKey:
@@ -26,19 +26,17 @@ class ForeignKey:
 @dataclass
 class Schema:
     """Registry of database schema information."""
-    
+
     # Map from child_table -> list[ForeignKey]
     _fks: dict[str, list[ForeignKey]] = field(default_factory=dict)
-    
+
     def add_foreign_key(self, fk: ForeignKey) -> None:
         """Register a foreign key constraint."""
-        if fk.table not in self._fks:
-            self._fks[fk.table] = []
-        self._fks[fk.table].append(fk)
-        
+        self._fks.setdefault(fk.table, []).append(fk)
+
     def get_fks(self, table: str) -> list[ForeignKey]:
         """Get all foreign keys where the given table is the child."""
-        return self._fks.get(table, [])
+        return list(self._fks.get(table, []))
 
     def get_referenced_tables(self, table: str) -> set[str]:
         """Get set of tables referenced by this table via FKs."""
