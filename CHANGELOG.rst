@@ -3,6 +3,43 @@ Changelog
 
 All releases: https://github.com/lucaswiman/frontrun/releases
 
+0.2.0 (unreleased)
+-------------------
+
+**SQL conflict detection in DPOR**
+
+DPOR now understands SQL.  Instead of treating all database traffic to the
+same host:port as a single conflict point, frontrun parses each SQL statement
+at the DBAPI layer, extracts per-table (or per-row) resource IDs, and reports
+them with correct Read/Write access kinds.  Two threads on different tables
+are independent; two SELECTs on the same table are independent; only
+genuinely conflicting operations (same table/row, at least one write) trigger
+interleaving exploration.
+
+- SQL parsing via regex fast-path (~90% of ORM queries) with sqlglot
+  fallback for complex SQL (CTEs, subqueries, UNION, MERGE).
+- Row-level conflict detection using equality and IN-list predicates on
+  primary key columns.  Parameter resolution for all five PEP 249
+  paramstyles (qmark, numeric, named, format, pyformat).
+- DBAPI cursor monkey-patching for sqlite3, psycopg2, psycopg3, pymysql,
+  asyncpg, aiosqlite, and aiomysql.  Both sync and async drivers supported.
+- Endpoint suppression prevents double-reporting when SQL-level detection is
+  active, including for C-level drivers via the LD_PRELOAD bridge.
+- Transaction grouping: operations within BEGIN/COMMIT are buffered and
+  reported atomically.  SAVEPOINT and ROLLBACK TO handle partial rollback.
+- Lock intent detection: SELECT FOR UPDATE and LOCK TABLE statements are
+  classified as writes.
+- PostgreSQL wire protocol parsing in the Rust LD_PRELOAD library catches
+  C-level SQL from libpq (Simple Query and Extended Query messages).
+- Anomaly classification: when DPOR finds a failing interleaving involving
+  SQL, the anomaly is classified as lost update, write skew, dirty read,
+  non-repeatable read, phantom read, or write-write conflict via DSG cycle
+  analysis.
+- Correctness verified by three TLA+ specifications (38,000+ states, 23
+  invariants, all passing).
+
+See :doc:`sql-technical-details` for the full technical walkthrough.
+
 0.1.0 (2026-02-27)
 -------------------
 
