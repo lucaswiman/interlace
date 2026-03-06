@@ -127,11 +127,11 @@ Implementation split into modular files (original plan called for single `_sql_d
 
 ---
 
-### TODO: psycopg3 (psycopg) Driver Support (Phase 6)
+### TODO: psycopg3 (psycopg) Driver Support (Phase 6) — ✅ Done
 **Priority:** Medium (psycopg3 is the modern PostgreSQL driver, increasingly common)
 **Scope:**
 - Patch `psycopg.Cursor.execute` and `psycopg.Cursor.executemany`
-- Patch `psycopg.AsyncCursor.execute` for async support
+- Patch `psycopg.AsyncCursor.execute` for async support (TODO: Async variant)
 - Factory injection pattern (C-extension cursor, like psycopg2)
 - Handle psycopg3's `$1` placeholder style (server-side prepared statements) in parameter resolution
 - psycopg3 uses `format` paramstyle for client-side binding, `$1` for server-side
@@ -220,7 +220,7 @@ If range predicate support becomes important, a lightweight interval-arithmetic 
 |-------|------|----------|--------|--------|--------|
 | 6 | Foreign key dependencies | 🟡 Medium | 150 lines + 25 tests | Multi-table correctness | **TODO** |
 | 6 | Transaction grouping | 🟡 Medium | 80 lines + 20 tests | Search space optimization | ✅ **Done** |
-| 6 | psycopg3 driver support | 🟡 Medium | 80 lines + 15 tests | Modern PostgreSQL driver | **TODO** |
+| 6 | psycopg3 driver support | 🟡 Medium | 80 lines + 15 tests | Modern PostgreSQL driver | ✅ **Done** |
 | 6 | Async driver support | 🟡 Medium | 200 lines + 30 tests | Async web frameworks | **TODO** |
 | 7 | Stored procedures | 🔴 Very Low | 200 lines + 40 tests | Rare in Python ORMs | **TODO** |
 | 7 | Temporal tables | 🔴 Very Low | 40 lines + 10 tests | Specialized SQL | **TODO** |

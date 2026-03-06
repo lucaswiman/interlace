@@ -52,10 +52,10 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None] 
     stripped = sql.strip().rstrip(";").strip()
     upper = stripped.upper()
 
-    # Strip literals to avoid false positives (e.g. " FROM " inside a string)
     no_literals = _RE_LITERAL.sub(" ", stripped)
     if ";" in no_literals:
         return None
+    upper_no_literals = no_literals.upper()
 
     # Transaction control - check before other patterns
     if _RE_TX_BEGIN.search(stripped):
@@ -75,14 +75,26 @@ def _regex_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None] 
         return set(), set(), None, f"RELEASE:{m.group(2)}"
 
     # Bail to full parser for complex SQL
-    if any(kw in upper for kw in (
+    if any(kw in upper_no_literals for kw in (
         "WITH ", "UNION", "INTERSECT", "EXCEPT", "MERGE", "RETURNING",
         "EXISTS", "IN ("
     )):
         return None
+        
+    if "USING" in upper_no_literals and "DELETE" in upper_no_literals:
+        return None
+
+    if " FROM " in upper_no_literals:
+        # Check for multiple tables in FROM clause (comma-separated)
+        # Using a conservative split to avoid complicated regex
+        from_after = upper_no_literals.split(" FROM ", 1)[1]
+        for end_kw in (" WHERE ", " GROUP BY ", " ORDER BY ", " LIMIT ", " FOR "):
+            from_after = from_after.split(end_kw, 1)[0]
+        if "," in from_after:
+            return None
 
     # Subqueries in DELETE or UPDATE (SELECT appearing after the first keyword)
-    if not any(stripped.lower().startswith(kw) for kw in ("select", "insert")) and "SELECT" in upper:
+    if not any(stripped.lower().startswith(kw) for kw in ("select", "insert")) and "SELECT" in upper_no_literals:
         return None
 
     # Function calls (advisory locks etc) — bail to sqlglot
@@ -222,12 +234,14 @@ def _sqlglot_parse(sql: str) -> tuple[set[str], set[str], str | None, str | None
                             "get_lock"):
                     # Extract lock ID/name if it's a literal
                     if call.expressions:
-                        arg = call.expressions[0]
-                        if isinstance(arg, exp.Literal):
-                            lock_id = arg.this
-                        else:
-                            lock_id = "?"
-                        write.add(f"advisory_lock:{lock_id}")
+                        lock_ids: list[str] = []
+                        for arg in call.expressions:
+                            if isinstance(arg, exp.Literal):
+                                lock_ids.append(str(arg.this))
+                            else:
+                                lock_ids.append("?")
+                        lock_id_str = ":".join(lock_ids)
+                        write.add(f"advisory_lock:{lock_id_str}")
                         if "shared" in name:
                             lock_intent = _merge_lock_intent(lock_intent, "SHARE")
                         else:

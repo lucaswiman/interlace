@@ -48,6 +48,7 @@ _RE_NUMERIC = re.compile(r":(\d+)")
 _RE_NAMED = re.compile(r"(?<!:):([A-Za-z_]\w*)")
 _RE_FORMAT = re.compile(r"(?<!%)%s")
 _RE_PYFORMAT = re.compile(r"(?<!%)%\(([^)]+)\)s")
+_RE_DOLLAR = re.compile(r"\$(\d+)")
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +59,8 @@ _RE_PYFORMAT = re.compile(r"(?<!%)%\(([^)]+)\)s")
 def resolve_parameters(sql: str, parameters: Any, paramstyle: str) -> str:
     """Substitute parameter placeholders with SQL literal values.
 
-    Supports all five PEP 249 paramstyles.  Returns the original SQL
-    unchanged if resolution fails (wrong paramstyle, missing params, etc.).
+    Supports all five PEP 249 paramstyles plus '$1' style.
+    Returns the original SQL unchanged if resolution fails.
     """
     if parameters is None:
         return sql
@@ -67,7 +68,9 @@ def resolve_parameters(sql: str, parameters: Any, paramstyle: str) -> str:
         if paramstyle == "qmark":
             return _resolve_positional(sql, parameters, _RE_QMARK)
         if paramstyle == "numeric":
-            return _resolve_numeric(sql, parameters)
+            return _resolve_numeric(sql, parameters, _RE_NUMERIC)
+        if paramstyle == "dollar":
+            return _resolve_numeric(sql, parameters, _RE_DOLLAR)
         if paramstyle == "named":
             return _resolve_named(sql, parameters)
         if paramstyle in ("format", "pyformat"):
@@ -97,15 +100,15 @@ def _resolve_positional(sql: str, parameters: Any, pattern: re.Pattern[str]) -> 
     return pattern.sub(replacer, sql)
 
 
-def _resolve_numeric(sql: str, parameters: Any) -> str:
-    """Replace :N placeholders (1-based index)."""
+def _resolve_numeric(sql: str, parameters: Any, pattern: re.Pattern[str]) -> str:
+    """Replace :N or $N placeholders (1-based index)."""
     params = tuple(parameters)
 
     def replacer(m: re.Match[str]) -> str:
         idx = int(m.group(1)) - 1
         return _python_to_sql_literal(params[idx])
 
-    return _RE_NUMERIC.sub(replacer, sql)
+    return pattern.sub(replacer, sql)
 
 
 def _resolve_named(sql: str, parameters: Any) -> str:

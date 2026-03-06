@@ -92,7 +92,7 @@
 | **2** | Row-level detection (precision) | 1.5, 5 | ✅ Done | ~270 lines |
 | **3** | Wire protocol parsing (C-level) | 6 | ✅ Done | ~210 lines |
 | **4** | Isolation anomaly classification | — | ✅ Done | ~200 lines |
-| **5+** | Advanced SQL features (TODOs) | SELECT FOR UPDATE, locks, unions, etc. | ✅ Done | ~500+ lines |
+| **5+** | Advanced SQL features (TODOs) | SELECT FOR UPDATE, locks, unions, psycopg3, etc. | ✅ Done | ~650+ lines |
 
 **Next steps:**
 - Phase 6 — Foreign keys (DSG construction improvements)

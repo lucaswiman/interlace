@@ -395,6 +395,29 @@ def patch_sql() -> None:
     except (ImportError, AttributeError):
         pass
 
+    # psycopg (v3): patch via cursor_factory injection into connect()
+    try:
+        import psycopg as _pg3mod  # type: ignore[import-untyped]
+
+        orig_cursor_cls = _pg3mod.Cursor
+        # Psycopg 3 uses 'format' as default paramstyle (client-side)
+        traced_cursor = _make_traced_cursor_class(orig_cursor_cls, paramstyle="format")
+        orig_connect = _pg3mod.connect
+
+        def _make_pg3_connect(orig: Any, cursor_cls: type) -> Any:
+            def patched_connect(*args: Any, **kwargs: Any) -> Any:
+                kwargs.setdefault("cursor_factory", cursor_cls)
+                return orig(*args, **kwargs)
+
+            return patched_connect
+
+        setattr(_pg3mod, "connect", _make_pg3_connect(orig_connect, traced_cursor))
+        _PATCHES.append((_pg3mod, "connect", orig_connect))
+        _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
+        _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
+    except (ImportError, AttributeError):
+        pass
+
     _sql_patched = True
 
 
