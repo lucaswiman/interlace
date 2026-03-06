@@ -59,15 +59,21 @@ dev = [
     "ruff>=0.1.0",
     "pyright>=1.1.0",
     "sqlglot>=20.0",
+    "aiosqlite>=0.17.0",
+    "pytest-asyncio>=0.21.0",
 ]
 sql = [
     "sqlglot>=20.0",
+]
+sql-async = [
+    "aiosqlite>=0.17.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--tb=short"
 timeout = 60
+asyncio_mode = "auto"
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

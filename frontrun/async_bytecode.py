@@ -53,6 +53,15 @@ from typing import Any, Optional
 from frontrun.async_scheduler import InterleavedLoop
 from frontrun.common import InterleavingResult
 
+# Lazy import for async SQL patching (avoid hard dependency)
+_sql_async_available = False
+try:
+    from frontrun._sql_cursor_async import patch_sql_async, unpatch_sql_async
+
+    _sql_async_available = True
+except ImportError:
+    pass
+
 # Context variable to track the active scheduler and task ID
 _scheduler_var: contextvars.ContextVar[Optional["AwaitScheduler"]] = contextvars.ContextVar("_scheduler", default=None)
 _task_id_var: contextvars.ContextVar[int | None] = contextvars.ContextVar("_task_id", default=None)
@@ -213,6 +222,7 @@ async def run_with_schedule(
     tasks: list[Callable[[Any], Coroutine[Any, Any, None]]],
     timeout: float = 5.0,
     deadlock_timeout: float = 5.0,
+    detect_sql: bool = False,
 ) -> Any:
     """Run one async interleaving and return the state object.
 
@@ -224,22 +234,31 @@ async def run_with_schedule(
         deadlock_timeout: Seconds to wait before declaring a deadlock
             (default 5.0).  Increase for code that legitimately blocks
             in C extensions (NumPy, database queries, network I/O).
+        detect_sql: If ``True``, patch async DBAPI drivers (aiosqlite,
+            psycopg AsyncCursor, aiomysql, asyncpg) to intercept SQL
+            and report table-level conflicts.
 
     Returns:
         The state object after execution.
     """
-    scheduler = AwaitScheduler(schedule, len(tasks), deadlock_timeout=deadlock_timeout)
-    runner = AsyncBytecodeShuffler(scheduler)
-
-    state = setup()
-    funcs: list[Callable[..., Coroutine[Any, Any, None]]] = [lambda s=state, t=t: t(s) for t in tasks]  # type: ignore[assignment]
-
+    if detect_sql and _sql_async_available:
+        patch_sql_async()
     try:
-        await runner.run(funcs, timeout=timeout)
-    except asyncio.TimeoutError:
-        pass
+        scheduler = AwaitScheduler(schedule, len(tasks), deadlock_timeout=deadlock_timeout)
+        runner = AsyncBytecodeShuffler(scheduler)
 
-    return state
+        state = setup()
+        funcs: list[Callable[..., Coroutine[Any, Any, None]]] = [lambda s=state, t=t: t(s) for t in tasks]  # type: ignore[assignment]
+
+        try:
+            await runner.run(funcs, timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
+
+        return state
+    finally:
+        if detect_sql and _sql_async_available:
+            unpatch_sql_async()
 
 
 async def explore_interleavings(
@@ -251,6 +270,7 @@ async def explore_interleavings(
     timeout_per_run: float = 5.0,
     seed: int | None = None,
     deadlock_timeout: float = 5.0,
+    detect_sql: bool = False,
 ) -> InterleavingResult:
     """Search for async interleavings that violate an invariant.
 
@@ -277,38 +297,47 @@ async def explore_interleavings(
         deadlock_timeout: Seconds to wait before declaring a deadlock
             (default 5.0).  Increase for code that legitimately blocks
             in C extensions (NumPy, database queries, network I/O).
+        detect_sql: If ``True``, patch async DBAPI drivers (aiosqlite,
+            psycopg AsyncCursor, aiomysql, asyncpg) to intercept SQL
+            and report table-level conflicts.
 
     Returns:
         InterleavingResult with the outcome.  The ``unique_interleavings``
         field reports how many distinct schedule orderings were observed.
     """
-    rng = random.Random(seed)
-    num_tasks = len(tasks)
-    result = InterleavingResult(property_holds=True, num_explored=0)
-    seen_schedule_hashes: set[int] = set()
+    if detect_sql and _sql_async_available:
+        patch_sql_async()
+    try:
+        rng = random.Random(seed)
+        num_tasks = len(tasks)
+        result = InterleavingResult(property_holds=True, num_explored=0)
+        seen_schedule_hashes: set[int] = set()
 
-    for _ in range(max_attempts):
-        num_rounds = rng.randint(1, max(1, max_ops // num_tasks))
-        schedule: list[int] = []
-        for _ in range(num_rounds):
-            round_perm = list(range(num_tasks))
-            rng.shuffle(round_perm)
-            schedule.extend(round_perm)
+        for _ in range(max_attempts):
+            num_rounds = rng.randint(1, max(1, max_ops // num_tasks))
+            schedule: list[int] = []
+            for _ in range(num_rounds):
+                round_perm = list(range(num_tasks))
+                rng.shuffle(round_perm)
+                schedule.extend(round_perm)
 
-        state = await run_with_schedule(
-            schedule, setup, tasks, timeout=timeout_per_run, deadlock_timeout=deadlock_timeout
-        )
-        result.num_explored += 1
-        seen_schedule_hashes.add(hash(tuple(schedule)))
+            state = await run_with_schedule(
+                schedule, setup, tasks, timeout=timeout_per_run, deadlock_timeout=deadlock_timeout
+            )
+            result.num_explored += 1
+            seen_schedule_hashes.add(hash(tuple(schedule)))
 
-        if not invariant(state):
-            result.property_holds = False
-            result.counterexample = schedule
-            result.unique_interleavings = len(seen_schedule_hashes)
-            return result
+            if not invariant(state):
+                result.property_holds = False
+                result.counterexample = schedule
+                result.unique_interleavings = len(seen_schedule_hashes)
+                return result
 
-    result.unique_interleavings = len(seen_schedule_hashes)
-    return result
+        result.unique_interleavings = len(seen_schedule_hashes)
+        return result
+    finally:
+        if detect_sql and _sql_async_available:
+            unpatch_sql_async()
 
 
 def schedule_strategy(num_tasks: int, max_ops: int = 100) -> Any:  # type: ignore[name-defined]
