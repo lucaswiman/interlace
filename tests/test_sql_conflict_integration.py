@@ -18,17 +18,14 @@ This verifies that the SQL conflict detection correctly identifies:
 """
 
 from __future__ import annotations
-from tests.sql_test_helpers import execute_with_retry
 
 import sqlite3
 import threading
 from collections.abc import Generator
-from typing import Any
 
 import pytest
 
-import frontrun._sql_cursor as sql_cursor_mod
-from frontrun._io_detection import _io_tls, set_io_reporter
+from frontrun._io_detection import set_io_reporter
 from frontrun._sql_cursor import (
     _ORIGINAL_METHODS,
     _PATCHES,
@@ -36,6 +33,7 @@ from frontrun._sql_cursor import (
     patch_sql,
     unpatch_sql,
 )
+from tests.sql_test_helpers import execute_with_retry
 
 # ---------------------------------------------------------------------------
 # Helpers

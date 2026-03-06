@@ -15,7 +15,6 @@ import pytest
 
 from frontrun._sql_parsing import parse_sql_access
 
-
 # =============================================================================
 # TODO: SELECT FOR UPDATE / FOR SHARE Locking Semantics
 # =============================================================================
@@ -301,33 +300,38 @@ class TestTransactionBoundariesTodo:
 
     def test_transaction_grouping_begin_commit(self):
         """Operations between BEGIN and COMMIT should be grouped atomically."""
-        from frontrun._io_detection import set_io_reporter, _io_tls
-        from frontrun._sql_cursor import _intercept_execute
         from unittest.mock import Mock
-        
+
+        from frontrun._io_detection import _io_tls, set_io_reporter
+        from frontrun._sql_cursor import _intercept_execute
+
         reporter = Mock()
         set_io_reporter(reporter)
-        
+
         # Setup: clear any leftover state in TLS
         for attr in ("_in_transaction", "_tx_buffer", "_tx_savepoints"):
-            if hasattr(_io_tls, attr): delattr(_io_tls, attr)
+            if hasattr(_io_tls, attr):
+                delattr(_io_tls, attr)
 
-        def mock_orig(self, op, params=None): return None
-        class MockCursor: pass
+        def mock_orig(self, op, params=None):
+            return None
+
+        class MockCursor:
+            pass
         cursor = MockCursor()
 
         # BEGIN
         _intercept_execute(mock_orig, cursor, "BEGIN")
         reporter.assert_not_called()
-        
+
         # SELECT
         _intercept_execute(mock_orig, cursor, "SELECT * FROM accounts WHERE id = 1")
         reporter.assert_not_called() # buffered
-        
+
         # UPDATE
         _intercept_execute(mock_orig, cursor, "UPDATE accounts SET balance = 0 WHERE id = 1")
         reporter.assert_not_called() # buffered
-        
+
         # COMMIT
         _intercept_execute(mock_orig, cursor, "COMMIT")
         # Now it should report everything
@@ -338,17 +342,22 @@ class TestTransactionBoundariesTodo:
 
     def test_savepoint_tracking(self):
         """Savepoint creation should be tracked separately from transaction."""
-        from frontrun._io_detection import set_io_reporter, _io_tls
-        from frontrun._sql_cursor import _intercept_execute
         from unittest.mock import Mock
-        
+
+        from frontrun._io_detection import _io_tls, set_io_reporter
+        from frontrun._sql_cursor import _intercept_execute
+
         reporter = Mock()
         set_io_reporter(reporter)
         for attr in ("_in_transaction", "_tx_buffer", "_tx_savepoints"):
-            if hasattr(_io_tls, attr): delattr(_io_tls, attr)
+            if hasattr(_io_tls, attr):
+                delattr(_io_tls, attr)
 
-        def mock_orig(self, op, params=None): return None
-        class MockCursor: pass
+        def mock_orig(self, op, params=None):
+            return None
+
+        class MockCursor:
+            pass
         cursor = MockCursor()
 
         _intercept_execute(mock_orig, cursor, "BEGIN")
@@ -357,7 +366,7 @@ class TestTransactionBoundariesTodo:
         _intercept_execute(mock_orig, cursor, "UPDATE t2 SET x=2")
         _intercept_execute(mock_orig, cursor, "ROLLBACK TO SAVEPOINT sp1")
         _intercept_execute(mock_orig, cursor, "COMMIT")
-        
+
         # Only t1 reported
         reporter.assert_any_call("sql:t1", "write")
         for call in reporter.call_args_list:
@@ -365,23 +374,28 @@ class TestTransactionBoundariesTodo:
 
     def test_rollback_transaction_boundary(self):
         """ROLLBACK should mark transaction boundary and discard operations."""
-        from frontrun._io_detection import set_io_reporter, _io_tls
-        from frontrun._sql_cursor import _intercept_execute
         from unittest.mock import Mock
-        
+
+        from frontrun._io_detection import _io_tls, set_io_reporter
+        from frontrun._sql_cursor import _intercept_execute
+
         reporter = Mock()
         set_io_reporter(reporter)
         for attr in ("_in_transaction", "_tx_buffer", "_tx_savepoints"):
-            if hasattr(_io_tls, attr): delattr(_io_tls, attr)
+            if hasattr(_io_tls, attr):
+                delattr(_io_tls, attr)
 
-        def mock_orig(self, op, params=None): return None
-        class MockCursor: pass
+        def mock_orig(self, op, params=None):
+            return None
+
+        class MockCursor:
+            pass
         cursor = MockCursor()
 
         _intercept_execute(mock_orig, cursor, "BEGIN")
         _intercept_execute(mock_orig, cursor, "DELETE FROM sensitive_data WHERE id = 1")
         _intercept_execute(mock_orig, cursor, "ROLLBACK")
-        
+
         reporter.assert_not_called()
 
 
@@ -757,7 +771,6 @@ class TestYamlTodoFormula:
         # 2. For each case, call parse_sql_access(sql, params)
         # 3. Assert against expected_read, expected_write
         # 4. Check features_todo (once implemented)
-        pass
 
 
 # =============================================================================
@@ -873,7 +886,7 @@ class TestMultipleRowInsertTodo:
 
     def test_multiple_row_insert_values(self):
         """INSERT with multiple VALUES rows should be recognized."""
-        from frontrun._sql_predicates import extract_row_level_access, EqualityPredicate
+        from frontrun._sql_predicates import EqualityPredicate, extract_row_level_access
         sql = """
         INSERT INTO users (name, email) VALUES
           ('Alice', 'a@x'),
@@ -882,7 +895,7 @@ class TestMultipleRowInsertTodo:
         """
         r, w, _, _, _ = parse_sql_access(sql)
         assert w == {"users"}
-        
+
         rows = extract_row_level_access(sql)
         assert rows is not None
         assert len(rows) == 3

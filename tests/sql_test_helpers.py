@@ -1,6 +1,7 @@
 import sqlite3
 import time
 
+
 def execute_with_retry(conn, sql, params=None):
     for i in range(50):
         try:
