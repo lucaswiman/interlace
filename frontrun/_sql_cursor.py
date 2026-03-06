@@ -102,29 +102,20 @@ def _sql_resource_id(table: str, predicates: list[Any], temporal: str | None = N
     return f"sql:{table}:{pred_key}"
 
 
-def _intercept_execute(
-    original_method: Any,
-    self: Any,
+def _report_sql_access(
     operation: Any,
     parameters: Any = None,
     *,
     is_executemany: bool = False,
     paramstyle: str = "format",
-) -> Any:
-    """Intercept a single execute/executemany call.
+) -> bool:
+    """Parse SQL and report table accesses to the per-thread reporter.
 
-    Parses *operation*, reports table accesses to the per-thread reporter,
-    activates suppression, then delegates to *original_method*.
+    Returns ``True`` if any SQL-level reporting was performed (which means
+    endpoint-level I/O should be suppressed for the subsequent DB call).
 
-    When *is_executemany* is False and the query touches exactly one table,
-    resolves *parameters* and extracts row-level predicates (equality and
-    IN-lists) so that
-    the reported resource ID is finer-grained than plain ``sql:<table>``.
-
-    Implements transaction grouping: when a transaction is active (BEGIN
-    detected), I/O reports are buffered in TLS and only flushed when COMMIT is
-    called.  ROLLBACK clears the buffer.  SAVEPOINTs and ROLLBACK TO SAVEPOINT
-    are supported via buffer truncation.
+    This helper is shared by both sync ``_intercept_execute`` and async
+    ``_intercept_execute_async``.
     """
     reporter = get_io_reporter()
     reported = False
@@ -237,6 +228,35 @@ def _intercept_execute(
             # Report writes
             for table in access.write_tables:
                 report_or_buffer(table, "write", pred_rows)
+
+    return reported
+
+
+def _intercept_execute(
+    original_method: Any,
+    self: Any,
+    operation: Any,
+    parameters: Any = None,
+    *,
+    is_executemany: bool = False,
+    paramstyle: str = "format",
+) -> Any:
+    """Intercept a single execute/executemany call.
+
+    Parses *operation*, reports table accesses to the per-thread reporter,
+    activates suppression, then delegates to *original_method*.
+
+    When *is_executemany* is False and the query touches exactly one table,
+    resolves *parameters* and extracts row-level predicates (equality and
+    IN-lists) so that
+    the reported resource ID is finer-grained than plain ``sql:<table>``.
+
+    Implements transaction grouping: when a transaction is active (BEGIN
+    detected), I/O reports are buffered in TLS and only flushed when COMMIT is
+    called.  ROLLBACK clears the buffer.  SAVEPOINTs and ROLLBACK TO SAVEPOINT
+    are supported via buffer truncation.
+    """
+    reported = _report_sql_access(operation, parameters, is_executemany=is_executemany, paramstyle=paramstyle)
 
     if reported:
         with _suppress_endpoint_io():
