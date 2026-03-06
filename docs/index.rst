@@ -29,6 +29,7 @@ Three approaches, in order of decreasing interpretability:
    dpor
    examples
    orm_race
+   sql-technical-details
    internals
    api_reference
    CASE_STUDIES
