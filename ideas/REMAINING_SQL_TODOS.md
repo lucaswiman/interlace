@@ -53,3 +53,48 @@ interdependent). Currently safe -- window functions already extract
 tables correctly, just miss the partition semantics.
 
 **Estimated effort:** ~20 lines + 3 tests
+
+---
+
+## Future Research / Hard Problems
+
+### Handling Non-Deterministic Resource IDs (Sequences & UUIDs)
+DPOR relies on deterministic resource IDs across runs to match events.
+If a test inserts a row and gets ID=1 in run A and ID=2 in run B
+(because the DB sequence wasn't reset), the resource IDs change:
+- Run A: `sql:users:(('id', '1'),)`
+- Run B: `sql:users:(('id', '2'),)`
+
+The DPOR scheduler will fail to map the events from Run A to Run B,
+breaking replay and exploration. This also applies to randomly generated
+UUIDs.
+
+**Approaches:**
+
+1.  **Enforced Determinism (Recommended):**
+    Document that users *must* reset sequences (`TRUNCATE ... RESTART IDENTITY`
+    in PostgreSQL) and seed PRNGs for UUIDs. This is standard practice for
+    reproducible testing but burdens the user.
+
+2.  **Relative/Offset IDs:**
+    At the start of a test, query the current sequence value ($S_0$).
+    For all subsequent operations, report IDs as $ID - S_0$.
+    *Risks:* Gaps in sequences, pre-existing data, multiple sequences per table.
+
+3.  **Symbolic ID Tracking:**
+    Intercept the `INSERT` that generates the ID, assign it a symbolic name
+    (`$sym1`), and track that value's flow through the Python application.
+    *Difficulty:* Requires full taint analysis of Python memory to know that
+    variable `user_id` holds the value `1` which corresponds to `$sym1`.
+    Extremely hard.
+
+4.  **Heuristic Matching / Anonymization:**
+    If row-level detection sees an integer ID, could it anonymize it?
+    No -- `WHERE id = 1` and `WHERE id = 2` *must* conflict if they refer to
+    the same row, but *must not* conflict if they refer to different rows.
+    We cannot simply ignore the value.
+
+**Recommendation:**
+Stick to approach #1 (Enforced Determinism) for now. Add a documentation
+section explaining why `TRUNCATE` alone is insufficient for DPOR (unlike
+standard tests where different IDs don't matter).
