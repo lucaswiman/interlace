@@ -31,8 +31,8 @@ try:
     from frontrun._sql_parsing import parse_sql_access
 except ImportError:
 
-    def parse_sql_access(sql: str) -> tuple[set[str], set[str], str | None, str | None]:  # type: ignore[misc]
-        return set(), set(), None, None
+    def parse_sql_access(sql: str) -> tuple[set[str], set[str], str | None, str | None, dict[str, str] | None]:  # type: ignore[misc]
+        return set(), set(), None, None, None
 
 
 # Try to import row-level predicate helpers.  These are always present in the
@@ -90,8 +90,10 @@ def is_tid_suppressed(tid: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _sql_resource_id(table: str, predicates: list[Any]) -> str:
+def _sql_resource_id(table: str, predicates: list[Any], temporal: str | None = None) -> str:
     """Build a resource ID from table name and optional predicates."""
+    if temporal:
+        table = f"{table}:history:{temporal}"
     if not predicates:
         return f"sql:{table}"
     pred_key = tuple(sorted((p.column, p.value) for p in predicates))
@@ -126,7 +128,7 @@ def _intercept_execute(
     reported = False
 
     if reporter is not None and isinstance(operation, str):
-        read_tables, write_tables, lock_intent, tx_op = parse_sql_access(operation)
+        read_tables, write_tables, lock_intent, tx_op, temporal_clauses = parse_sql_access(operation)
 
         # 1. Handle Transaction Control Operations
         if tx_op:
@@ -182,8 +184,9 @@ def _intercept_execute(
                     pred_rows = rows
 
             def report_or_buffer(table: str, kind: str, rows: list[list[Any]]) -> None:
+                temporal = (temporal_clauses or {}).get(table)
                 for row_preds in rows:
-                    res_id = _sql_resource_id(table, row_preds)
+                    res_id = _sql_resource_id(table, row_preds, temporal)
                     if in_tx:
                         if not hasattr(_io_tls, "_tx_buffer"):
                             _io_tls._tx_buffer = []

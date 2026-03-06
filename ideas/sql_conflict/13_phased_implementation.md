@@ -104,15 +104,14 @@ Implementation split into modular files (original plan called for single `_sql_d
 
 ---
 
-### TODO: Temporal Table Support (Phase 7, Very Low Priority)
+### TODO: Temporal Table Support (Phase 7) — ✅ Done
 **Priority:** Very Low (rare; specialized SQL)
 **Scope:**
 - Detect `FOR SYSTEM_TIME` clauses in SELECT
 - Extract temporal predicate (`AS OF`, `BETWEEN`, `ALL`, etc.)
 - Add temporal dimension to ObjectIds: `table:pk:time_bucket`
 - Conflict detection: historical queries don't conflict with current writes
-
-**Estimated effort:** ~40 lines + 10 tests
+- Implemented via `sqlglot` with `tsql` dialect fallback and resource ID refinement.
 
 ---
 
@@ -223,7 +222,7 @@ If range predicate support becomes important, a lightweight interval-arithmetic 
 | 6 | psycopg3 driver support | 🟡 Medium | 80 lines + 15 tests | Modern PostgreSQL driver | ✅ **Done** |
 | 6 | Async driver support | 🟡 Medium | 200 lines + 30 tests | Async web frameworks | **TODO** |
 | 7 | Stored procedures | 🔴 Very Low | 200 lines + 40 tests | Rare in Python ORMs | **TODO** |
-| 7 | Temporal tables | 🔴 Very Low | 40 lines + 10 tests | Specialized SQL | **TODO** |
+| 7 | Temporal tables | 🔴 Very Low | 40 lines + 10 tests | Specialized SQL | ✅ **Done** |
 | 7 | Computed columns | 🔴 Very Low | 30 lines + 5 tests | Informational | **TODO** |
 | 7 | Connection pooling awareness | 🔴 Low | 40 lines + 10 tests | Pool state leakage | **TODO** |
 | 7 | Multi-statement SQL strings | 🔴 Low | 30 lines + 10 tests | Manual SQL only | ✅ **Done** |
