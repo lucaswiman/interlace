@@ -391,6 +391,7 @@ class DporScheduler:
             # DPOR will see all transaction operations as a single atomic block
             # occurring at the COMMIT point.
             from frontrun._io_detection import _io_tls as _iotls
+
             if getattr(_iotls, "_in_transaction", False):
                 if frame is not None:
                     _process_opcode(frame, self, thread_id)

@@ -21,26 +21,42 @@ import importlib
 import sqlite3
 import threading
 from collections.abc import Generator
-from typing import Any
+from typing import Any, NamedTuple
 
 from frontrun._io_detection import _io_tls, get_io_reporter
 from frontrun._schema import get_schema
+
+
+class SqlAccessResult(NamedTuple):
+    """Result of parsing a SQL statement for read/write table extraction."""
+
+    read_tables: set[str]
+    write_tables: set[str]
+    lock_intent: str | None
+    tx_op: str | None
+    temporal_clauses: dict[str, str] | None
+
+
+def _noop_parse_sql_access(sql: str) -> SqlAccessResult:
+    return SqlAccessResult(set(), set(), None, None, None)
+
 
 # Try to import parse_sql_access from the parsing module.
 # Falls back to a no-op if the module isn't available yet.
 try:
     from frontrun._sql_parsing import parse_sql_access
 except ImportError:
-
-    def parse_sql_access(sql: str) -> tuple[set[str], set[str], str | None, str | None, dict[str, str] | None]:  # type: ignore[misc]
-        return set(), set(), None, None, None
+    parse_sql_access = _noop_parse_sql_access
 
 
 # Try to import row-level predicate helpers.  These are always present in the
 # same package, but guard with try/except for robustness.
 try:
     from frontrun._sql_params import resolve_parameters
-    from frontrun._sql_predicates import EqualityPredicate, extract_row_level_access
+    from frontrun._sql_predicates import (
+        EqualityPredicate,  # pyright: ignore[reportAssignmentType]
+        extract_row_level_access,
+    )
 except ImportError:
 
     def resolve_parameters(sql: str, parameters: Any, paramstyle: str) -> str:  # type: ignore[misc]
@@ -129,48 +145,48 @@ def _intercept_execute(
     reported = False
 
     if reporter is not None and isinstance(operation, str):
-        read_tables, write_tables, lock_intent, tx_op, temporal_clauses = parse_sql_access(operation)
+        access = parse_sql_access(operation)
 
         # 1. Handle Transaction Control Operations
-        if tx_op:
+        if access.tx_op:
             reported = True  # Suppress endpoint I/O for TX control too
-            if tx_op == "BEGIN":
+            if access.tx_op == "BEGIN":
                 _io_tls._in_transaction = True
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
-            elif tx_op == "COMMIT":
+            elif access.tx_op == "COMMIT":
                 _io_tls._in_transaction = False
                 buffer = getattr(_io_tls, "_tx_buffer", [])
                 for res_id, kind in buffer:
                     reporter(res_id, kind)
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
-            elif tx_op == "ROLLBACK":
+            elif access.tx_op == "ROLLBACK":
                 _io_tls._in_transaction = False
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
-            elif tx_op.startswith("SAVEPOINT:"):
-                name = tx_op.split(":", 1)[1]
+            elif access.tx_op.startswith("SAVEPOINT:"):
+                name = access.tx_op.split(":", 1)[1]
                 savepoints = getattr(_io_tls, "_tx_savepoints", {})
                 buffer = getattr(_io_tls, "_tx_buffer", [])
                 savepoints[name] = len(buffer)
                 _io_tls._tx_savepoints = savepoints
-            elif tx_op.startswith("ROLLBACK_TO:"):
-                name = tx_op.split(":", 1)[1]
+            elif access.tx_op.startswith("ROLLBACK_TO:"):
+                name = access.tx_op.split(":", 1)[1]
                 savepoints = getattr(_io_tls, "_tx_savepoints", {})
                 if name in savepoints:
                     idx = savepoints[name]
                     buffer = getattr(_io_tls, "_tx_buffer", [])
                     _io_tls._tx_buffer = buffer[:idx]
-            elif tx_op.startswith("RELEASE:"):
-                name = tx_op.split(":", 1)[1]
+            elif access.tx_op.startswith("RELEASE:"):
+                name = access.tx_op.split(":", 1)[1]
                 savepoints = getattr(_io_tls, "_tx_savepoints", {})
                 savepoints.pop(name, None)
 
         # 2. Handle Data Access Operations
-        if read_tables or write_tables:
+        if access.read_tables or access.write_tables:
             reported = True
-            all_tables = read_tables | write_tables
+            all_tables = access.read_tables | access.write_tables
             in_tx = getattr(_io_tls, "_in_transaction", False)
 
             # Row-level predicate extraction (WHERE equality, IN-lists, and INSERT VALUES)
@@ -187,7 +203,7 @@ def _intercept_execute(
                     has_row_level = True
 
             def report_or_buffer(table: str, kind: str, rows: list[list[Any]]) -> None:
-                temporal = temporal_clauses.get(table) if temporal_clauses else None
+                temporal = access.temporal_clauses.get(table) if access.temporal_clauses else None
                 for row_preds in rows:
                     res_id = _sql_resource_id(table, row_preds, temporal)
                     if in_tx:
@@ -198,15 +214,15 @@ def _intercept_execute(
                         reporter(res_id, kind)
 
             # Report explicit reads
-            for table in read_tables:
+            for table in access.read_tables:
                 # SELECT FOR UPDATE is both read and write to create conflicts.
                 # SHARE locks are treated as reads (they don't block other shares).
-                kind = "write" if lock_intent == "UPDATE" else "read"
+                kind = "write" if access.lock_intent == "UPDATE" else "read"
                 report_or_buffer(table, kind, pred_rows)
 
             # Report implicit reads from Foreign Key dependencies
             schema = get_schema()
-            for table in write_tables:
+            for table in access.write_tables:
                 fks = schema.get_fks(table)
                 for fk in fks:
                     # Determine predicates for the referenced table
@@ -234,7 +250,7 @@ def _intercept_execute(
                     report_or_buffer(fk.ref_table, "read", ref_pred_rows)
 
             # Report writes
-            for table in write_tables:
+            for table in access.write_tables:
                 report_or_buffer(table, "write", pred_rows)
 
     if reported:
