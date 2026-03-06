@@ -65,7 +65,7 @@
     - Phase 1: Table-Level Detection (MVP) — ~300 lines code
     - Phase 2: Row-Level Detection — ~270 lines code
     - Phase 3: Wire Protocol Parsing — ~80 lines code
-    - Phase 4: Anomaly Classification — ~200 lines code (deferred)
+    - Phase 4: Anomaly Classification — ~300 lines code (✅ done)
 
 ### Decision & Verification
 15. **[14_decisions_resolved.md](14_decisions_resolved.md)** — Design Decisions
@@ -91,12 +91,12 @@
 | **1** | Table-level detection (MVP) | 1, 2, 3, 4 | ✅ Done | ~300 lines |
 | **2** | Row-level detection (precision) | 1.5, 5 | ✅ Done | ~270 lines |
 | **3** | Wire protocol parsing (C-level) | 6 | ✅ Done | ~210 lines |
-| **4** | Isolation anomaly classification | — | ✓ Designed | ~200 lines |
-| **5+** | Advanced SQL features (TODOs) | SELECT FOR UPDATE, locks, unions, etc. | 📋 Documented | ~500+ lines |
+| **4** | Isolation anomaly classification | — | ✅ Done | ~200 lines |
+| **5+** | Advanced SQL features (TODOs) | SELECT FOR UPDATE, locks, unions, psycopg3, etc. | ✅ Done | ~650+ lines |
 
 **Next steps:**
-- Phase 4 — Anomaly classification (DSG construction + cycle classification for lost update, write skew, dirty read, etc.)
-- See [13_phased_implementation.md](13_phased_implementation.md#phase-5-advanced-sql-features-todo) for Phase 5+ TODOs documenting known limitations and unimplemented features.
+- Phase 6 — Foreign keys (DSG construction improvements)
+- See [13_phased_implementation.md](13_phased_implementation.md#phase-5-advanced-sql-features-todo) for remaining TODOs.
 
 ---
 
@@ -119,7 +119,7 @@ Algorithm 6 (Wire Protocol Parsing)
 1. **Phase 1:** Algorithms 1 → 2 → 3 → 4 (enables table-level conflict detection)
 2. **Phase 2:** Algorithm 1.5 → Algorithm 5 (enables row-level conflict detection)
 3. **Phase 3:** Algorithm 6 (catches C-level SQL)
-4. **Phase 4:** Anomaly classification (not yet designed)
+4. **Phase 4:** Anomaly classification (DSG + cycle detection)
 
 ---
 
@@ -128,10 +128,10 @@ Algorithm 6 (Wire Protocol Parsing)
 ### Phase 1: Table-Level Detection (MVP)
 
 - [x] ~~Create `frontrun/_sql_detection.py`~~ → Split into modular files:
-  - [x] Implement Algorithm 1a: `_regex_parse()` → `frontrun/_sql_parsing.py` (173 lines)
+  - [x] Implement Algorithm 1a: `_regex_parse()` → `frontrun/_sql_parsing.py` (~290 lines)
   - [x] Implement Algorithm 1b: `_sqlglot_parse()` (with optional sqlglot) → `frontrun/_sql_parsing.py`
   - [x] Implement Algorithm 1c: `parse_sql_access()` combined entry point → `frontrun/_sql_parsing.py`
-  - [x] Implement Algorithm 2: `_make_patched_execute()`, `patch_sql()`, `unpatch_sql()` → `frontrun/_sql_cursor.py` (275 lines)
+  - [x] Implement Algorithm 2: `_intercept_execute()`, `patch_sql()`, `unpatch_sql()` → `frontrun/_sql_cursor.py` (~410 lines)
   - [x] Implement Algorithm 3 (partial): `_suppress_tids` set + `is_tid_suppressed()` → `frontrun/_sql_cursor.py`
 
 - [x] Modify `frontrun/_io_detection.py` (+3 lines)
@@ -184,14 +184,19 @@ Algorithm 6 (Wire Protocol Parsing)
   - [x] Integrate SQL extraction into `send()` hook (Linux + macOS)
   - [x] Write SQL-enriched `sql_write` events to pipe when SQL is detected
 
-### Phase 4: Anomaly Classification (Deferred)
+### Phase 4: Anomaly Classification — ✅ Done
 
-- [ ] Create `frontrun/_sql_anomaly.py` (~200 lines)
-  - [ ] DSG (Dependency Serialization Graph) construction
-  - [ ] Cycle classification (lost update, write skew, dirty read, phantom, etc.)
+- [x] Create `frontrun/_sql_anomaly.py` (~300 lines)
+  - [x] DSG (Dependency Serialization Graph) construction
+  - [x] Cycle classification (lost update, write skew, dirty read, non_repeatable_read, write_write)
+  - [x] Pre-DSG pattern checks (non-repeatable read, lost update)
+  - [x] Tests: `tests/test_sql_anomaly.py`
 
-- [ ] Extend `frontrun/common.py`
-  - [ ] Add anomaly metadata to `InterleavingResult`
+- [x] Extend `frontrun/common.py`
+  - [x] Add `sql_anomaly: SqlAnomaly | None` to `InterleavingResult`
+
+- [x] Integrate into `frontrun/dpor.py`
+  - [x] Call `classify_sql_anomaly(recorder.events)` in result processing
 
 ---
 
@@ -199,9 +204,9 @@ Algorithm 6 (Wire Protocol Parsing)
 
 | File | Location | Lines | Status | Purpose |
 |------|----------|-------|--------|---------|
-| `_sql_parsing.py` | `frontrun/` | 173 | ✅ Done | SQL read/write set extraction (regex + sqlglot) |
+| `_sql_parsing.py` | `frontrun/` | ~290 | ✅ Done | SQL read/write set extraction (regex + sqlglot + lock intent + tx control) |
 | `_sql_params.py` | `frontrun/` | 128 | ✅ Done | Parameter resolution (all 5 PEP 249 paramstyles) |
-| `_sql_cursor.py` | `frontrun/` | 275 | ✅ Done | DBAPI cursor monkey-patching + suppression |
+| `_sql_cursor.py` | `frontrun/` | ~410 | ✅ Done | DBAPI cursor monkey-patching + suppression + transaction grouping |
 | `test_sql_parsing.py` | `tests/` | 514 | ✅ Done | 91 tests for SQL parsing |
 | `test_sql_params.py` | `tests/` | 856 | ✅ Done | 123 tests for parameter resolution |
 | `test_sql_cursor.py` | `tests/` | 1236 | ✅ Done | 77 tests for cursor patching |
@@ -213,7 +218,9 @@ Algorithm 6 (Wire Protocol Parsing)
 | `pyproject.toml` | root | +3 | ✅ Done | Add `sqlglot>=20.0` to `[sql]` extra |
 | `test_integration_orm.py` | `tests/` | ~265 | ✅ Done | ORM lost-update integration tests |
 | `sql_extract.rs` | `crates/io/src/` | ~210 | ✅ Done | Wire protocol parsing (16 tests) |
-| `_sql_anomaly.py` | `frontrun/` | ~200 | ⬜ Phase 4 | Anomaly classification |
+| `_sql_anomaly.py` | `frontrun/` | ~300 | ✅ Done | Anomaly classification (DSG + cycle detection) |
+| `test_sql_anomaly.py` | `tests/` | ~235 | ✅ Done | Tests for anomaly classification |
+| `common.py` | `frontrun/` | +10 | ✅ Done | Add `sql_anomaly` to `InterleavingResult` |
 
 ---
 
@@ -264,8 +271,15 @@ Algorithm 6 (Wire Protocol Parsing)
   - Algorithm 4 (ObjectId derivation): no new code — uses existing `_make_object_key` via `sql:{table}` resource IDs
   - Phase 1 integration: `dpor.py` and `bytecode.py` call `patch_sql()`/`unpatch_sql()`; `pyproject.toml` adds `[sql]` extra
   - Algorithm 5 (Row-level predicates): `frontrun/_sql_predicates.py` — 41 tests passing
+- **Phase 4 completed**: 2026-03-05
+  - Anomaly classification: `frontrun/_sql_anomaly.py` — DSG construction + cycle detection
+  - `InterleavingResult.sql_anomaly` field added to `common.py`
+  - Integrated into `dpor.py` result processing
+- **Transaction grouping completed**: 2026-03-05
+  - BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE/ROLLBACK TO support in `_sql_cursor.py`
+  - Transaction atomicity in DPOR scheduler (skip scheduling during transactions)
 - **Verified**: All 3 TLA+ specs pass exhaustive model checking
-- **Last Updated**: 2026-03-04
+- **Last Updated**: 2026-03-05
 
 ---
 

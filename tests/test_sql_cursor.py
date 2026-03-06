@@ -56,8 +56,9 @@ class IOLog:
             return [k for _, k in self.events]
 
     def events_for_table(self, table: str) -> list[tuple[str, str]]:
+        prefix = f"sql:{table}"
         with self._lock:
-            return [(r, k) for r, k in self.events if r == f"sql:{table}"]
+            return [(r, k) for r, k in self.events if r == prefix or r.startswith(f"{prefix}:")]
 
 
 def _make_db() -> sqlite3.Connection:
@@ -344,8 +345,8 @@ def test_reporter_called_with_correct_resource_id_format() -> None:
     log.clear()
     conn.execute("SELECT x FROM mytable")
 
-    assert all(r.startswith("sql:") for r, _ in log.events)
-    assert ("sql:mytable", "read") in log.events
+    assert all(r == "sql:mytable" or r.startswith("sql:mytable:") for r, _ in log.events)
+    assert any((r == "sql:mytable" or r.startswith("sql:mytable:")) and k == "read" for r, k in log.events)
     conn.close()
 
 
@@ -359,7 +360,7 @@ def test_select_where_clause_still_reports_table() -> None:
     log.clear()
     conn.execute("SELECT name FROM users WHERE age > 20")
 
-    assert ("sql:users", "read") in log.events
+    assert any((r == "sql:users" or r.startswith("sql:users:")) and k == "read" for r, k in log.events)
     conn.close()
 
 
@@ -373,7 +374,7 @@ def test_reporter_called_once_per_table_per_execute() -> None:
     log.clear()
     conn.execute("SELECT * FROM users")
     # Each table should be reported exactly once for a single execute
-    user_reads = [(r, k) for r, k in log.events if r == "sql:users" and k == "read"]
+    user_reads = [(r, k) for r, k in log.events if (r == "sql:users" or r.startswith("sql:users:")) and k == "read"]
     assert len(user_reads) == 1
     conn.close()
 
@@ -389,7 +390,7 @@ def test_multiple_executes_each_reported() -> None:
     conn.execute("SELECT * FROM users")
     conn.execute("SELECT * FROM users")
 
-    user_reads = [(r, k) for r, k in log.events if r == "sql:users" and k == "read"]
+    user_reads = [(r, k) for r, k in log.events if (r == "sql:users" or r.startswith("sql:users:")) and k == "read"]
     assert len(user_reads) == 2
     conn.close()
 
@@ -406,8 +407,8 @@ def test_different_tables_reported_independently() -> None:
     conn.execute("SELECT * FROM users")
     conn.execute("SELECT * FROM orders")
 
-    assert ("sql:users", "read") in log.events
-    assert ("sql:orders", "read") in log.events
+    assert any((r == "sql:users" or r.startswith("sql:users:")) and k == "read" for r, k in log.events)
+    assert any((r == "sql:orders" or r.startswith("sql:orders:")) and k == "read" for r, k in log.events)
     conn.close()
 
 
@@ -700,7 +701,7 @@ def test_parameterized_query_reports_correctly() -> None:
     log.clear()
     conn.execute("SELECT name FROM users WHERE id = ?", (1,))
 
-    assert ("sql:users", "read") in log.events
+    assert any((r == "sql:users" or r.startswith("sql:users:")) and k == "read" for r, k in log.events)
     conn.close()
 
 
@@ -731,7 +732,7 @@ def test_executemany_reports_write() -> None:
     data = [(10, "Eve", 22), (11, "Frank", 28)]
     conn.executemany("INSERT INTO users VALUES (?, ?, ?)", data)
 
-    assert any(r == "sql:users" and k == "write" for r, k in log.events)
+    assert any((r == "sql:users" or r.startswith("sql:users:")) and k == "write" for r, k in log.events)
     conn.close()
 
 
@@ -850,7 +851,7 @@ def test_pragma_not_reported() -> None:
     conn.close()
 
 
-def test_create_table_not_reported() -> None:
+def test_create_table_reported() -> None:
     log = IOLog()
     set_io_reporter(log)
     patch_sql()
@@ -858,7 +859,8 @@ def test_create_table_not_reported() -> None:
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE foo (x INTEGER)")
 
-    assert len(log.events) == 0
+    assert len(log.events) == 1
+    assert log.events[0] == ("sql:foo", "write")
     conn.close()
 
 
@@ -991,7 +993,7 @@ def test_reporter_tls_isolation() -> None:
     # Main thread reporter should not have received thread's events
     assert len(thread_main_events) == 0
     # Thread reporter should have received orders access
-    assert ("sql:orders", "read") in thread_events
+    assert any((r == "sql:orders" or r.startswith("sql:orders:")) and k == "read" for r, k in thread_events)
 
 
 def test_sql_suppress_tls_isolation() -> None:
@@ -1059,7 +1061,7 @@ def test_intercept_execute_reports_to_reporter() -> None:
 
     _intercept_execute(original, fake_self, "SELECT * FROM mytable")
 
-    assert ("sql:mytable", "read") in log.events
+    assert any((r == "sql:mytable" or r.startswith("sql:mytable:")) and k == "read" for r, k in log.events)
 
 
 def test_intercept_execute_no_reporter_no_report() -> None:
@@ -1131,7 +1133,7 @@ def test_full_workflow_select_insert_update_delete() -> None:
     conn.execute("DELETE FROM users WHERE id = 3")
     conn.commit()
 
-    user_events = [(r, k) for r, k in log.events if r == "sql:users"]
+    user_events = log.events_for_table("users")
     kinds = [k for _, k in user_events]
     assert kinds.count("read") >= 3  # SELECT + UPDATE + DELETE all read
     assert kinds.count("write") >= 3  # INSERT + UPDATE + DELETE all write
@@ -1149,7 +1151,7 @@ def test_schema_qualified_table_stripped() -> None:
     # sqlite3 uses schema.table notation with "main" schema
     conn.execute("SELECT * FROM main.users")
 
-    assert ("sql:users", "read") in log.events
+    assert any((r == "sql:users" or r.startswith("sql:users:")) and k == "read" for r, k in log.events)
     conn.close()
 
 
@@ -1178,7 +1180,7 @@ def test_case_insensitive_sql_keywords() -> None:
     log.clear()
     conn.execute("select name from users")
 
-    assert ("sql:users", "read") in log.events
+    assert any((r == "sql:users" or r.startswith("sql:users:")) and k == "read" for r, k in log.events)
     conn.close()
 
 
@@ -1200,7 +1202,7 @@ def test_multiline_sql_works() -> None:
             age > 20
     """)
 
-    assert ("sql:users", "read") in log.events
+    assert any((r == "sql:users" or r.startswith("sql:users:")) and k == "read" for r, k in log.events)
     conn.close()
 
 
@@ -1217,7 +1219,7 @@ def test_existing_connection_not_traced() -> None:
     conn.execute("SELECT * FROM t")
     # No events expected for pre-patch connections
     # (The reporter is set, but the connection uses the original cursor)
-    assert ("sql:t", "read") not in log.events
+    assert not any((r == "sql:t" or r.startswith("sql:t:")) and k == "read" for r, k in log.events)
     conn.close()
 
 
@@ -1232,5 +1234,5 @@ def test_new_connection_after_patch_is_traced() -> None:
     log.clear()
     conn.execute("SELECT * FROM t")
 
-    assert ("sql:t", "read") in log.events
+    assert any((r == "sql:t" or r.startswith("sql:t:")) and k == "read" for r, k in log.events)
     conn.close()

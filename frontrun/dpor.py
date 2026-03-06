@@ -56,7 +56,6 @@ from frontrun._deadlock import SchedulerAbort, install_wait_for_graph, uninstall
 from frontrun._io_detection import (
     patch_io,
     set_io_reporter,
-    uninstall_io_profile,
     unpatch_io,
 )
 from frontrun._sql_anomaly import classify_sql_anomaly
@@ -387,6 +386,16 @@ class DporScheduler:
                     with _elock:
                         _engine.report_io_access(_execution, thread_id, _obj_key, _io_kind)
                 _pending_io.clear()
+
+            # Skip scheduling if inside a SQL transaction to ensure atomicity.
+            # DPOR will see all transaction operations as a single atomic block
+            # occurring at the COMMIT point.
+            from frontrun._io_detection import _io_tls as _iotls
+            if getattr(_iotls, "_in_transaction", False):
+                if frame is not None:
+                    _process_opcode(frame, self, thread_id)
+                return True
+
             while True:
                 if self._finished or self._error:
                     return False
@@ -1478,7 +1487,6 @@ class DporBytecodeRunner:
             self._preload_bridge.unregister_thread(threading.get_native_id())
         if self.detect_io:
             set_io_reporter(None)
-            uninstall_io_profile()
         clear_context()
         set_sync_reporter(None)
         _dpor_tls.scheduler = None

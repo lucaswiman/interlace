@@ -16,12 +16,15 @@ drivers like pymysql, direct class patching is used as a fallback.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import sqlite3
 import threading
+from collections.abc import Generator
 from typing import Any
 
 from frontrun._io_detection import _io_tls, get_io_reporter
+from frontrun._schema import get_schema
 
 # Try to import parse_sql_access from the parsing module.
 # Falls back to a no-op if the module isn't available yet.
@@ -29,22 +32,27 @@ try:
     from frontrun._sql_parsing import parse_sql_access
 except ImportError:
 
-    def parse_sql_access(sql: str) -> tuple[set[str], set[str]]:  # type: ignore[misc]
-        return set(), set()
+    def parse_sql_access(sql: str) -> tuple[set[str], set[str], str | None, str | None, dict[str, str] | None]:  # type: ignore[misc]
+        return set(), set(), None, None, None
 
 
 # Try to import row-level predicate helpers.  These are always present in the
 # same package, but guard with try/except for robustness.
 try:
     from frontrun._sql_params import resolve_parameters
-    from frontrun._sql_predicates import extract_equality_predicates
+    from frontrun._sql_predicates import EqualityPredicate, extract_row_level_access
 except ImportError:
 
     def resolve_parameters(sql: str, parameters: Any, paramstyle: str) -> str:  # type: ignore[misc]
         return sql
 
-    def extract_equality_predicates(sql: str) -> list:  # type: ignore[misc]
-        return []
+    def extract_row_level_access(sql: str) -> list[list[Any]] | None:  # type: ignore[misc]
+        return None
+
+    class EqualityPredicate:  # type: ignore[no-redef]
+        def __init__(self, column: str, value: str):
+            self.column = column
+            self.value = value
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +63,21 @@ except ImportError:
 # The LD_PRELOAD bridge listener checks this to skip endpoint-level reports.
 _suppress_tids: set[int] = set()
 _suppress_lock = threading.Lock()  # Real lock (not cooperative)
+
+
+@contextlib.contextmanager
+def _suppress_endpoint_io() -> Generator[None, None, None]:
+    """Temporarily suppress endpoint-level I/O for the current thread."""
+    tid = threading.get_native_id()
+    _io_tls._sql_suppress = True
+    with _suppress_lock:
+        _suppress_tids.add(tid)
+    try:
+        yield
+    finally:
+        with _suppress_lock:
+            _suppress_tids.discard(tid)
+        _io_tls._sql_suppress = False
 
 
 def is_tid_suppressed(tid: int) -> bool:
@@ -68,8 +91,10 @@ def is_tid_suppressed(tid: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _sql_resource_id(table: str, predicates: list[Any]) -> str:
+def _sql_resource_id(table: str, predicates: list[Any], temporal: str | None = None) -> str:
     """Build a resource ID from table name and optional predicates."""
+    if temporal:
+        table = f"{table}:history:{temporal}"
     if not predicates:
         return f"sql:{table}"
     pred_key = tuple(sorted((p.column, p.value) for p in predicates))
@@ -91,48 +116,132 @@ def _intercept_execute(
     activates suppression, then delegates to *original_method*.
 
     When *is_executemany* is False and the query touches exactly one table,
-    resolves *parameters* and extracts row-level equality predicates so that
+    resolves *parameters* and extracts row-level predicates (equality and
+    IN-lists) so that
     the reported resource ID is finer-grained than plain ``sql:<table>``.
+
+    Implements transaction grouping: when a transaction is active (BEGIN
+    detected), I/O reports are buffered in TLS and only flushed when COMMIT is
+    called.  ROLLBACK clears the buffer.  SAVEPOINTs and ROLLBACK TO SAVEPOINT
+    are supported via buffer truncation.
     """
     reporter = get_io_reporter()
     reported = False
 
     if reporter is not None and isinstance(operation, str):
-        read_tables, write_tables = parse_sql_access(operation)
+        read_tables, write_tables, lock_intent, tx_op, temporal_clauses = parse_sql_access(operation)
+
+        # 1. Handle Transaction Control Operations
+        if tx_op:
+            reported = True  # Suppress endpoint I/O for TX control too
+            if tx_op == "BEGIN":
+                _io_tls._in_transaction = True
+                _io_tls._tx_buffer = []
+                _io_tls._tx_savepoints = {}
+            elif tx_op == "COMMIT":
+                _io_tls._in_transaction = False
+                buffer = getattr(_io_tls, "_tx_buffer", [])
+                for res_id, kind in buffer:
+                    reporter(res_id, kind)
+                _io_tls._tx_buffer = []
+                _io_tls._tx_savepoints = {}
+            elif tx_op == "ROLLBACK":
+                _io_tls._in_transaction = False
+                _io_tls._tx_buffer = []
+                _io_tls._tx_savepoints = {}
+            elif tx_op.startswith("SAVEPOINT:"):
+                name = tx_op.split(":", 1)[1]
+                savepoints = getattr(_io_tls, "_tx_savepoints", {})
+                buffer = getattr(_io_tls, "_tx_buffer", [])
+                savepoints[name] = len(buffer)
+                _io_tls._tx_savepoints = savepoints
+            elif tx_op.startswith("ROLLBACK_TO:"):
+                name = tx_op.split(":", 1)[1]
+                savepoints = getattr(_io_tls, "_tx_savepoints", {})
+                if name in savepoints:
+                    idx = savepoints[name]
+                    buffer = getattr(_io_tls, "_tx_buffer", [])
+                    _io_tls._tx_buffer = buffer[:idx]
+            elif tx_op.startswith("RELEASE:"):
+                name = tx_op.split(":", 1)[1]
+                savepoints = getattr(_io_tls, "_tx_savepoints", {})
+                savepoints.pop(name, None)
+
+        # 2. Handle Data Access Operations
         if read_tables or write_tables:
             reported = True
             all_tables = read_tables | write_tables
+            in_tx = getattr(_io_tls, "_in_transaction", False)
 
-            # Row-level: resolve params → extract predicates for single-table
-            # operations.  Skip for executemany (each row may have different
-            # params) and multi-table queries (can't attribute columns to
-            # tables without aliases).
-            predicates: list[Any] = []
-            if len(all_tables) == 1 and not is_executemany and " where " in operation.lower():
+            # Row-level predicate extraction (WHERE equality, IN-lists, and INSERT VALUES)
+            pred_rows: list[list[Any]] = [[]]  # default: one report, no predicates (table-level)
+            has_row_level = False
+            if len(all_tables) == 1 and not is_executemany:
                 if parameters is not None:
                     resolved = resolve_parameters(operation, parameters, paramstyle)
-                    predicates = extract_equality_predicates(resolved)
+                    rows = extract_row_level_access(resolved)
                 else:
-                    predicates = extract_equality_predicates(operation)
+                    rows = extract_row_level_access(operation)
+                if rows is not None:
+                    pred_rows = rows
+                    has_row_level = True
 
+            def report_or_buffer(table: str, kind: str, rows: list[list[Any]]) -> None:
+                temporal = temporal_clauses.get(table) if temporal_clauses else None
+                for row_preds in rows:
+                    res_id = _sql_resource_id(table, row_preds, temporal)
+                    if in_tx:
+                        if not hasattr(_io_tls, "_tx_buffer"):
+                            _io_tls._tx_buffer = []
+                        _io_tls._tx_buffer.append((res_id, kind))
+                    else:
+                        reporter(res_id, kind)
+
+            # Report explicit reads
             for table in read_tables:
-                reporter(_sql_resource_id(table, predicates), "read")
+                # SELECT FOR UPDATE is both read and write to create conflicts.
+                # SHARE locks are treated as reads (they don't block other shares).
+                kind = "write" if lock_intent == "UPDATE" else "read"
+                report_or_buffer(table, kind, pred_rows)
+
+            # Report implicit reads from Foreign Key dependencies
+            schema = get_schema()
             for table in write_tables:
-                reporter(_sql_resource_id(table, predicates), "write")
+                fks = schema.get_fks(table)
+                for fk in fks:
+                    # Determine predicates for the referenced table
+                    ref_pred_rows: list[list[Any]] = [[]]  # default table-level
+
+                    # If we have row-level predicates for the write table
+                    if has_row_level:
+                        mapped_rows = []
+                        for row in pred_rows:
+                            # Check if row has the FK column
+                            fk_val = None
+                            for pred in row:
+                                if isinstance(pred, EqualityPredicate) and pred.column == fk.column:
+                                    fk_val = pred.value
+                                    break
+
+                            if fk_val is not None:
+                                mapped_rows.append([EqualityPredicate(fk.ref_column, fk_val)])
+                            else:
+                                # If any row is missing the FK value, we must fall back to table-level
+                                mapped_rows = [[]]
+                                break
+                        ref_pred_rows = mapped_rows
+
+                    report_or_buffer(fk.ref_table, "read", ref_pred_rows)
+
+            # Report writes
+            for table in write_tables:
+                report_or_buffer(table, "write", pred_rows)
 
     if reported:
-        tid = threading.get_native_id()
-        _io_tls._sql_suppress = True  # type: ignore[attr-defined]
-        with _suppress_lock:
-            _suppress_tids.add(tid)
-        try:
+        with _suppress_endpoint_io():
             if parameters is not None:
                 return original_method(self, operation, parameters)
             return original_method(self, operation)
-        finally:
-            with _suppress_lock:
-                _suppress_tids.discard(tid)
-            _io_tls._sql_suppress = False  # type: ignore[attr-defined]
     else:
         if parameters is not None:
             return original_method(self, operation, parameters)
@@ -233,7 +342,6 @@ def _patch_sqlite3() -> None:
     """Patch sqlite3.connect to inject TracedConnection factory."""
     orig_connect = sqlite3.connect
     traced_conn_cls = _make_traced_sqlite3_connection_class()
-    traced_cursor_cls = _make_traced_cursor_class(sqlite3.Cursor, paramstyle="qmark")
 
     def patched_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
         if "factory" not in kwargs:
@@ -245,9 +353,6 @@ def _patch_sqlite3() -> None:
     # Expose for tests via _ORIGINAL_METHODS — key by (cursor_class, method_name)
     _ORIGINAL_METHODS[(sqlite3.Cursor, "execute")] = sqlite3.Cursor.execute
     _ORIGINAL_METHODS[(sqlite3.Cursor, "executemany")] = sqlite3.Cursor.executemany
-    # Also expose the traced subclasses for inspection
-    _ORIGINAL_METHODS[(traced_cursor_cls, "_traced_execute")] = traced_cursor_cls.execute
-    _ORIGINAL_METHODS[(traced_cursor_cls, "_traced_executemany")] = traced_cursor_cls.executemany
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +370,6 @@ def _patch_class_methods(cls: type, paramstyle: str) -> None:
         if key in _ORIGINAL_METHODS:
             continue
         _ORIGINAL_METHODS[key] = original
-        _orig = original
 
         def _make_patched(orig: Any, mname: str, ps: str) -> Any:
             _is_executemany = mname == "executemany"
@@ -312,6 +416,13 @@ def patch_sql() -> None:
         except (ImportError, AttributeError):
             pass  # driver not installed — skip silently
 
+    def _make_patched_connect(orig: Any, cursor_cls: type) -> Any:
+        def patched_connect(*args: Any, **kwargs: Any) -> Any:
+            kwargs.setdefault("cursor_factory", cursor_cls)
+            return orig(*args, **kwargs)
+
+        return patched_connect
+
     # psycopg2: patch via cursor_factory injection into connect()
     try:
         import psycopg2 as _pg2mod  # type: ignore[import-untyped]
@@ -320,16 +431,23 @@ def patch_sql() -> None:
         orig_cursor_cls = _pg2ext.cursor
         traced_cursor = _make_traced_cursor_class(orig_cursor_cls, paramstyle="pyformat")
         orig_connect = _pg2mod.connect
-
-        def _make_pg2_connect(orig: Any, cursor_cls: type) -> Any:
-            def patched_connect(*args: Any, **kwargs: Any) -> Any:
-                kwargs.setdefault("cursor_factory", cursor_cls)
-                return orig(*args, **kwargs)
-
-            return patched_connect
-
-        setattr(_pg2mod, "connect", _make_pg2_connect(orig_connect, traced_cursor))
+        setattr(_pg2mod, "connect", _make_patched_connect(orig_connect, traced_cursor))
         _PATCHES.append((_pg2mod, "connect", orig_connect))
+        _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
+        _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
+    except (ImportError, AttributeError):
+        pass
+
+    # psycopg (v3): patch via cursor_factory injection into connect()
+    try:
+        import psycopg as _pg3mod  # type: ignore[import-untyped]
+
+        orig_cursor_cls = _pg3mod.Cursor
+        # Psycopg 3 uses 'format' as default paramstyle (client-side)
+        traced_cursor = _make_traced_cursor_class(orig_cursor_cls, paramstyle="format")
+        orig_connect = _pg3mod.connect
+        setattr(_pg3mod, "connect", _make_patched_connect(orig_connect, traced_cursor))
+        _PATCHES.append((_pg3mod, "connect", orig_connect))
         _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
         _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
     except (ImportError, AttributeError):
