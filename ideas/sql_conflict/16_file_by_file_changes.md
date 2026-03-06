@@ -116,3 +116,26 @@ SQL isolation anomaly classification (~300 lines).
 ### `frontrun/common.py` (modify) — ✅
 
 Extended `InterleavingResult` with `sql_anomaly: SqlAnomaly | None` field.
+
+## Completed (2026-03-06)
+
+### `frontrun/_schema.py` (new file) — ✅
+
+Schema registry for Foreign Key constraints. ~50 lines.
+- `ForeignKey` dataclass (`table`, `column`, `ref_table`, `ref_column`)
+- `Schema` class (`add_foreign_key`, `get_fks`)
+- Global `register_schema()` / `get_schema()`
+
+### `frontrun/_sql_cursor.py` (modify) — ✅
+
+Integrated FK dependency logic into `_intercept_execute()`.
+- Query `get_schema()` for FKs on write tables
+- Synthesize implicit `read` operations for referenced tables
+- Attempt to map row-level predicates from write to read (e.g. `orders.user_id=1` → `users.id=1`)
+- Fall back to table-level read if predicates cannot be mapped
+
+### `tests/test_foreign_keys.py` (new file) — ✅
+
+Tests for FK dependency detection.
+- `test_fk_dependency_table_level` — verifies implicit read of parent table
+- `test_fk_dependency_row_level` — verifies row-level granularity preserved

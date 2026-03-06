@@ -23,6 +23,7 @@ import threading
 from typing import Any, Generator
 
 from frontrun._io_detection import _io_tls, get_io_reporter
+from frontrun._schema import get_schema
 
 # Try to import parse_sql_access from the parsing module.
 # Falls back to a no-op if the module isn't available yet.
@@ -38,7 +39,7 @@ except ImportError:
 # same package, but guard with try/except for robustness.
 try:
     from frontrun._sql_params import resolve_parameters
-    from frontrun._sql_predicates import extract_row_level_access
+    from frontrun._sql_predicates import extract_row_level_access, EqualityPredicate
 except ImportError:
 
     def resolve_parameters(sql: str, parameters: Any, paramstyle: str) -> str:  # type: ignore[misc]
@@ -46,6 +47,11 @@ except ImportError:
 
     def extract_row_level_access(sql: str) -> list[list[Any]] | None:  # type: ignore[misc]
         return None
+
+    class EqualityPredicate:  # type: ignore[no-redef]
+        def __init__(self, column: str, value: str):
+            self.column = column
+            self.value = value
 
 
 # ---------------------------------------------------------------------------
@@ -175,8 +181,8 @@ def _intercept_execute(
                 if rows is not None:
                     pred_rows = rows
 
-            def report_or_buffer(table: str, kind: str) -> None:
-                for row_preds in pred_rows:
+            def report_or_buffer(table: str, kind: str, rows: list[list[Any]]) -> None:
+                for row_preds in rows:
                     res_id = _sql_resource_id(table, row_preds)
                     if in_tx:
                         if not hasattr(_io_tls, "_tx_buffer"):
@@ -185,13 +191,45 @@ def _intercept_execute(
                     else:
                         reporter(res_id, kind)
 
+            # Report explicit reads
             for table in read_tables:
                 # SELECT FOR UPDATE is both read and write to create conflicts.
                 # SHARE locks are treated as reads (they don't block other shares).
                 kind = "write" if lock_intent == "UPDATE" else "read"
-                report_or_buffer(table, kind)
+                report_or_buffer(table, kind, pred_rows)
+
+            # Report implicit reads from Foreign Key dependencies
+            schema = get_schema()
             for table in write_tables:
-                report_or_buffer(table, "write")
+                fks = schema.get_fks(table)
+                for fk in fks:
+                    # Determine predicates for the referenced table
+                    ref_pred_rows: list[list[Any]] = [[]]  # default table-level
+
+                    # If we have row-level predicates for the write table
+                    if pred_rows != [[]]:
+                        mapped_rows = []
+                        for row in pred_rows:
+                            # Check if row has the FK column
+                            fk_val = None
+                            for pred in row:
+                                if isinstance(pred, EqualityPredicate) and pred.column == fk.column:
+                                    fk_val = pred.value
+                                    break
+                            
+                            if fk_val is not None:
+                                mapped_rows.append([EqualityPredicate(fk.ref_column, fk_val)])
+                            else:
+                                # If any row is missing the FK value, we must fall back to table-level
+                                mapped_rows = [[]]
+                                break
+                        ref_pred_rows = mapped_rows
+                    
+                    report_or_buffer(fk.ref_table, "read", ref_pred_rows)
+
+            # Report writes
+            for table in write_tables:
+                report_or_buffer(table, "write", pred_rows)
 
     if reported:
         with _suppress_endpoint_io():

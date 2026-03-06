@@ -69,13 +69,13 @@ Implementation split into modular files (original plan called for single `_sql_d
 
 ## Phase 6: Further Improvements (TODO)
 
-### TODO: Cross-Table Foreign Key Analysis (Phase 6)
+### TODO: Cross-Table Foreign Key Analysis (Phase 6) — ✅ Partial (Manual Registration)
 **Priority:** Medium (affects multi-table transactions)
 **Scope:**
-- Schema introspection: query `information_schema.referential_constraints` (PostgreSQL, MySQL) or equivalent
+- Schema introspection: query `information_schema.referential_constraints` (PostgreSQL, MySQL) or equivalent (TODO)
 - Build FK dependency graph on first connection: `{orders → users, shipments → orders}`
-- Cache in thread-local storage
-- At conflict detection: if Op1 touches T1, Op2 touches T2, and path T1 → T2 exists, mark as dependent
+- Cache in thread-local storage: Implemented via `frontrun/_schema.py` global registry.
+- At conflict detection: if Op1 touches T1, Op2 touches T2, and path T1 → T2 exists, mark as dependent: ✅ Implemented in `_sql_cursor.py`. Writes to T1 now report implicit reads on T2.
 
 **Estimated effort:** ~150 lines + 25 tests
 
