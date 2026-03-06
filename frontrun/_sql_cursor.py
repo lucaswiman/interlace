@@ -21,33 +21,18 @@ import importlib
 import sqlite3
 import threading
 from collections.abc import Generator
-from typing import Any, NamedTuple
+from typing import Any
 
 from frontrun._io_detection import _io_tls, get_io_reporter
 from frontrun._schema import get_schema
-
-
-class SqlAccessResult(NamedTuple):
-    """Result of parsing a SQL statement for read/write table extraction."""
-
-    read_tables: set[str]
-    write_tables: set[str]
-    lock_intent: str | None
-    tx_op: str | None
-    temporal_clauses: dict[str, str] | None
-
-
-def _noop_parse_sql_access(sql: str) -> SqlAccessResult:
-    return SqlAccessResult(set(), set(), None, None, None)
-
-
-# Try to import parse_sql_access from the parsing module.
-# Falls back to a no-op if the module isn't available yet.
-try:
-    from frontrun._sql_parsing import parse_sql_access
-except ImportError:
-    parse_sql_access = _noop_parse_sql_access
-
+from frontrun._sql_parsing import (
+    LockIntent,
+    Release,
+    RollbackTo,
+    Savepoint,
+    TxOp,
+    parse_sql_access,
+)
 
 # Try to import row-level predicate helpers.  These are always present in the
 # same package, but guard with try/except for robustness.
@@ -62,7 +47,7 @@ except ImportError:
     def resolve_parameters(sql: str, parameters: Any, paramstyle: str) -> str:  # type: ignore[misc]
         return sql
 
-    def extract_row_level_access(sql: str) -> list[list[Any]] | None:  # type: ignore[misc]
+    def extract_row_level_access(sql: str, *, ast: Any | None = None) -> list[list[Any]] | None:  # type: ignore[misc]
         return None
 
     class EqualityPredicate:  # type: ignore[no-redef]
@@ -148,40 +133,38 @@ def _intercept_execute(
         access = parse_sql_access(operation)
 
         # 1. Handle Transaction Control Operations
-        if access.tx_op:
+        if access.tx_op is not None:
             reported = True  # Suppress endpoint I/O for TX control too
-            if access.tx_op == "BEGIN":
+            tx = access.tx_op
+            if tx is TxOp.BEGIN:
                 _io_tls._in_transaction = True
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
-            elif access.tx_op == "COMMIT":
+            elif tx is TxOp.COMMIT:
                 _io_tls._in_transaction = False
                 buffer = getattr(_io_tls, "_tx_buffer", [])
                 for res_id, kind in buffer:
                     reporter(res_id, kind)
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
-            elif access.tx_op == "ROLLBACK":
+            elif tx is TxOp.ROLLBACK:
                 _io_tls._in_transaction = False
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
-            elif access.tx_op.startswith("SAVEPOINT:"):
-                name = access.tx_op.split(":", 1)[1]
+            elif isinstance(tx, Savepoint):
                 savepoints = getattr(_io_tls, "_tx_savepoints", {})
                 buffer = getattr(_io_tls, "_tx_buffer", [])
-                savepoints[name] = len(buffer)
+                savepoints[tx.name] = len(buffer)
                 _io_tls._tx_savepoints = savepoints
-            elif access.tx_op.startswith("ROLLBACK_TO:"):
-                name = access.tx_op.split(":", 1)[1]
+            elif isinstance(tx, RollbackTo):
                 savepoints = getattr(_io_tls, "_tx_savepoints", {})
-                if name in savepoints:
-                    idx = savepoints[name]
+                if tx.name in savepoints:
+                    idx = savepoints[tx.name]
                     buffer = getattr(_io_tls, "_tx_buffer", [])
                     _io_tls._tx_buffer = buffer[:idx]
-            elif access.tx_op.startswith("RELEASE:"):
-                name = access.tx_op.split(":", 1)[1]
+            elif isinstance(tx, Release):  # pyright: ignore[reportUnnecessaryIsInstance]
                 savepoints = getattr(_io_tls, "_tx_savepoints", {})
-                savepoints.pop(name, None)
+                savepoints.pop(tx.name, None)
 
         # 2. Handle Data Access Operations
         if access.read_tables or access.write_tables:
@@ -190,6 +173,8 @@ def _intercept_execute(
             in_tx = getattr(_io_tls, "_in_transaction", False)
 
             # Row-level predicate extraction (WHERE equality, IN-lists, and INSERT VALUES)
+            # Reuses the pre-parsed AST from parse_sql_access when available (avoids
+            # a second sqlglot.parse_one call — Refactor 3).
             pred_rows: list[list[Any]] = [[]]  # default: one report, no predicates (table-level)
             has_row_level = False
             if len(all_tables) == 1 and not is_executemany:
@@ -197,7 +182,7 @@ def _intercept_execute(
                     resolved = resolve_parameters(operation, parameters, paramstyle)
                     rows = extract_row_level_access(resolved)
                 else:
-                    rows = extract_row_level_access(operation)
+                    rows = extract_row_level_access(operation, ast=access.ast)
                 if rows is not None:
                     pred_rows = rows
                     has_row_level = True
@@ -217,7 +202,7 @@ def _intercept_execute(
             for table in access.read_tables:
                 # SELECT FOR UPDATE is both read and write to create conflicts.
                 # SHARE locks are treated as reads (they don't block other shares).
-                kind = "write" if access.lock_intent == "UPDATE" else "read"
+                kind = "write" if access.lock_intent is LockIntent.UPDATE else "read"
                 report_or_buffer(table, kind, pred_rows)
 
             # Report implicit reads from Foreign Key dependencies

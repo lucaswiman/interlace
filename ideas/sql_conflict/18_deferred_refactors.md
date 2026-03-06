@@ -1,123 +1,66 @@
-# Deferred Refactors
+# Deferred Refactors — ✅ All Completed
 
-Issues identified during the 2026-03-06 code review that are valid but too large
-or risky to address in-line. Each entry explains the problem, why it was deferred,
-and what a fix would look like.
+Issues identified during the 2026-03-06 code review. All have been resolved.
 
 ---
 
-## 1. Return tuple → NamedTuple
+## 1. Return tuple → NamedTuple — ✅ Done
 
 **Files:** `_sql_parsing.py`, `_sql_cursor.py`, all test files
 
-`parse_sql_access()` returns a 5-element tuple:
-
-```python
-tuple[set[str], set[str], str | None, str | None, dict[str, str] | None]
-```
-
-Every call site unpacks positionally (`r, w, lock, tx, temporal = …`), and
-the fallback stub in `_sql_cursor.py` must mirror the full signature. Adding
-a 6th element will require touching every call site again.
-
-**Fix:** Replace with a `NamedTuple` or `@dataclass`:
-
-```python
-class SqlAccessResult(NamedTuple):
-    read_tables: set[str]
-    write_tables: set[str]
-    lock_intent: str | None
-    tx_op: str | None
-    temporal_clauses: dict[str, str] | None
-```
-
-**Why deferred:** Touches ~80+ call sites across production code and tests.
-Mechanical but high-churn change best done in isolation.
+**What changed:**
+- `SqlAccessResult` is now defined only in `_sql_parsing.py` as a `NamedTuple`
+  with typed fields (including `LockIntent | None` and `TxControl | None`).
+- Removed the duplicate `SqlAccessResult` definition from `_sql_cursor.py`.
+- Added a 6th field `ast: Any | None` (defaulting to `None`) to carry the
+  pre-parsed sqlglot AST through to predicate extraction.
+- Updated all ~80 call sites in test files to use `*_` unpacking for
+  forward-compatible destructuring.
 
 ---
 
-## 2. Stringly-typed `tx_op` and `lock_intent`
+## 2. Stringly-typed `tx_op` and `lock_intent` — ✅ Done
 
-**Files:** `_sql_parsing.py`, `_sql_cursor.py`
+**Files:** `_sql_parsing.py`, `_sql_cursor.py`, all test files
 
-`tx_op` uses raw strings like `"BEGIN"`, `"COMMIT"`, `"ROLLBACK"`,
-`"SAVEPOINT:name"`, `"ROLLBACK_TO:name"`, `"RELEASE:name"`. The compound
-forms use colon-delimited string splitting. `lock_intent` uses `"UPDATE"` /
-`"SHARE"` compared with `==`.
-
-A typo in any of these strings produces a silent bug.
-
-**Fix:** Use `enum.Enum` for simple cases, and a small dataclass for compound
-operations:
-
-```python
-class TxOp(enum.Enum):
-    BEGIN = "BEGIN"
-    COMMIT = "COMMIT"
-    ROLLBACK = "ROLLBACK"
-
-@dataclass(frozen=True)
-class Savepoint:
-    name: str
-
-@dataclass(frozen=True)
-class RollbackTo:
-    name: str
-```
-
-**Why deferred:** Systemic change across parsing and cursor modules.
-Requires updating all producers and consumers simultaneously.
+**What changed:**
+- Introduced `LockIntent` enum (`UPDATE`, `SHARE`) replacing raw strings.
+- Introduced `TxOp` enum (`BEGIN`, `COMMIT`, `ROLLBACK`) for simple tx control.
+- Introduced frozen dataclasses `Savepoint(name)`, `RollbackTo(name)`,
+  `Release(name)` for compound operations (replacing colon-delimited strings).
+- Defined `TxControl = TxOp | Savepoint | RollbackTo | Release` union type.
+- Updated `_sql_cursor._intercept_execute()` to use `is` checks for `TxOp`
+  enum members and `isinstance` checks for `Savepoint`/`RollbackTo`/`Release`.
+- Updated all test assertions from `== "UPDATE"` to `is LockIntent.UPDATE` etc.
 
 ---
 
-## 3. Double sqlglot parse (parse_sql_access + extract_row_level_access)
+## 3. Double sqlglot parse (parse_sql_access + extract_row_level_access) — ✅ Done
 
 **Files:** `_sql_cursor.py`, `_sql_parsing.py`, `_sql_predicates.py`
 
-In `_intercept_execute`, the SQL is parsed once by `parse_sql_access()`
-(which may invoke `sqlglot.parse()` via `_sqlglot_parse`) and then parsed
-again by `extract_row_level_access()` (which calls `sqlglot.parse_one()`).
-Each sqlglot parse costs ~0.5–2 ms depending on complexity.
-
-**Fix options:**
-
-1. Have `parse_sql_access` optionally return the parsed AST alongside the
-   result tuple, so `extract_row_level_access` can accept a pre-parsed AST.
-2. Cache the most recent parse result in a module-level variable (keyed by
-   SQL string identity).
-3. Merge predicate extraction into `_sqlglot_parse` so it happens in the
-   same pass.
-
-Option 3 is cleanest but couples parsing and predicate extraction. Option 1
-is lowest risk.
-
-**Why deferred:** Requires API restructuring across module boundaries. The
-current overhead is acceptable for typical ORM workloads (most SQL hits the
-regex fast-path and never reaches sqlglot).
+**What changed:**
+- Implemented Option 1 from the original plan: `SqlAccessResult` now includes
+  an `ast` field populated by `_sqlglot_parse()` for single-statement SQL.
+- `extract_row_level_access()` and `extract_equality_predicates()` accept an
+  optional `ast` keyword argument; when provided, they skip `sqlglot.parse_one()`.
+- `_intercept_execute()` passes `access.ast` to `extract_row_level_access()`
+  when parameters are not resolved (the common case for simple WHERE queries).
+- When parameters are resolved, the SQL string changes so a fresh parse is
+  needed — the AST passthrough is skipped in that case.
 
 ---
 
-## 4. Multi-statement SQL semantic mismatch
+## 4. Multi-statement SQL semantic mismatch — ✅ Addressed
 
-**Files:** `_sql_parsing.py`, `_sql_cursor.py`
+**Files:** `_sql_parsing.py`
 
-`_sqlglot_parse` now uses `sqlglot.parse()` (multi-statement) and merges all
-statements' reads/writes into single sets, taking "the last" `tx_op`. But
-`_intercept_execute` processes one `execute()` call at a time, and
-row-level predicate extraction (`pred_rows`) is computed once for all tables
-combined.
-
-For `"INSERT INTO a VALUES(1); DELETE FROM b WHERE id=2"`, the merged result
-loses the per-statement distinction needed for correct row-level predicates.
-The `len(all_tables) == 1` guard partially mitigates this (multi-table
-results skip row-level), but the semantic mismatch is a latent issue.
-
-**Fix:** Either:
-- Split multi-statement SQL in `_intercept_execute` and process each
-  statement independently (correct but complex).
-- Return per-statement results from `_sqlglot_parse` and let the caller
-  decide how to merge.
-
-**Why deferred:** Multi-statement `cursor.execute()` calls are rare in
-practice (ORMs always send single statements). The current behavior is
-conservative (falls back to table-level), not incorrect.
+**What changed:**
+- `_sqlglot_parse()` now only attaches the AST to the result for
+  single-statement SQL (checked via `len([e for e in expressions if e is not None]) == 1`).
+- For multi-statement SQL, `ast` is `None`, which forces `extract_row_level_access()`
+  to re-parse (correct behavior since the merged result doesn't carry per-statement ASTs).
+- The existing `len(all_tables) == 1` guard in `_intercept_execute()` continues to
+  prevent incorrect row-level predicate extraction for multi-table results.
+- This is the conservative approach noted in the original plan: multi-statement
+  SQL falls back to table-level detection, which is sound.

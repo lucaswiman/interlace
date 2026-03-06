@@ -7,8 +7,53 @@ back to sqlglot for complex SQL (CTEs, subqueries, UNION, etc.).
 
 from __future__ import annotations
 
+import enum
 import re
-from typing import NamedTuple
+from dataclasses import dataclass
+from typing import Any, NamedTuple
+
+# ---------------------------------------------------------------------------
+# Typed enums for lock intent and transaction operations
+# ---------------------------------------------------------------------------
+
+
+class LockIntent(enum.Enum):
+    """Lock mode extracted from SQL statements (FOR UPDATE, FOR SHARE, LOCK TABLE)."""
+
+    UPDATE = "UPDATE"
+    SHARE = "SHARE"
+
+
+class TxOp(enum.Enum):
+    """Simple transaction control operations."""
+
+    BEGIN = "BEGIN"
+    COMMIT = "COMMIT"
+    ROLLBACK = "ROLLBACK"
+
+
+@dataclass(frozen=True)
+class Savepoint:
+    """SAVEPOINT <name> operation."""
+
+    name: str
+
+
+@dataclass(frozen=True)
+class RollbackTo:
+    """ROLLBACK TO SAVEPOINT <name> operation."""
+
+    name: str
+
+
+@dataclass(frozen=True)
+class Release:
+    """RELEASE SAVEPOINT <name> operation."""
+
+    name: str
+
+
+TxControl = TxOp | Savepoint | RollbackTo | Release
 
 
 class SqlAccessResult(NamedTuple):
@@ -16,9 +61,13 @@ class SqlAccessResult(NamedTuple):
 
     read_tables: set[str]
     write_tables: set[str]
-    lock_intent: str | None
-    tx_op: str | None
+    lock_intent: LockIntent | None
+    tx_op: TxControl | None
     temporal_clauses: dict[str, str] | None
+    ast: Any | None = None  # Pre-parsed sqlglot AST (when available from _sqlglot_parse)
+
+
+_EMPTY = SqlAccessResult(set(), set(), None, None, None, None)
 
 
 # Precompiled patterns — matches the leading keyword + first table name.
@@ -68,20 +117,20 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
 
     # Transaction control - check before other patterns (no literal stripping needed)
     if _RE_TX_BEGIN.search(stripped):
-        return SqlAccessResult(set(), set(), None, "BEGIN", None)
+        return SqlAccessResult(set(), set(), None, TxOp.BEGIN, None)
     if _RE_TX_COMMIT.search(stripped):
-        return SqlAccessResult(set(), set(), None, "COMMIT", None)
+        return SqlAccessResult(set(), set(), None, TxOp.COMMIT, None)
     if _RE_TX_ROLLBACK.search(stripped):
         m = _RE_TX_ROLLBACK_TO.search(stripped)
         if m:
-            return SqlAccessResult(set(), set(), None, f"ROLLBACK_TO:{m.group(2)}", None)
-        return SqlAccessResult(set(), set(), None, "ROLLBACK", None)
+            return SqlAccessResult(set(), set(), None, RollbackTo(m.group(2)), None)
+        return SqlAccessResult(set(), set(), None, TxOp.ROLLBACK, None)
     m = _RE_TX_SAVEPOINT.search(stripped)
     if m:
-        return SqlAccessResult(set(), set(), None, f"SAVEPOINT:{m.group(1)}", None)
+        return SqlAccessResult(set(), set(), None, Savepoint(m.group(1)), None)
     m = _RE_TX_RELEASE.search(stripped)
     if m:
-        return SqlAccessResult(set(), set(), None, f"RELEASE:{m.group(2)}", None)
+        return SqlAccessResult(set(), set(), None, Release(m.group(2)), None)
 
     # Strip literals to avoid false positives (e.g. " FROM " inside a string)
     no_literals = _RE_LITERAL.sub(" ", stripped)
@@ -121,26 +170,26 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
 
     read: set[str] = set()
     write: set[str] = set()
-    lock_intent: str | None = None
+    lock_intent: LockIntent | None = None
 
     m_lock = _RE_LOCK_TABLE.search(no_literals)
     if m_lock:
         tbl = _strip_quotes(m_lock.group(1))
         # Treat LOCK TABLE as an exclusive write by default for safety.
         # This ensures it conflicts with all other accesses.
-        lock_intent = "UPDATE"
+        lock_intent = LockIntent.UPDATE
         m_mode = _RE_LOCK_MODE.search(no_literals)
         if m_mode:
             mode = m_mode.group(1).upper()
             if "SHARE" in mode and "EXCLUSIVE" not in mode:
-                lock_intent = "SHARE"
+                lock_intent = LockIntent.SHARE
         write.add(tbl)
         return SqlAccessResult(read, write, lock_intent, None, None)
 
     if _RE_FOR_UPDATE.search(no_literals):
-        lock_intent = "UPDATE"
+        lock_intent = LockIntent.UPDATE
     elif _RE_FOR_SHARE.search(no_literals):
-        lock_intent = "SHARE"
+        lock_intent = LockIntent.SHARE
 
     m_insert = _RE_INSERT.search(no_literals)
     if m_insert:
@@ -179,17 +228,23 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
     return None  # unknown statement type → fall through
 
 
-def _merge_lock_intent(a: str | None, b: str | None) -> str | None:
+def _merge_lock_intent(a: LockIntent | None, b: LockIntent | None) -> LockIntent | None:
     """Merge two lock intents, preferring UPDATE over SHARE."""
-    if a == "UPDATE" or b == "UPDATE":
-        return "UPDATE"
-    if a == "SHARE" or b == "SHARE":
-        return "SHARE"
+    if a is LockIntent.UPDATE or b is LockIntent.UPDATE:
+        return LockIntent.UPDATE
+    if a is LockIntent.SHARE or b is LockIntent.SHARE:
+        return LockIntent.SHARE
     return None
 
 
 def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
-    """Full parser: handles CTEs, subqueries, UNION, MERGE, etc."""
+    """Full parser: handles CTEs, subqueries, UNION, MERGE, etc.
+
+    Returns a single merged :class:`SqlAccessResult` for all statements.
+    For multi-statement SQL, reads/writes are merged and the last tx_op wins.
+    The ``ast`` field is populated with the first parsed AST (for single-statement
+    SQL, this is the only AST; callers can use it to avoid re-parsing).
+    """
     try:
         import sqlglot  # type: ignore[import-untyped]
         from sqlglot import errors as sqlglot_errors  # type: ignore[import-untyped]
@@ -214,45 +269,49 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
 
     all_write: set[str] = set()
     all_read: set[str] = set()
-    all_lock_intent: str | None = None
-    all_tx_op: str | None = None
+    all_lock_intent: LockIntent | None = None
+    all_tx_op: TxControl | None = None
     all_temporal: dict[str, str] | None = None
+    first_ast: Any | None = None
 
     for ast in expressions:
         if ast is None:
             continue
 
+        if first_ast is None:
+            first_ast = ast
+
         write: set[str] = set()
         read: set[str] = set()
-        lock_intent: str | None = None
-        tx_op: str | None = None
+        lock_intent: LockIntent | None = None
+        tx_op: TxControl | None = None
 
         # Transaction control
         if isinstance(ast, exp.Transaction):
-            tx_op = "BEGIN"
+            tx_op = TxOp.BEGIN
         elif isinstance(ast, exp.Commit):
-            tx_op = "COMMIT"
+            tx_op = TxOp.COMMIT
         elif isinstance(ast, exp.Rollback):
-            tx_op = "ROLLBACK"
+            tx_op = TxOp.ROLLBACK
         else:
             # Extract lock intent from SELECT
             if isinstance(ast, exp.Select):
                 lock = ast.find(exp.Lock)
                 if lock:
                     if lock.args.get("update"):
-                        lock_intent = "UPDATE"
+                        lock_intent = LockIntent.UPDATE
                     else:
                         # sqlglot might not have "share" key, but if it's a Lock and not update,
                         # it's usually a share lock in dialects that support it.
-                        lock_intent = "SHARE"
+                        lock_intent = LockIntent.SHARE
                         # Extra check for some versions/dialects
                         kind = lock.args.get("kind")
                         if kind:
                             kind_upper = str(kind).upper()
                             if "UPDATE" in kind_upper:
-                                lock_intent = "UPDATE"
+                                lock_intent = LockIntent.UPDATE
                             elif "SHARE" in kind_upper:
-                                lock_intent = "SHARE"
+                                lock_intent = LockIntent.SHARE
 
             # Advisory locks (PostgreSQL, MySQL)
             for call in ast.find_all(exp.Anonymous):
@@ -277,9 +336,9 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
                         lock_id_str = ":".join(lock_ids)
                         write.add(f"advisory_lock:{lock_id_str}")
                         if "shared" in name:
-                            lock_intent = _merge_lock_intent(lock_intent, "SHARE")
+                            lock_intent = _merge_lock_intent(lock_intent, LockIntent.SHARE)
                         else:
-                            lock_intent = _merge_lock_intent(lock_intent, "UPDATE")
+                            lock_intent = _merge_lock_intent(lock_intent, LockIntent.UPDATE)
 
             # Shared table visitor logic
             for t in ast.find_all(exp.Table):
@@ -336,9 +395,11 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
         all_write.update(write)
         all_lock_intent = _merge_lock_intent(all_lock_intent, lock_intent)
         if tx_op:
-            all_tx_op = tx_op  # Take the last tx_op or any? usually only one makes sense
+            all_tx_op = tx_op  # Take the last tx_op
 
-    return SqlAccessResult(all_read, all_write, all_lock_intent, all_tx_op, all_temporal)
+    # For single-statement SQL, attach AST so callers can avoid re-parsing
+    result_ast = first_ast if len([e for e in expressions if e is not None]) == 1 else None
+    return SqlAccessResult(all_read, all_write, all_lock_intent, all_tx_op, all_temporal, result_ast)
 
 
 def parse_sql_access(sql: str) -> SqlAccessResult:
@@ -359,4 +420,4 @@ def parse_sql_access(sql: str) -> SqlAccessResult:
         return result
 
     # Parse failure: return empty sets → endpoint-level fallback
-    return SqlAccessResult(set(), set(), None, None, None)
+    return _EMPTY
