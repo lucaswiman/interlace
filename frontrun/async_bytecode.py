@@ -60,7 +60,13 @@ try:
 
     _sql_async_available = True
 except ImportError:
-    pass
+
+    def patch_sql_async() -> None:  # type: ignore[misc]
+        pass
+
+    def unpatch_sql_async() -> None:  # type: ignore[misc]
+        pass
+
 
 # Context variable to track the active scheduler and task ID
 _scheduler_var: contextvars.ContextVar[Optional["AwaitScheduler"]] = contextvars.ContextVar("_scheduler", default=None)
