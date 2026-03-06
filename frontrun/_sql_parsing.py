@@ -92,6 +92,14 @@ _RE_TX_ROLLBACK = re.compile(r"^\s*ROLLBACK\b", re.I)
 _RE_TX_SAVEPOINT = re.compile(r"^\s*SAVEPOINT\s+(\w+)\b", re.I)
 _RE_TX_RELEASE = re.compile(r"^\s*RELEASE\s+(SAVEPOINT\s+)?(\w+)\b", re.I)
 _RE_TX_ROLLBACK_TO = re.compile(r"^\s*ROLLBACK\s+TO\s+(SAVEPOINT\s+)?(\w+)\b", re.I)
+# COPY: COPY table FROM/TO ...
+_RE_COPY = re.compile(rf"^\s*COPY{_WS}({_IDENT})", re.I)
+_RE_COPY_DIR = re.compile(r"\b(FROM|TO)\b", re.I)
+# PREPARE / EXECUTE (PostgreSQL server-side prepared statements)
+_RE_PREPARE = re.compile(rf"^\s*PREPARE{_WS}(\w+)", re.I)
+_RE_PREPARE_AS = re.compile(r"\bAS\b", re.I)
+_RE_EXECUTE_STMT = re.compile(rf"^\s*EXECUTE{_WS}(\w+)", re.I)
+_RE_DEALLOCATE = re.compile(rf"^\s*DEALLOCATE{_WS}", re.I)
 
 
 def _strip_quotes(name: str) -> str:
@@ -160,7 +168,7 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
             return None
 
     # Subqueries in DELETE or UPDATE (SELECT appearing after the first keyword)
-    if not any(stripped.lower().startswith(kw) for kw in ("select", "insert")) and "SELECT" in upper_no_literals:
+    if not any(stripped.lower().startswith(kw) for kw in ("select", "insert", "prepare")) and "SELECT" in upper_no_literals:
         return None
 
     # Function calls (advisory locks etc) — bail to sqlglot
@@ -224,6 +232,43 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
         for m in _RE_JOIN.finditer(no_literals):
             read.add(_strip_quotes(m.group(1)))
         return SqlAccessResult(read, write, lock_intent, None, None)
+
+    # COPY table FROM/TO — PostgreSQL bulk I/O
+    m_copy = _RE_COPY.search(no_literals)
+    if m_copy:
+        tbl = _strip_quotes(m_copy.group(1))
+        # COPY (subquery) — has parenthesis right after COPY, bail to sqlglot
+        after_copy = no_literals[m_copy.start():].lstrip()
+        if after_copy.upper().startswith("COPY") and "(" in after_copy.split()[1:2]:
+            return None
+        m_dir = _RE_COPY_DIR.search(no_literals, m_copy.end())
+        if m_dir and m_dir.group(1).upper() == "TO":
+            read.add(tbl)
+        else:
+            write.add(tbl)
+        return SqlAccessResult(read, write, None, None, None)
+
+    # DEALLOCATE [PREPARE] stmt_name — no table access
+    if _RE_DEALLOCATE.search(stripped):
+        return SqlAccessResult(set(), set(), None, None, None)
+
+    # PREPARE stmt AS <sql> — parse the inner SQL
+    m_prepare = _RE_PREPARE.search(stripped)
+    if m_prepare:
+        m_as = _RE_PREPARE_AS.search(stripped, m_prepare.end())
+        if m_as:
+            inner_sql = stripped[m_as.end():].strip()
+            if inner_sql:
+                inner = _regex_parse(inner_sql)
+                if inner is not None:
+                    return inner
+                return None  # let sqlglot handle the inner SQL
+        return SqlAccessResult(set(), set(), None, None, None)
+
+    # EXECUTE stmt_name [(params)] — opaque, cannot resolve table without prepared stmt registry
+    m_exec = _RE_EXECUTE_STMT.search(stripped)
+    if m_exec:
+        return SqlAccessResult(set(), set(), None, None, None)
 
     return None  # unknown statement type → fall through
 

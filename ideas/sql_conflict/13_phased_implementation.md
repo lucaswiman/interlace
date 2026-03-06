@@ -155,17 +155,13 @@ Implementation split into modular files (original plan called for single `_sql_d
 
 ---
 
-### TODO: Connection Pooling Awareness (Phase 7, Low Priority)
+### TODO: Connection Pooling Awareness (Phase 7, Low Priority) — ✅ Done
 **Priority:** Low (pooled connections mostly transparent to cursor patching)
 **Scope:**
-- SQLAlchemy `create_engine()` pool management
-- pgbouncer / PgPool-II — external connection poolers
-- Per-connection TLS tracking (pool may share connections across logical sessions)
-- Transaction state may leak across pool checkout/checkin boundaries
-
-**Mitigation:** Current cursor-level patching works correctly with pooled connections since we intercept at `cursor.execute()`, not `connect()`. The main risk is transaction state (`_in_transaction`) persisting across pool recycling.
-
-**Estimated effort:** ~40 lines + 10 tests (mostly defensive cleanup at pool boundaries)
+- `reset_connection_state()` clears `_in_transaction`, `_tx_buffer`, `_tx_savepoints` from TLS
+- Call at pool checkout/checkin to prevent state leakage across logical sessions
+- Safe to call even when no transaction is active (no-op)
+- Tests: `tests/test_sql_pooling.py` (7 tests)
 
 ---
 
@@ -183,15 +179,13 @@ Implementation split into modular files (original plan called for single `_sql_d
 
 ---
 
-### TODO: Phantom Read Detection in Anomaly Classifier (Phase 7)
-**Priority:** Low (phantoms require range predicates, currently table-level)
+### TODO: Phantom Read Detection in Anomaly Classifier (Phase 7) — ✅ Done
+**Priority:** Low
 **Scope:**
-- `_sql_anomaly.py` classifies: dirty_read, write_skew, lost_update, write_write, non_repeatable_read
-- Missing: phantom reads (a thread re-executes a range query and gets different rows due to concurrent INSERT/DELETE)
-- Requires range predicate support to distinguish from non-repeatable reads
-- Per Berenson et al. (1995): phantom = new rows appear; non-repeatable = existing rows change
-
-**Estimated effort:** ~50 lines + 15 tests (blocked on range predicate support)
+- `_sql_anomaly.py` now classifies: dirty_read, write_skew, lost_update, write_write, non_repeatable_read, **phantom_read**
+- Heuristic: if a thread reads a table twice and another thread writes (INSERT/DELETE, never reads) between the two reads, classify as phantom
+- Checked after non-repeatable read (NRR is the more general pattern)
+- Tests: 4 tests in `tests/test_sql_anomaly.py`
 
 ---
 
@@ -224,8 +218,10 @@ If range predicate support becomes important, a lightweight interval-arithmetic 
 | 7 | Stored procedures | 🔴 Very Low | 200 lines + 40 tests | Rare in Python ORMs | **TODO** |
 | 7 | Temporal tables | 🔴 Very Low | 40 lines + 10 tests | Specialized SQL | ✅ **Done** |
 | 7 | Computed columns | 🔴 Very Low | 30 lines + 5 tests | Informational | **TODO** |
-| 7 | Connection pooling awareness | 🔴 Low | 40 lines + 10 tests | Pool state leakage | **TODO** |
+| 7 | Connection pooling awareness | 🔴 Low | 15 lines + 7 tests | Pool state leakage | ✅ **Done** |
 | 7 | Multi-statement SQL strings | 🔴 Low | 30 lines + 10 tests | Manual SQL only | ✅ **Done** |
-| 7 | Phantom read detection | 🔴 Low | 50 lines + 15 tests | Blocked on range predicates | **TODO** |
+| 7 | Phantom read detection | 🔴 Low | 40 lines + 4 tests | Heuristic-based | ✅ **Done** |
+| 7 | COPY statement parsing | 🔴 Low | 20 lines + 10 tests | PostgreSQL bulk I/O | ✅ **Done** |
+| 7 | PREPARE/EXECUTE parsing | 🔴 Low | 20 lines + 8 tests | Server-side prepared stmts | ✅ **Done** |
 
 **Legend:** 🟢 High-impact | 🟡 Medium-impact | 🔴 Low-impact
