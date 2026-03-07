@@ -60,6 +60,7 @@ from frontrun._io_detection import (
 )
 from frontrun._sql_anomaly import classify_sql_anomaly
 from frontrun._sql_cursor import is_tid_suppressed, patch_sql, unpatch_sql
+from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import should_trace_file as _should_trace_file
@@ -1613,6 +1614,7 @@ def explore_dpor(
     deadlock_timeout: float = 5.0,
     reproduce_on_failure: int = 10,
     total_timeout: float | None = None,
+    warn_nondeterministic_sql: bool = True,
 ) -> InterleavingResult:
     """Systematically explore interleavings using DPOR.
 
@@ -1646,6 +1648,12 @@ def explore_dpor(
         total_timeout: Maximum total time in seconds for the entire
             exploration (default None = unlimited).  When exceeded, returns
             results gathered so far.
+        warn_nondeterministic_sql: If True (default), raise
+            :class:`~frontrun.common.NondeterministicSQLError` when SQL
+            INSERT statements are detected but ``lastrowid`` capture
+            failed (e.g. psycopg2 without RETURNING).  Set to False to
+            suppress.  When capture succeeds, INSERTs use stable
+            indexical resource IDs automatically.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample found.
@@ -1698,6 +1706,7 @@ def explore_dpor(
         while True:
             if total_deadline is not None and time.monotonic() > total_deadline:
                 break
+            clear_insert_tracker()
             with engine_lock:
                 execution = engine.begin_execution()
             recorder = TraceRecorder()
@@ -1737,6 +1746,9 @@ def explore_dpor(
                 runner._unpatch_locks()
 
             result.num_explored += 1
+
+            if warn_nondeterministic_sql:
+                check_uncaptured_inserts()
 
             if not invariant(state):
                 result.property_holds = False

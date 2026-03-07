@@ -337,6 +337,31 @@ The Python-side bridge can then parse the SQL and report at table level,
 even for C-extension drivers that never go through ``cursor.execute()``.
 
 
+Indexical INSERT Resource IDs
+------------------------------
+
+Autoincrement columns (``SERIAL``, ``IDENTITY``, ``AUTOINCREMENT``)
+assign IDs based on execution order.  When DPOR explores different
+thread interleavings, the same INSERT produces different concrete IDs.
+
+Frontrun solves this with **indexical resource IDs**: after each INSERT
+executes, ``cursor.lastrowid`` is captured and mapped to a logical alias
+like ``sql:users:t0_ins0`` ("thread 0's first INSERT into users").
+Downstream operations referencing the captured ID are automatically
+translated to the same alias, giving DPOR stable conflict detection
+across interleavings.
+
+Each INSERT also reports a write to a shared **sequence resource**
+``sql:<table>:seq``, ensuring DPOR explores both orderings of concurrent
+INSERTs to the same table.
+
+**Fallback:** When ``lastrowid`` capture fails (e.g. psycopg2 without a
+``RETURNING`` clause), ``explore_dpor()`` and ``explore_interleavings()``
+raise ``NondeterministicSQLError`` by default.  Suppress this with
+``warn_nondeterministic_sql=False`` if you understand the implications,
+or add a ``RETURNING`` clause to your INSERTs.
+
+
 References
 ----------
 

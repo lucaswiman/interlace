@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import re
 import sqlite3
 import threading
 from collections.abc import Generator
@@ -25,6 +26,7 @@ from typing import Any
 
 from frontrun._io_detection import _io_tls, get_io_reporter
 from frontrun._schema import get_schema
+from frontrun._sql_insert_tracker import record_insert, resolve_alias
 from frontrun._sql_parsing import (
     LockIntent,
     Release,
@@ -54,6 +56,15 @@ except ImportError:
         def __init__(self, column: str, value: str):
             self.column = column
             self.value = value
+
+
+# ---------------------------------------------------------------------------
+# INSERT detection regex (used by _intercept_execute for post-INSERT capture).
+# Reuses the same pattern as _sql_parsing._RE_INSERT to extract the table name
+# in a single match, avoiding a redundant parse_sql_access call.
+# ---------------------------------------------------------------------------
+
+_RE_INSERT_TABLE = re.compile(r"^\s*INSERT\s+INTO\s+[`\"\[]?(\w+)", re.I)
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +101,17 @@ def is_tid_suppressed(tid: int) -> bool:
 # ---------------------------------------------------------------------------
 # Core interception logic
 # ---------------------------------------------------------------------------
+
+
+def _report_or_buffer(reporter: Any, res_id: str, kind: str) -> None:
+    """Report a SQL access immediately, or buffer it if inside a transaction."""
+    in_tx = getattr(_io_tls, "_in_transaction", False)
+    if in_tx:
+        if not hasattr(_io_tls, "_tx_buffer"):
+            _io_tls._tx_buffer = []
+        _io_tls._tx_buffer.append((res_id, kind))
+    else:
+        reporter(res_id, kind)
 
 
 def _sql_resource_id(table: str, predicates: list[Any], temporal: str | None = None) -> str:
@@ -181,13 +203,15 @@ def _report_sql_access(
             def report_or_buffer(table: str, kind: str, rows: list[list[Any]]) -> None:
                 temporal = access.temporal_clauses.get(table) if access.temporal_clauses else None
                 for row_preds in rows:
-                    res_id = _sql_resource_id(table, row_preds, temporal)
-                    if in_tx:
-                        if not hasattr(_io_tls, "_tx_buffer"):
-                            _io_tls._tx_buffer = []
-                        _io_tls._tx_buffer.append((res_id, kind))
-                    else:
-                        reporter(res_id, kind)
+                    # Check if any predicate value matches a captured INSERT ID
+                    alias = None
+                    for pred in row_preds:
+                        if isinstance(pred, EqualityPredicate):
+                            alias = resolve_alias(table, pred.value)
+                            if alias is not None:
+                                break
+                    res_id = alias if alias is not None else _sql_resource_id(table, row_preds, temporal)
+                    _report_or_buffer(reporter, res_id, kind)
 
             # Report explicit reads
             for table in access.read_tables:
@@ -232,6 +256,21 @@ def _report_sql_access(
     return reported
 
 
+def _capture_insert_id(cursor: Any, table: str) -> None:
+    """Capture lastrowid after INSERT and report indexical alias + sequence resource."""
+    reporter = get_io_reporter()
+    if reporter is None:
+        return
+
+    lastrowid = getattr(cursor, "lastrowid", None)
+
+    alias = record_insert(table, lastrowid)
+
+    # Report the logical alias and shared sequence resource as writes
+    _report_or_buffer(reporter, alias, "write")
+    _report_or_buffer(reporter, f"sql:{table}:seq", "write")
+
+
 def _intercept_execute(
     original_method: Any,
     self: Any,
@@ -256,17 +295,26 @@ def _intercept_execute(
     called.  ROLLBACK clears the buffer.  SAVEPOINTs and ROLLBACK TO SAVEPOINT
     are supported via buffer truncation.
     """
+    insert_match = _RE_INSERT_TABLE.match(operation) if isinstance(operation, str) else None
     reported = _report_sql_access(operation, parameters, is_executemany=is_executemany, paramstyle=paramstyle)
 
     if reported:
         with _suppress_endpoint_io():
             if parameters is not None:
-                return original_method(self, operation, parameters)
-            return original_method(self, operation)
+                result = original_method(self, operation, parameters)
+            else:
+                result = original_method(self, operation)
     else:
         if parameters is not None:
-            return original_method(self, operation, parameters)
-        return original_method(self, operation)
+            result = original_method(self, operation, parameters)
+        else:
+            result = original_method(self, operation)
+
+    # Post-INSERT: capture lastrowid and record indexical alias
+    if insert_match is not None and not is_executemany and reported:
+        _capture_insert_id(self, insert_match.group(1))
+
+    return result
 
 
 # ---------------------------------------------------------------------------

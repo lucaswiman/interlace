@@ -270,6 +270,16 @@ Each thread creates its own ``Session`` and gets its own ``User`` ORM
 instance, so there is no Python-level shared state.  The real conflict
 is the database row, and DPOR finds it via the network I/O.
 
+.. note::
+
+   **Indexical INSERT IDs.**  Frontrun automatically captures
+   ``cursor.lastrowid`` after INSERTs and uses stable logical aliases
+   (like ``sql:users:t0_ins0``) for DPOR conflict detection, so
+   autoincrement IDs don't cause nondeterminism.  If ``lastrowid``
+   capture fails (e.g. psycopg2 without ``RETURNING``),
+   ``NondeterministicSQLError`` is raised by default.  See
+   :doc:`sql-technical-details` for details.
+
 
 Demo 4 --- Naive threading (intermittent)
 ------------------------------------------

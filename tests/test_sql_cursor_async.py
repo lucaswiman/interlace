@@ -591,9 +591,14 @@ async def test_savepoint_rollback_to_truncates_buffer() -> None:
         await conn.execute("ROLLBACK TO sp1")
         await conn.execute("COMMIT")
 
-    # Only the first INSERT should be flushed (second was rolled back)
+    # Only the first INSERT's events should be flushed (second was rolled back).
+    # Each INSERT produces table-level + alias + sequence writes.
     write_events = [(r, k) for r, k in log.events if k == "write"]
-    assert len(write_events) == 1  # Only first INSERT survived
+    write_resources = {r for r, _ in write_events}
+    # First INSERT's resources survive; second INSERT's do not
+    assert "sql:t" in write_resources or any(r.startswith("sql:t:") for r in write_resources)
+    # No events from the second INSERT (VALUES (2, 'b'))
+    assert not any("ins1" in r for r, _ in write_events)
 
 
 # ---------------------------------------------------------------------------

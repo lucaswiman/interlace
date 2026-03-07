@@ -7,6 +7,30 @@ psycopg3, connection pooling, etc.) is complete and verified.
 
 ---
 
+## High Priority
+
+### Autoincrement / Sequence Non-Determinism — ✅ DONE
+
+Implemented in `frontrun/_sql_insert_tracker.py`:
+
+1. **Post-INSERT ID Capture with Logical Aliases.** ✅ After INSERT,
+   `cursor.lastrowid` is captured and mapped to indexical aliases like
+   `sql:users:t0_ins0`.  Downstream operations resolve concrete IDs
+   to these aliases automatically.
+
+2. **Sequence-as-Resource.** ✅ Each INSERT reports a write to
+   `sql:<table>:seq`, ensuring DPOR explores orderings of concurrent
+   INSERTs.
+
+3. **Fallback Warning.** ✅ `NondeterministicSQLError` raised only when
+   `lastrowid` capture fails (e.g. psycopg2 without RETURNING).
+   Controlled by `warn_nondeterministic_sql=True`.
+
+**Remaining:** RETURNING clause injection for PostgreSQL drivers
+(psycopg2/psycopg3) where `lastrowid` is unavailable.
+
+---
+
 ## Medium Priority
 
 ### Cross-Table Foreign Key Analysis
@@ -25,31 +49,3 @@ FK constraint creates a real conflict.
   automatic introspection is the remaining piece
 
 **Estimated effort:** ~150 lines + 25 tests
-
----
-
-## Low Priority
-
-### Stored Procedure Analysis
-Intercept `CREATE PROCEDURE`/`CREATE FUNCTION`, parse their bodies,
-cache `{sp_name -> {read_tables, write_tables}}`. At `CALL` or
-function invocation, use cached access instead of endpoint-level.
-
-Rare in modern Python ORMs -- most code uses direct SQL.
-
-**Estimated effort:** ~200 lines + 40 tests
-
-### Generated & Computed Columns
-Schema introspection to identify `GENERATED ALWAYS AS` columns.
-Exclude from row-level predicate matching (can't be set by user).
-Informational only; minimal impact on conflict detection.
-
-**Estimated effort:** ~30 lines + 5 tests
-
-### Window Function Handling
-Recognize `OVER (PARTITION BY ...)` clauses and fall back to
-table-level when present (all rows in the partition are
-interdependent). Currently safe -- window functions already extract
-tables correctly, just miss the partition semantics.
-
-**Estimated effort:** ~20 lines + 3 tests
