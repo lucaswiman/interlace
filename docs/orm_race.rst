@@ -270,6 +270,15 @@ Each thread creates its own ``Session`` and gets its own ``User`` ORM
 instance, so there is no Python-level shared state.  The real conflict
 is the database row, and DPOR finds it via the network I/O.
 
+.. note::
+
+   **Nondeterministic SQL warning.**  If your test setup uses INSERTs
+   to create rows (rather than pre-populating them with explicit IDs),
+   ``explore_dpor`` will raise ``NondeterministicSQLError`` by default.
+   This is because autoincrement IDs depend on thread scheduling.  The
+   ``_State.__init__`` setup above avoids this by using ``session.get``
+   on a pre-existing row.  See :doc:`sql-technical-details` for details.
+
 
 Demo 4 --- Naive threading (intermittent)
 ------------------------------------------

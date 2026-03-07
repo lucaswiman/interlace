@@ -9,6 +9,18 @@ if TYPE_CHECKING:
     from frontrun._sql_anomaly import SqlAnomaly
 
 
+class NondeterministicSQLError(Exception):
+    """Raised when SQL INSERT statements are detected during exploration.
+
+    Autoincrement/SERIAL/IDENTITY columns assign IDs based on execution
+    order, making test results non-deterministic across interleavings.
+    Pre-allocate rows with explicit IDs in your test setup instead.
+
+    Pass ``warn_nondeterministic_sql=False`` to suppress this check if
+    you understand the implications.
+    """
+
+
 @dataclass
 class Step:
     """Represents a single step in the execution schedule.

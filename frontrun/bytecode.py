@@ -53,12 +53,12 @@ from frontrun._io_detection import (
     set_io_reporter,
     unpatch_io,
 )
-from frontrun._sql_cursor import patch_sql, unpatch_sql
+from frontrun._sql_cursor import clear_insert_tables, get_insert_tables, patch_sql, unpatch_sql
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.cli import require_active as _require_frontrun_env
-from frontrun.common import InterleavingResult
+from frontrun.common import InterleavingResult, NondeterministicSQLError
 
 # Type variable for the shared state passed between setup and thread functions
 T = TypeVar("T")
@@ -580,6 +580,7 @@ def explore_interleavings(
     deadlock_timeout: float = 5.0,
     reproduce_on_failure: int = 10,
     total_timeout: float | None = None,
+    warn_nondeterministic_sql: bool = True,
 ) -> InterleavingResult:
     """Search for interleavings that violate an invariant.
 
@@ -617,6 +618,10 @@ def explore_interleavings(
         total_timeout: Maximum total time in seconds for the entire
             exploration (default None = unlimited).  When exceeded, returns
             results gathered so far.
+        warn_nondeterministic_sql: If True (default), raise
+            :class:`~frontrun.common.NondeterministicSQLError` when SQL
+            INSERT statements are detected during exploration.  Set to
+            False to suppress.
 
     Returns:
         InterleavingResult with the outcome.  The ``unique_interleavings``
@@ -630,6 +635,7 @@ def explore_interleavings(
     seen_schedule_hashes: set[int] = set()
     total_deadline = time.monotonic() + total_timeout if total_timeout is not None else None
 
+    clear_insert_tables()
     for _ in range(max_attempts):
         if total_deadline is not None and time.monotonic() > total_deadline:
             break
@@ -654,6 +660,25 @@ def explore_interleavings(
         )
         result.num_explored += 1
         seen_schedule_hashes.add(hash(tuple(schedule)))
+
+        if warn_nondeterministic_sql:
+            insert_tables = get_insert_tables()
+            if insert_tables:
+                tables_str = ", ".join(sorted(insert_tables))
+                raise NondeterministicSQLError(
+                    f"SQL INSERT statements were detected on table(s): {tables_str}\n\n"
+                    "Autoincrement/SERIAL/IDENTITY columns assign different IDs depending on "
+                    "thread scheduling, making results non-deterministic across interleavings.\n\n"
+                    "To fix this, pre-allocate rows with explicit IDs in your test setup:\n\n"
+                    "    def setup():\n"
+                    "        with Session(engine) as session:\n"
+                    "            session.add(User(id=1, name='alice'))\n"
+                    "            session.add(User(id=2, name='bob'))\n"
+                    "            session.commit()\n"
+                    "        return State(alice_id=1, bob_id=2)\n\n"
+                    "If your test intentionally exercises concurrent INSERTs and you understand\n"
+                    "the non-determinism implications, pass warn_nondeterministic_sql=False."
+                )
 
         if not invariant(state):
             result.property_holds = False

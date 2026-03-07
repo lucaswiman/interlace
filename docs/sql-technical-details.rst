@@ -337,6 +337,68 @@ The Python-side bridge can then parse the SQL and report at table level,
 even for C-extension drivers that never go through ``cursor.execute()``.
 
 
+Nondeterministic SQL Warning
+-----------------------------
+
+By default, ``explore_dpor()`` and ``explore_interleavings()`` raise
+``NondeterministicSQLError`` when an INSERT statement is detected during
+exploration.
+
+**Why:** Autoincrement columns (``SERIAL``, ``IDENTITY``,
+``AUTOINCREMENT``) assign IDs based on execution order.  When DPOR
+explores different thread interleavings, the same INSERT produces
+different IDs, making downstream queries, invariant assertions, and
+row-level conflict detection unstable.
+
+**The fix:** Pre-allocate rows with explicit IDs in your test setup so
+that thread functions operate on existing rows rather than creating new
+ones:
+
+.. code-block:: python
+
+   def setup():
+       with Session(engine) as session:
+           session.add(User(id=1, name="alice", login_count=0))
+           session.add(User(id=2, name="bob", login_count=0))
+           session.commit()
+       return State(alice_id=1, bob_id=2)
+
+   def thread_fn(state):
+       with Session(engine) as session:
+           user = session.get(User, state.alice_id)
+           user.login_count += 1
+           session.commit()
+
+   result = explore_dpor(
+       setup=setup,
+       threads=[thread_fn, thread_fn],
+       invariant=lambda s: read_login_count(s) == 2,
+   )
+
+This pattern is both deterministic and reflects the common case: most
+real concurrency bugs are read-modify-write races on *existing* rows
+(the lost-update pattern), not races between concurrent INSERTs.
+
+If your test intentionally exercises concurrent INSERTs and you
+understand the non-determinism implications, suppress the check:
+
+.. code-block:: python
+
+   result = explore_dpor(
+       setup=setup,
+       threads=[inserter_a, inserter_b],
+       invariant=check,
+       warn_nondeterministic_sql=False,
+   )
+
+.. note::
+
+   The warning fires on the *first* INSERT observed, before completing
+   the first interleaving.  This is intentional: the non-determinism
+   affects every subsequent interleaving, so there is no value in
+   continuing.
+
+
 References
 ----------
 

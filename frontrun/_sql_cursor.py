@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import re
 import sqlite3
 import threading
 from collections.abc import Generator
@@ -54,6 +55,34 @@ except ImportError:
         def __init__(self, column: str, value: str):
             self.column = column
             self.value = value
+
+
+# ---------------------------------------------------------------------------
+# INSERT tracking infrastructure
+# ---------------------------------------------------------------------------
+
+_insert_tables: set[str] = set()
+_insert_tables_lock = threading.Lock()
+
+_RE_IS_INSERT = re.compile(r"^\s*INSERT\b", re.I)
+
+
+def record_insert_table(table: str) -> None:
+    """Record that an INSERT was observed on this table."""
+    with _insert_tables_lock:
+        _insert_tables.add(table)
+
+
+def get_insert_tables() -> set[str]:
+    """Return set of tables that received INSERTs during this exploration."""
+    with _insert_tables_lock:
+        return _insert_tables.copy()
+
+
+def clear_insert_tables() -> None:
+    """Clear the INSERT tracking state (call between explorations)."""
+    with _insert_tables_lock:
+        _insert_tables.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +257,11 @@ def _report_sql_access(
             # Report writes
             for table in access.write_tables:
                 report_or_buffer(table, "write", pred_rows)
+
+            # Track INSERT statements for nondeterministic-SQL warnings
+            if _RE_IS_INSERT.match(operation):
+                for table in access.write_tables:
+                    record_insert_table(table)
 
     return reported
 

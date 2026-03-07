@@ -26,7 +26,11 @@ Async bytecode exploration::
 
 from importlib.metadata import version as _metadata_version
 
+from frontrun.common import NondeterministicSQLError
+
 try:
     __version__: str = _metadata_version("frontrun")
 except Exception:
     __version__ = "0.0.0"
+
+__all__ = ["NondeterministicSQLError", "__version__"]
