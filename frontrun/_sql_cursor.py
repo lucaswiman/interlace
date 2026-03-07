@@ -183,7 +183,6 @@ def _report_sql_access(
         if access.read_tables or access.write_tables:
             reported = True
             all_tables = access.read_tables | access.write_tables
-            in_tx = getattr(_io_tls, "_in_transaction", False)
 
             # Row-level predicate extraction (WHERE equality, IN-lists, and INSERT VALUES)
             # Reuses the pre-parsed AST from parse_sql_access when available (avoids
