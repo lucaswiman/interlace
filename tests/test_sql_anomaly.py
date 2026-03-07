@@ -237,9 +237,9 @@ class TestClassifyPhantomRead:
         # will match NRR first.  To test phantom, we need NRR to NOT match.
         # Use row-level resource IDs where the two reads don't match the write resource:
         events = [
-            _sql_event_row(0, 0, "orders", "set_a", "read"),   # Thread 0 reads set A
-            _sql_event(1, 1, "orders", "write"),                # Thread 1 inserts (table-level write)
-            _sql_event_row(2, 0, "orders", "set_a", "read"),   # Thread 0 re-reads set A
+            _sql_event_row(0, 0, "orders", "set_a", "read"),  # Thread 0 reads set A
+            _sql_event(1, 1, "orders", "write"),  # Thread 1 inserts (table-level write)
+            _sql_event_row(2, 0, "orders", "set_a", "read"),  # Thread 0 re-reads set A
         ]
         result = classify_sql_anomaly(events)
         assert result is not None
@@ -254,7 +254,7 @@ class TestClassifyPhantomRead:
         events = [
             _sql_event(0, 0, "accounts", "read"),
             _sql_event(1, 1, "accounts", "write"),  # UPDATE by thread 1 (also reads)
-            _sql_event(2, 1, "accounts", "read"),   # thread 1 reads (shows it's an UPDATE)
+            _sql_event(2, 1, "accounts", "read"),  # thread 1 reads (shows it's an UPDATE)
             _sql_event(3, 0, "accounts", "read"),
         ]
         result = classify_sql_anomaly(events)

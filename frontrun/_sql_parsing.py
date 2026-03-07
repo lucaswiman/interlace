@@ -168,7 +168,10 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
             return None
 
     # Subqueries in DELETE or UPDATE (SELECT appearing after the first keyword)
-    if not any(stripped.lower().startswith(kw) for kw in ("select", "insert", "prepare")) and "SELECT" in upper_no_literals:
+    if (
+        not any(stripped.lower().startswith(kw) for kw in ("select", "insert", "prepare"))
+        and "SELECT" in upper_no_literals
+    ):
         return None
 
     # Function calls (advisory locks etc) — bail to sqlglot
@@ -238,7 +241,7 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
     if m_copy:
         tbl = _strip_quotes(m_copy.group(1))
         # COPY (subquery) — has parenthesis right after COPY, bail to sqlglot
-        after_copy = no_literals[m_copy.start():].lstrip()
+        after_copy = no_literals[m_copy.start() :].lstrip()
         if after_copy.upper().startswith("COPY") and "(" in after_copy.split()[1:2]:
             return None
         m_dir = _RE_COPY_DIR.search(no_literals, m_copy.end())
@@ -257,7 +260,7 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
     if m_prepare:
         m_as = _RE_PREPARE_AS.search(stripped, m_prepare.end())
         if m_as:
-            inner_sql = stripped[m_as.end():].strip()
+            inner_sql = stripped[m_as.end() :].strip()
             if inner_sql:
                 inner = _regex_parse(inner_sql)
                 if inner is not None:
