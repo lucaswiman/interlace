@@ -1702,11 +1702,11 @@ def explore_dpor(
         preload_dispatcher.add_listener(preload_bridge.listener)
         preload_dispatcher.start()
 
-    clear_insert_tracker()
     try:
         while True:
             if total_deadline is not None and time.monotonic() > total_deadline:
                 break
+            clear_insert_tracker()
             with engine_lock:
                 execution = engine.begin_execution()
             recorder = TraceRecorder()

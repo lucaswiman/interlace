@@ -129,9 +129,11 @@ def check_uncaptured_inserts() -> None:
 
 def clear_insert_tracker() -> None:
     """Reset all INSERT tracking state (call between DPOR executions)."""
-    global _state
     with _lock:
-        _state = _TrackerState()
+        _state.records.clear()
+        _state.concrete_to_alias.clear()
+        _state.thread_table_seq.clear()
+        _state.uncaptured_tables.clear()
 
 
 def get_records() -> list[InsertRecord]:

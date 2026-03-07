@@ -638,7 +638,6 @@ def explore_interleavings(
     seen_schedule_hashes: set[int] = set()
     total_deadline = time.monotonic() + total_timeout if total_timeout is not None else None
 
-    clear_insert_tracker()
     for _ in range(max_attempts):
         if total_deadline is not None and time.monotonic() > total_deadline:
             break
@@ -649,6 +648,7 @@ def explore_interleavings(
             rng.shuffle(round_perm)
             schedule.extend(round_perm)
 
+        clear_insert_tracker()
         if debug:
             print(f"Running with {schedule=} {threads=}", flush=True)
         recorder = TraceRecorder()

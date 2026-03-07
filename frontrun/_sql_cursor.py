@@ -59,10 +59,12 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# INSERT detection regex (used by _intercept_execute for post-INSERT capture)
+# INSERT detection regex (used by _intercept_execute for post-INSERT capture).
+# Reuses the same pattern as _sql_parsing._RE_INSERT to extract the table name
+# in a single match, avoiding a redundant parse_sql_access call.
 # ---------------------------------------------------------------------------
 
-_RE_IS_INSERT = re.compile(r"^\s*INSERT\b", re.I)
+_RE_INSERT_TABLE = re.compile(r"^\s*INSERT\s+INTO\s+[`\"\[]?(\w+)", re.I)
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +101,17 @@ def is_tid_suppressed(tid: int) -> bool:
 # ---------------------------------------------------------------------------
 # Core interception logic
 # ---------------------------------------------------------------------------
+
+
+def _report_or_buffer(reporter: Any, res_id: str, kind: str) -> None:
+    """Report a SQL access immediately, or buffer it if inside a transaction."""
+    in_tx = getattr(_io_tls, "_in_transaction", False)
+    if in_tx:
+        if not hasattr(_io_tls, "_tx_buffer"):
+            _io_tls._tx_buffer = []
+        _io_tls._tx_buffer.append((res_id, kind))
+    else:
+        reporter(res_id, kind)
 
 
 def _sql_resource_id(table: str, predicates: list[Any], temporal: str | None = None) -> str:
@@ -198,12 +211,7 @@ def _report_sql_access(
                             if alias is not None:
                                 break
                     res_id = alias if alias is not None else _sql_resource_id(table, row_preds, temporal)
-                    if in_tx:
-                        if not hasattr(_io_tls, "_tx_buffer"):
-                            _io_tls._tx_buffer = []
-                        _io_tls._tx_buffer.append((res_id, kind))
-                    else:
-                        reporter(res_id, kind)
+                    _report_or_buffer(reporter, res_id, kind)
 
             # Report explicit reads
             for table in access.read_tables:
@@ -248,32 +256,19 @@ def _report_sql_access(
     return reported
 
 
-def _capture_insert_id(cursor: Any, operation: str) -> None:
+def _capture_insert_id(cursor: Any, table: str) -> None:
     """Capture lastrowid after INSERT and report indexical alias + sequence resource."""
     reporter = get_io_reporter()
     if reporter is None:
         return
 
-    access = parse_sql_access(operation)
-    if not access.write_tables:
-        return
-
-    table = next(iter(access.write_tables))
     lastrowid = getattr(cursor, "lastrowid", None)
 
     alias = record_insert(table, lastrowid)
 
-    # Report the logical alias as a write (stable across interleavings)
-    in_tx = getattr(_io_tls, "_in_transaction", False)
-    if in_tx:
-        if not hasattr(_io_tls, "_tx_buffer"):
-            _io_tls._tx_buffer = []
-        _io_tls._tx_buffer.append((alias, "write"))
-        _io_tls._tx_buffer.append((f"sql:{table}:seq", "write"))
-    else:
-        reporter(alias, "write")
-        # Shared sequence resource — concurrent INSERTs to the same table conflict here
-        reporter(f"sql:{table}:seq", "write")
+    # Report the logical alias and shared sequence resource as writes
+    _report_or_buffer(reporter, alias, "write")
+    _report_or_buffer(reporter, f"sql:{table}:seq", "write")
 
 
 def _intercept_execute(
@@ -300,7 +295,7 @@ def _intercept_execute(
     called.  ROLLBACK clears the buffer.  SAVEPOINTs and ROLLBACK TO SAVEPOINT
     are supported via buffer truncation.
     """
-    is_insert = isinstance(operation, str) and _RE_IS_INSERT.match(operation) is not None
+    insert_match = _RE_INSERT_TABLE.match(operation) if isinstance(operation, str) else None
     reported = _report_sql_access(operation, parameters, is_executemany=is_executemany, paramstyle=paramstyle)
 
     if reported:
@@ -316,8 +311,8 @@ def _intercept_execute(
             result = original_method(self, operation)
 
     # Post-INSERT: capture lastrowid and record indexical alias
-    if is_insert and not is_executemany and reported:
-        _capture_insert_id(self, operation)
+    if insert_match is not None and not is_executemany and reported:
+        _capture_insert_id(self, insert_match.group(1))
 
     return result
 
