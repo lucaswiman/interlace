@@ -85,6 +85,29 @@ def clear_insert_tables() -> None:
         _insert_tables.clear()
 
 
+def check_nondeterministic_inserts() -> None:
+    """Raise :class:`~frontrun.common.NondeterministicSQLError` if INSERTs were recorded."""
+    insert_tables = get_insert_tables()
+    if insert_tables:
+        from frontrun.common import NondeterministicSQLError
+
+        tables_str = ", ".join(sorted(insert_tables))
+        raise NondeterministicSQLError(
+            f"SQL INSERT statements were detected on table(s): {tables_str}\n\n"
+            "Autoincrement/SERIAL/IDENTITY columns assign different IDs depending on "
+            "thread scheduling, making results non-deterministic across interleavings.\n\n"
+            "To fix this, pre-allocate rows with explicit IDs in your test setup:\n\n"
+            "    def setup():\n"
+            "        with Session(engine) as session:\n"
+            "            session.add(User(id=1, name='alice'))\n"
+            "            session.add(User(id=2, name='bob'))\n"
+            "            session.commit()\n"
+            "        return State(alice_id=1, bob_id=2)\n\n"
+            "If your test intentionally exercises concurrent INSERTs and you understand\n"
+            "the non-determinism implications, pass warn_nondeterministic_sql=False."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Suppression infrastructure
 # ---------------------------------------------------------------------------
