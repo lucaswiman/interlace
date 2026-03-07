@@ -9,38 +9,25 @@ psycopg3, connection pooling, etc.) is complete and verified.
 
 ## High Priority
 
-### Autoincrement / Sequence Non-Determinism
+### Autoincrement / Sequence Non-Determinism — ✅ DONE
 
-When threads concurrently INSERT into tables with autoincrement PKs,
-the assigned IDs depend on execution order.  This makes downstream
-queries, invariant assertions, and row-level ObjectIds unstable across
-interleavings.  See `ideas/sql_conflics/opus_autoincr_proposal.md` for
-full analysis.
+Implemented in `frontrun/_sql_insert_tracker.py`:
 
-**Approach (three complementary pieces):**
+1. **Post-INSERT ID Capture with Logical Aliases.** ✅ After INSERT,
+   `cursor.lastrowid` is captured and mapped to indexical aliases like
+   `sql:users:t0_ins0`.  Downstream operations resolve concrete IDs
+   to these aliases automatically.
 
-1. **Post-INSERT ID Capture with Logical Aliases.**  After a patched
-   `cursor.execute()` runs an INSERT, inspect `cursor.lastrowid` (or
-   RETURNING clause result) to learn the assigned ID.  Map
-   `(thread_id, table, insert_seq)` to the concrete ID.  Subsequent
-   operations referencing that ID get a stable logical ObjectId like
-   `sql:users:logical_insert_0_thread_a`.  (~200 lines + 30 tests)
+2. **Sequence-as-Resource.** ✅ Each INSERT reports a write to
+   `sql:<table>:seq`, ensuring DPOR explores orderings of concurrent
+   INSERTs.
 
-2. **Sequence-as-Resource.**  Treat the autoincrement counter as a DPOR
-   resource.  INSERT to a table with autoincrement reports a write to
-   `sql:seq:<table>_<col>`.  `currval()`/`lastval()` calls report a
-   read.  Pairs with `information_schema.columns` introspection for
-   detection.  (~50 lines + 10 tests)
+3. **Fallback Warning.** ✅ `NondeterministicSQLError` raised only when
+   `lastrowid` capture fails (e.g. psycopg2 without RETURNING).
+   Controlled by `warn_nondeterministic_sql=True`.
 
-3. **Nondeterministic-SQL Warning Mode (default on).**  When
-   `explore_dpor` or `explore_interleavings` detects SQL resources
-   (INSERTs to tables, especially with autoincrement), fail early with a
-   clear warning telling users to keep tests deterministic by
-   pre-allocating IDs or using explicit PKs in test setup.  Controlled
-   by `warn_nondeterministic_sql=True` (default).  Users who understand
-   the implications can set it to `False`.
-
-**Estimated total effort:** ~300 lines + 50 tests
+**Remaining:** RETURNING clause injection for PostgreSQL drivers
+(psycopg2/psycopg3) where `lastrowid` is unavailable.
 
 ---
 

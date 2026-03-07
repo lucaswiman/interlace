@@ -59,13 +59,8 @@ from frontrun._io_detection import (
     unpatch_io,
 )
 from frontrun._sql_anomaly import classify_sql_anomaly
-from frontrun._sql_cursor import (
-    check_nondeterministic_inserts,
-    clear_insert_tables,
-    is_tid_suppressed,
-    patch_sql,
-    unpatch_sql,
-)
+from frontrun._sql_cursor import is_tid_suppressed, patch_sql, unpatch_sql
+from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import should_trace_file as _should_trace_file
@@ -1655,8 +1650,10 @@ def explore_dpor(
             results gathered so far.
         warn_nondeterministic_sql: If True (default), raise
             :class:`~frontrun.common.NondeterministicSQLError` when SQL
-            INSERT statements are detected during exploration.  Set to
-            False to suppress.
+            INSERT statements are detected but ``lastrowid`` capture
+            failed (e.g. psycopg2 without RETURNING).  Set to False to
+            suppress.  When capture succeeds, INSERTs use stable
+            indexical resource IDs automatically.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample found.
@@ -1705,7 +1702,7 @@ def explore_dpor(
         preload_dispatcher.add_listener(preload_bridge.listener)
         preload_dispatcher.start()
 
-    clear_insert_tables()
+    clear_insert_tracker()
     try:
         while True:
             if total_deadline is not None and time.monotonic() > total_deadline:
@@ -1751,7 +1748,7 @@ def explore_dpor(
             result.num_explored += 1
 
             if warn_nondeterministic_sql:
-                check_nondeterministic_inserts()
+                check_uncaptured_inserts()
 
             if not invariant(state):
                 result.property_holds = False

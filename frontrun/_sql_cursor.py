@@ -26,6 +26,7 @@ from typing import Any
 
 from frontrun._io_detection import _io_tls, get_io_reporter
 from frontrun._schema import get_schema
+from frontrun._sql_insert_tracker import record_insert, resolve_alias
 from frontrun._sql_parsing import (
     LockIntent,
     Release,
@@ -58,54 +59,10 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# INSERT tracking infrastructure
+# INSERT detection regex (used by _intercept_execute for post-INSERT capture)
 # ---------------------------------------------------------------------------
 
-_insert_tables: set[str] = set()
-_insert_tables_lock = threading.Lock()
-
 _RE_IS_INSERT = re.compile(r"^\s*INSERT\b", re.I)
-
-
-def record_insert_table(table: str) -> None:
-    """Record that an INSERT was observed on this table."""
-    with _insert_tables_lock:
-        _insert_tables.add(table)
-
-
-def get_insert_tables() -> set[str]:
-    """Return set of tables that received INSERTs during this exploration."""
-    with _insert_tables_lock:
-        return _insert_tables.copy()
-
-
-def clear_insert_tables() -> None:
-    """Clear the INSERT tracking state (call between explorations)."""
-    with _insert_tables_lock:
-        _insert_tables.clear()
-
-
-def check_nondeterministic_inserts() -> None:
-    """Raise :class:`~frontrun.common.NondeterministicSQLError` if INSERTs were recorded."""
-    insert_tables = get_insert_tables()
-    if insert_tables:
-        from frontrun.common import NondeterministicSQLError
-
-        tables_str = ", ".join(sorted(insert_tables))
-        raise NondeterministicSQLError(
-            f"SQL INSERT statements were detected on table(s): {tables_str}\n\n"
-            "Autoincrement/SERIAL/IDENTITY columns assign different IDs depending on "
-            "thread scheduling, making results non-deterministic across interleavings.\n\n"
-            "To fix this, pre-allocate rows with explicit IDs in your test setup:\n\n"
-            "    def setup():\n"
-            "        with Session(engine) as session:\n"
-            "            session.add(User(id=1, name='alice'))\n"
-            "            session.add(User(id=2, name='bob'))\n"
-            "            session.commit()\n"
-            "        return State(alice_id=1, bob_id=2)\n\n"
-            "If your test intentionally exercises concurrent INSERTs and you understand\n"
-            "the non-determinism implications, pass warn_nondeterministic_sql=False."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +190,14 @@ def _report_sql_access(
             def report_or_buffer(table: str, kind: str, rows: list[list[Any]]) -> None:
                 temporal = access.temporal_clauses.get(table) if access.temporal_clauses else None
                 for row_preds in rows:
-                    res_id = _sql_resource_id(table, row_preds, temporal)
+                    # Check if any predicate value matches a captured INSERT ID
+                    alias = None
+                    for pred in row_preds:
+                        if isinstance(pred, EqualityPredicate):
+                            alias = resolve_alias(table, pred.value)
+                            if alias is not None:
+                                break
+                    res_id = alias if alias is not None else _sql_resource_id(table, row_preds, temporal)
                     if in_tx:
                         if not hasattr(_io_tls, "_tx_buffer"):
                             _io_tls._tx_buffer = []
@@ -281,12 +245,35 @@ def _report_sql_access(
             for table in access.write_tables:
                 report_or_buffer(table, "write", pred_rows)
 
-            # Track INSERT statements for nondeterministic-SQL warnings
-            if _RE_IS_INSERT.match(operation):
-                for table in access.write_tables:
-                    record_insert_table(table)
-
     return reported
+
+
+def _capture_insert_id(cursor: Any, operation: str) -> None:
+    """Capture lastrowid after INSERT and report indexical alias + sequence resource."""
+    reporter = get_io_reporter()
+    if reporter is None:
+        return
+
+    access = parse_sql_access(operation)
+    if not access.write_tables:
+        return
+
+    table = next(iter(access.write_tables))
+    lastrowid = getattr(cursor, "lastrowid", None)
+
+    alias = record_insert(table, lastrowid)
+
+    # Report the logical alias as a write (stable across interleavings)
+    in_tx = getattr(_io_tls, "_in_transaction", False)
+    if in_tx:
+        if not hasattr(_io_tls, "_tx_buffer"):
+            _io_tls._tx_buffer = []
+        _io_tls._tx_buffer.append((alias, "write"))
+        _io_tls._tx_buffer.append((f"sql:{table}:seq", "write"))
+    else:
+        reporter(alias, "write")
+        # Shared sequence resource — concurrent INSERTs to the same table conflict here
+        reporter(f"sql:{table}:seq", "write")
 
 
 def _intercept_execute(
@@ -313,17 +300,26 @@ def _intercept_execute(
     called.  ROLLBACK clears the buffer.  SAVEPOINTs and ROLLBACK TO SAVEPOINT
     are supported via buffer truncation.
     """
+    is_insert = isinstance(operation, str) and _RE_IS_INSERT.match(operation) is not None
     reported = _report_sql_access(operation, parameters, is_executemany=is_executemany, paramstyle=paramstyle)
 
     if reported:
         with _suppress_endpoint_io():
             if parameters is not None:
-                return original_method(self, operation, parameters)
-            return original_method(self, operation)
+                result = original_method(self, operation, parameters)
+            else:
+                result = original_method(self, operation)
     else:
         if parameters is not None:
-            return original_method(self, operation, parameters)
-        return original_method(self, operation)
+            result = original_method(self, operation, parameters)
+        else:
+            result = original_method(self, operation)
+
+    # Post-INSERT: capture lastrowid and record indexical alias
+    if is_insert and not is_executemany and reported:
+        _capture_insert_id(self, operation)
+
+    return result
 
 
 # ---------------------------------------------------------------------------

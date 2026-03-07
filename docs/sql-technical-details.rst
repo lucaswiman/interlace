@@ -337,66 +337,29 @@ The Python-side bridge can then parse the SQL and report at table level,
 even for C-extension drivers that never go through ``cursor.execute()``.
 
 
-Nondeterministic SQL Warning
------------------------------
+Indexical INSERT Resource IDs
+------------------------------
 
-By default, ``explore_dpor()`` and ``explore_interleavings()`` raise
-``NondeterministicSQLError`` when an INSERT statement is detected during
-exploration.
+Autoincrement columns (``SERIAL``, ``IDENTITY``, ``AUTOINCREMENT``)
+assign IDs based on execution order.  When DPOR explores different
+thread interleavings, the same INSERT produces different concrete IDs.
 
-**Why:** Autoincrement columns (``SERIAL``, ``IDENTITY``,
-``AUTOINCREMENT``) assign IDs based on execution order.  When DPOR
-explores different thread interleavings, the same INSERT produces
-different IDs, making downstream queries, invariant assertions, and
-row-level conflict detection unstable.
+Frontrun solves this with **indexical resource IDs**: after each INSERT
+executes, ``cursor.lastrowid`` is captured and mapped to a logical alias
+like ``sql:users:t0_ins0`` ("thread 0's first INSERT into users").
+Downstream operations referencing the captured ID are automatically
+translated to the same alias, giving DPOR stable conflict detection
+across interleavings.
 
-**The fix:** Pre-allocate rows with explicit IDs in your test setup so
-that thread functions operate on existing rows rather than creating new
-ones:
+Each INSERT also reports a write to a shared **sequence resource**
+``sql:<table>:seq``, ensuring DPOR explores both orderings of concurrent
+INSERTs to the same table.
 
-.. code-block:: python
-
-   def setup():
-       with Session(engine) as session:
-           session.add(User(id=1, name="alice", login_count=0))
-           session.add(User(id=2, name="bob", login_count=0))
-           session.commit()
-       return State(alice_id=1, bob_id=2)
-
-   def thread_fn(state):
-       with Session(engine) as session:
-           user = session.get(User, state.alice_id)
-           user.login_count += 1
-           session.commit()
-
-   result = explore_dpor(
-       setup=setup,
-       threads=[thread_fn, thread_fn],
-       invariant=lambda s: read_login_count(s) == 2,
-   )
-
-This pattern is both deterministic and reflects the common case: most
-real concurrency bugs are read-modify-write races on *existing* rows
-(the lost-update pattern), not races between concurrent INSERTs.
-
-If your test intentionally exercises concurrent INSERTs and you
-understand the non-determinism implications, suppress the check:
-
-.. code-block:: python
-
-   result = explore_dpor(
-       setup=setup,
-       threads=[inserter_a, inserter_b],
-       invariant=check,
-       warn_nondeterministic_sql=False,
-   )
-
-.. note::
-
-   The warning fires on the *first* INSERT observed, before completing
-   the first interleaving.  This is intentional: the non-determinism
-   affects every subsequent interleaving, so there is no value in
-   continuing.
+**Fallback:** When ``lastrowid`` capture fails (e.g. psycopg2 without a
+``RETURNING`` clause), ``explore_dpor()`` and ``explore_interleavings()``
+raise ``NondeterministicSQLError`` by default.  Suppress this with
+``warn_nondeterministic_sql=False`` if you understand the implications,
+or add a ``RETURNING`` clause to your INSERTs.
 
 
 References

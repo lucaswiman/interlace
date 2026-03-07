@@ -20,7 +20,7 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from frontrun._sql_cursor import _report_sql_access, _suppress_endpoint_io
+from frontrun._sql_cursor import _RE_IS_INSERT, _capture_insert_id, _report_sql_access, _suppress_endpoint_io
 
 # ---------------------------------------------------------------------------
 # Async interception
@@ -41,17 +41,26 @@ async def _intercept_execute_async(
     Parses *operation*, reports table accesses via the shared
     ``_report_sql_access`` helper, then ``await``s the original async method.
     """
+    is_insert = isinstance(operation, str) and _RE_IS_INSERT.match(operation) is not None
     reported = _report_sql_access(operation, parameters, is_executemany=is_executemany, paramstyle=paramstyle)
 
     if reported:
         with _suppress_endpoint_io():
             if parameters is not None:
-                return await original_method(self, operation, parameters)
-            return await original_method(self, operation)
+                result = await original_method(self, operation, parameters)
+            else:
+                result = await original_method(self, operation)
     else:
         if parameters is not None:
-            return await original_method(self, operation, parameters)
-        return await original_method(self, operation)
+            result = await original_method(self, operation, parameters)
+        else:
+            result = await original_method(self, operation)
+
+    # Post-INSERT: capture lastrowid and record indexical alias
+    if is_insert and not is_executemany and reported:
+        _capture_insert_id(self, operation)
+
+    return result
 
 
 async def _intercept_asyncpg_execute(
