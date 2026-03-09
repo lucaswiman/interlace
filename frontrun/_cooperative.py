@@ -899,6 +899,11 @@ def patch_locks() -> None:
     the count.  ``unpatch_locks()`` only restores the originals when
     the count drops to zero.
     """
+    # Pre-import modules that grab threading.Lock at module level so their
+    # internal lock objects are created with the real C-level lock before we
+    # monkey-patch threading.Lock with a cooperative version.
+    import concurrent.futures.thread  # noqa: F401
+
     global _patched, _patch_count  # noqa: PLW0603
     with _patch_count_lock:
         _patch_count += 1

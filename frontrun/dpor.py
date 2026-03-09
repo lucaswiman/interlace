@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 import types
+import warnings
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -187,6 +188,8 @@ class _PreloadBridge:
         self._pending: dict[int, list[tuple[int, str, str]]] = {}
         self._active = False
         self._dispatcher = dispatcher  # IOEventDispatcher (for poll())
+        self._fd_to_dpor_ids: dict[str, set[int]] = {}
+        self._warned_fds: set[str] = set()
 
     def register_thread(self, os_tid: int, dpor_id: int) -> None:
         """Map an OS thread ID to a DPOR logical thread ID."""
@@ -208,6 +211,8 @@ class _PreloadBridge:
             self._tid_to_dpor.clear()
             self._pending.clear()
             self._active = False
+            self._fd_to_dpor_ids.clear()
+            self._warned_fds.clear()
 
     def listener(self, event: Any) -> None:
         """IOEventDispatcher callback — buffer the event for the right thread."""
@@ -225,6 +230,18 @@ class _PreloadBridge:
             dpor_id = self._tid_to_dpor.get(event.tid)
             if dpor_id is None:
                 return
+            # Warn if two distinct DPOR threads share the same socket fd.
+            # This usually means threads are reusing the same DB connection,
+            # which breaks DPOR's per-thread conflict tracking.
+            seen = self._fd_to_dpor_ids.setdefault(event.resource_id, set())
+            if dpor_id not in seen and seen and event.resource_id not in self._warned_fds:
+                warnings.warn(
+                    f"DPOR threads {seen} and {dpor_id} share socket {event.resource_id!r}. "
+                    "Each thread should use its own database connection.",
+                    stacklevel=2,
+                )
+                self._warned_fds.add(event.resource_id)
+            seen.add(dpor_id)
             # Map libc I/O operations to DPOR access kinds.  Using the
             # actual send/recv distinction (write/read) is critical: the
             # DPOR engine's ObjectState tracks per-thread latest-read and

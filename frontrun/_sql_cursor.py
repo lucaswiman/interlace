@@ -103,10 +103,17 @@ def is_tid_suppressed(tid: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _report_or_buffer(reporter: Any, res_id: str, kind: str) -> None:
-    """Report a SQL access immediately, or buffer it if inside a transaction."""
+def _report_or_buffer(reporter: Any, res_id: str, kind: str, *, force_immediate: bool = False) -> None:
+    """Report a SQL access immediately, or buffer it if inside a transaction.
+
+    When ``force_immediate=True`` the access is reported right away even
+    inside a transaction (used for SELECT FOR UPDATE to let the DPOR engine
+    learn about write-intent conflicts before C-level blocking can occur).
+    Transaction atomicity is preserved because the DPOR scheduler still
+    skips yielding inside transactions.
+    """
     in_tx = getattr(_io_tls, "_in_transaction", False)
-    if in_tx:
+    if in_tx and not force_immediate:
         if not hasattr(_io_tls, "_tx_buffer"):
             _io_tls._tx_buffer = []
         _io_tls._tx_buffer.append((res_id, kind))
@@ -199,6 +206,10 @@ def _report_sql_access(
                     pred_rows = rows
                     has_row_level = True
 
+            # SELECT FOR UPDATE signals write intent immediately so the DPOR
+            # engine can learn about conflicts before C-level blocking occurs.
+            lock_update = access.lock_intent is LockIntent.UPDATE
+
             def report_or_buffer(table: str, kind: str, rows: list[list[Any]]) -> None:
                 temporal = access.temporal_clauses.get(table) if access.temporal_clauses else None
                 for row_preds in rows:
@@ -210,13 +221,13 @@ def _report_sql_access(
                             if alias is not None:
                                 break
                     res_id = alias if alias is not None else _sql_resource_id(table, row_preds, temporal)
-                    _report_or_buffer(reporter, res_id, kind)
+                    _report_or_buffer(reporter, res_id, kind, force_immediate=lock_update)
 
             # Report explicit reads
             for table in access.read_tables:
                 # SELECT FOR UPDATE is both read and write to create conflicts.
                 # SHARE locks are treated as reads (they don't block other shares).
-                kind = "write" if access.lock_intent is LockIntent.UPDATE else "read"
+                kind = "write" if lock_update else "read"
                 report_or_buffer(table, kind, pred_rows)
 
             # Report implicit reads from Foreign Key dependencies
