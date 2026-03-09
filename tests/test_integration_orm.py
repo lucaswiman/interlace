@@ -309,23 +309,15 @@ class TestOrmRowLockDeadlock:
         def thread_a(_state: _State) -> None:
             """Lock user 1, then user 2."""
             with engine.connect() as conn:
-                conn.exec_driver_sql(
-                    "SELECT id FROM users WHERE id = %s FOR UPDATE", (1,)
-                )
-                conn.exec_driver_sql(
-                    "SELECT id FROM users WHERE id = %s FOR UPDATE", (2,)
-                )
+                conn.exec_driver_sql("SELECT id FROM users WHERE id = %s FOR UPDATE", (1,))
+                conn.exec_driver_sql("SELECT id FROM users WHERE id = %s FOR UPDATE", (2,))
                 conn.exec_driver_sql("COMMIT")
 
         def thread_b(_state: _State) -> None:
             """Lock user 2, then user 1 — opposite order from thread_a."""
             with engine.connect() as conn:
-                conn.exec_driver_sql(
-                    "SELECT id FROM users WHERE id = %s FOR UPDATE", (2,)
-                )
-                conn.exec_driver_sql(
-                    "SELECT id FROM users WHERE id = %s FOR UPDATE", (1,)
-                )
+                conn.exec_driver_sql("SELECT id FROM users WHERE id = %s FOR UPDATE", (2,))
+                conn.exec_driver_sql("SELECT id FROM users WHERE id = %s FOR UPDATE", (1,))
                 conn.exec_driver_sql("COMMIT")
 
         def _invariant(_state: _State) -> bool:
@@ -339,8 +331,6 @@ class TestOrmRowLockDeadlock:
             deadlock_timeout=15.0,
         )
 
-        assert not result.property_holds, (
-            "DPOR should detect the row-lock deadlock as an invariant violation"
-        )
+        assert not result.property_holds, "DPOR should detect the row-lock deadlock as an invariant violation"
         assert result.explanation is not None
         assert "deadlock" in result.explanation.lower(), result.explanation

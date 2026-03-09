@@ -120,6 +120,50 @@ def _report_or_buffer(reporter: Any, res_id: str, kind: str, *, force_immediate:
     else:
         reporter(res_id, kind)
 
+    # Track resources that need row-lock arbitration (SELECT FOR UPDATE).
+    # We don't gate on _in_transaction because many drivers (e.g. psycopg2
+    # under SQLAlchemy autobegin) start implicit transactions without an
+    # explicit BEGIN going through the cursor, so _in_transaction stays False
+    # even though the DB connection is actually in a transaction.
+    if force_immediate:
+        pending = getattr(_io_tls, "_pending_row_locks", None)
+        if pending is None:
+            pending = []
+            _io_tls._pending_row_locks = pending
+        pending.append(res_id)
+
+
+def _get_dpor_context() -> tuple[Any, int] | None:
+    """Return (scheduler, thread_id) if DPOR is active, else ``None``."""
+    from frontrun._io_detection import get_dpor_scheduler
+
+    scheduler = get_dpor_scheduler()
+    if scheduler is None:
+        return None
+    from frontrun.dpor import _dpor_tls
+
+    thread_id = getattr(_dpor_tls, "thread_id", None)
+    if thread_id is None:
+        return None
+    return scheduler, thread_id
+
+
+def _acquire_pending_row_locks() -> None:
+    """Drain pending row-lock resources from TLS and acquire them on the scheduler."""
+    lock_resources = getattr(_io_tls, "_pending_row_locks", None)
+    if lock_resources:
+        _io_tls._pending_row_locks = []
+        ctx = _get_dpor_context()
+        if ctx is not None:
+            ctx[0].acquire_row_locks(ctx[1], lock_resources)
+
+
+def _release_dpor_row_locks() -> None:
+    """Release any DPOR row locks held by the current thread."""
+    ctx = _get_dpor_context()
+    if ctx is not None:
+        ctx[0].release_row_locks(ctx[1])
+
 
 def _sql_resource_id(table: str, predicates: list[Any], temporal: str | None = None) -> str:
     """Build a resource ID from table name and optional predicates."""
@@ -167,10 +211,12 @@ def _report_sql_access(
                     reporter(res_id, kind)
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
+                _release_dpor_row_locks()
             elif tx is TxOp.ROLLBACK:
                 _io_tls._in_transaction = False
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
+                _release_dpor_row_locks()
             elif isinstance(tx, Savepoint):
                 savepoints = getattr(_io_tls, "_tx_savepoints", {})
                 buffer = getattr(_io_tls, "_tx_buffer", [])
@@ -307,6 +353,9 @@ def _intercept_execute(
     """
     insert_match = _RE_INSERT_TABLE.match(operation) if isinstance(operation, str) else None
     reported = _report_sql_access(operation, parameters, is_executemany=is_executemany, paramstyle=paramstyle)
+
+    # Block if another DPOR thread holds a conflicting row lock
+    _acquire_pending_row_locks()
 
     if reported:
         with _suppress_endpoint_io():
@@ -543,7 +592,7 @@ def reset_connection_state() -> None:
     from leaking across logical sessions.  Safe to call even when no
     transaction is active (it's a no-op in that case).
     """
-    for attr in ("_in_transaction", "_tx_buffer", "_tx_savepoints"):
+    for attr in ("_in_transaction", "_tx_buffer", "_tx_savepoints", "_pending_row_locks"):
         if hasattr(_io_tls, attr):
             delattr(_io_tls, attr)
 

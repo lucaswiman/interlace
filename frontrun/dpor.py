@@ -540,6 +540,12 @@ class DporScheduler:
                                 self._error = err
                             self._condition.notify_all()
                             raise SchedulerAbort(str(err))
+                    # Yield scheduling to the holder so it can run and
+                    # either release the lock or block on one of ours
+                    # (triggering WaitForGraph cycle detection).
+                    if self._current_thread == thread_id:
+                        self._current_thread = holder
+                        self._condition.notify_all()
                     # Wait for the holder to release
                     if not self._condition.wait(timeout=self.deadlock_timeout):
                         if graph is not None:

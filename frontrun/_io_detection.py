@@ -52,6 +52,16 @@ def set_io_reporter(reporter: IOReporter | None) -> None:
     _io_tls.io_reporter = reporter
 
 
+def get_dpor_scheduler() -> Any:
+    """Return the per-thread DPOR scheduler reference, or ``None``."""
+    return getattr(_io_tls, "_dpor_scheduler", None)
+
+
+def set_dpor_scheduler(scheduler: Any) -> None:
+    """Install a per-thread DPOR scheduler reference (or clear with ``None``)."""
+    _io_tls._dpor_scheduler = scheduler
+
+
 # ---------------------------------------------------------------------------
 # Resource identity helpers
 # ---------------------------------------------------------------------------

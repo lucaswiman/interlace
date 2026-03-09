@@ -182,9 +182,7 @@ class TestCooperativeLockDeadlock:
             ta.join(timeout=3.0)
             tb.join(timeout=3.0)
 
-            assert isinstance(sched._error, DeadlockError), (
-                f"Expected DeadlockError on scheduler, got {sched._error!r}"
-            )
+            assert isinstance(sched._error, DeadlockError), f"Expected DeadlockError on scheduler, got {sched._error!r}"
             assert not isinstance(sched._error, TimeoutError)
         finally:
             self._teardown()
@@ -224,9 +222,7 @@ class TestCooperativeLockDeadlock:
             ta.join(timeout=3.0)
             tb.join(timeout=3.0)
 
-            assert isinstance(sched._error, DeadlockError), (
-                f"Expected DeadlockError on scheduler, got {sched._error!r}"
-            )
+            assert isinstance(sched._error, DeadlockError), f"Expected DeadlockError on scheduler, got {sched._error!r}"
             assert not isinstance(sched._error, TimeoutError)
         finally:
             self._teardown()

@@ -172,6 +172,7 @@ class TestRowLockRegistry:
                 self._condition = real_condition(self._lock)
                 self._finished = False
                 self._error: Exception | None = None
+                self._current_thread: int | None = None
                 self._active_row_locks: dict[str, int] = {}
                 self._row_lock_ids: dict[str, int] = {}
                 self._row_lock_next_id: int = 0
@@ -263,6 +264,7 @@ class TestRowLockRegistry:
                 self._condition = real_condition(self._lock)
                 self._finished = False
                 self._error: Exception | None = None
+                self._current_thread: int | None = None
                 self._active_row_locks: dict[str, int] = {}
                 self._row_lock_ids: dict[str, int] = {}
                 self._row_lock_next_id: int = 0
