@@ -173,11 +173,14 @@ class TestRowLockRegistry:
                 self._finished = False
                 self._error: Exception | None = None
                 self._active_row_locks: dict[str, int] = {}
+                self._row_lock_ids: dict[str, int] = {}
+                self._row_lock_next_id: int = 0
 
             # Bind the real methods from DporScheduler so tests exercise production code.
             acquire_row_locks = DporScheduler.acquire_row_locks
             release_row_locks = DporScheduler.release_row_locks
             _release_row_locks_unlocked = DporScheduler._release_row_locks_unlocked
+            _row_lock_int_id = DporScheduler._row_lock_int_id
 
         return RowLockHost()
 
@@ -262,7 +265,6 @@ class TestRowLockRegistry:
                 self._error: Exception | None = None
                 self._active_row_locks: dict[str, int] = {}
                 self._row_lock_ids: dict[str, int] = {}
-                self._row_lock_names: dict[int, str] = {}
                 self._row_lock_next_id: int = 0
 
             acquire_row_locks = DporScheduler.acquire_row_locks
@@ -333,7 +335,7 @@ class TestRowLockRegistry:
 
     def test_holding_edges_removed_on_release(self) -> None:
         """_release_row_locks_unlocked removes holding edges from WaitForGraph."""
-        from frontrun._deadlock import WaitForGraph, install_wait_for_graph, uninstall_wait_for_graph
+        from frontrun._deadlock import install_wait_for_graph, uninstall_wait_for_graph
 
         install_wait_for_graph()
         try:

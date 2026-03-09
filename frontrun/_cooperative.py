@@ -18,7 +18,7 @@ happens-before engine without changing the core spin-yield logic.
 
 **Deadlock detection** — cooperative Lock and RLock register waiting/holding
 edges in a global :class:`~frontrun._deadlock.WaitForGraph`.  If adding a
-waiting edge creates a cycle, a ``TimeoutError`` with a diagnostic message
+waiting edge creates a cycle, a :class:`~frontrun._deadlock.DeadlockError`
 is raised immediately.  All spin loops also check ``scheduler._error``
 eagerly (before each iteration) and bail via
 :class:`~frontrun._deadlock.SchedulerAbort` when the scheduler has been
@@ -93,6 +93,28 @@ def set_sync_reporter(reporter: SyncReporter | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Internal helper
+# ---------------------------------------------------------------------------
+
+
+def _check_lock_cycle(graph: Any, thread_id: int, object_id: int, scheduler: Any) -> None:
+    """If *graph* contains a cycle after adding a waiting edge, raise SchedulerAbort.
+
+    Must be called before the spin loop.  Removes the waiting edge and reports
+    a :class:`~frontrun._deadlock.DeadlockError` via the scheduler if a cycle
+    is found.
+    """
+    from frontrun._deadlock import DeadlockError, SchedulerAbort, format_cycle
+
+    cycle = graph.add_waiting(thread_id, object_id)
+    if cycle is not None:
+        graph.remove_waiting(thread_id, object_id)
+        msg = f"Lock-ordering deadlock detected: {format_cycle(cycle)}"
+        scheduler.report_error(DeadlockError(msg, format_cycle(cycle)))
+        raise SchedulerAbort(msg)
+
+
+# ---------------------------------------------------------------------------
 # Cooperative Lock
 # ---------------------------------------------------------------------------
 
@@ -115,7 +137,7 @@ class CooperativeLock:
         self._owner_thread_id: int | None = None  # frontrun thread_id, not OS tid
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
-        from frontrun._deadlock import SchedulerAbort, format_cycle, get_wait_for_graph
+        from frontrun._deadlock import get_wait_for_graph
 
         if not blocking:
             result = self._lock.acquire(blocking=False)
@@ -139,17 +161,10 @@ class CooperativeLock:
 
         scheduler, thread_id = ctx
 
-        # Register waiting edge in the wait-for graph
+        # Register waiting edge in the wait-for graph; raises SchedulerAbort on cycle
         graph = get_wait_for_graph()
         if graph is not None:
-            cycle = graph.add_waiting(thread_id, self._object_id)
-            if cycle is not None:
-                from frontrun._deadlock import DeadlockError
-
-                graph.remove_waiting(thread_id, self._object_id)
-                msg = f"Lock-ordering deadlock detected: {format_cycle(cycle)}"
-                scheduler.report_error(DeadlockError(msg, format_cycle(cycle)))
-                raise SchedulerAbort(msg)
+            _check_lock_cycle(graph, thread_id, self._object_id, scheduler)
 
         # Tell the DPOR engine that this thread is waiting for the lock
         # so it can schedule the lock holder instead.
@@ -249,7 +264,7 @@ class CooperativeRLock:
         self._owner_thread_id: int | None = None  # frontrun thread_id
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
-        from frontrun._deadlock import SchedulerAbort, format_cycle, get_wait_for_graph
+        from frontrun._deadlock import get_wait_for_graph
 
         me = threading.get_ident()
         if self._owner == me:
@@ -283,17 +298,10 @@ class CooperativeRLock:
 
         scheduler, thread_id = ctx
 
-        # Register waiting edge in the wait-for graph
+        # Register waiting edge in the wait-for graph; raises SchedulerAbort on cycle
         graph = get_wait_for_graph()
         if graph is not None:
-            cycle = graph.add_waiting(thread_id, self._object_id)
-            if cycle is not None:
-                from frontrun._deadlock import DeadlockError
-
-                graph.remove_waiting(thread_id, self._object_id)
-                msg = f"Lock-ordering deadlock detected: {format_cycle(cycle)}"
-                scheduler.report_error(DeadlockError(msg, format_cycle(cycle)))
-                raise SchedulerAbort(msg)
+            _check_lock_cycle(graph, thread_id, self._object_id, scheduler)
 
         # Tell the DPOR engine that this thread is waiting for the lock
         # so it can schedule the lock holder instead.

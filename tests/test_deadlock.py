@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
+import threading
+import time
+from typing import Any
 
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
 
@@ -140,8 +142,6 @@ class TestCooperativeLockDeadlock:
 
     def test_cooperative_lock_deadlock_raises_deadlock_error(self) -> None:
         """CooperativeLock: cycle detection raises DeadlockError not TimeoutError."""
-        import threading
-
         from frontrun._cooperative import CooperativeLock, set_context
         from frontrun._deadlock import DeadlockError, SchedulerAbort
 
@@ -156,7 +156,7 @@ class TestCooperativeLockDeadlock:
                 set_context(sched, 0)
                 lock_a.acquire()
                 # signal t1 that we hold lock_a — yield so t1 runs
-                import time; time.sleep(0.05)
+                time.sleep(0.05)
                 try:
                     lock_b.acquire()
                 except (SchedulerAbort, DeadlockError):
@@ -166,7 +166,7 @@ class TestCooperativeLockDeadlock:
 
             def t1() -> None:
                 set_context(sched, 1)
-                import time; time.sleep(0.02)
+                time.sleep(0.02)
                 lock_b.acquire()
                 try:
                     lock_a.acquire()  # should detect cycle → DeadlockError
@@ -191,8 +191,6 @@ class TestCooperativeLockDeadlock:
 
     def test_cooperative_rlock_deadlock_raises_deadlock_error(self) -> None:
         """CooperativeRLock: cycle detection raises DeadlockError not TimeoutError."""
-        import threading
-
         from frontrun._cooperative import CooperativeRLock, set_context
         from frontrun._deadlock import DeadlockError, SchedulerAbort
 
@@ -204,7 +202,7 @@ class TestCooperativeLockDeadlock:
             def t0() -> None:
                 set_context(sched, 0)
                 lock_a.acquire()
-                import time; time.sleep(0.05)
+                time.sleep(0.05)
                 try:
                     lock_b.acquire()
                 except (SchedulerAbort, DeadlockError):
@@ -212,7 +210,7 @@ class TestCooperativeLockDeadlock:
 
             def t1() -> None:
                 set_context(sched, 1)
-                import time; time.sleep(0.02)
+                time.sleep(0.02)
                 lock_b.acquire()
                 try:
                     lock_a.acquire()  # should detect cycle

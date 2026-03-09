@@ -340,7 +340,6 @@ class DporScheduler:
         # row-lock nodes ("row_lock", int) are disjoint from cooperative-lock
         # nodes ("lock", id(obj)) in the WaitForGraph.
         self._row_lock_ids: dict[str, int] = {}
-        self._row_lock_names: dict[int, str] = {}
         self._row_lock_next_id: int = 0
 
         # Request the first scheduling decision
@@ -507,7 +506,6 @@ class DporScheduler:
             lid = self._row_lock_next_id
             self._row_lock_next_id += 1
             self._row_lock_ids[res_id] = lid
-            self._row_lock_names[lid] = res_id
         return lid
 
     def acquire_row_locks(self, thread_id: int, resource_ids: list[str]) -> None:
@@ -526,7 +524,7 @@ class DporScheduler:
         graph = get_wait_for_graph()
         with self._condition:
             for res_id in resource_ids:
-                lock_int_id = self._row_lock_int_id(res_id) if graph is not None else 0
+                lock_int_id = self._row_lock_int_id(res_id)
                 while True:
                     holder = self._active_row_locks.get(res_id)
                     if holder is None or holder == thread_id:
@@ -536,7 +534,7 @@ class DporScheduler:
                         cycle = graph.add_waiting(thread_id, lock_int_id, kind="row_lock")
                         if cycle is not None:
                             graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
-                            desc = format_cycle(cycle, self._row_lock_names)
+                            desc = format_cycle(cycle, {v: k for k, v in self._row_lock_ids.items()})
                             err = DeadlockError(f"Row-lock deadlock detected: {desc}", desc)
                             if self._error is None:
                                 self._error = err

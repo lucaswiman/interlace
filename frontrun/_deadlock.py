@@ -55,7 +55,8 @@ class WaitForGraph:
     thread H".  A cycle ``T1 -> L1 -> T2 -> L2 -> T1`` means threads T1 and
     T2 are in a lock-ordering deadlock.
 
-    Nodes are either ``("thread", thread_id)`` or ``("lock", lock_object_id)``.
+    Nodes are ``("thread", thread_id)``, ``("lock", lock_object_id)``, or
+    ``("row_lock", row_lock_int_id)``.
     """
 
     def __init__(self) -> None:
