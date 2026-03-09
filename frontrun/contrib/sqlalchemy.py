@@ -5,7 +5,7 @@ optional lock_timeout injection automatically.
 
 Example::
 
-    from frontrun.contrib.sqlalchemy import sqlalchemy_dpor
+    from frontrun.contrib.sqlalchemy import sqlalchemy_dpor, get_connection
 
     result = sqlalchemy_dpor(
         engine=engine,
@@ -15,14 +15,26 @@ Example::
         lock_timeout=500,  # optional, milliseconds
     )
     assert result.property_holds, result.explanation
+
+Inside a thread function, retrieve the per-thread connection with::
+
+    conn = get_connection()
 """
 
 from __future__ import annotations
 
+import contextvars
 from collections.abc import Callable
 from typing import Any, TypeVar
 
 T = TypeVar("T")
+
+_current_connection: contextvars.ContextVar[Any] = contextvars.ContextVar("_current_connection")
+
+
+def get_connection() -> Any:
+    """Return the per-thread SQLAlchemy connection set by ``sqlalchemy_dpor``."""
+    return _current_connection.get()
 
 
 def sqlalchemy_dpor(
@@ -43,6 +55,7 @@ def sqlalchemy_dpor(
             Any open connections on the engine are disposed before this runs.
         threads: List of callables, each receiving the shared state.
             Each thread gets its own connection scoped to its execution.
+            Use :func:`get_connection` inside the thread to access it.
         invariant: Predicate over shared state after all threads complete.
         lock_timeout: If set, execute ``SET lock_timeout = <N>ms`` on each
             thread's connection before running the thread.  Converts
@@ -60,14 +73,12 @@ def sqlalchemy_dpor(
         def wrapper(state: T) -> None:
             with engine.connect() as conn:
                 if lock_timeout is not None:
-                    conn.exec_driver_sql(f"SET lock_timeout = '{lock_timeout}ms'")
-                # Expose the connection on the state object so thread fns can use it.
-                _prev = getattr(state, "_dpor_conn", None)
-                state._dpor_conn = conn  # type: ignore[attr-defined]
+                    conn.exec_driver_sql(f"SET lock_timeout = '{int(lock_timeout)}ms'")
+                token = _current_connection.set(conn)
                 try:
                     fn(state)
                 finally:
-                    state._dpor_conn = _prev  # type: ignore[attr-defined]
+                    _current_connection.reset(token)
 
         return wrapper
 

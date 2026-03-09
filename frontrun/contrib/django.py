@@ -65,7 +65,7 @@ def django_dpor(
             conn.ensure_connection()
             if lock_timeout is not None:
                 with conn.cursor() as cursor:
-                    cursor.execute(f"SET lock_timeout = '{lock_timeout}ms'")
+                    cursor.execute(f"SET lock_timeout = '{int(lock_timeout)}ms'")
             try:
                 fn(state)
             finally:
