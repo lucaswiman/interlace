@@ -135,14 +135,12 @@ def _report_or_buffer(reporter: Any, res_id: str, kind: str, *, force_immediate:
 
 def _get_dpor_context() -> tuple[Any, int] | None:
     """Return (scheduler, thread_id) if DPOR is active, else ``None``."""
-    from frontrun._io_detection import get_dpor_scheduler
+    from frontrun._io_detection import get_dpor_scheduler, get_dpor_thread_id
 
     scheduler = get_dpor_scheduler()
     if scheduler is None:
         return None
-    from frontrun.dpor import _dpor_tls
-
-    thread_id = getattr(_dpor_tls, "thread_id", None)
+    thread_id = get_dpor_thread_id()
     if thread_id is None:
         return None
     return scheduler, thread_id

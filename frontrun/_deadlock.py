@@ -19,7 +19,11 @@ or other unmanaged blocking calls.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from frontrun._real_threading import lock as _real_lock
+
+LockKind = Literal["lock", "row_lock"]
 
 
 class DeadlockError(Exception):
@@ -64,7 +68,7 @@ class WaitForGraph:
         # adjacency: node -> set of successor nodes
         self._edges: dict[tuple[str, int], set[tuple[str, int]]] = {}
 
-    def add_waiting(self, thread_id: int, lock_id: int, kind: str = "lock") -> list[tuple[str, int]] | None:
+    def add_waiting(self, thread_id: int, lock_id: int, kind: LockKind = "lock") -> list[tuple[str, int]] | None:
         """Record that *thread_id* is waiting for *lock_id*.
 
         Returns the cycle path if adding this edge creates a cycle,
@@ -79,7 +83,7 @@ class WaitForGraph:
                 return cycle
             return None
 
-    def remove_waiting(self, thread_id: int, lock_id: int, kind: str = "lock") -> None:
+    def remove_waiting(self, thread_id: int, lock_id: int, kind: LockKind = "lock") -> None:
         """Remove the waiting edge (thread acquired or gave up)."""
         src = ("thread", thread_id)
         dst = (kind, lock_id)
@@ -90,14 +94,14 @@ class WaitForGraph:
                 if not succs:
                     del self._edges[src]
 
-    def add_holding(self, thread_id: int, lock_id: int, kind: str = "lock") -> None:
+    def add_holding(self, thread_id: int, lock_id: int, kind: LockKind = "lock") -> None:
         """Record that *lock_id* is held by *thread_id*."""
         src = (kind, lock_id)
         dst = ("thread", thread_id)
         with self._lock:
             self._edges.setdefault(src, set()).add(dst)
 
-    def remove_holding(self, thread_id: int, lock_id: int, kind: str = "lock") -> None:
+    def remove_holding(self, thread_id: int, lock_id: int, kind: LockKind = "lock") -> None:
         """Remove the holding edge (thread released the lock)."""
         src = (kind, lock_id)
         dst = ("thread", thread_id)

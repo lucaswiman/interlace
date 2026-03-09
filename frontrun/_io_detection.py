@@ -62,6 +62,16 @@ def set_dpor_scheduler(scheduler: Any) -> None:
     _io_tls._dpor_scheduler = scheduler
 
 
+def get_dpor_thread_id() -> int | None:
+    """Return the per-thread DPOR thread ID, or ``None``."""
+    return getattr(_io_tls, "_dpor_thread_id", None)
+
+
+def set_dpor_thread_id(thread_id: int | None) -> None:
+    """Install a per-thread DPOR thread ID (or clear with ``None``)."""
+    _io_tls._dpor_thread_id = thread_id
+
+
 # ---------------------------------------------------------------------------
 # Resource identity helpers
 # ---------------------------------------------------------------------------

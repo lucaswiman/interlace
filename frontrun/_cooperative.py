@@ -32,6 +32,7 @@ from collections.abc import Callable
 from typing import Any
 
 from frontrun import _real_threading as _rt
+from frontrun._deadlock import DeadlockError, SchedulerAbort, format_cycle
 
 # ---------------------------------------------------------------------------
 # Real (non-cooperative) factories, saved before any patching happens.
@@ -104,14 +105,12 @@ def _check_lock_cycle(graph: Any, thread_id: int, object_id: int, scheduler: Any
     a :class:`~frontrun._deadlock.DeadlockError` via the scheduler if a cycle
     is found.
     """
-    from frontrun._deadlock import DeadlockError, SchedulerAbort, format_cycle
-
     cycle = graph.add_waiting(thread_id, object_id)
     if cycle is not None:
         graph.remove_waiting(thread_id, object_id)
-        msg = f"Lock-ordering deadlock detected: {format_cycle(cycle)}"
-        scheduler.report_error(DeadlockError(msg, format_cycle(cycle)))
-        raise SchedulerAbort(msg)
+        desc = format_cycle(cycle)
+        scheduler.report_error(DeadlockError(f"Lock-ordering deadlock detected: {desc}", desc))
+        raise SchedulerAbort(desc)
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +419,6 @@ class CooperativeSemaphore:
             reporter(event, self._object_id)
 
     def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
-        from frontrun._deadlock import SchedulerAbort
 
         # Fast path: try to decrement counter
         self._lock.acquire()
@@ -554,7 +552,6 @@ class CooperativeEvent:
         self._event = real_event()
 
     def wait(self, timeout: float | None = None) -> bool:
-        from frontrun._deadlock import SchedulerAbort
 
         if self._event.is_set():
             return True
@@ -639,7 +636,6 @@ class CooperativeCondition:
         self._lock.release()
 
     def wait(self, timeout: float | None = None) -> bool:
-        from frontrun._deadlock import SchedulerAbort
 
         # _waiters and notify_count_before_wait are written while we hold
         # self._lock (the caller must hold it per the Condition API).
@@ -766,7 +762,6 @@ class CooperativeQueue:
         self._queue = self._queue_class(maxsize)
 
     def get(self, block: bool = True, timeout: float | None = None) -> Any:
-        from frontrun._deadlock import SchedulerAbort
 
         try:
             return self._queue.get(block=False)
@@ -807,7 +802,6 @@ class CooperativeQueue:
             scheduler.wait_for_turn(thread_id)
 
     def put(self, item: Any, block: bool = True, timeout: float | None = None) -> None:
-        from frontrun._deadlock import SchedulerAbort
 
         try:
             self._queue.put(item, block=False)
