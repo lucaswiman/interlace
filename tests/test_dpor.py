@@ -832,3 +832,87 @@ class TestSyncPrimitiveCorrectness:
             deadlock_timeout=5.0,
         )
         assert not result.property_holds, "DPOR should detect this via STORE_SUBSCR tracking"
+
+
+# ---------------------------------------------------------------------------
+# Deadlock detection as invariant violations
+# ---------------------------------------------------------------------------
+
+
+class TestDeadlockAsInvariantViolation:
+    """Deadlocks should surface as property_holds=False, not silently time out."""
+
+    def test_cooperative_lock_deadlock_is_reported(self) -> None:
+        """Two threads with lock-order inversion: deadlock → property_holds=False.
+
+        Each thread writes shared state INSIDE its first lock, creating a
+        conflict that DPOR tracks.  The conflict forces exploration of the
+        ordering where T0 holds lock_a and T1 holds lock_b simultaneously,
+        which exposes the deadlock via WaitForGraph cycle detection.
+        """
+
+        class State:
+            def __init__(self) -> None:
+                self.lock_a = threading.Lock()
+                self.lock_b = threading.Lock()
+                self.x = 0
+
+        def thread0(s: State) -> None:
+            with s.lock_a:
+                s.x += 1  # write inside lock_a — DPOR uses this as the conflict point
+                with s.lock_b:
+                    pass
+
+        def thread1(s: State) -> None:
+            with s.lock_b:
+                s.x += 1  # write inside lock_b — conflict with T0's write
+                with s.lock_a:
+                    pass
+
+        result = explore_dpor(
+            setup=State,
+            threads=[thread0, thread1],
+            invariant=lambda s: True,  # no data invariant — deadlock itself is the problem
+            max_executions=500,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=True,
+        )
+
+        assert not result.property_holds, "Deadlock should set property_holds=False"
+        assert result.explanation is not None
+        assert "deadlock" in result.explanation.lower()
+        assert result.counterexample is not None
+
+    def test_no_deadlock_is_not_reported(self) -> None:
+        """Consistent lock ordering does not cause a false deadlock report."""
+
+        class State:
+            def __init__(self) -> None:
+                self.lock_a = threading.Lock()
+                self.lock_b = threading.Lock()
+                self.x = 0
+
+        def thread0(s: State) -> None:
+            with s.lock_a:
+                s.x += 1
+                with s.lock_b:
+                    pass
+
+        def thread1(s: State) -> None:
+            with s.lock_a:
+                s.x += 1
+                with s.lock_b:
+                    pass
+
+        result = explore_dpor(
+            setup=State,
+            threads=[thread0, thread1],
+            invariant=lambda s: True,
+            max_executions=100,
+            detect_io=False,
+            deadlock_timeout=2.0,
+        )
+
+        assert result.property_holds, "Consistent lock order should not be reported as deadlock"

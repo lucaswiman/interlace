@@ -53,7 +53,7 @@ from frontrun._cooperative import (
     set_sync_reporter,
     unpatch_locks,
 )
-from frontrun._deadlock import SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
+from frontrun._deadlock import DeadlockError, SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
 from frontrun._io_detection import (
     patch_io,
     set_io_reporter,
@@ -1861,6 +1861,27 @@ def explore_dpor(
                 runner._unpatch_locks()
 
             result.num_explored += 1
+
+            # Check for deadlock before running the invariant — a deadlock
+            # means the program never completed, so the invariant can never be
+            # satisfied.  Report it as a property violation with a clear message.
+            if isinstance(scheduler._error, DeadlockError):
+                result.property_holds = False
+                with engine_lock:
+                    schedule = execution.schedule_trace
+                schedule_list = list(schedule)
+                result.failures.append((result.num_explored, schedule_list))
+                if result.counterexample is None:
+                    result.counterexample = schedule_list
+                if result.explanation is None:
+                    result.explanation = (
+                        f"Deadlock detected after {result.num_explored} interleaving(s).\n\n"
+                        f"{scheduler._error.cycle_description}"
+                    )
+                if stop_on_first:
+                    with _INSTR_CACHE_LOCK:
+                        _INSTR_CACHE.clear()
+                    return result
 
             if warn_nondeterministic_sql:
                 check_uncaptured_inserts()
