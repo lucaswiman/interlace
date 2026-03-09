@@ -20,12 +20,11 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from frontrun._io_detection import _io_tls
 from frontrun._sql_cursor import (
     _RE_INSERT_TABLE,
     _acquire_pending_row_locks,
     _capture_insert_id,
-    _release_dpor_row_locks,
+    _detect_autobegin,
     _report_sql_access,
     _suppress_endpoint_io,
 )
@@ -50,6 +49,7 @@ async def _intercept_execute_async(
     ``_report_sql_access`` helper, then ``await``s the original async method.
     """
     insert_match = _RE_INSERT_TABLE.match(operation) if isinstance(operation, str) else None
+    _detect_autobegin(self)
     reported = _report_sql_access(operation, parameters, is_executemany=is_executemany, paramstyle=paramstyle)
 
     # Block if another DPOR thread holds a conflicting row lock
@@ -66,12 +66,6 @@ async def _intercept_execute_async(
             result = await original_method(self, operation, parameters)
         else:
             result = await original_method(self, operation)
-
-    # True autocommit: release client-side row locks (see _intercept_execute).
-    if not getattr(_io_tls, "_in_transaction", False):
-        conn = getattr(self, "connection", None)
-        if getattr(conn, "autocommit", None) is True:
-            _release_dpor_row_locks()
 
     # Post-INSERT: capture lastrowid and record indexical alias
     if insert_match is not None and not is_executemany and reported:

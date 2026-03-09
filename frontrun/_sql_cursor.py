@@ -111,9 +111,16 @@ def _report_or_buffer(reporter: Any, res_id: str, kind: str, *, force_immediate:
     learn about write-intent conflicts before C-level blocking can occur).
     Transaction atomicity is preserved because the DPOR scheduler still
     skips yielding inside transactions.
+
+    Autobegin transactions (``_is_autobegin=True``) are NOT buffered: with
+    READ COMMITTED isolation (PostgreSQL default), individual statements are
+    visible to other transactions, so DPOR must see each access point to
+    explore interleavings.  Row-lock tracking still works because
+    ``_in_transaction`` is True.
     """
     in_tx = getattr(_io_tls, "_in_transaction", False)
-    if in_tx and not force_immediate:
+    is_autobegin = getattr(_io_tls, "_is_autobegin", False)
+    if in_tx and not force_immediate and not is_autobegin:
         if not hasattr(_io_tls, "_tx_buffer"):
             _io_tls._tx_buffer = []
         _io_tls._tx_buffer.append((res_id, kind))
@@ -121,28 +128,48 @@ def _report_or_buffer(reporter: Any, res_id: str, kind: str, *, force_immediate:
         reporter(res_id, kind)
 
     # Track resources that need row-lock arbitration (SELECT FOR UPDATE).
-    #
-    # We don't gate on _in_transaction because of three transaction modes:
-    #
-    # 1. Explicit BEGIN: _in_transaction is True. Row locks held until
-    #    COMMIT/ROLLBACK releases them. Works correctly.
-    #
-    # 2. Autobegin (psycopg2 default, autocommit=False): The driver starts
-    #    an implicit transaction at the C/libpq level without sending an
-    #    explicit BEGIN through cursor.execute(), so _in_transaction stays
-    #    False. But the row lock IS held across statements until COMMIT.
-    #    We must track it here; COMMIT/ROLLBACK releases it.
-    #
-    # 3. True autocommit (connection.autocommit=True): Each statement is
-    #    its own transaction; the row lock is released immediately after
-    #    the statement. _intercept_execute handles this by releasing row
-    #    locks after the statement completes when autocommit is detected.
-    if force_immediate:
+    # Only when inside a transaction — outside a tx the DB releases the lock
+    # immediately so there's no blocking risk.
+    if force_immediate and in_tx:
         pending = getattr(_io_tls, "_pending_row_locks", None)
         if pending is None:
             pending = []
             _io_tls._pending_row_locks = pending
         pending.append(res_id)
+
+
+def _detect_autobegin(cursor: Any) -> None:
+    """Set ``_in_transaction`` if the connection is in autobegin mode.
+
+    DB-API drivers like psycopg2 default to ``autocommit=False``, which
+    means the first statement implicitly starts a transaction at the
+    C/driver level — no explicit ``BEGIN`` flows through
+    ``cursor.execute()``.  We detect this by checking the cursor's
+    connection: if ``autocommit`` is not ``True`` and we haven't already
+    seen a ``BEGIN``, we treat the connection as having an implicit
+    transaction.
+
+    This is best-effort: if the connection doesn't expose ``autocommit``
+    (e.g. sqlite3), we leave ``_in_transaction`` unchanged and fall back
+    to statement-level tracking.
+    """
+    if getattr(_io_tls, "_in_transaction", False):
+        return  # already in a transaction
+    conn = getattr(cursor, "connection", None)
+    if conn is None:
+        return
+    autocommit = getattr(conn, "autocommit", None)
+    if autocommit is None:
+        return  # driver doesn't expose autocommit — can't detect
+    if not autocommit:
+        # autocommit=False → autobegin: implicit transaction is active.
+        # Set _is_autobegin so _report_or_buffer reports accesses
+        # immediately (READ COMMITTED doesn't buffer) while still
+        # tracking row locks via the _in_transaction flag.
+        _io_tls._in_transaction = True
+        _io_tls._is_autobegin = True
+        _io_tls._tx_buffer = []
+        _io_tls._tx_savepoints = {}
 
 
 def _get_dpor_context() -> tuple[Any, int] | None:
@@ -212,10 +239,12 @@ def _report_sql_access(
             tx = access.tx_op
             if tx is TxOp.BEGIN:
                 _io_tls._in_transaction = True
+                _io_tls._is_autobegin = False
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
             elif tx is TxOp.COMMIT:
                 _io_tls._in_transaction = False
+                _io_tls._is_autobegin = False
                 buffer = getattr(_io_tls, "_tx_buffer", [])
                 for res_id, kind in buffer:
                     reporter(res_id, kind)
@@ -224,6 +253,7 @@ def _report_sql_access(
                 _release_dpor_row_locks()
             elif tx is TxOp.ROLLBACK:
                 _io_tls._in_transaction = False
+                _io_tls._is_autobegin = False
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
                 _release_dpor_row_locks()
@@ -362,6 +392,20 @@ def _intercept_execute(
     are supported via buffer truncation.
     """
     insert_match = _RE_INSERT_TABLE.match(operation) if isinstance(operation, str) else None
+
+    # Detect autobegin: most DB-API drivers (psycopg2, pymysql) default to
+    # autocommit=False, meaning the first statement implicitly starts a
+    # transaction at the C/driver level without sending an explicit BEGIN
+    # through cursor.execute().  We detect this and set _in_transaction so
+    # that (a) accesses are buffered atomically, (b) the DPOR scheduler
+    # treats the transaction as an atomic block, and (c) row locks are
+    # tracked for deadlock detection.
+    #
+    # We skip this when connection.autocommit is True (each statement is
+    # its own transaction, locks released immediately) or when we've
+    # already seen an explicit BEGIN.
+    _detect_autobegin(self)
+
     reported = _report_sql_access(operation, parameters, is_executemany=is_executemany, paramstyle=paramstyle)
 
     # Block if another DPOR thread holds a conflicting row lock
@@ -378,15 +422,6 @@ def _intercept_execute(
             result = original_method(self, operation, parameters)
         else:
             result = original_method(self, operation)
-
-    # True autocommit: each statement is its own transaction, so row locks
-    # are released immediately by the DB.  Release our client-side tracking
-    # to avoid holding phantom locks that could cause false deadlocks.
-    # Best-effort: only psycopg2/psycopg3 expose connection.autocommit.
-    if not getattr(_io_tls, "_in_transaction", False):
-        conn = getattr(self, "connection", None)
-        if getattr(conn, "autocommit", None) is True:
-            _release_dpor_row_locks()
 
     # Post-INSERT: capture lastrowid and record indexical alias
     if insert_match is not None and not is_executemany and reported:

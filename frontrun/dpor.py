@@ -416,12 +416,17 @@ class DporScheduler:
                         _engine.report_io_access(_execution, thread_id, _obj_key, _io_kind)
                 _pending_io.clear()
 
-            # Skip scheduling if inside a SQL transaction to ensure atomicity.
-            # DPOR will see all transaction operations as a single atomic block
-            # occurring at the COMMIT point.
+            # Skip scheduling if inside an explicit SQL transaction to ensure
+            # atomicity.  DPOR will see all transaction operations as a single
+            # atomic block occurring at the COMMIT point.
+            #
+            # Autobegin transactions (_is_autobegin=True) are NOT skipped: with
+            # READ COMMITTED isolation (the PostgreSQL default), individual
+            # statements are visible to other transactions, so DPOR must be
+            # able to interleave between them to find races like lost updates.
             from frontrun._io_detection import _io_tls as _iotls
 
-            if getattr(_iotls, "_in_transaction", False):
+            if getattr(_iotls, "_in_transaction", False) and not getattr(_iotls, "_is_autobegin", False):
                 if frame is not None:
                     _process_opcode(frame, self, thread_id)
                 return True
