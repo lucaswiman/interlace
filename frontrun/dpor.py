@@ -331,6 +331,18 @@ class DporScheduler:
         # FOR_ITER can report reads on the underlying container.
         self._iter_to_container: dict[int, Any] = {}
 
+        # Row-lock registry: resource_id → thread_id holding the lock.
+        # SELECT FOR UPDATE is exclusive — only one thread can hold it at a time.
+        self._active_row_locks: dict[str, int] = {}
+
+        # Stable integer IDs for row-lock resources (for WaitForGraph nodes).
+        # String resource IDs are assigned monotonically increasing integers so
+        # row-lock nodes ("row_lock", int) are disjoint from cooperative-lock
+        # nodes ("lock", id(obj)) in the WaitForGraph.
+        self._row_lock_ids: dict[str, int] = {}
+        self._row_lock_names: dict[int, str] = {}
+        self._row_lock_next_id: int = 0
+
         # Request the first scheduling decision
         self._current_thread = self._schedule_next()
 
@@ -455,6 +467,9 @@ class DporScheduler:
             self._threads_done.add(thread_id)
             with self._engine_lock:
                 self.execution.finish_thread(thread_id)
+            # Release any row locks the thread may still hold (safety net).
+            # _release_row_locks_unlocked avoids re-acquiring self._condition.
+            self._release_row_locks_unlocked(thread_id)
             # If the done thread was the current one, schedule next
             if self._current_thread == thread_id:
                 next_thread = self._schedule_next()
@@ -484,6 +499,85 @@ class DporScheduler:
         stacks = getattr(_dpor_tls, "_shadow_stacks", None)
         if stacks is not None:
             stacks.pop(frame_id, None)
+
+    def _row_lock_int_id(self, res_id: str) -> int:
+        """Return a stable monotonic integer ID for *res_id* (allocated on first call)."""
+        lid = self._row_lock_ids.get(res_id)
+        if lid is None:
+            lid = self._row_lock_next_id
+            self._row_lock_next_id += 1
+            self._row_lock_ids[res_id] = lid
+            self._row_lock_names[lid] = res_id
+        return lid
+
+    def acquire_row_locks(self, thread_id: int, resource_ids: list[str]) -> None:
+        """Block until all *resource_ids* can be held by *thread_id*.
+
+        If another thread holds a conflicting lock, waits on the condition
+        variable.  On timeout (the holder is likely blocked in C too), lets
+        the C call proceed — the ``lock_timeout`` PostgreSQL safety net
+        will handle it as a fast error rather than an indefinite hang.
+
+        When a WaitForGraph is installed, registers waiting/holding edges for
+        instant cycle-based deadlock detection.
+        """
+        from frontrun._deadlock import DeadlockError, SchedulerAbort, format_cycle, get_wait_for_graph
+
+        graph = get_wait_for_graph()
+        with self._condition:
+            for res_id in resource_ids:
+                lock_int_id = self._row_lock_int_id(res_id) if graph is not None else 0
+                while True:
+                    holder = self._active_row_locks.get(res_id)
+                    if holder is None or holder == thread_id:
+                        break
+                    # Another thread holds this row lock — check for cycle first
+                    if graph is not None:
+                        cycle = graph.add_waiting(thread_id, lock_int_id, kind="row_lock")
+                        if cycle is not None:
+                            graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
+                            desc = format_cycle(cycle, self._row_lock_names)
+                            err = DeadlockError(f"Row-lock deadlock detected: {desc}", desc)
+                            if self._error is None:
+                                self._error = err
+                            self._condition.notify_all()
+                            raise SchedulerAbort(str(err))
+                    # Wait for the holder to release
+                    if not self._condition.wait(timeout=self.deadlock_timeout):
+                        if graph is not None:
+                            graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
+                        if self._finished or self._error:
+                            return
+                        # Timeout — the holder is probably blocked in C too.
+                        # Let the C call proceed; lock_timeout safety net will handle it.
+                        return
+                    if graph is not None:
+                        graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
+                    if self._finished or self._error:
+                        return
+                self._active_row_locks[res_id] = thread_id
+                if graph is not None:
+                    graph.add_holding(thread_id, lock_int_id, kind="row_lock")
+
+    def _release_row_locks_unlocked(self, thread_id: int) -> bool:
+        """Remove row locks for *thread_id*. Caller must hold ``self._condition``."""
+        from frontrun._deadlock import get_wait_for_graph
+
+        to_remove = [r for r, t in self._active_row_locks.items() if t == thread_id]
+        graph = get_wait_for_graph()
+        for r in to_remove:
+            del self._active_row_locks[r]
+            if graph is not None:
+                lid = self._row_lock_ids.get(r)
+                if lid is not None:
+                    graph.remove_holding(thread_id, lid, kind="row_lock")
+        return bool(to_remove)
+
+    def release_row_locks(self, thread_id: int) -> None:
+        """Release all row locks held by *thread_id* (called on COMMIT/ROLLBACK)."""
+        with self._condition:
+            if self._release_row_locks_unlocked(thread_id):
+                self._condition.notify_all()
 
 
 # ---------------------------------------------------------------------------
@@ -1471,6 +1565,10 @@ class DporBytecodeRunner:
         if self._preload_bridge is not None:
             self._preload_bridge.register_thread(threading.get_native_id(), thread_id)
 
+        from frontrun._io_detection import set_dpor_scheduler
+
+        set_dpor_scheduler(self.scheduler)
+
         if self.detect_io:
             _recorder = scheduler.trace_recorder
 
@@ -1503,6 +1601,9 @@ class DporBytecodeRunner:
             self._preload_bridge.unregister_thread(threading.get_native_id())
         if self.detect_io:
             set_io_reporter(None)
+        from frontrun._io_detection import set_dpor_scheduler
+
+        set_dpor_scheduler(None)
         clear_context()
         set_sync_reporter(None)
         _dpor_tls.scheduler = None

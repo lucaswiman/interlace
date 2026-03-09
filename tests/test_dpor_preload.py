@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import tempfile
 import warnings
+from typing import Any
 
 import pytest
 
@@ -152,6 +153,207 @@ class TestPreloadBridge:
 # ---------------------------------------------------------------------------
 # Integration: DPOR detects C-level file I/O races via the preload bridge
 # ---------------------------------------------------------------------------
+
+
+class TestRowLockRegistry:
+    """Unit tests for DporScheduler.acquire_row_locks / release_row_locks."""
+
+    def _make_scheduler(self) -> Any:
+        """Create a minimal object with the real row-lock methods from DporScheduler."""
+        from frontrun._cooperative import real_condition, real_lock
+        from frontrun.dpor import DporScheduler
+
+        class RowLockHost:
+            """Lightweight host carrying only the row-lock subset of DporScheduler."""
+
+            def __init__(self) -> None:
+                self.deadlock_timeout = 1.0
+                self._lock = real_lock()
+                self._condition = real_condition(self._lock)
+                self._finished = False
+                self._error: Exception | None = None
+                self._active_row_locks: dict[str, int] = {}
+
+            # Bind the real methods from DporScheduler so tests exercise production code.
+            acquire_row_locks = DporScheduler.acquire_row_locks
+            release_row_locks = DporScheduler.release_row_locks
+            _release_row_locks_unlocked = DporScheduler._release_row_locks_unlocked
+
+        return RowLockHost()
+
+    def test_acquire_single_lock(self) -> None:
+        """A single thread can acquire a row lock."""
+        sched = self._make_scheduler()
+        sched.acquire_row_locks(0, ["sql:users:(('id', 42))"])
+        assert sched._active_row_locks.get("sql:users:(('id', 42))") == 0
+
+    def test_same_thread_reacquire(self) -> None:
+        """The same thread re-acquiring a lock it already holds is a no-op."""
+        sched = self._make_scheduler()
+        sched.acquire_row_locks(0, ["sql:users:(('id', 42))"])
+        sched.acquire_row_locks(0, ["sql:users:(('id', 42))"])
+        assert sched._active_row_locks.get("sql:users:(('id', 42))") == 0
+
+    def test_release_unlocks_waiters(self) -> None:
+        """Releasing a lock unblocks a waiting thread."""
+        import threading
+
+        sched = self._make_scheduler()
+        sched.acquire_row_locks(0, ["sql:users:(('id', 42))"])
+
+        acquired = threading.Event()
+        error: list[Exception] = []
+
+        def waiter() -> None:
+            try:
+                sched.acquire_row_locks(1, ["sql:users:(('id', 42))"])
+                acquired.set()
+            except Exception as e:
+                error.append(e)
+
+        t = threading.Thread(target=waiter)
+        t.start()
+
+        # Give the waiter time to block
+        import time
+
+        time.sleep(0.1)
+        assert not acquired.is_set(), "Waiter should still be blocked"
+
+        sched.release_row_locks(0)
+        t.join(timeout=2.0)
+        assert acquired.is_set(), "Waiter should have acquired after release"
+        assert sched._active_row_locks.get("sql:users:(('id', 42))") == 1
+
+    def test_release_no_locks_held(self) -> None:
+        """Releasing when no locks are held is a no-op."""
+        sched = self._make_scheduler()
+        sched.release_row_locks(0)  # Should not raise
+
+    def test_multiple_resources(self) -> None:
+        """acquire_row_locks handles multiple resource IDs."""
+        sched = self._make_scheduler()
+        sched.acquire_row_locks(0, ["sql:users:(('id', 1))", "sql:users:(('id', 2))"])
+        assert sched._active_row_locks.get("sql:users:(('id', 1))") == 0
+        assert sched._active_row_locks.get("sql:users:(('id', 2))") == 0
+
+    def test_timeout_on_held_lock(self) -> None:
+        """acquire_row_locks times out when the holder doesn't release."""
+        sched = self._make_scheduler()
+        sched.deadlock_timeout = 0.2  # Fast timeout for test
+        sched.acquire_row_locks(0, ["sql:users:(('id', 42))"])
+
+        # Thread 1 tries to acquire, should timeout
+        sched.acquire_row_locks(1, ["sql:users:(('id', 42))"])
+        # After timeout, thread 0 still holds the lock
+        assert sched._active_row_locks.get("sql:users:(('id', 42))") == 0
+
+    def _make_scheduler_with_graph(self) -> Any:
+        """RowLockHost with WaitForGraph integration fields bound."""
+        from frontrun._cooperative import real_condition, real_lock
+        from frontrun.dpor import DporScheduler
+
+        class RowLockHost:
+            def __init__(self) -> None:
+                self.deadlock_timeout = 2.0
+                self._lock = real_lock()
+                self._condition = real_condition(self._lock)
+                self._finished = False
+                self._error: Exception | None = None
+                self._active_row_locks: dict[str, int] = {}
+                self._row_lock_ids: dict[str, int] = {}
+                self._row_lock_names: dict[int, str] = {}
+                self._row_lock_next_id: int = 0
+
+            acquire_row_locks = DporScheduler.acquire_row_locks
+            release_row_locks = DporScheduler.release_row_locks
+            _release_row_locks_unlocked = DporScheduler._release_row_locks_unlocked
+            _row_lock_int_id = DporScheduler._row_lock_int_id
+
+        return RowLockHost()
+
+    def test_deadlock_detected_via_wait_for_graph(self) -> None:
+        """Two-thread row-lock deadlock is detected instantly via WaitForGraph."""
+        import threading
+        import time
+
+        from frontrun._deadlock import (
+            DeadlockError,
+            SchedulerAbort,
+            install_wait_for_graph,
+            uninstall_wait_for_graph,
+        )
+
+        install_wait_for_graph()
+        try:
+            sched = self._make_scheduler_with_graph()
+
+            t0_has_x = threading.Event()
+            t1_has_y = threading.Event()
+            t0_waiting_for_y = threading.Event()
+            errors: list[Exception] = []
+
+            def t0() -> None:
+                try:
+                    sched.acquire_row_locks(0, ["row_X"])
+                    t0_has_x.set()
+                    t1_has_y.wait()
+                    t0_waiting_for_y.set()
+                    sched.acquire_row_locks(0, ["row_Y"])  # blocks; killed by deadlock signal
+                except SchedulerAbort:
+                    pass
+                except Exception as e:
+                    errors.append(e)
+
+            def t1() -> None:
+                try:
+                    sched.acquire_row_locks(1, ["row_Y"])
+                    t1_has_y.set()
+                    t0_has_x.wait()
+                    t0_waiting_for_y.wait()
+                    time.sleep(0.05)  # let T0 reach condition.wait
+                    sched.acquire_row_locks(1, ["row_X"])  # should detect cycle
+                except SchedulerAbort:
+                    pass
+                except Exception as e:
+                    errors.append(e)
+
+            ta = threading.Thread(target=t0)
+            tb = threading.Thread(target=t1)
+            ta.start()
+            tb.start()
+            ta.join(timeout=5.0)
+            tb.join(timeout=5.0)
+
+            assert not errors, f"Unexpected errors: {errors}"
+            assert isinstance(sched._error, DeadlockError), f"Expected DeadlockError, got {sched._error!r}"
+            assert "row_X" in sched._error.cycle_description or "row_Y" in sched._error.cycle_description
+        finally:
+            uninstall_wait_for_graph()
+
+    def test_holding_edges_removed_on_release(self) -> None:
+        """_release_row_locks_unlocked removes holding edges from WaitForGraph."""
+        from frontrun._deadlock import WaitForGraph, install_wait_for_graph, uninstall_wait_for_graph
+
+        install_wait_for_graph()
+        try:
+            sched = self._make_scheduler_with_graph()
+            sched.acquire_row_locks(0, ["row_A"])
+            lid = sched._row_lock_ids.get("row_A")
+            assert lid is not None
+
+            # Verify holding edge exists: ("row_lock", lid) -> ("thread", 0)
+            from frontrun._deadlock import get_wait_for_graph
+
+            graph = get_wait_for_graph()
+            assert graph is not None
+            assert ("thread", 0) in graph._edges.get(("row_lock", lid), set())
+
+            # Release and verify edge is gone
+            sched.release_row_locks(0)
+            assert ("thread", 0) not in graph._edges.get(("row_lock", lid), set())
+        finally:
+            uninstall_wait_for_graph()
 
 
 class TestPreloadDporIntegration:
