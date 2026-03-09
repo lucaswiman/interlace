@@ -22,6 +22,14 @@ from __future__ import annotations
 from frontrun._real_threading import lock as _real_lock
 
 
+class DeadlockError(Exception):
+    """Raised when WaitForGraph detects a lock-ordering deadlock cycle."""
+
+    def __init__(self, message: str, cycle_description: str) -> None:
+        super().__init__(message)
+        self.cycle_description = cycle_description
+
+
 class SchedulerAbortError(Exception):
     """Raised inside cooperative spin loops when the scheduler has errored.
 
@@ -55,14 +63,14 @@ class WaitForGraph:
         # adjacency: node -> set of successor nodes
         self._edges: dict[tuple[str, int], set[tuple[str, int]]] = {}
 
-    def add_waiting(self, thread_id: int, lock_id: int) -> list[tuple[str, int]] | None:
+    def add_waiting(self, thread_id: int, lock_id: int, kind: str = "lock") -> list[tuple[str, int]] | None:
         """Record that *thread_id* is waiting for *lock_id*.
 
         Returns the cycle path if adding this edge creates a cycle,
         otherwise ``None``.
         """
         src = ("thread", thread_id)
-        dst = ("lock", lock_id)
+        dst = (kind, lock_id)
         with self._lock:
             self._edges.setdefault(src, set()).add(dst)
             cycle = self._find_cycle_from(src)
@@ -70,10 +78,10 @@ class WaitForGraph:
                 return cycle
             return None
 
-    def remove_waiting(self, thread_id: int, lock_id: int) -> None:
+    def remove_waiting(self, thread_id: int, lock_id: int, kind: str = "lock") -> None:
         """Remove the waiting edge (thread acquired or gave up)."""
         src = ("thread", thread_id)
-        dst = ("lock", lock_id)
+        dst = (kind, lock_id)
         with self._lock:
             succs = self._edges.get(src)
             if succs is not None:
@@ -81,16 +89,16 @@ class WaitForGraph:
                 if not succs:
                     del self._edges[src]
 
-    def add_holding(self, thread_id: int, lock_id: int) -> None:
+    def add_holding(self, thread_id: int, lock_id: int, kind: str = "lock") -> None:
         """Record that *lock_id* is held by *thread_id*."""
-        src = ("lock", lock_id)
+        src = (kind, lock_id)
         dst = ("thread", thread_id)
         with self._lock:
             self._edges.setdefault(src, set()).add(dst)
 
-    def remove_holding(self, thread_id: int, lock_id: int) -> None:
+    def remove_holding(self, thread_id: int, lock_id: int, kind: str = "lock") -> None:
         """Remove the holding edge (thread released the lock)."""
-        src = ("lock", lock_id)
+        src = (kind, lock_id)
         dst = ("thread", thread_id)
         with self._lock:
             succs = self._edges.get(src)
@@ -111,7 +119,7 @@ class WaitForGraph:
 
         Must be called with ``self._lock`` held.
         """
-        visited: set[tuple[str, int]] = set()
+        visited: set[tuple[str, int]] = {start}  # include start so loop-back is detected
         path: list[tuple[str, int]] = []
 
         def dfs(node: tuple[str, int]) -> bool:
@@ -133,12 +141,14 @@ class WaitForGraph:
         return None
 
 
-def format_cycle(cycle: list[tuple[str, int]]) -> str:
+def format_cycle(cycle: list[tuple[str, int]], lock_names: dict[int, str] | None = None) -> str:
     """Human-readable description of a deadlock cycle."""
     parts: list[str] = []
     for kind, ident in cycle:
         if kind == "thread":
             parts.append(f"thread {ident}")
+        elif kind == "row_lock" and lock_names and ident in lock_names:
+            parts.append(f"row_lock {lock_names[ident]}")
         else:
             parts.append(f"lock 0x{ident:x}")
     return " -> ".join(parts)
