@@ -110,3 +110,125 @@ class TestFormatCycleWithLockNames:
         cycle = [("thread", 3)]
         result = format_cycle(cycle)
         assert "thread 3" in result
+
+
+class TestCooperativeLockDeadlock:
+    """Cooperative lock deadlocks should raise DeadlockError, not TimeoutError."""
+
+    def _setup(self) -> tuple[Any, Any]:
+        """Install graph + scheduler mock, return (graph, fake_scheduler)."""
+        from frontrun._deadlock import install_wait_for_graph
+
+        graph = install_wait_for_graph()
+
+        class FakeScheduler:
+            _error: Exception | None = None
+            _finished: bool = False
+
+            def report_error(self, err: Exception) -> None:
+                self._error = err
+
+            def wait_for_turn(self, tid: int) -> None:
+                pass
+
+        return graph, FakeScheduler()
+
+    def _teardown(self) -> None:
+        from frontrun._deadlock import uninstall_wait_for_graph
+
+        uninstall_wait_for_graph()
+
+    def test_cooperative_lock_deadlock_raises_deadlock_error(self) -> None:
+        """CooperativeLock: cycle detection raises DeadlockError not TimeoutError."""
+        import threading
+
+        from frontrun._cooperative import CooperativeLock, set_context
+        from frontrun._deadlock import DeadlockError, SchedulerAbort
+
+        graph, sched = self._setup()
+        try:
+            lock_a = CooperativeLock()
+            lock_b = CooperativeLock()
+
+            caught: list[Exception] = []
+
+            def t0() -> None:
+                set_context(sched, 0)
+                lock_a.acquire()
+                # signal t1 that we hold lock_a — yield so t1 runs
+                import time; time.sleep(0.05)
+                try:
+                    lock_b.acquire()
+                except (SchedulerAbort, DeadlockError):
+                    pass
+                except Exception as e:
+                    caught.append(e)
+
+            def t1() -> None:
+                set_context(sched, 1)
+                import time; time.sleep(0.02)
+                lock_b.acquire()
+                try:
+                    lock_a.acquire()  # should detect cycle → DeadlockError
+                except (SchedulerAbort, DeadlockError):
+                    pass
+                except Exception as e:
+                    caught.append(e)
+
+            ta = threading.Thread(target=t0)
+            tb = threading.Thread(target=t1)
+            ta.start()
+            tb.start()
+            ta.join(timeout=3.0)
+            tb.join(timeout=3.0)
+
+            assert isinstance(sched._error, DeadlockError), (
+                f"Expected DeadlockError on scheduler, got {sched._error!r}"
+            )
+            assert not isinstance(sched._error, TimeoutError)
+        finally:
+            self._teardown()
+
+    def test_cooperative_rlock_deadlock_raises_deadlock_error(self) -> None:
+        """CooperativeRLock: cycle detection raises DeadlockError not TimeoutError."""
+        import threading
+
+        from frontrun._cooperative import CooperativeRLock, set_context
+        from frontrun._deadlock import DeadlockError, SchedulerAbort
+
+        _, sched = self._setup()
+        try:
+            lock_a = CooperativeRLock()
+            lock_b = CooperativeRLock()
+
+            def t0() -> None:
+                set_context(sched, 0)
+                lock_a.acquire()
+                import time; time.sleep(0.05)
+                try:
+                    lock_b.acquire()
+                except (SchedulerAbort, DeadlockError):
+                    pass
+
+            def t1() -> None:
+                set_context(sched, 1)
+                import time; time.sleep(0.02)
+                lock_b.acquire()
+                try:
+                    lock_a.acquire()  # should detect cycle
+                except (SchedulerAbort, DeadlockError):
+                    pass
+
+            ta = threading.Thread(target=t0)
+            tb = threading.Thread(target=t1)
+            ta.start()
+            tb.start()
+            ta.join(timeout=3.0)
+            tb.join(timeout=3.0)
+
+            assert isinstance(sched._error, DeadlockError), (
+                f"Expected DeadlockError on scheduler, got {sched._error!r}"
+            )
+            assert not isinstance(sched._error, TimeoutError)
+        finally:
+            self._teardown()

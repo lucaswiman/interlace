@@ -144,9 +144,11 @@ class CooperativeLock:
         if graph is not None:
             cycle = graph.add_waiting(thread_id, self._object_id)
             if cycle is not None:
+                from frontrun._deadlock import DeadlockError
+
                 graph.remove_waiting(thread_id, self._object_id)
                 msg = f"Lock-ordering deadlock detected: {format_cycle(cycle)}"
-                scheduler.report_error(TimeoutError(msg))
+                scheduler.report_error(DeadlockError(msg, format_cycle(cycle)))
                 raise SchedulerAbort(msg)
 
         # Tell the DPOR engine that this thread is waiting for the lock
@@ -286,9 +288,11 @@ class CooperativeRLock:
         if graph is not None:
             cycle = graph.add_waiting(thread_id, self._object_id)
             if cycle is not None:
+                from frontrun._deadlock import DeadlockError
+
                 graph.remove_waiting(thread_id, self._object_id)
                 msg = f"Lock-ordering deadlock detected: {format_cycle(cycle)}"
-                scheduler.report_error(TimeoutError(msg))
+                scheduler.report_error(DeadlockError(msg, format_cycle(cycle)))
                 raise SchedulerAbort(msg)
 
         # Tell the DPOR engine that this thread is waiting for the lock
