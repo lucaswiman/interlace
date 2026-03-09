@@ -20,10 +20,12 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
+from frontrun._io_detection import _io_tls
 from frontrun._sql_cursor import (
     _RE_INSERT_TABLE,
     _acquire_pending_row_locks,
     _capture_insert_id,
+    _release_dpor_row_locks,
     _report_sql_access,
     _suppress_endpoint_io,
 )
@@ -64,6 +66,12 @@ async def _intercept_execute_async(
             result = await original_method(self, operation, parameters)
         else:
             result = await original_method(self, operation)
+
+    # True autocommit: release client-side row locks (see _intercept_execute).
+    if not getattr(_io_tls, "_in_transaction", False):
+        conn = getattr(self, "connection", None)
+        if getattr(conn, "autocommit", None) is True:
+            _release_dpor_row_locks()
 
     # Post-INSERT: capture lastrowid and record indexical alias
     if insert_match is not None and not is_executemany and reported:

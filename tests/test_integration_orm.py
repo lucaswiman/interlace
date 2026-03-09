@@ -334,3 +334,51 @@ class TestOrmRowLockDeadlock:
         assert not result.property_holds, "DPOR should detect the row-lock deadlock as an invariant violation"
         assert result.explanation is not None
         assert "deadlock" in result.explanation.lower(), result.explanation
+
+    def test_autocommit_no_false_deadlock(self, deadlock_engine) -> None:  # type: ignore[no-untyped-def]
+        """SELECT FOR UPDATE with autocommit=True should NOT report a deadlock.
+
+        In true autocommit mode each statement is its own transaction, so
+        row locks are released immediately after the statement.  There is
+        no window for a cross-thread deadlock cycle.
+        """
+        import psycopg2  # type: ignore[import-untyped]
+
+        engine = deadlock_engine
+
+        class _State:
+            def __init__(self) -> None:
+                engine.dispose()
+
+        def thread_a(_state: _State) -> None:
+            conn = psycopg2.connect(str(engine.url))
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (1,))
+            cur.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (2,))
+            cur.close()
+            conn.close()
+
+        def thread_b(_state: _State) -> None:
+            conn = psycopg2.connect(str(engine.url))
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (2,))
+            cur.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (1,))
+            cur.close()
+            conn.close()
+
+        def _invariant(_state: _State) -> bool:
+            return True
+
+        result = explore_dpor(
+            setup=_State,
+            threads=[thread_a, thread_b],
+            invariant=_invariant,
+            detect_io=True,
+            deadlock_timeout=15.0,
+        )
+
+        assert result.property_holds, (
+            f"Autocommit SELECT FOR UPDATE should NOT deadlock — got false deadlock: {result.explanation}"
+        )

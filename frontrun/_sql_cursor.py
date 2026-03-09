@@ -121,10 +121,22 @@ def _report_or_buffer(reporter: Any, res_id: str, kind: str, *, force_immediate:
         reporter(res_id, kind)
 
     # Track resources that need row-lock arbitration (SELECT FOR UPDATE).
-    # We don't gate on _in_transaction because many drivers (e.g. psycopg2
-    # under SQLAlchemy autobegin) start implicit transactions without an
-    # explicit BEGIN going through the cursor, so _in_transaction stays False
-    # even though the DB connection is actually in a transaction.
+    #
+    # We don't gate on _in_transaction because of three transaction modes:
+    #
+    # 1. Explicit BEGIN: _in_transaction is True. Row locks held until
+    #    COMMIT/ROLLBACK releases them. Works correctly.
+    #
+    # 2. Autobegin (psycopg2 default, autocommit=False): The driver starts
+    #    an implicit transaction at the C/libpq level without sending an
+    #    explicit BEGIN through cursor.execute(), so _in_transaction stays
+    #    False. But the row lock IS held across statements until COMMIT.
+    #    We must track it here; COMMIT/ROLLBACK releases it.
+    #
+    # 3. True autocommit (connection.autocommit=True): Each statement is
+    #    its own transaction; the row lock is released immediately after
+    #    the statement. _intercept_execute handles this by releasing row
+    #    locks after the statement completes when autocommit is detected.
     if force_immediate:
         pending = getattr(_io_tls, "_pending_row_locks", None)
         if pending is None:
@@ -366,6 +378,15 @@ def _intercept_execute(
             result = original_method(self, operation, parameters)
         else:
             result = original_method(self, operation)
+
+    # True autocommit: each statement is its own transaction, so row locks
+    # are released immediately by the DB.  Release our client-side tracking
+    # to avoid holding phantom locks that could cause false deadlocks.
+    # Best-effort: only psycopg2/psycopg3 expose connection.autocommit.
+    if not getattr(_io_tls, "_in_transaction", False):
+        conn = getattr(self, "connection", None)
+        if getattr(conn, "autocommit", None) is True:
+            _release_dpor_row_locks()
 
     # Post-INSERT: capture lastrowid and record indexical alias
     if insert_match is not None and not is_executemany and reported:
