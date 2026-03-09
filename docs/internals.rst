@@ -461,3 +461,93 @@ underlying row-level conflict is invisible to any client-side
 instrumentation; only the database server knows which rows are being
 accessed.  For precise control over database-level races, use trace
 markers with manual scheduling.
+
+**Row-lock deadlocks** are a special case that *is* handled precisely at
+the client side, via the row-lock registry described in the next section.
+
+
+Deadlock detection
+--------------------
+
+A deadlock means no thread can make progress — the program is permanently
+stuck.  Since the invariant can never be evaluated on a stuck program,
+a deadlock is always reported as ``property_holds = False``.
+
+Frontrun detects two kinds of deadlock, both using a directed
+**wait-for graph**:
+
+**Cooperative-lock deadlocks (Python-level):**
+
+When ``CooperativeLock`` or ``CooperativeRLock`` would block (the lock is
+held by another thread), the slow path registers a waiting edge in the
+global ``WaitForGraph`` before entering the spin loop:
+
+.. code-block:: text
+
+    add_waiting(thread_id, lock_id)  →  DFS from ("thread", thread_id)
+
+If the DFS finds a path back to the starting node, a cycle exists.
+The waiting edge is immediately removed, ``DeadlockError`` is stored on
+``scheduler._error``, and ``SchedulerAbort`` is raised to exit all
+managed threads cleanly.  No actual waiting occurs.
+
+**Row-lock deadlocks (``SELECT FOR UPDATE``):**
+
+``SELECT FOR UPDATE`` acquires a row-level exclusive lock inside Postgres.
+If thread A holds row lock X and waits for row lock Y while thread B
+holds row lock Y and waits for row lock X, both threads will block
+indefinitely inside libpq's C code --- invisible to Python tracing.
+
+Frontrun prevents this by maintaining a client-side row-lock registry
+(``DporScheduler._active_row_locks``) and intercepting the lock
+acquisition *before* the C call:
+
+.. code-block:: text
+
+    SQL cursor detects "SELECT ... FOR UPDATE"
+        → identifies row-level resource ID  (e.g. "sql:users:(('id',1))")
+        → calls acquire_row_locks(thread_id, [resource_id])
+
+    acquire_row_locks:
+        if another thread holds the lock:
+            add_waiting(thread_id, row_lock_id, kind="row_lock")
+            if WaitForGraph detects a cycle:
+                remove_waiting(...)
+                scheduler._error = DeadlockError(cycle_description)
+                notify_all()
+                raise SchedulerAbort
+            else:
+                condition.wait()   ← Python-level, not C-level
+
+Row-lock nodes use a separate namespace in the wait-for graph
+(``("row_lock", counter)`` vs ``("lock", id(obj))`` for cooperative
+locks), so their integer IDs cannot collide regardless of pointer values.
+
+**Cross-domain cycles** (a cooperative Python lock and a row lock in a
+cycle together) are also detected, because both node types coexist in the
+same ``WaitForGraph`` and the DFS traverses edges regardless of kind.
+
+**Error propagation:**
+
+.. code-block:: text
+
+    DeadlockError stored on scheduler._error
+    SchedulerAbort raised in detecting thread
+    Other threads see scheduler._error and exit their spin loops
+    runner.run() returns normally (no TimeoutError)
+    explore_dpor checks isinstance(scheduler._error, DeadlockError)
+        → result.property_holds = False
+        → result.explanation = "Deadlock detected ... <cycle>"
+        → result.counterexample = schedule trace
+
+Because ``DeadlockError`` is not a subclass of ``TimeoutError``, it is
+not swallowed by the ``except TimeoutError: pass`` guard in the main
+exploration loop.
+
+**What is NOT covered:**
+
+- Deadlocks that occur entirely inside a C extension without going through
+  the row-lock registry (e.g. two threads sharing a single psycopg2
+  connection object, which is unsupported anyway).
+- ``LOCK TABLE`` or advisory locks — only ``SELECT FOR UPDATE`` /
+  ``SELECT FOR SHARE`` row locks are intercepted by the SQL cursor layer.

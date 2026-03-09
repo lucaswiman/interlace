@@ -1,9 +1,14 @@
-"""Integration test: SQLAlchemy ORM lost-update race against real Postgres.
+"""Integration tests: SQLAlchemy ORM races and deadlocks against real Postgres.
 
-SQLAlchemy's ORM computes new column values in Python.  When two
-concurrent sessions read the same row, compute a new value from the
-stale read, and write it back, the second commit silently overwrites
-the first — a classic **lost update**.
+Covers two scenarios:
+
+1. **Lost update** — two threads read-compute-write the same row without
+   locking, causing one increment to be silently overwritten.
+
+2. **Row-lock deadlock** — two threads acquire ``SELECT FOR UPDATE`` row
+   locks in opposite orders, creating a lock-ordering cycle that Frontrun
+   detects instantly and reports as an invariant violation
+   (``result.property_holds = False``).
 
 Requires a running Postgres with a ``frontrun_test`` database::
 
@@ -267,3 +272,75 @@ class TestOrmNaiveThreading:
                 failures += 1
 
         assert failures > 0, f"Race never triggered in {trials} trials"
+
+
+# ---------------------------------------------------------------------------
+# 5. Row-lock deadlock — detected as invariant violation
+# ---------------------------------------------------------------------------
+
+
+class TestOrmRowLockDeadlock:
+    """DPOR detects a SELECT FOR UPDATE deadlock as an invariant violation.
+
+    Thread A acquires a row lock on user 1, then tries to lock user 2.
+    Thread B acquires a row lock on user 2, then tries to lock user 1.
+    In the interleaving where each thread holds one lock and waits for the
+    other, the WaitForGraph detects the cycle and sets property_holds=False.
+    """
+
+    @pytest.fixture(scope="class")
+    def deadlock_engine(self, engine):  # type: ignore[no-untyped-def]
+        """Ensure a second user row exists for the two-resource deadlock."""
+        with Session(engine) as session:
+            existing = session.get(User, 2)
+            if existing is None:
+                session.add(User(id=2, name="Bob", login_count=0))
+                session.commit()
+        return engine
+
+    def test_row_lock_deadlock_is_invariant_violation(self, deadlock_engine) -> None:  # type: ignore[no-untyped-def]
+        """explore_dpor reports property_holds=False when a SELECT FOR UPDATE deadlock is found."""
+        engine = deadlock_engine
+
+        class _State:
+            def __init__(self) -> None:
+                engine.dispose()
+
+        def thread_a(_state: _State) -> None:
+            """Lock user 1, then user 2."""
+            with engine.connect() as conn:
+                conn.exec_driver_sql(
+                    "SELECT id FROM users WHERE id = %s FOR UPDATE", (1,)
+                )
+                conn.exec_driver_sql(
+                    "SELECT id FROM users WHERE id = %s FOR UPDATE", (2,)
+                )
+                conn.exec_driver_sql("COMMIT")
+
+        def thread_b(_state: _State) -> None:
+            """Lock user 2, then user 1 — opposite order from thread_a."""
+            with engine.connect() as conn:
+                conn.exec_driver_sql(
+                    "SELECT id FROM users WHERE id = %s FOR UPDATE", (2,)
+                )
+                conn.exec_driver_sql(
+                    "SELECT id FROM users WHERE id = %s FOR UPDATE", (1,)
+                )
+                conn.exec_driver_sql("COMMIT")
+
+        def _invariant(_state: _State) -> bool:
+            return True  # deadlock fires before invariant check
+
+        result = explore_dpor(
+            setup=_State,
+            threads=[thread_a, thread_b],
+            invariant=_invariant,
+            detect_io=True,
+            deadlock_timeout=15.0,
+        )
+
+        assert not result.property_holds, (
+            "DPOR should detect the row-lock deadlock as an invariant violation"
+        )
+        assert result.explanation is not None
+        assert "deadlock" in result.explanation.lower(), result.explanation
