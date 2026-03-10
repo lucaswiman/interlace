@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 import types
+import warnings
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -52,7 +53,7 @@ from frontrun._cooperative import (
     set_sync_reporter,
     unpatch_locks,
 )
-from frontrun._deadlock import SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
+from frontrun._deadlock import DeadlockError, SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
 from frontrun._io_detection import (
     patch_io,
     set_io_reporter,
@@ -187,6 +188,7 @@ class _PreloadBridge:
         self._pending: dict[int, list[tuple[int, str, str]]] = {}
         self._active = False
         self._dispatcher = dispatcher  # IOEventDispatcher (for poll())
+        self._fd_to_dpor_ids: dict[str, set[int]] = {}
 
     def register_thread(self, os_tid: int, dpor_id: int) -> None:
         """Map an OS thread ID to a DPOR logical thread ID."""
@@ -208,6 +210,7 @@ class _PreloadBridge:
             self._tid_to_dpor.clear()
             self._pending.clear()
             self._active = False
+            self._fd_to_dpor_ids.clear()
 
     def listener(self, event: Any) -> None:
         """IOEventDispatcher callback — buffer the event for the right thread."""
@@ -225,6 +228,17 @@ class _PreloadBridge:
             dpor_id = self._tid_to_dpor.get(event.tid)
             if dpor_id is None:
                 return
+            # Warn if two distinct DPOR threads share the same socket fd.
+            # This usually means threads are reusing the same DB connection,
+            # which breaks DPOR's per-thread conflict tracking.
+            seen = self._fd_to_dpor_ids.setdefault(event.resource_id, set())
+            if dpor_id not in seen and len(seen) == 1:
+                warnings.warn(
+                    f"DPOR threads {seen} and {dpor_id} share socket {event.resource_id!r}. "
+                    "Each thread should use its own database connection.",
+                    stacklevel=2,
+                )
+            seen.add(dpor_id)
             # Map libc I/O operations to DPOR access kinds.  Using the
             # actual send/recv distinction (write/read) is critical: the
             # DPOR engine's ObjectState tracks per-thread latest-read and
@@ -317,6 +331,20 @@ class DporScheduler:
         # FOR_ITER can report reads on the underlying container.
         self._iter_to_container: dict[int, Any] = {}
 
+        # Row-lock registry: resource_id → thread_id holding the lock.
+        # SELECT FOR UPDATE is exclusive — only one thread can hold it at a time.
+        self._active_row_locks: dict[str, int] = {}
+        # Reverse index: thread_id → set of resource_ids held by that thread.
+        # Avoids O(n) scan in _release_row_locks_unlocked.
+        self._thread_row_locks: dict[int, set[str]] = {}
+
+        # Stable integer IDs for row-lock resources (for WaitForGraph nodes).
+        # String resource IDs are assigned monotonically increasing integers so
+        # row-lock nodes ("row_lock", int) are disjoint from cooperative-lock
+        # nodes ("lock", id(obj)) in the WaitForGraph.
+        self._row_lock_ids: dict[str, int] = {}
+        self._row_lock_next_id: int = 0
+
         # Request the first scheduling decision
         self._current_thread = self._schedule_next()
 
@@ -388,12 +416,17 @@ class DporScheduler:
                         _engine.report_io_access(_execution, thread_id, _obj_key, _io_kind)
                 _pending_io.clear()
 
-            # Skip scheduling if inside a SQL transaction to ensure atomicity.
-            # DPOR will see all transaction operations as a single atomic block
-            # occurring at the COMMIT point.
+            # Skip scheduling if inside an explicit SQL transaction to ensure
+            # atomicity.  DPOR will see all transaction operations as a single
+            # atomic block occurring at the COMMIT point.
+            #
+            # Autobegin transactions (_is_autobegin=True) are NOT skipped: with
+            # READ COMMITTED isolation (the PostgreSQL default), individual
+            # statements are visible to other transactions, so DPOR must be
+            # able to interleave between them to find races like lost updates.
             from frontrun._io_detection import _io_tls as _iotls
 
-            if getattr(_iotls, "_in_transaction", False):
+            if getattr(_iotls, "_in_transaction", False) and not getattr(_iotls, "_is_autobegin", False):
                 if frame is not None:
                     _process_opcode(frame, self, thread_id)
                 return True
@@ -441,6 +474,9 @@ class DporScheduler:
             self._threads_done.add(thread_id)
             with self._engine_lock:
                 self.execution.finish_thread(thread_id)
+            # Release any row locks the thread may still hold (safety net).
+            # _release_row_locks_unlocked avoids re-acquiring self._condition.
+            self._release_row_locks_unlocked(thread_id)
             # If the done thread was the current one, schedule next
             if self._current_thread == thread_id:
                 next_thread = self._schedule_next()
@@ -470,6 +506,93 @@ class DporScheduler:
         stacks = getattr(_dpor_tls, "_shadow_stacks", None)
         if stacks is not None:
             stacks.pop(frame_id, None)
+
+    def _row_lock_int_id(self, res_id: str) -> int:
+        """Return a stable monotonic integer ID for *res_id* (allocated on first call)."""
+        lid = self._row_lock_ids.get(res_id)
+        if lid is None:
+            lid = self._row_lock_next_id
+            self._row_lock_next_id += 1
+            self._row_lock_ids[res_id] = lid
+        return lid
+
+    def acquire_row_locks(self, thread_id: int, resource_ids: list[str]) -> None:
+        """Block until all *resource_ids* can be held by *thread_id*.
+
+        If another thread holds a conflicting lock, waits on the condition
+        variable.  On timeout (the holder is likely blocked in C too), lets
+        the C call proceed — the ``lock_timeout`` PostgreSQL safety net
+        will handle it as a fast error rather than an indefinite hang.
+
+        When a WaitForGraph is installed, registers waiting/holding edges for
+        instant cycle-based deadlock detection.
+        """
+        from frontrun._deadlock import DeadlockError, SchedulerAbort, format_cycle, get_wait_for_graph
+
+        graph = get_wait_for_graph()
+        with self._condition:
+            for res_id in resource_ids:
+                lock_int_id = self._row_lock_int_id(res_id)
+                while True:
+                    holder = self._active_row_locks.get(res_id)
+                    if holder is None or holder == thread_id:
+                        break
+                    # Another thread holds this row lock — check for cycle first
+                    if graph is not None:
+                        cycle = graph.add_waiting(thread_id, lock_int_id, kind="row_lock")
+                        if cycle is not None:
+                            graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
+                            desc = format_cycle(cycle, {v: k for k, v in self._row_lock_ids.items()})
+                            err = DeadlockError(f"Row-lock deadlock detected: {desc}", desc)
+                            if self._error is None:
+                                self._error = err
+                            self._condition.notify_all()
+                            raise SchedulerAbort(str(err))
+                    # Yield scheduling to the holder so it can run and
+                    # either release the lock or block on one of ours
+                    # (triggering WaitForGraph cycle detection).
+                    if self._current_thread == thread_id:
+                        self._current_thread = holder
+                        self._condition.notify_all()
+                    # Wait for the holder to release
+                    if not self._condition.wait(timeout=self.deadlock_timeout):
+                        if graph is not None:
+                            graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
+                        if self._finished or self._error:
+                            return
+                        # Timeout — the holder is probably blocked in C too.
+                        # Let the C call proceed; lock_timeout safety net will handle it.
+                        return
+                    if graph is not None:
+                        graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
+                    if self._finished or self._error:
+                        return
+                self._active_row_locks[res_id] = thread_id
+                self._thread_row_locks.setdefault(thread_id, set()).add(res_id)
+                if graph is not None:
+                    graph.add_holding(thread_id, lock_int_id, kind="row_lock")
+
+    def _release_row_locks_unlocked(self, thread_id: int) -> bool:
+        """Remove row locks for *thread_id*. Caller must hold ``self._condition``."""
+        from frontrun._deadlock import get_wait_for_graph
+
+        held = self._thread_row_locks.pop(thread_id, None)
+        if not held:
+            return False
+        graph = get_wait_for_graph()
+        for r in held:
+            self._active_row_locks.pop(r, None)
+            if graph is not None:
+                lid = self._row_lock_ids.get(r)
+                if lid is not None:
+                    graph.remove_holding(thread_id, lid, kind="row_lock")
+        return True
+
+    def release_row_locks(self, thread_id: int) -> None:
+        """Release all row locks held by *thread_id* (called on COMMIT/ROLLBACK)."""
+        with self._condition:
+            if self._release_row_locks_unlocked(thread_id):
+                self._condition.notify_all()
 
 
 # ---------------------------------------------------------------------------
@@ -1457,6 +1580,11 @@ class DporBytecodeRunner:
         if self._preload_bridge is not None:
             self._preload_bridge.register_thread(threading.get_native_id(), thread_id)
 
+        from frontrun._io_detection import set_dpor_scheduler, set_dpor_thread_id
+
+        set_dpor_scheduler(self.scheduler)
+        set_dpor_thread_id(thread_id)
+
         if self.detect_io:
             _recorder = scheduler.trace_recorder
 
@@ -1489,6 +1617,10 @@ class DporBytecodeRunner:
             self._preload_bridge.unregister_thread(threading.get_native_id())
         if self.detect_io:
             set_io_reporter(None)
+        from frontrun._io_detection import set_dpor_scheduler, set_dpor_thread_id
+
+        set_dpor_scheduler(None)
+        set_dpor_thread_id(None)
         clear_context()
         set_sync_reporter(None)
         _dpor_tls.scheduler = None
@@ -1746,6 +1878,27 @@ def explore_dpor(
                 runner._unpatch_locks()
 
             result.num_explored += 1
+
+            # Check for deadlock before running the invariant — a deadlock
+            # means the program never completed, so the invariant can never be
+            # satisfied.  Report it as a property violation with a clear message.
+            if isinstance(scheduler._error, DeadlockError):
+                result.property_holds = False
+                with engine_lock:
+                    schedule = execution.schedule_trace
+                schedule_list = list(schedule)
+                result.failures.append((result.num_explored, schedule_list))
+                if result.counterexample is None:
+                    result.counterexample = schedule_list
+                if result.explanation is None:
+                    result.explanation = (
+                        f"Deadlock detected after {result.num_explored} interleaving(s).\n\n"
+                        f"{scheduler._error.cycle_description}"
+                    )
+                if stop_on_first:
+                    with _INSTR_CACHE_LOCK:
+                        _INSTR_CACHE.clear()
+                    return result
 
             if warn_nondeterministic_sql:
                 check_uncaptured_inserts()

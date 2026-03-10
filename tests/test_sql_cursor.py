@@ -110,6 +110,11 @@ def _cleanup_sql_patch() -> Generator[None, None, None]:
     set_io_reporter(None)
     if hasattr(_io_tls, "_sql_suppress"):
         _io_tls._sql_suppress = False
+    _io_tls._in_transaction = False
+    _io_tls._is_autobegin = False
+    _io_tls._tx_buffer = []
+    _io_tls._tx_savepoints = {}
+    _io_tls._pending_row_locks = []
 
 
 # ---------------------------------------------------------------------------
@@ -1236,3 +1241,79 @@ def test_new_connection_after_patch_is_traced() -> None:
 
     assert any((r == "sql:t" or r.startswith("sql:t:")) and k == "read" for r, k in log.events)
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Row-lock capture tests
+# ---------------------------------------------------------------------------
+
+
+def test_report_or_buffer_captures_pending_row_locks() -> None:
+    """_report_or_buffer with force_immediate=True inside a tx captures resource IDs."""
+    from frontrun._sql_cursor import _report_or_buffer
+
+    log = IOLog()
+    set_io_reporter(log)
+    _io_tls._in_transaction = True
+    _io_tls._pending_row_locks = []
+
+    try:
+        _report_or_buffer(log, "sql:users:(('id', 42))", "write", force_immediate=True)
+        pending = getattr(_io_tls, "_pending_row_locks", [])
+        assert "sql:users:(('id', 42))" in pending
+        # Should also have reported immediately
+        assert ("sql:users:(('id', 42))", "write") in log.events
+    finally:
+        _io_tls._in_transaction = False
+        _io_tls._pending_row_locks = []
+
+
+def test_report_or_buffer_no_capture_outside_tx() -> None:
+    """_report_or_buffer with force_immediate=True does NOT track row locks outside a tx.
+
+    When ``_in_transaction`` is False the DB releases locks immediately after the
+    statement, so there's no blocking risk.  Autobegin detection (which sets
+    ``_in_transaction=True``) happens earlier in ``_intercept_execute``, before
+    ``_report_or_buffer`` is called.
+    """
+    from frontrun._sql_cursor import _report_or_buffer
+
+    log = IOLog()
+    set_io_reporter(log)
+    _io_tls._in_transaction = False
+    _io_tls._pending_row_locks = []
+
+    try:
+        _report_or_buffer(log, "sql:users:(('id', 42))", "write", force_immediate=True)
+        pending = getattr(_io_tls, "_pending_row_locks", [])
+        assert len(pending) == 0
+    finally:
+        _io_tls._pending_row_locks = []
+
+
+def test_report_or_buffer_no_capture_without_force_immediate() -> None:
+    """_report_or_buffer without force_immediate does NOT capture even in a tx."""
+    from frontrun._sql_cursor import _report_or_buffer
+
+    log = IOLog()
+    set_io_reporter(log)
+    _io_tls._in_transaction = True
+    _io_tls._tx_buffer = []
+    _io_tls._pending_row_locks = []
+
+    try:
+        _report_or_buffer(log, "sql:users:(('id', 42))", "write", force_immediate=False)
+        pending = getattr(_io_tls, "_pending_row_locks", [])
+        assert len(pending) == 0
+    finally:
+        _io_tls._in_transaction = False
+        _io_tls._tx_buffer = []
+        _io_tls._pending_row_locks = []
+
+
+def test_release_dpor_row_locks_no_scheduler() -> None:
+    """_release_dpor_row_locks is a no-op when no scheduler is set."""
+    from frontrun._sql_cursor import _release_dpor_row_locks
+
+    # Should not raise
+    _release_dpor_row_locks()

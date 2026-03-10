@@ -103,15 +103,103 @@ def is_tid_suppressed(tid: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _report_or_buffer(reporter: Any, res_id: str, kind: str) -> None:
-    """Report a SQL access immediately, or buffer it if inside a transaction."""
+def _report_or_buffer(reporter: Any, res_id: str, kind: str, *, force_immediate: bool = False) -> None:
+    """Report a SQL access immediately, or buffer it if inside a transaction.
+
+    When ``force_immediate=True`` the access is reported right away even
+    inside a transaction (used for SELECT FOR UPDATE to let the DPOR engine
+    learn about write-intent conflicts before C-level blocking can occur).
+    Transaction atomicity is preserved because the DPOR scheduler still
+    skips yielding inside transactions.
+
+    Autobegin transactions (``_is_autobegin=True``) are NOT buffered: with
+    READ COMMITTED isolation (PostgreSQL default), individual statements are
+    visible to other transactions, so DPOR must see each access point to
+    explore interleavings.  Row-lock tracking still works because
+    ``_in_transaction`` is True.
+    """
     in_tx = getattr(_io_tls, "_in_transaction", False)
-    if in_tx:
+    is_autobegin = getattr(_io_tls, "_is_autobegin", False)
+    if in_tx and not force_immediate and not is_autobegin:
         if not hasattr(_io_tls, "_tx_buffer"):
             _io_tls._tx_buffer = []
         _io_tls._tx_buffer.append((res_id, kind))
     else:
         reporter(res_id, kind)
+
+    # Track resources that need row-lock arbitration (SELECT FOR UPDATE).
+    # Only when inside a transaction — outside a tx the DB releases the lock
+    # immediately so there's no blocking risk.
+    if force_immediate and in_tx:
+        pending = getattr(_io_tls, "_pending_row_locks", None)
+        if pending is None:
+            pending = []
+            _io_tls._pending_row_locks = pending
+        pending.append(res_id)
+
+
+def _detect_autobegin(cursor: Any) -> None:
+    """Set ``_in_transaction`` if the connection is in autobegin mode.
+
+    DB-API drivers like psycopg2 default to ``autocommit=False``, which
+    means the first statement implicitly starts a transaction at the
+    C/driver level — no explicit ``BEGIN`` flows through
+    ``cursor.execute()``.  We detect this by checking the cursor's
+    connection: if ``autocommit`` is not ``True`` and we haven't already
+    seen a ``BEGIN``, we treat the connection as having an implicit
+    transaction.
+
+    This is best-effort: if the connection doesn't expose ``autocommit``
+    (e.g. sqlite3), we leave ``_in_transaction`` unchanged and fall back
+    to statement-level tracking.
+    """
+    if getattr(_io_tls, "_in_transaction", False):
+        return  # already in a transaction
+    conn = getattr(cursor, "connection", None)
+    if conn is None:
+        return
+    autocommit = getattr(conn, "autocommit", None)
+    if autocommit is None:
+        return  # driver doesn't expose autocommit — can't detect
+    if not autocommit:
+        # autocommit=False → autobegin: implicit transaction is active.
+        # Set _is_autobegin so _report_or_buffer reports accesses
+        # immediately (READ COMMITTED doesn't buffer) while still
+        # tracking row locks via the _in_transaction flag.
+        _io_tls._in_transaction = True
+        _io_tls._is_autobegin = True
+        _io_tls._tx_buffer = []
+        _io_tls._tx_savepoints = {}
+
+
+def _get_dpor_context() -> tuple[Any, int] | None:
+    """Return (scheduler, thread_id) if DPOR is active, else ``None``."""
+    from frontrun._io_detection import get_dpor_scheduler, get_dpor_thread_id
+
+    scheduler = get_dpor_scheduler()
+    if scheduler is None:
+        return None
+    thread_id = get_dpor_thread_id()
+    if thread_id is None:
+        return None
+    return scheduler, thread_id
+
+
+def _acquire_pending_row_locks() -> None:
+    """Drain pending row-lock resources from TLS and acquire them on the scheduler."""
+    lock_resources = getattr(_io_tls, "_pending_row_locks", None)
+    if lock_resources:
+        _io_tls._pending_row_locks = []
+        ctx = _get_dpor_context()
+        if ctx is not None:
+            ctx[0].acquire_row_locks(ctx[1], lock_resources)
+
+
+def _release_dpor_row_locks() -> None:
+    """Release any DPOR row locks held by the current thread."""
+    ctx = _get_dpor_context()
+    if ctx is not None:
+        ctx[0].release_row_locks(ctx[1])
 
 
 def _sql_resource_id(table: str, predicates: list[Any], temporal: str | None = None) -> str:
@@ -151,19 +239,24 @@ def _report_sql_access(
             tx = access.tx_op
             if tx is TxOp.BEGIN:
                 _io_tls._in_transaction = True
+                _io_tls._is_autobegin = False
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
             elif tx is TxOp.COMMIT:
                 _io_tls._in_transaction = False
+                _io_tls._is_autobegin = False
                 buffer = getattr(_io_tls, "_tx_buffer", [])
                 for res_id, kind in buffer:
                     reporter(res_id, kind)
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
+                _release_dpor_row_locks()
             elif tx is TxOp.ROLLBACK:
                 _io_tls._in_transaction = False
+                _io_tls._is_autobegin = False
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
+                _release_dpor_row_locks()
             elif isinstance(tx, Savepoint):
                 savepoints = getattr(_io_tls, "_tx_savepoints", {})
                 buffer = getattr(_io_tls, "_tx_buffer", [])
@@ -199,6 +292,10 @@ def _report_sql_access(
                     pred_rows = rows
                     has_row_level = True
 
+            # SELECT FOR UPDATE signals write intent immediately so the DPOR
+            # engine can learn about conflicts before C-level blocking occurs.
+            lock_update = access.lock_intent is LockIntent.UPDATE
+
             def report_or_buffer(table: str, kind: str, rows: list[list[Any]]) -> None:
                 temporal = access.temporal_clauses.get(table) if access.temporal_clauses else None
                 for row_preds in rows:
@@ -210,13 +307,13 @@ def _report_sql_access(
                             if alias is not None:
                                 break
                     res_id = alias if alias is not None else _sql_resource_id(table, row_preds, temporal)
-                    _report_or_buffer(reporter, res_id, kind)
+                    _report_or_buffer(reporter, res_id, kind, force_immediate=lock_update)
 
             # Report explicit reads
             for table in access.read_tables:
                 # SELECT FOR UPDATE is both read and write to create conflicts.
                 # SHARE locks are treated as reads (they don't block other shares).
-                kind = "write" if access.lock_intent is LockIntent.UPDATE else "read"
+                kind = "write" if lock_update else "read"
                 report_or_buffer(table, kind, pred_rows)
 
             # Report implicit reads from Foreign Key dependencies
@@ -295,7 +392,24 @@ def _intercept_execute(
     are supported via buffer truncation.
     """
     insert_match = _RE_INSERT_TABLE.match(operation) if isinstance(operation, str) else None
+
+    # Detect autobegin: most DB-API drivers (psycopg2, pymysql) default to
+    # autocommit=False, meaning the first statement implicitly starts a
+    # transaction at the C/driver level without sending an explicit BEGIN
+    # through cursor.execute().  We detect this and set _in_transaction so
+    # that (a) accesses are buffered atomically, (b) the DPOR scheduler
+    # treats the transaction as an atomic block, and (c) row locks are
+    # tracked for deadlock detection.
+    #
+    # We skip this when connection.autocommit is True (each statement is
+    # its own transaction, locks released immediately) or when we've
+    # already seen an explicit BEGIN.
+    _detect_autobegin(self)
+
     reported = _report_sql_access(operation, parameters, is_executemany=is_executemany, paramstyle=paramstyle)
+
+    # Block if another DPOR thread holds a conflicting row lock
+    _acquire_pending_row_locks()
 
     if reported:
         with _suppress_endpoint_io():
@@ -532,7 +646,7 @@ def reset_connection_state() -> None:
     from leaking across logical sessions.  Safe to call even when no
     transaction is active (it's a no-op in that case).
     """
-    for attr in ("_in_transaction", "_tx_buffer", "_tx_savepoints"):
+    for attr in ("_in_transaction", "_tx_buffer", "_tx_savepoints", "_pending_row_locks"):
         if hasattr(_io_tls, attr):
             delattr(_io_tls, attr)
 

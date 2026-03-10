@@ -294,3 +294,34 @@ class TestTraceMarkerTimeout:
         executor.run("t1", worker)
         with pytest.raises(TimeoutError, match="Schedule incomplete.*marker_that_does_not_exist"):
             executor.wait(timeout=5.0)
+
+
+# ---------------------------------------------------------------------------
+# Bug: patch_locks() breaks concurrent.futures.ThreadPoolExecutor
+# ---------------------------------------------------------------------------
+
+
+class TestPatchLocksConcurrentFutures:
+    """patch_locks() replaces threading.Lock with CooperativeLock.  Modules
+    that import threading.Lock at module-load time (like concurrent.futures.thread)
+    would get a CooperativeLock for their internal locks, causing failures when
+    those locks are later tested with isinstance(..., _thread.LockType).
+
+    The fix pre-imports concurrent.futures.thread before monkey-patching so
+    its internal lock objects are created with the real C-level lock.
+    """
+
+    def test_patch_locks_concurrent_futures_threadpool(self):
+        """After patch_locks(), ThreadPoolExecutor should still submit tasks."""
+        import concurrent.futures
+
+        from frontrun._cooperative import patch_locks, unpatch_locks
+
+        patch_locks()
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(lambda: 42)
+                result = future.result(timeout=5.0)
+            assert result == 42
+        finally:
+            unpatch_locks()

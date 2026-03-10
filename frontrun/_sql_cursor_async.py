@@ -20,7 +20,14 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from frontrun._sql_cursor import _RE_INSERT_TABLE, _capture_insert_id, _report_sql_access, _suppress_endpoint_io
+from frontrun._sql_cursor import (
+    _RE_INSERT_TABLE,
+    _acquire_pending_row_locks,
+    _capture_insert_id,
+    _detect_autobegin,
+    _report_sql_access,
+    _suppress_endpoint_io,
+)
 
 # ---------------------------------------------------------------------------
 # Async interception
@@ -42,7 +49,11 @@ async def _intercept_execute_async(
     ``_report_sql_access`` helper, then ``await``s the original async method.
     """
     insert_match = _RE_INSERT_TABLE.match(operation) if isinstance(operation, str) else None
+    _detect_autobegin(self)
     reported = _report_sql_access(operation, parameters, is_executemany=is_executemany, paramstyle=paramstyle)
+
+    # Block if another DPOR thread holds a conflicting row lock
+    _acquire_pending_row_locks()
 
     if reported:
         with _suppress_endpoint_io():
