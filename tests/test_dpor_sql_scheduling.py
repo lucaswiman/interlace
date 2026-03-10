@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import threading
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -32,7 +31,6 @@ import pytest
 from frontrun._sql_cursor import patch_sql, unpatch_sql
 from frontrun._tracing import _FRONTRUN_DIR
 from frontrun.dpor import explore_dpor
-
 
 # ---------------------------------------------------------------------------
 # Helper: compile an "ORM wrapper" that looks like library code to the tracer
@@ -125,8 +123,7 @@ class TestReportAndWaitCalledPerSqlOp:
         # All calls must use frame=None (not a real frame)
         for call in calls:
             assert call.args[0] is None, (
-                f"report_and_wait should be called with frame=None from _intercept_execute, "
-                f"got frame={call.args[0]!r}"
+                f"report_and_wait should be called with frame=None from _intercept_execute, got frame={call.args[0]!r}"
             )
 
     def test_report_and_wait_not_called_when_dpor_inactive(self, mem_db: sqlite3.Connection) -> None:
@@ -156,9 +153,7 @@ class TestReportAndWaitCalledPerSqlOp:
 class TestDporSqlSchedulingPoints:
     """DPOR must explore >1 interleaving when SQL is called from untraced library code."""
 
-    def test_orm_style_sql_more_interleavings_than_without_sql_events(
-        self, mem_db: sqlite3.Connection
-    ) -> None:
+    def test_orm_style_sql_more_interleavings_than_without_sql_events(self, mem_db: sqlite3.Connection) -> None:
         """SQL scheduling points cause DPOR to explore significantly more interleavings.
 
         _orm_increment is compiled with a filename inside _FRONTRUN_DIR so that
