@@ -417,7 +417,7 @@ class TestPreloadDporIntegration:
             threads=[increment, increment],
             invariant=check_invariant,
             detect_io=True,
-            max_interleavings=30,
+            max_executions=30,
             reproduce_on_failure=0,
         )
         # DPOR should detect the lost-update race: the LD_PRELOAD bridge
@@ -462,7 +462,7 @@ class TestPreloadDporIntegration:
             threads=[increment, increment],
             invariant=check_invariant,
             detect_io=True,
-            max_interleavings=30,
+            max_executions=30,
             reproduce_on_failure=0,
         )
         assert result.property_holds, (

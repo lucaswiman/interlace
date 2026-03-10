@@ -192,6 +192,14 @@ a way that triggers the database-level race. It doesn't need to
 *understand* the conflict to stumble into it.
 
 
+.. note::
+
+   The ``explore_dpor`` calls in Demos 2 and 3 manage connections manually
+   (``engine.dispose()`` in ``setup``, one ``Session`` per thread). The
+   :mod:`frontrun.contrib.sqlalchemy` module provides a ``sqlalchemy_dpor``
+   helper that handles this boilerplate automatically. See
+   :doc:`dpor_guide` for details.
+
 Demo 3 --- DPOR systematic exploration
 ---------------------------------------
 

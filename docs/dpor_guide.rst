@@ -322,3 +322,78 @@ shared socket endpoint as a conflict point.
    The bytecode explorer does *not* consume ``LD_PRELOAD`` events.
    It relies on random scheduling and may still find C-level races
    by chance, but it has no awareness of the underlying I/O conflicts.
+
+
+ORM helpers: ``django_dpor`` and ``sqlalchemy_dpor``
+------------------------------------------------------
+
+Writing correct ``explore_dpor()`` tests against a real database requires
+boilerplate: each thread needs its own connection, stale connections from a
+previous execution must be closed, and optional lock timeouts must be injected
+before the thread runs. The ``frontrun.contrib`` package provides ready-made
+wrappers that handle this automatically.
+
+``django_dpor``
+~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   from frontrun.contrib.django import django_dpor
+
+   result = django_dpor(
+       setup=_State,
+       threads=[thread_a, thread_b],
+       invariant=lambda s: s.login_count == 2,
+       lock_timeout=500,  # optional, milliseconds
+   )
+   assert result.property_holds, result.explanation
+
+``django_dpor`` wraps ``explore_dpor`` and:
+
+* Calls ``connections.close_all()`` before each execution so threads open
+  fresh connections (avoids sharing a stale connection across DPOR replays).
+* Calls ``conn.close()`` / ``conn.ensure_connection()`` at the start of each
+  thread so every thread has its own independent connection.
+* Optionally executes ``SET lock_timeout = '<N>ms'`` on each connection,
+  converting C-level row-lock blocking into a fast PostgreSQL error rather than
+  a hang.
+
+All extra keyword arguments are forwarded to ``explore_dpor``.
+
+``sqlalchemy_dpor``
+~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   from frontrun.contrib.sqlalchemy import sqlalchemy_dpor, get_connection
+
+   result = sqlalchemy_dpor(
+       engine=engine,
+       setup=_State,
+       threads=[thread_a, thread_b],
+       invariant=lambda s: _read_count() == 2,
+       lock_timeout=500,  # optional, milliseconds
+   )
+   assert result.property_holds, result.explanation
+
+``sqlalchemy_dpor`` wraps ``explore_dpor`` and:
+
+* Calls ``engine.dispose()`` before each execution to close pooled connections.
+* Opens a fresh ``engine.connect()`` connection for each thread and stores it
+  in a ``ContextVar`` so the thread can retrieve it with ``get_connection()``.
+* Optionally executes ``SET lock_timeout = '<N>ms'`` via
+  ``conn.exec_driver_sql()``.
+
+Inside a thread function, retrieve the per-thread connection with:
+
+.. code-block:: python
+
+   from frontrun.contrib.sqlalchemy import get_connection
+
+   def thread_fn(state):
+       conn = get_connection()
+       result = conn.execute(text("SELECT login_count FROM users WHERE id = 1"))
+       ...
+
+Both helpers accept ``detect_io=True`` (the default) and all other
+``explore_dpor`` keyword arguments.

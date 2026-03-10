@@ -411,6 +411,15 @@ def _intercept_execute(
     # Block if another DPOR thread holds a conflicting row lock
     _acquire_pending_row_locks()
 
+    # Force a DPOR scheduling point so the engine can interleave between
+    # SQL operations.  Without this, all code inside frontrun/ is skipped
+    # by the tracer, so pending_io is never flushed between back-to-back
+    # SQL calls.
+    if reported:
+        _dpor_ctx = _get_dpor_context()
+        if _dpor_ctx is not None:
+            _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
+
     if reported:
         with _suppress_endpoint_io():
             if parameters is not None:

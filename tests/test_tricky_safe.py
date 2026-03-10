@@ -849,7 +849,7 @@ class TestLockAcquireReleaseLoop:
             invariant=lambda s: s.value == 6,
             detect_io=False,
             deadlock_timeout=5.0,
-            max_interleavings=100,
+            max_executions=100,
         )
         assert result.property_holds, f"False positive on lock loop: {result}"
 

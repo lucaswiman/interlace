@@ -1737,10 +1737,10 @@ def explore_dpor(
     setup: Callable[[], T],
     threads: list[Callable[[T], None]],
     invariant: Callable[[T], bool],
-    max_interleavings: int | None = None,
+    max_executions: int | None = None,
     preemption_bound: int | None = 2,
     max_branches: int = 100_000,
-    timeout_per_interleaving: float = 5.0,
+    timeout_per_run: float = 5.0,
     stop_on_first: bool = True,
     detect_io: bool = True,
     deadlock_timeout: float = 5.0,
@@ -1759,16 +1759,11 @@ def explore_dpor(
         threads: List of callables, each receiving the shared state.
         invariant: Predicate over shared state; must be True after all
             threads complete.
-        max_interleavings: Maximum number of interleavings to explore
-            (None = unlimited, bounded only by the DPOR state space).
-            Use this to prevent combinatorial explosion on code with many
-            SQL operations.  Race conditions are usually found in the
-            first few hundred interleavings.
+        max_executions: Safety limit on total executions (None = unlimited).
         preemption_bound: Limit on preemptions per execution. 2 catches most
             bugs. None = unbounded (full DPOR).
         max_branches: Maximum scheduling points per execution.
-        timeout_per_interleaving: Timeout in seconds for each individual
-            interleaving (default 5.0).
+        timeout_per_run: Timeout for each individual run.
         stop_on_first: If True (default), stop exploring as soon as the
             first invariant violation is found.  Set to False to collect
             all failing interleavings.
@@ -1805,7 +1800,7 @@ def explore_dpor(
     _require_frontrun_env("explore_dpor")
     num_threads = len(threads)
     pb = None if preemption_bound is None else preemption_bound
-    me = None if max_interleavings is None else max_interleavings
+    me = None if max_executions is None else max_executions
     engine = PyDporEngine(
         num_threads=num_threads,
         preemption_bound=pb,
@@ -1875,7 +1870,7 @@ def explore_dpor(
 
                 funcs = [make_thread_func(t, state) for t in threads]
                 try:
-                    runner.run(funcs, timeout=timeout_per_interleaving)
+                    runner.run(funcs, timeout=timeout_per_run)
                 except TimeoutError:
                     pass
             finally:
@@ -1946,7 +1941,7 @@ def explore_dpor(
                                 schedule_list,
                                 setup,
                                 threads,
-                                timeout=timeout_per_interleaving,
+                                timeout=timeout_per_run,
                                 detect_io=False,
                                 deadlock_timeout=deadlock_timeout,
                             )
