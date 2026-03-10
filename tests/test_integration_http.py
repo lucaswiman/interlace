@@ -181,7 +181,7 @@ class TestHttpCounterRace:
             threads=[increment, increment],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -212,7 +212,7 @@ class TestHttpCounterRace:
             threads=[increment, increment],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -307,7 +307,7 @@ class TestHttpConfigRace:
             threads=[update_field_a, update_field_b],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -343,7 +343,7 @@ class TestHttpConfigRace:
             ],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -396,7 +396,7 @@ class TestHttpTransferRace:
             threads=[transfer_10, transfer_30],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -435,7 +435,7 @@ class TestHttpTransferRace:
             ],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -481,7 +481,7 @@ class TestHttpInventoryRace:
             threads=[buy, buy],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -518,7 +518,7 @@ class TestHttpInventoryRace:
             threads=[buy, buy],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )

@@ -131,7 +131,7 @@ class TestRedisCounterRace:
             threads=[increment, increment],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -167,7 +167,7 @@ class TestRedisCounterRace:
             threads=[increment, increment],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -258,7 +258,7 @@ class TestRedisCheckThenAct:
             threads=[maybe_init, maybe_init],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -298,7 +298,7 @@ class TestRedisCheckThenAct:
             threads=[maybe_init, maybe_init],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -348,7 +348,7 @@ class TestRedisInventoryRace:
             threads=[buy, buy],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -389,7 +389,7 @@ class TestRedisInventoryRace:
             threads=[buy, buy],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -490,7 +490,7 @@ class TestRedisTransferRace:
             threads=[transfer_a_to_b, transfer_a_to_b_also],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )
@@ -533,7 +533,7 @@ class TestRedisTransferRace:
             ],
             invariant=invariant,
             detect_io=True,
-            max_interleavings=50,
+            max_executions=50,
             deadlock_timeout=15.0,
             reproduce_on_failure=0,
         )

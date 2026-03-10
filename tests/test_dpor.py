@@ -237,7 +237,7 @@ class TestExploreDpor:
             setup=Counter,
             threads=[lambda c: c.increment(), lambda c: c.increment()],
             invariant=lambda c: c.value == 2,
-            max_interleavings=500,
+            max_executions=500,
             preemption_bound=2,
         )
 
@@ -272,7 +272,7 @@ class TestExploreDpor:
             setup=AccountBalance,
             threads=[lambda bal: bal.deposit(100), lambda bal: bal.deposit(100)],
             invariant=lambda bal: bal.get_balance() == 200,
-            max_interleavings=500,
+            max_executions=500,
             preemption_bound=2,
         )
 
@@ -297,7 +297,7 @@ class TestExploreDpor:
                 lambda c: setattr(c, "value", c.value + 1),
             ],
             invariant=lambda c: c.value >= 1,  # at least one increment
-            max_interleavings=100,
+            max_executions=100,
             preemption_bound=2,
         )
 
@@ -325,7 +325,7 @@ class TestExploreDpor:
             setup=Bank,
             threads=[lambda b: b.transfer(50), lambda b: b.transfer(50)],
             invariant=lambda b: b.a.balance + b.b.balance == 200,
-            max_interleavings=500,
+            max_executions=500,
             preemption_bound=2,
         )
 
@@ -348,7 +348,7 @@ class TestExploreDpor:
             setup=LockedCounter,
             threads=[lambda c: c.increment(), lambda c: c.increment()],
             invariant=lambda c: c.value == 2,
-            max_interleavings=50,
+            max_executions=50,
             preemption_bound=2,
         )
 
@@ -369,7 +369,7 @@ class TestExploreDpor:
                 lambda s: setattr(s, "b", 1),
             ],
             invariant=lambda s: s.a == 1 and s.b == 1,
-            max_interleavings=100,
+            max_executions=100,
             preemption_bound=2,
         )
 
@@ -390,7 +390,7 @@ class TestExploreDpor:
             setup=Counter,
             threads=[lambda c: c.increment(), lambda c: c.increment()],
             invariant=lambda c: c.value == 2,
-            max_interleavings=50,
+            max_executions=50,
             preemption_bound=2,
         )
 
@@ -416,7 +416,7 @@ class TestExploreDpor:
             setup=Counter,
             threads=[lambda c: c.increment(), lambda c: c.increment()],
             invariant=lambda c: c.value == 2,
-            max_interleavings=500,
+            max_executions=500,
             preemption_bound=2,
         )
 
@@ -438,7 +438,7 @@ class TestExploreDpor:
             threads=[lambda c: c.increment(), lambda c: c.increment()],
             invariant=lambda c: c.value == 2,
             preemption_bound=None,
-            max_interleavings=500,
+            max_executions=500,
         )
 
         assert not result.property_holds
@@ -462,7 +462,7 @@ class TestExploreDpor:
                 lambda c: c.increment(),
             ],
             invariant=lambda c: c.value == 3,
-            max_interleavings=500,
+            max_executions=500,
             preemption_bound=2,
         )
 
@@ -490,14 +490,14 @@ class TestEdgeCases:
             setup=State,
             threads=[lambda s: s.run()],
             invariant=lambda s: s.value == 42,
-            max_interleavings=10,
+            max_executions=10,
         )
 
         assert result.property_holds
         assert result.num_explored == 1
 
-    def test_max_interleavings_respected(self) -> None:
-        """max_interleavings should limit exploration."""
+    def test_max_executions_respected(self) -> None:
+        """max_executions should limit exploration."""
 
         class Counter:
             def __init__(self) -> None:
@@ -511,7 +511,7 @@ class TestEdgeCases:
             setup=Counter,
             threads=[lambda c: c.increment(), lambda c: c.increment()],
             invariant=lambda c: True,  # Always passes
-            max_interleavings=3,
+            max_executions=3,
             preemption_bound=None,
         )
 
@@ -873,7 +873,7 @@ class TestDeadlockAsInvariantViolation:
             setup=State,
             threads=[thread0, thread1],
             invariant=lambda s: True,  # no data invariant — deadlock itself is the problem
-            max_interleavings=500,
+            max_executions=500,
             preemption_bound=2,
             detect_io=False,
             deadlock_timeout=2.0,
@@ -910,7 +910,7 @@ class TestDeadlockAsInvariantViolation:
             setup=State,
             threads=[thread0, thread1],
             invariant=lambda s: True,
-            max_interleavings=100,
+            max_executions=100,
             detect_io=False,
             deadlock_timeout=2.0,
         )
