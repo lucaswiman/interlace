@@ -683,7 +683,7 @@ class TestDporIntegration:
             setup=Counter,
             threads=[lambda c: c.increment(), lambda c: c.increment()],
             invariant=lambda c: c.value == 2,
-            max_executions=500,
+            max_interleavings=500,
             preemption_bound=2,
         )
 
@@ -708,7 +708,7 @@ class TestDporIntegration:
             setup=Counter,
             threads=[lambda c: c.increment(), lambda c: c.increment()],
             invariant=lambda c: c.value == 2,
-            max_executions=500,
+            max_interleavings=500,
             preemption_bound=2,
             reproduce_on_failure=5,
         )
@@ -739,7 +739,7 @@ class TestDporIntegration:
             setup=LockedCounter,
             threads=[lambda c: c.increment(), lambda c: c.increment()],
             invariant=lambda c: c.value == 2,
-            max_executions=50,
+            max_interleavings=50,
             preemption_bound=2,
         )
 
