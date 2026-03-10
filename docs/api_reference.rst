@@ -71,3 +71,17 @@ Async Scheduler Utilities
    :members:
    :undoc-members:
    :show-inheritance:
+
+
+ORM Helpers (contrib)
+----------------------
+
+.. automodule:: frontrun.contrib.django
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+.. automodule:: frontrun.contrib.sqlalchemy
+   :members:
+   :undoc-members:
+   :show-inheritance:
