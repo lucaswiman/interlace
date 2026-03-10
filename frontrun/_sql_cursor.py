@@ -598,9 +598,18 @@ def patch_sql() -> None:
         except (ImportError, AttributeError):
             pass  # driver not installed — skip silently
 
-    def _make_patched_connect(orig: Any, cursor_cls: type) -> Any:
+    def _make_patched_connect(orig: Any, default_cursor_cls: type, paramstyle: str) -> Any:
+        # Cache traced subclasses by (caller-provided cursor_factory class) to avoid
+        # creating a new class on every connect() call.
+        _cache: dict[type, type] = {}
+
         def patched_connect(*args: Any, **kwargs: Any) -> Any:
-            kwargs.setdefault("cursor_factory", cursor_cls)
+            # Wrap whatever cursor_factory the caller already set (e.g. Django's Cursor),
+            # rather than using setdefault, which is a no-op when the caller set it first.
+            user_factory = kwargs.get("cursor_factory", default_cursor_cls)
+            if user_factory not in _cache:
+                _cache[user_factory] = _make_traced_cursor_class(user_factory, paramstyle=paramstyle)
+            kwargs["cursor_factory"] = _cache[user_factory]
             return orig(*args, **kwargs)
 
         return patched_connect
@@ -611,9 +620,8 @@ def patch_sql() -> None:
         import psycopg2.extensions as _pg2ext  # type: ignore[import-untyped]
 
         orig_cursor_cls = _pg2ext.cursor
-        traced_cursor = _make_traced_cursor_class(orig_cursor_cls, paramstyle="pyformat")
         orig_connect = _pg2mod.connect
-        setattr(_pg2mod, "connect", _make_patched_connect(orig_connect, traced_cursor))
+        setattr(_pg2mod, "connect", _make_patched_connect(orig_connect, orig_cursor_cls, paramstyle="pyformat"))
         _PATCHES.append((_pg2mod, "connect", orig_connect))
         _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
         _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
@@ -625,10 +633,9 @@ def patch_sql() -> None:
         import psycopg as _pg3mod  # type: ignore[import-untyped]
 
         orig_cursor_cls = _pg3mod.Cursor
-        # Psycopg 3 uses 'format' as default paramstyle (client-side)
-        traced_cursor = _make_traced_cursor_class(orig_cursor_cls, paramstyle="format")
         orig_connect = _pg3mod.connect
-        setattr(_pg3mod, "connect", _make_patched_connect(orig_connect, traced_cursor))
+        # Psycopg 3 uses 'format' as default paramstyle (client-side)
+        setattr(_pg3mod, "connect", _make_patched_connect(orig_connect, orig_cursor_cls, paramstyle="format"))
         _PATCHES.append((_pg3mod, "connect", orig_connect))
         _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
         _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
