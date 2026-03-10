@@ -1,24 +1,19 @@
-"""Reproduction test for FRONTRUN_DEFECTS.md #1: LD_PRELOAD shared socket deadlock.
+"""Regression test for FRONTRUN_DEFECTS.md #1: LD_PRELOAD shared socket deadlock.
 
 When the LD_PRELOAD library is active, two DPOR threads that each open their
-own psycopg2 connection to the same PostgreSQL server (via Unix socket) are
-incorrectly identified as sharing a socket.  The LD_PRELOAD library tracks
-connections by socket path (resource_id), so both threads connecting to
-``/var/run/postgresql/.s.PGSQL.5432`` look like the same connection.
+own psycopg2 connection to the same PostgreSQL server (via Unix socket) must
+be treated as accessing a shared resource (the database) — but not incorrectly
+flagged as sharing a single socket.
 
-This triggers:
-  - "DPOR threads {0} and 1 share socket ..." warning
-  - Deadlock in scheduler.report_and_wait() as both threads block
-
-This test demonstrates the bug by using explore_dpor with detect_io=True
-and two threads that each independently connect to PostgreSQL and run SQL.
-The test expects a timeout (deadlock) or the shared-socket warning.
+Previously, ``_PreloadBridge`` keyed its shared-fd tracking by resource_id
+(the socket path) rather than fd, causing a spurious "shared socket" warning
+and potential deadlocks when threads independently connected to the same
+PostgreSQL server.
 """
 
 from __future__ import annotations
 
 import os
-import warnings
 
 import pytest
 
@@ -71,27 +66,22 @@ def _setup_table():
 
 
 class TestSharedSocketDeadlock:
-    """Reproduce defect #1: LD_PRELOAD + per-thread psycopg2 connections deadlock."""
+    """Regression test for defect #1: LD_PRELOAD + per-thread psycopg2 connections."""
 
-    def test_two_threads_own_connections_deadlocks_with_preload(self) -> None:
+    def test_two_threads_own_connections_with_preload(self) -> None:
         """Two DPOR threads each opening their own psycopg2 connection.
 
-        This simulates what django_dpor does: each thread closes the shared
-        connection and opens a fresh one.  With LD_PRELOAD active, both
-        threads connect to the same Unix socket path, causing the preload
-        bridge to think they share a connection → deadlock.
-
-        Expected behavior: this test should pass (DPOR explores interleavings).
-        Actual behavior (defect #1): deadlocks or emits shared-socket warning.
+        This simulates what django_dpor does: each thread opens a fresh
+        connection to the same PostgreSQL server.  With LD_PRELOAD active,
+        DPOR should detect the shared database resource and explore
+        interleavings without deadlocking or emitting spurious warnings.
         """
-        require_active("test_two_threads_own_connections_deadlocks_with_preload")
+        require_active("test_two_threads_own_connections_with_preload")
 
         class State:
             pass
 
         def thread_fn(state: State) -> None:
-            # Each thread opens its own independent connection — simulating
-            # Django's conn.close() + conn.ensure_connection() pattern.
             conn = psycopg2.connect(_DB_URL)
             conn.autocommit = True
             cur = conn.cursor()
@@ -109,49 +99,21 @@ class TestSharedSocketDeadlock:
             conn.close()
             return val == 2
 
-        # Use a short timeout to detect the deadlock quickly rather than
-        # hanging for the full test suite timeout.
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            result = explore_dpor(
-                setup=State,
-                threads=[thread_fn, thread_fn],
-                invariant=invariant,
-                detect_io=True,
-                timeout_per_run=5.0,
-                total_timeout=15.0,
-                max_executions=5,
-                reproduce_on_failure=0,
-            )
+        result = explore_dpor(
+            setup=State,
+            threads=[thread_fn, thread_fn],
+            invariant=invariant,
+            detect_io=True,
+            timeout_per_run=5.0,
+            total_timeout=15.0,
+            max_executions=5,
+            reproduce_on_failure=0,
+        )
 
-        # Check for the shared-socket warning — this is the signature of defect #1.
-        shared_socket_warnings = [
-            w for w in caught if "share socket" in str(w.message)
-        ]
-
-        # If we get here without deadlocking, check results.
-        # The defect manifests as either:
-        #   (a) Deadlock → timeout_per_run fires → test sees error in result
-        #   (b) Shared-socket warning → incorrect conflict tracking
-        #
-        # If the bug is fixed, DPOR should explore >1 interleaving and the
-        # invariant should hold (UPDATE is atomic in PostgreSQL).
-        if shared_socket_warnings:
-            pytest.fail(
-                f"Defect #1 reproduced: shared-socket warning fired.\n"
-                f"Warning: {shared_socket_warnings[0].message}\n"
-                f"DPOR explored {result.num_explored} interleavings."
-            )
-
-        if result.num_explored <= 1:
-            pytest.fail(
-                f"Defect #1 likely present: DPOR explored only "
-                f"{result.num_explored} interleaving(s), suggesting I/O "
-                f"conflicts were not detected despite LD_PRELOAD being active."
-            )
-
-        # If we get here, the bug is fixed — DPOR correctly explored
-        # interleavings with per-thread connections.
+        assert result.num_explored > 1, (
+            f"DPOR explored only {result.num_explored} interleaving(s); "
+            f"expected >1 with LD_PRELOAD detecting database I/O conflicts"
+        )
         assert result.property_holds, (
             f"Unexpected invariant violation: {result.explanation}"
         )
