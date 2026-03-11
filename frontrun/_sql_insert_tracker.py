@@ -11,7 +11,6 @@ the same logical alias, giving DPOR stable resource IDs across interleavings.
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from typing import Any
 

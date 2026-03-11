@@ -50,20 +50,35 @@ def _pg_available():
         pytest.skip(f"PostgreSQL not available at {_DB_NAME}")
 
     with connection.cursor() as cur:
-        for tbl in ["auth_user_groups", "auth_user_user_permissions", "auth_user",
-                    "auth_group_permissions", "auth_group", "auth_permission", "django_content_type"]:
+        for tbl in [
+            "auth_user_groups",
+            "auth_user_user_permissions",
+            "auth_user",
+            "auth_group_permissions",
+            "auth_group",
+            "auth_permission",
+            "django_content_type",
+        ]:
             cur.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE")
     with connection.schema_editor() as editor:
         from django.contrib.auth.models import Group, Permission
         from django.contrib.contenttypes.models import ContentType
+
         editor.create_model(ContentType)
         editor.create_model(Permission)
         editor.create_model(Group)
         editor.create_model(User)
     yield
     with connection.cursor() as cur:
-        for tbl in ["auth_user_groups", "auth_user_user_permissions", "auth_user",
-                    "auth_group_permissions", "auth_group", "auth_permission", "django_content_type"]:
+        for tbl in [
+            "auth_user_groups",
+            "auth_user_user_permissions",
+            "auth_user",
+            "auth_group_permissions",
+            "auth_group",
+            "auth_permission",
+            "django_content_type",
+        ]:
             cur.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE")
 
 
@@ -96,6 +111,7 @@ class TestDjangoIntegration:
                     state.results[i] = "activated"
                 except Exception as exc:
                     state.results[i] = f"error: {exc}"
+
             return fn
 
         def _invariant(state: _State) -> bool:
@@ -113,7 +129,5 @@ class TestDjangoIntegration:
         # We don't necessarily expect the race to be found in this specific
         # setup without more granular predicates or specific interleaving triggers,
         # but we must not deadlock.
-        assert result.property_holds, (
-            f"Race condition: both threads activated the same user.\n{result.explanation}"
-        )
+        assert result.property_holds, f"Race condition: both threads activated the same user.\n{result.explanation}"
         assert result.num_explored > 0
