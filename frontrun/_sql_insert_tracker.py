@@ -15,6 +15,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+from frontrun import _real_threading as _rt
 from frontrun._cooperative import get_context
 
 
@@ -40,7 +41,7 @@ class _TrackerState:
     uncaptured_tables: set[str] = field(default_factory=set)
 
 
-_lock = threading.Lock()
+_lock = _rt.lock()
 _state = _TrackerState()
 
 
