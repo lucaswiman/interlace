@@ -24,6 +24,7 @@ import threading
 from collections.abc import Generator
 from typing import Any
 
+from frontrun import _real_threading as _rt
 from frontrun._io_detection import _io_tls, get_io_reporter
 from frontrun._schema import get_schema
 from frontrun._sql_insert_tracker import record_insert, resolve_alias
@@ -74,7 +75,7 @@ _RE_INSERT_TABLE = re.compile(r"^\s*INSERT\s+INTO\s+[`\"\[]?(\w+)", re.I)
 # OS thread IDs currently inside a patched execute call.
 # The LD_PRELOAD bridge listener checks this to skip endpoint-level reports.
 _suppress_tids: set[int] = set()
-_suppress_lock = threading.Lock()  # Real lock (not cooperative)
+_suppress_lock = _rt.lock()  # Real lock (not cooperative)
 
 
 @contextlib.contextmanager
