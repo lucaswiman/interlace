@@ -237,8 +237,9 @@ class TestRegexParse:
         sql = "MERGE INTO target USING source ON target.id = source.id WHEN MATCHED THEN UPDATE SET target.v = source.v"
         assert _regex_parse(sql) is None
 
-    def test_returning_falls_through(self):
-        assert _regex_parse("INSERT INTO orders (total) VALUES (100) RETURNING id") is None
+    def test_returning_succeeds_regex(self):
+        r, w, *_ = _regex_parse("INSERT INTO orders (total) VALUES (100) RETURNING id")
+        assert r == set() and w == {"orders"}
 
     def test_with_cte_select_falls_through(self):
         assert _regex_parse("WITH t AS (SELECT 1) SELECT * FROM t") is None

@@ -147,7 +147,7 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
     # Bail to full parser for complex SQL
     if any(
         kw in upper_no_literals
-        for kw in ("WITH ", "UNION", "INTERSECT", "EXCEPT", "MERGE", "RETURNING", "EXISTS", "IN (")
+        for kw in ("WITH ", "UNION", "INTERSECT", "EXCEPT", "MERGE", "EXISTS")
     ):
         return None
 
@@ -299,6 +299,11 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
         from sqlglot import exp  # type: ignore[import-untyped]
     except ImportError:
         return None
+
+    # Pre-process pyformat parameter placeholders (%s, %(name)s) which
+    # sqlglot default dialect chokes on (misinterprets % as modulo).
+    if "%" in sql:
+        sql = re.sub(r"%(?:\(\w+\))?s", "?", sql)
 
     try:
         expressions = sqlglot.parse(sql)
