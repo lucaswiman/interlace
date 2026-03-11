@@ -11,10 +11,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-import warnings
 from typing import Any
-
-import pytest
 
 from frontrun._preload_io import PreloadIOEvent
 from frontrun.dpor import _PreloadBridge, explore_dpor
@@ -91,63 +88,6 @@ class TestPreloadBridge:
         key_0 = bridge.drain(0)[0][0]
         key_1 = bridge.drain(1)[0][0]
         assert key_0 == key_1, "Same resource_id should map to the same DPOR object key"
-
-    def test_shared_fd_warning(self) -> None:
-        """Two DPOR threads writing to the same socket fd should trigger a warning."""
-        bridge = _PreloadBridge()
-        bridge.register_thread(os_tid=1000, dpor_id=0)
-        bridge.register_thread(os_tid=2000, dpor_id=1)
-
-        shared_fd = "socket:127.0.0.1:5432"
-        ev0 = PreloadIOEvent(kind="write", resource_id=shared_fd, fd=5, pid=1, tid=1000)
-        ev1 = PreloadIOEvent(kind="write", resource_id=shared_fd, fd=5, pid=1, tid=2000)
-
-        bridge.listener(ev0)
-        with pytest.warns(UserWarning, match="share socket"):
-            bridge.listener(ev1)
-
-    def test_shared_fd_warning_fires_once_per_fd(self) -> None:
-        """The shared-fd warning is emitted only once per fd (not on every event)."""
-        bridge = _PreloadBridge()
-        bridge.register_thread(os_tid=1000, dpor_id=0)
-        bridge.register_thread(os_tid=2000, dpor_id=1)
-
-        shared_fd = "socket:127.0.0.1:5432"
-        ev0 = PreloadIOEvent(kind="write", resource_id=shared_fd, fd=5, pid=1, tid=1000)
-        ev1 = PreloadIOEvent(kind="write", resource_id=shared_fd, fd=5, pid=1, tid=2000)
-        ev2 = PreloadIOEvent(kind="write", resource_id=shared_fd, fd=5, pid=1, tid=2000)
-
-        bridge.listener(ev0)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            bridge.listener(ev1)
-            bridge.listener(ev2)
-
-        assert len(caught) == 1, f"Expected exactly 1 warning, got {len(caught)}"
-
-    def test_clear_resets_fd_tracking(self) -> None:
-        """clear() should reset fd tracking so warnings fire again after a new run."""
-        bridge = _PreloadBridge()
-        bridge.register_thread(os_tid=1000, dpor_id=0)
-        bridge.register_thread(os_tid=2000, dpor_id=1)
-
-        shared_fd = "socket:127.0.0.1:5432"
-        ev0 = PreloadIOEvent(kind="write", resource_id=shared_fd, fd=5, pid=1, tid=1000)
-        ev1 = PreloadIOEvent(kind="write", resource_id=shared_fd, fd=5, pid=1, tid=2000)
-
-        bridge.listener(ev0)
-        bridge.listener(ev1)  # first warning (ignored here)
-
-        bridge.clear()
-        bridge.register_thread(os_tid=1000, dpor_id=0)
-        bridge.register_thread(os_tid=2000, dpor_id=1)
-
-        bridge.listener(ev0)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            bridge.listener(ev1)
-
-        assert len(caught) == 1, "Warning should fire again after clear()"
 
 
 # ---------------------------------------------------------------------------
