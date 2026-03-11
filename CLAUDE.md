@@ -14,7 +14,7 @@ Deterministic concurrency testing library. Three approaches: trace markers (`# f
 
 Use the Makefile to build virtualenvs. Prefer working in the **3.14** virtualenv:
 
-- `make build-dpor-3.14` — build the 3.14t venv with Rust DPOR extension (preferred)
+- `make build-dpor-3.14` — build the 3.14 venv with Rust DPOR extension (preferred)
 - `make build-dpor-3.10` / `make build-dpor-3.14` — other versions
 - `make build-io` — build the LD_PRELOAD I/O interception library (libfrontrun_io.so)
 - Virtualenvs live at `.venv-3.14t/`, `.venv-3.10/`, `.venv-3.14/`
@@ -23,11 +23,11 @@ Use the Makefile to build virtualenvs. Prefer working in the **3.14** virtualenv
 
 ## Running tests
 
-Always use `make test-<version>` to run tests. This builds the DPOR extension and I/O library, then runs pytest through the `frontrun` CLI wrapper (which sets up `LD_PRELOAD` for C-level I/O interception). Do **not** run `.venv-3.14t/bin/pytest` directly — tests that use `explore_dpor()` will be skipped or misconfigured without the `frontrun` wrapper.
+Always use `make test-<version>` to run tests. This builds the DPOR extension and I/O library, then runs pytest through the `frontrun` CLI wrapper (which sets up `LD_PRELOAD` for C-level I/O interception). Do **not** run `.venv-3.14/bin/pytest` directly — tests that use `explore_dpor()` will be skipped or misconfigured without the `frontrun` wrapper.
 
-- `make test-3.14t` / `make test-3.10` / `make test-3.14` — single version
+- `make test-3.14` / `make test-3.10` / `make test-3.14t` — single version
 - `make test` — all Python versions (3.10, 3.14, 3.14t)
-- Override pytest args: `make test-3.14t PYTEST_ARGS="-v --timeout=120 -k test_name"`
+- Override pytest args: `make test-3.14 PYTEST_ARGS="-v --timeout=120 -k test_name"`
 
 ### Integration tests (Redis, HTTP, ORM)
 
