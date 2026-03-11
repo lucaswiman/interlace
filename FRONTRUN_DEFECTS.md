@@ -69,12 +69,34 @@ interleaving where both SELECTs happen before either UPDATE.
 
 **Possible fixes:**
 
-1. Fall back to table-level resource IDs when different predicates are
-   used for the same table across threads (conservative but correct).
-2. Use the INSERT-tracker's alias resolution to map `id=1` back to the
-   row inserted with `username='testuser'`, unifying the resource IDs.
-3. Treat any read + write on the same table as conflicting regardless
-   of row-level predicates (loses precision but guarantees soundness).
+1.  **Fallback to table-level:** Fall back to table-level resource IDs when
+    different predicates (different sets of columns) are used for the same
+    table across threads. Conservative but correct.
+2.  **Alias Resolution (INSERT-tracker):** Use the INSERT-tracker's alias
+    resolution to map `id=1` back to the row inserted with
+    `username='testuser'`, unifying the resource IDs.
+3.  **Mandatory Table-level Conflict:** Treat any read + write on the same
+    table as conflicting regardless of row-level predicates.
+4.  **SMT Solver (Z3):** Use an SMT solver to check if predicates can overlap
+    given schema constraints (e.g., `id=1` and `username='testuser'` can
+    overlap if both can be true for the same row). Precise but heavy.
+5.  **DB-assisted Resolution (PK Query):** For each statement, query the DB
+    (or use `EXPLAIN`) to resolve the predicates to a set of affected
+    primary keys. Use PKs as the resource IDs. Reliable but slow.
+6.  **Query Rewriting (RETURNING):** Rewrite SELECT/UPDATE to use
+    `RETURNING id` (or equivalent) to get the exact affected rows at
+    runtime and use those IDs for conflict detection.
+7.  **Bloom Filter / Shadow Table:** Maintain an in-memory shadow table of
+    which primary keys have been accessed. Requires a way to map every
+    predicate to a PK (back to #5).
+8.  **Tainted Model Tracking (ORM-level):** In `frontrun.contrib.django`,
+    attach the original lookup predicate to the model instance. When
+    `.save()` is called, report both the PK predicate AND the original
+    lookup predicate to link the resources.
+9.  **Conservative Column-Set Partitioning:** Partition row-level access by
+    column set. If two operations use different sets of columns in their
+    WHERE clauses on the same table, they are treated as conflicting at
+    the table level.
 
 **Workaround:** None available within the current frontrun API. The
 row-level predicate feature cannot be disabled independently of
@@ -83,7 +105,9 @@ row-level predicate feature cannot be disabled independently of
 
 ---
 
-## #2 — SQL parsing fails for DELETE and INSERT with %s placeholders (OPEN)
+## #2 — SQL parsing fails for DELETE and INSERT with %s placeholders (FIXED)
+
+**Status:** FIXED in commit 21f97d7
 
 **Severity:** CRITICAL — INSERTs and DELETEs are invisible to DPOR
 
@@ -91,57 +115,15 @@ row-level predicate feature cannot be disabled independently of
 
 **Description:**
 
-`parse_sql_access()` fails to extract table names from `DELETE` and
-`INSERT` statements that use `%s` parameter placeholders (Django's
-`pyformat` paramstyle). The regex fast-path bails on `IN (` and
-`RETURNING` keywords, falling through to `_sqlglot_parse()`. sqlglot
-cannot parse `%s` as valid SQL, so parsing fails and returns empty
-read/write table sets. DPOR never learns about these operations.
+`parse_sql_access()` failed to extract table names from `DELETE` and
+`INSERT` statements that use `%s` parameter placeholders.
 
-```python
-from frontrun._sql_parsing import parse_sql_access
-
-# DELETE: fails — returns empty tables
-parse_sql_access('DELETE FROM "t" WHERE "t"."id" IN (%s)')
-# → SqlAccessResult(read_tables=set(), write_tables=set(), ...)
-
-# INSERT: fails — returns empty tables
-parse_sql_access('INSERT INTO "t" ("a", "b") VALUES (%s, %s) RETURNING "t"."id"')
-# → SqlAccessResult(read_tables=set(), write_tables=set(), ...)
-
-# UPDATE: succeeds (regex handles it)
-parse_sql_access('UPDATE "t" SET "a" = %s WHERE "t"."id" = %s')
-# → SqlAccessResult(read_tables={'t'}, write_tables={'t'}, ...)
-
-# SELECT: succeeds (regex handles it)
-parse_sql_access('SELECT "t"."id" FROM "t" WHERE "t"."id" = %s')
-# → SqlAccessResult(read_tables={'t'}, write_tables=set(), ...)
-```
-
-**Root cause:** In `_sql_parsing.py`, the regex fast-path at line 148-152
-bails to the sqlglot full parser when it sees `IN (` (DELETE case) or
-`RETURNING` (INSERT case). sqlglot then fails because `%s` is not valid
-SQL syntax.
-
-**Impact:** Any Django code that uses `DELETE ... WHERE id IN (%s)` or
-`INSERT ... RETURNING id` is invisible to DPOR. Since Django generates
-both patterns for standard ORM operations (`.delete()` and `.create()`),
-DPOR cannot detect conflicts involving INSERTs or DELETEs. This makes
-it impossible to find races involving:
-- Double-INSERT (e.g., duplicate friend request creation)
-- DELETE-then-SELECT (e.g., accepting a deleted request)
-- INSERT-after-check TOCTOU patterns
-
-**Possible fixes:**
-
-1. In the regex fast-path, handle `RETURNING` for INSERT and `IN (` for
-   DELETE before bailing to sqlglot. The table name is already captured
-   by the INSERT/DELETE regex — just return it.
-2. Pre-process `%s` placeholders (replace with `NULL` or `0`) before
-   passing to sqlglot.
-3. Make `_regex_parse` less conservative about bailing: `RETURNING` in
-   an INSERT context doesn't require the full parser since the table
-   is always `INSERT INTO <table>`.
+**Fix:**
+1.  Modified `_regex_parse` to allow `RETURNING` (INSERT) and `IN (` (DELETE)
+    to be handled by the fast-path regexes when no subqueries are present.
+2.  Added pre-processing to `_sqlglot_parse` to replace `%s` and `%(name)s`
+    placeholders with `?` before passing to the full parser, as sqlglot
+    default dialect misinterprets `%` as a modulo operator.
 
 ---
 
