@@ -40,7 +40,6 @@ import sys
 import threading
 import time
 import types
-
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -209,7 +208,6 @@ class _PreloadBridge:
             self._tid_to_dpor.clear()
             self._pending.clear()
             self._active = False
-
 
     def listener(self, event: Any) -> None:
         """IOEventDispatcher callback — buffer the event for the right thread."""

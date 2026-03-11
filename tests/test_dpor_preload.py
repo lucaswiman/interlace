@@ -13,8 +13,6 @@ import os
 import tempfile
 from typing import Any
 
-import pytest
-
 from frontrun._preload_io import PreloadIOEvent
 from frontrun.dpor import _PreloadBridge, explore_dpor
 
@@ -90,7 +88,6 @@ class TestPreloadBridge:
         key_0 = bridge.drain(0)[0][0]
         key_1 = bridge.drain(1)[0][0]
         assert key_0 == key_1, "Same resource_id should map to the same DPOR object key"
-
 
 
 # ---------------------------------------------------------------------------
