@@ -145,10 +145,7 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
     upper_no_literals = no_literals.upper()
 
     # Bail to full parser for complex SQL
-    if any(
-        kw in upper_no_literals
-        for kw in ("WITH ", "UNION", "INTERSECT", "EXCEPT", "MERGE", "EXISTS")
-    ):
+    if any(kw in upper_no_literals for kw in ("WITH ", "UNION", "INTERSECT", "EXCEPT", "MERGE", "EXISTS")):
         return None
 
     # FOR SYSTEM_TIME is complex for regex, bail to sqlglot

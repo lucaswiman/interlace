@@ -578,19 +578,18 @@ class TestDjangoPlaceholders:
         # DELETE: formerly failed because of %s and IN (
         sql = 'DELETE FROM "t" WHERE "t"."id" IN (%s)'
         result = parse_sql_access(sql)
-        assert 't' in result.read_tables
-        assert 't' in result.write_tables
+        assert "t" in result.read_tables
+        assert "t" in result.write_tables
 
     def test_insert_with_placeholders(self):
         # INSERT: formerly failed because of %s and RETURNING
         sql = 'INSERT INTO "t" ("a", "b") VALUES (%s, %s) RETURNING "t"."id"'
         result = parse_sql_access(sql)
         assert result.read_tables == set()
-        assert 't' in result.write_tables
+        assert "t" in result.write_tables
 
     def test_named_placeholders(self):
         # Test %(name)s style
-        sql = 'SELECT * FROM t WHERE id = %(id)s'
+        sql = "SELECT * FROM t WHERE id = %(id)s"
         result = parse_sql_access(sql)
-        assert 't' in result.read_tables
-
+        assert "t" in result.read_tables
