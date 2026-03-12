@@ -208,14 +208,16 @@ def _release_dpor_row_locks() -> None:
         ctx[0].release_row_locks(ctx[1])
 
 
-# Global to track primary column set per table for cross-column conflict detection.
-# Initialized to the first column set seen for each table in the current session.
-_table_primary_colset: dict[str, tuple[str, ...]] = {}
+# Global to track primary column set per (db_scope, table) for cross-column
+# conflict detection.  Keyed by (db_scope, table) rather than just table to
+# avoid cross-database contamination when the same table name exists in
+# multiple databases with different schemas/access patterns.
+_table_primary_colset: dict[tuple[str | None, str], tuple[str, ...]] = {}
 
 
-def _get_primary_colset(table: str, colset: tuple[str, ...]) -> tuple[str, ...]:
+def _get_primary_colset(table: str, colset: tuple[str, ...], *, db_scope: str | None = None) -> tuple[str, ...]:
     """Return the primary column set for a table, initializing it if necessary."""
-    return _table_primary_colset.setdefault(table, colset)
+    return _table_primary_colset.setdefault((db_scope, table), colset)
 
 
 def _stable_db_scope(identity: str) -> str:
@@ -472,7 +474,7 @@ def _report_sql_access(
                 # - Non-primary vs Non-primary: WRITE vs WRITE bridge -> CONFLICT (table-level).
                 if dpor_ctx is not None and table not in reported_bridges and has_row_level_predicates:
                     colset = tuple(sorted(p.column for p in rows[0]))
-                    primary = _get_primary_colset(table, colset)
+                    primary = _get_primary_colset(table, colset, db_scope=db_scope)
 
                     if colset == primary:
                         # Primary row-level reads use a shared READ bridge so
@@ -550,11 +552,61 @@ def _report_sql_access(
             for table in access.write_tables:
                 report_or_buffer(table, "write", pred_rows)
 
+            # Phantom read detection (sequence-number tracking):
+            # SELECT depends on which rows exist in a table.  If a concurrent
+            # INSERT adds a row (or DELETE removes one), the SELECT's result
+            # changes.  Row-level conflict tracking misses this because the
+            # new/removed row has a different resource ID than the SELECT's
+            # table-level or row-level resource.
+            #
+            # Fix: use the table's :seq resource as a "membership" marker.
+            # - Pure-read tables (SELECT) report READ on :seq.
+            # - INSERT tables report WRITE on :seq (moved here from
+            #   _capture_insert_id so the write is flushed at the INSERT's
+            #   scheduling point, not left as orphaned pending_io).
+            # - DELETE tables report WRITE on :seq.
+            # - UPDATE is excluded: it doesn't change table membership, and
+            #   adding :seq writes would cause false conflicts between
+            #   UPDATEs to different rows.
+            #
+            # This creates READ-WRITE conflicts between SELECT and
+            # INSERT/DELETE, detecting phantom read races.
+            pure_read_tables = access.read_tables - access.write_tables
+            for table in pure_read_tables:
+                _report_or_buffer(
+                    reporter,
+                    _sql_sequence_resource_id(table, db_scope=db_scope),
+                    "read",
+                )
+            # INSERT targets: in write_tables but NOT in read_tables (INSERT
+            # doesn't read the target table, unlike UPDATE/DELETE).
+            insert_tables = access.write_tables - access.read_tables
+            for table in insert_tables:
+                _report_or_buffer(
+                    reporter,
+                    _sql_sequence_resource_id(table, db_scope=db_scope),
+                    "write",
+                )
+            delete_tables = access.delete_tables or set()
+            for table in delete_tables:
+                _report_or_buffer(
+                    reporter,
+                    _sql_sequence_resource_id(table, db_scope=db_scope),
+                    "write",
+                )
+
     return reported
 
 
 def _capture_insert_id(cursor: Any, table: str) -> None:
-    """Capture lastrowid after INSERT and report indexical alias + sequence resource."""
+    """Capture lastrowid after INSERT and report indexical alias.
+
+    The shared sequence resource (sql:<table>:seq) WRITE is now reported
+    in ``_report_sql_access`` instead of here.  This ensures the :seq write
+    is flushed at the INSERT's scheduling point (via ``report_and_wait``),
+    rather than being left as orphaned ``pending_io`` when the INSERT is
+    the last operation before the thread exits.
+    """
     reporter = get_io_reporter()
     if reporter is None:
         return
@@ -564,9 +616,8 @@ def _capture_insert_id(cursor: Any, table: str) -> None:
 
     alias = record_insert(table, lastrowid, db_scope=db_scope)
 
-    # Report the logical alias and shared sequence resource as writes
+    # Report the logical alias as a write (indexical tracking for determinism)
     _report_or_buffer(reporter, alias, "write")
-    _report_or_buffer(reporter, _sql_sequence_resource_id(table, db_scope=db_scope), "write")
 
 
 def _execute_with_retry(original_method: Any, cursor: Any, operation: Any, parameters: Any = None) -> Any:
@@ -645,11 +696,20 @@ def _intercept_execute(
         if _dpor_ctx is not None:
             _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
 
-    if reported:
-        with _suppress_endpoint_io():
+    try:
+        if reported:
+            with _suppress_endpoint_io():
+                result = _execute_with_retry(original_method, self, operation, parameters)
+        else:
             result = _execute_with_retry(original_method, self, operation, parameters)
-    else:
-        result = _execute_with_retry(original_method, self, operation, parameters)
+    except Exception:
+        # Release row locks on execution failure to prevent framework-induced
+        # deadlocks.  Without this, if a SQL statement raises (e.g.,
+        # OperationalError from SQLite lock contention), any row locks
+        # acquired by _acquire_pending_row_locks remain held until thread
+        # exit, blocking other DPOR threads indefinitely.
+        _release_dpor_row_locks()
+        raise
 
     # Post-INSERT: capture lastrowid and record indexical alias
     if insert_match is not None and not is_executemany and reported:

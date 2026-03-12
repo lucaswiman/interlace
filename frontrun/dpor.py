@@ -1601,6 +1601,26 @@ class DporBytecodeRunner:
         """Clean up both shared and DPOR-specific TLS."""
         if self._preload_bridge is not None:
             self._preload_bridge.unregister_thread(threading.get_native_id())
+
+        # Flush any orphaned pending_io before tearing down TLS.
+        # _capture_insert_id adds the indexical alias WRITE to pending_io
+        # AFTER the INSERT's report_and_wait scheduling point.  If the INSERT
+        # is the last operation before the thread exits, the alias WRITE
+        # would be silently discarded.  Flushing here ensures the DPOR engine
+        # sees all I/O events, even those reported after the last scheduling
+        # point.
+        _pending = getattr(_dpor_tls, "pending_io", None)
+        if _pending:
+            _tid = getattr(_dpor_tls, "thread_id", None)
+            _engine = getattr(_dpor_tls, "engine", None)
+            _execution = getattr(_dpor_tls, "execution", None)
+            if _tid is not None and _engine is not None and _execution is not None:
+                _elock = self.scheduler._engine_lock
+                for _obj_key, _io_kind in _pending:
+                    with _elock:
+                        _engine.report_io_access(_execution, _tid, _obj_key, _io_kind)
+                _pending.clear()
+
         if self.detect_io:
             set_io_reporter(None)
         from frontrun._io_detection import set_dpor_scheduler, set_dpor_thread_id

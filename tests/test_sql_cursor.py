@@ -378,9 +378,9 @@ def test_reporter_called_once_per_table_per_execute() -> None:
     conn.execute("CREATE TABLE users (id INTEGER, name TEXT)")
     log.clear()
     conn.execute("SELECT * FROM users")
-    # Each table should be reported exactly once for a single execute
+    # Table-level read + :seq read for phantom detection
     user_reads = [(r, k) for r, k in log.events if (r == "sql:users" or r.startswith("sql:users:")) and k == "read"]
-    assert len(user_reads) == 1
+    assert len(user_reads) == 2
     conn.close()
 
 
@@ -395,8 +395,9 @@ def test_multiple_executes_each_reported() -> None:
     conn.execute("SELECT * FROM users")
     conn.execute("SELECT * FROM users")
 
+    # Each SELECT produces a table-level read + :seq read for phantom detection (2 per execute)
     user_reads = [(r, k) for r, k in log.events if (r == "sql:users" or r.startswith("sql:users:")) and k == "read"]
-    assert len(user_reads) == 2
+    assert len(user_reads) == 4
     conn.close()
 
 
@@ -864,7 +865,8 @@ def test_create_table_reported() -> None:
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE foo (x INTEGER)")
 
-    assert len(log.events) == 1
+    # DDL write + :seq write for phantom detection
+    assert len(log.events) == 2
     resource_id, kind = log.events[0]
     assert kind == "write"
     assert resource_id.startswith("sql:foo")
