@@ -1295,8 +1295,12 @@ def test_report_or_buffer_no_capture_outside_tx() -> None:
         _io_tls._pending_row_locks = []
 
 
-def test_report_or_buffer_no_capture_without_force_immediate() -> None:
-    """_report_or_buffer without force_immediate does NOT capture even in a tx."""
+def test_report_or_buffer_captures_writes_in_tx() -> None:
+    """_report_or_buffer captures write-kind accesses in transactions for row lock arbitration.
+
+    After the defect #6 fix, all writes inside transactions (not just SELECT FOR UPDATE)
+    are tracked in _pending_row_locks to prevent cooperative scheduler deadlocks with PG row locks.
+    """
     from frontrun._sql_cursor import _report_or_buffer
 
     log = IOLog()
@@ -1308,7 +1312,8 @@ def test_report_or_buffer_no_capture_without_force_immediate() -> None:
     try:
         _report_or_buffer(log, "sql:users:(('id', 42))", "write", force_immediate=False)
         pending = getattr(_io_tls, "_pending_row_locks", [])
-        assert len(pending) == 0
+        assert len(pending) == 1
+        assert pending[0] == "sql:users:(('id', 42))"
     finally:
         _io_tls._in_transaction = False
         _io_tls._tx_buffer = []
