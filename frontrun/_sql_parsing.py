@@ -454,7 +454,12 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
     # For single-statement SQL, attach AST so callers can avoid re-parsing
     result_ast = first_ast if len([e for e in expressions if e is not None]) == 1 else None
     return SqlAccessResult(
-        all_read, all_write, all_lock_intent, all_tx_op, all_temporal, result_ast,
+        all_read,
+        all_write,
+        all_lock_intent,
+        all_tx_op,
+        all_temporal,
+        result_ast,
         all_delete if all_delete else None,
     )
 

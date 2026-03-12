@@ -29,8 +29,6 @@ import os
 import sqlite3
 from typing import Any
 
-import pytest
-
 from frontrun._sql_cursor import patch_sql, unpatch_sql
 from frontrun._tracing import _FRONTRUN_DIR
 from frontrun.dpor import explore_dpor
@@ -111,8 +109,7 @@ class TestSelectReadsSequenceResource:
             # The SELECT should report a READ on the :seq resource for phantom detection
             seq_reads = [(r, k) for r, k in events if r.endswith(":seq") and k == "read"]
             assert len(seq_reads) >= 1, (
-                f"SELECT should report READ on sql:tokens:...:seq for phantom read detection, "
-                f"but got events: {events}"
+                f"SELECT should report READ on sql:tokens:...:seq for phantom read detection, but got events: {events}"
             )
 
             conn.close()
@@ -191,8 +188,7 @@ class TestDeleteWritesSequenceResource:
 
             seq_writes = [(r, k) for r, k in events if r.endswith(":seq") and k == "write"]
             assert len(seq_writes) >= 1, (
-                f"DELETE should report WRITE on sql:tokens:...:seq for phantom read detection, "
-                f"but got events: {events}"
+                f"DELETE should report WRITE on sql:tokens:...:seq for phantom read detection, but got events: {events}"
             )
 
             conn.close()
@@ -221,21 +217,20 @@ class TestDporPhantomReadDetection:
         either INSERT, detecting the invariant violation.
         """
 
-        _DB_URI = "file:phantom_dpor_test?mode=memory&cache=shared"
+        db_uri = "file:phantom_dpor_test?mode=memory&cache=shared"
 
         # Keep a connection alive so the shared-cache DB survives across
         # setup/thread/invariant calls.
-        _keeper = sqlite3.connect(_DB_URI, uri=True, check_same_thread=False, isolation_level=None)
+        _keeper = sqlite3.connect(db_uri, uri=True, check_same_thread=False, isolation_level=None)
         _keeper.execute(
-            "CREATE TABLE IF NOT EXISTS tokens "
-            "(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, token TEXT)"
+            "CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, token TEXT)"
         )
 
         class State:
             pass
 
         def thread_fn(state: State) -> None:
-            conn = sqlite3.connect(_DB_URI, uri=True, check_same_thread=False, isolation_level=None)
+            conn = sqlite3.connect(db_uri, uri=True, check_same_thread=False, isolation_level=None)
             cur = conn.cursor()
             _check_and_insert_token(cur, user_id=1, token_value=f"tok_{id(state)}")
             conn.close()
@@ -245,7 +240,7 @@ class TestDporPhantomReadDetection:
             return State()
 
         def invariant(state: State) -> bool:
-            conn = sqlite3.connect(_DB_URI, uri=True, check_same_thread=False, isolation_level=None)
+            conn = sqlite3.connect(db_uri, uri=True, check_same_thread=False, isolation_level=None)
             cur = conn.cursor()
             cur.execute("SELECT COUNT(*) FROM tokens WHERE user_id = 1")
             count = cur.fetchone()[0]
