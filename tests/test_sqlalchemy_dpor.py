@@ -7,6 +7,7 @@ Verifies that ``sqlalchemy_dpor`` correctly:
 4. Passes ``lock_timeout`` through to ``explore_dpor`` for raw connections
 5. Detects TOCTOU races with check-then-insert patterns
 """
+
 from __future__ import annotations
 
 import os
@@ -86,8 +87,6 @@ def test_sqlalchemy_dpor_per_thread_connections(engine) -> None:
 
 def test_sqlalchemy_dpor_lock_timeout_injection(engine) -> None:
     """Verify lock_timeout is injected on per-thread connections."""
-    from sqlalchemy import text
-
     from frontrun.contrib.sqlalchemy import get_connection, sqlalchemy_dpor
 
     observed_lock_timeouts: list[str] = []
@@ -112,9 +111,7 @@ def test_sqlalchemy_dpor_lock_timeout_injection(engine) -> None:
     )
 
     assert result.num_explored >= 1
-    assert any(lt == "2s" for lt in observed_lock_timeouts), (
-        f"Expected lock_timeout='2s', got {observed_lock_timeouts}"
-    )
+    assert any(lt == "2s" for lt in observed_lock_timeouts), f"Expected lock_timeout='2s', got {observed_lock_timeouts}"
 
 
 def test_sqlalchemy_dpor_toctou_race(engine) -> None:

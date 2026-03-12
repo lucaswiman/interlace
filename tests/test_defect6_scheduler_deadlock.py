@@ -27,6 +27,7 @@ Running:
       frontrun-bugs/tests/test_defect6_scheduler_deadlock.py::test_workaround_with_lock_timeout \
       -v --timeout=30
 """
+
 from __future__ import annotations
 
 import os
@@ -89,9 +90,7 @@ def _make_thread_fn(idx: int, use_lock_timeout: bool = False):
                     cur.execute("SET lock_timeout = '2s'")
 
                 # CHECK: does the row exist?
-                cur.execute(
-                    "SELECT id FROM defect6_test WHERE id = %s", ("row1",)
-                )
+                cur.execute("SELECT id FROM defect6_test WHERE id = %s", ("row1",))
                 row = cur.fetchone()
                 if row is not None:
                     state.results[idx] = "already_exists"
@@ -122,9 +121,7 @@ def _invariant(state: _State) -> bool:
     or LockNotAvailable with lock_timeout).
     """
     r0, r1 = state.results
-    has_error = (r0 is not None and r0.startswith("error")) or (
-        r1 is not None and r1.startswith("error")
-    )
+    has_error = (r0 is not None and r0.startswith("error")) or (r1 is not None and r1.startswith("error"))
     return not has_error
 
 
@@ -145,8 +142,7 @@ def test_deadlock_without_lock_timeout(_pg_available) -> None:
     """
     result = explore_dpor(
         setup=_State,
-        threads=[_make_thread_fn(0, use_lock_timeout=False),
-                 _make_thread_fn(1, use_lock_timeout=False)],
+        threads=[_make_thread_fn(0, use_lock_timeout=False), _make_thread_fn(1, use_lock_timeout=False)],
         invariant=_invariant,
         deadlock_timeout=10.0,
         timeout_per_run=15.0,
@@ -164,8 +160,7 @@ def test_workaround_with_lock_timeout(_pg_available) -> None:
     """
     result = explore_dpor(
         setup=_State,
-        threads=[_make_thread_fn(0, use_lock_timeout=True),
-                 _make_thread_fn(1, use_lock_timeout=True)],
+        threads=[_make_thread_fn(0, use_lock_timeout=True), _make_thread_fn(1, use_lock_timeout=True)],
         invariant=_invariant,
         deadlock_timeout=10.0,
         timeout_per_run=15.0,
@@ -192,8 +187,7 @@ def test_explore_dpor_lock_timeout_parameter(_pg_available) -> None:
     """
     result = explore_dpor(
         setup=_State,
-        threads=[_make_thread_fn(0, use_lock_timeout=False),
-                 _make_thread_fn(1, use_lock_timeout=False)],
+        threads=[_make_thread_fn(0, use_lock_timeout=False), _make_thread_fn(1, use_lock_timeout=False)],
         invariant=_invariant,
         deadlock_timeout=10.0,
         timeout_per_run=15.0,
