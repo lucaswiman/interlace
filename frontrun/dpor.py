@@ -359,6 +359,10 @@ class DporScheduler:
                 holder = self._row_lock_blocked[scheduled]
                 if holder not in self._threads_done:
                     return holder
+                # Holder is done — lock should have been released via
+                # mark_done → _release_row_locks_unlocked.  Clean up the
+                # stale blocked entry so scheduled can proceed.
+                self._row_lock_blocked.pop(scheduled, None)
             return scheduled
 
     def wait_for_turn(self, thread_id: int) -> bool:
@@ -481,6 +485,8 @@ class DporScheduler:
             # Release any row locks the thread may still hold (safety net).
             # _release_row_locks_unlocked avoids re-acquiring self._condition.
             self._release_row_locks_unlocked(thread_id)
+            # Clean up stale row-lock-blocked entry (safety net).
+            self._row_lock_blocked.pop(thread_id, None)
             # If the done thread was the current one, schedule next
             if self._current_thread == thread_id:
                 next_thread = self._schedule_next()
@@ -1877,7 +1883,7 @@ def explore_dpor(
     # Inject SET lock_timeout on new PG connections (defect #6 workaround).
     from frontrun._sql_cursor import get_lock_timeout, set_lock_timeout
 
-    prev_lock_timeout = get_lock_timeout() if lock_timeout is not None else None
+    prev_lock_timeout = get_lock_timeout()
     if lock_timeout is not None:
         set_lock_timeout(lock_timeout)
 
@@ -2046,8 +2052,7 @@ def explore_dpor(
                 if not engine.next_execution():
                     break
     finally:
-        if lock_timeout is not None:
-            set_lock_timeout(prev_lock_timeout)
+        set_lock_timeout(prev_lock_timeout)
         if preload_dispatcher is not None:
             preload_dispatcher.stop()
 
