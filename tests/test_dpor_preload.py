@@ -117,6 +117,7 @@ class TestRowLockRegistry:
                 self._thread_row_locks: dict[int, set[str]] = {}
                 self._row_lock_ids: dict[str, int] = {}
                 self._row_lock_next_id: int = 0
+                self._row_lock_blocked: dict[int, int] = {}
 
             # Bind the real methods from DporScheduler so tests exercise production code.
             acquire_row_locks = DporScheduler.acquire_row_locks
@@ -210,6 +211,7 @@ class TestRowLockRegistry:
                 self._thread_row_locks: dict[int, set[str]] = {}
                 self._row_lock_ids: dict[str, int] = {}
                 self._row_lock_next_id: int = 0
+                self._row_lock_blocked: dict[int, int] = {}
 
             acquire_row_locks = DporScheduler.acquire_row_locks
             release_row_locks = DporScheduler.release_row_locks

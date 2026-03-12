@@ -133,10 +133,14 @@ def _report_or_buffer(reporter: Any, res_id: str, kind: str, *, force_immediate:
     else:
         reporter(res_id, kind)
 
-    # Track resources that need row-lock arbitration (SELECT FOR UPDATE).
-    # Only when inside a transaction — outside a tx the DB releases the lock
-    # immediately so there's no blocking risk.
-    if force_immediate and in_tx:
+    # Track resources that need row-lock arbitration.
+    # SELECT FOR UPDATE (force_immediate) always needs arbitration.
+    # Any write inside a transaction (INSERT, UPDATE, DELETE) also needs
+    # arbitration because PG row locks (e.g. from UNIQUE constraints or
+    # row-level locks) can cause the cooperative scheduler to deadlock
+    # when one thread blocks in the kernel waiting for another's lock
+    # (defect #6).
+    if in_tx and (force_immediate or kind == "write"):
         pending = getattr(_io_tls, "_pending_row_locks", None)
         if pending is None:
             pending = []
@@ -802,6 +806,21 @@ _PATCHES: list[tuple[Any, str, Any]] = []
 # For the factory-based approach we store the original connect function here.
 _ORIGINAL_METHODS: dict[tuple[type, str], Any] = {}
 
+# Global lock_timeout (milliseconds) to inject on new PostgreSQL connections.
+# Set by explore_dpor(lock_timeout=...) and cleared after exploration.
+_lock_timeout_ms: int | None = None
+
+
+def set_lock_timeout(ms: int | None) -> None:
+    """Set the global lock_timeout that will be injected on new PG connections."""
+    global _lock_timeout_ms  # noqa: PLW0603
+    _lock_timeout_ms = ms
+
+
+def get_lock_timeout() -> int | None:
+    """Return the current global lock_timeout (milliseconds), or None."""
+    return _lock_timeout_ms
+
 
 # ---------------------------------------------------------------------------
 # sqlite3 patching
@@ -916,6 +935,18 @@ def patch_sql() -> None:
                 identity = _normalize_mapping_db_identity(driver, relevant)
             if identity is not None:
                 _register_connection_db_scope(conn, identity)
+            # Inject SET lock_timeout if configured (defect #6 workaround).
+            # Use the *original* cursor class to avoid triggering DPOR
+            # scheduling points during connection setup.
+            if _lock_timeout_ms is not None and driver in ("psycopg2", "psycopg"):
+                _was_autocommit = conn.autocommit
+                conn.autocommit = True
+                _lt_cur = conn.cursor(cursor_factory=default_cursor_cls)
+                try:
+                    _lt_cur.execute(f"SET lock_timeout = '{int(_lock_timeout_ms)}ms'")
+                finally:
+                    _lt_cur.close()
+                conn.autocommit = _was_autocommit
             return conn
 
         return patched_connect

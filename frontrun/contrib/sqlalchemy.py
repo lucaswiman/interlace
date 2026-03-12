@@ -89,5 +89,6 @@ def sqlalchemy_dpor(
         threads=wrapped_threads,
         invariant=invariant,
         detect_io=detect_io,
+        lock_timeout=lock_timeout,
         **kwargs,
     )
