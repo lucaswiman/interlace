@@ -1,5 +1,7 @@
 import sqlite3
 
+from frontrun._io_detection import set_io_reporter
+from frontrun._sql_cursor import patch_sql, unpatch_sql
 from frontrun.dpor import explore_dpor
 
 
@@ -49,41 +51,38 @@ def test_cross_column_conflict_fix():
 
 
 def test_row_level_preserved_for_primary_colset():
-    """Verify that row-level benefits are still preserved for the primary column set."""
-    uri = "file:row_level_preserved?mode=memory&cache=shared"
-    master = sqlite3.connect(uri, uri=True)
-    master.execute("CREATE TABLE IF NOT EXISTS counters (id INTEGER PRIMARY KEY, val INT)")
-    master.execute("DELETE FROM counters")
-    master.execute("INSERT INTO counters VALUES (1, 0), (2, 0)")
-    master.commit()
+    """Primary-key writes should stay row-granular, not collapse to table writes."""
+    events: list[tuple[str, str]] = []
 
-    class State:
-        def __init__(self):
-            conn = sqlite3.connect(uri, uri=True)
-            conn.execute("UPDATE counters SET val = 0")
-            conn.commit()
+    def reporter(resource_id: str, kind: str) -> None:
+        events.append((resource_id, kind))
+
+    set_io_reporter(reporter)
+    patch_sql()
+    conn = None
+    try:
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE counters (id INTEGER PRIMARY KEY, val INT)")
+        conn.execute("INSERT INTO counters VALUES (1, 0), (2, 0)")
+
+        events.clear()
+        conn.execute("UPDATE counters SET val = 1 WHERE id = 1")
+        first_update = list(events)
+
+        events.clear()
+        conn.execute("UPDATE counters SET val = 1 WHERE id = 2")
+        second_update = list(events)
+    finally:
+        unpatch_sql()
+        set_io_reporter(None)
+        if conn is not None:
             conn.close()
 
-    def t1(s):
-        conn = sqlite3.connect(uri, uri=True, isolation_level=None)
-        # Update row 1
-        conn.execute("UPDATE counters SET val = 1 WHERE id = 1")
-        conn.close()
+    first_writes = [res for res, kind in first_update if kind == "write"]
+    second_writes = [res for res, kind in second_update if kind == "write"]
 
-    def t2(s):
-        conn = sqlite3.connect(uri, uri=True, isolation_level=None)
-        # Update row 2
-        conn.execute("UPDATE counters SET val = 1 WHERE id = 2")
-        conn.close()
-
-    # Since both use 'id' (the primary colset) and different rows, they should be independent.
-    # DPOR should explore exactly 1 path.
-    res = explore_dpor(
-        setup=State,
-        threads=[t1, t2],
-        invariant=lambda s: True,
-        detect_io=True,
-    )
-
-    assert res.num_explored == 1, f"Row-level benefits lost! Explored {res.num_explored} paths instead of 1."
-    master.close()
+    assert first_writes, first_update
+    assert second_writes, second_update
+    assert "sql:counters" not in first_writes, first_update
+    assert "sql:counters" not in second_writes, second_update
+    assert set(first_writes).isdisjoint(second_writes), (first_update, second_update)

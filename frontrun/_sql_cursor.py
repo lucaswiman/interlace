@@ -21,13 +21,14 @@ import importlib
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Generator
 from typing import Any
 
 from frontrun import _real_threading as _rt
 from frontrun._io_detection import _io_tls, get_io_reporter
 from frontrun._schema import get_schema
-from frontrun._sql_insert_tracker import record_insert, resolve_alias
+from frontrun._sql_insert_tracker import clear_insert_tracker, record_insert, resolve_alias
 from frontrun._sql_parsing import (
     LockIntent,
     Release,
@@ -287,6 +288,7 @@ def _report_sql_access(
         if access.read_tables or access.write_tables:
             reported = True
             all_tables = access.read_tables | access.write_tables
+            dpor_ctx = _get_dpor_context()
 
             # Row-level predicate extraction (WHERE equality, IN-lists, and INSERT VALUES)
             # Reuses the pre-parsed AST from parse_sql_access when available (avoids
@@ -310,6 +312,7 @@ def _report_sql_access(
 
             def report_or_buffer(table: str, kind: str, rows: list[list[Any]]) -> None:
                 temporal = access.temporal_clauses.get(table) if access.temporal_clauses else None
+                has_row_level_predicates = bool(rows and rows[0])
 
                 # Conservative Column-Set Partitioning (Defect #1):
                 # When using row-level predicates, we must ensure that accesses using
@@ -327,24 +330,21 @@ def _report_sql_access(
                 # - Primary vs Primary: both READ bridge -> NO conflict on bridge. Row-level works!
                 # - Primary vs Non-primary: READ vs WRITE bridge -> CONFLICT. Correct.
                 # - Non-primary vs Non-primary: WRITE vs WRITE bridge -> CONFLICT (table-level).
-                if table not in reported_bridges:
-                    if rows and rows[0]:
-                        colset = tuple(sorted(p.column for p in rows[0]))
-                        primary = _get_primary_colset(table, colset)
+                if dpor_ctx is not None and table not in reported_bridges and has_row_level_predicates:
+                    colset = tuple(sorted(p.column for p in rows[0]))
+                    primary = _get_primary_colset(table, colset)
 
-                        if colset == primary:
-                            # Primary colset uses READ on the bridge to preserve
-                            # row-level independence for the common access pattern.
-                            bridge_kind = "read"
-                        else:
-                            # Non-primary colset conflicts conservatively at table scope.
-                            bridge_kind = "write"
-
-                        _report_or_buffer(reporter, f"sql:{table}", bridge_kind, force_immediate=lock_update)
-                        reported_bridges.add(table)
-                    elif not rows or not rows[0]:
-                        # Table-level access
-                        _report_or_buffer(reporter, f"sql:{table}", kind, force_immediate=lock_update)
+                    if colset == primary:
+                        # Primary row-level reads use a shared READ bridge so
+                        # they still conflict conservatively with non-primary
+                        # accesses, while primary row-level writes stay fully
+                        # row-granular.
+                        if kind == "read":
+                            _report_or_buffer(reporter, f"sql:{table}", "read", force_immediate=lock_update)
+                            reported_bridges.add(table)
+                    else:
+                        # Non-primary colset conflicts conservatively at table scope.
+                        _report_or_buffer(reporter, f"sql:{table}", "write", force_immediate=lock_update)
                         reported_bridges.add(table)
 
                 for row_preds in rows:
@@ -416,6 +416,23 @@ def _capture_insert_id(cursor: Any, table: str) -> None:
     _report_or_buffer(reporter, f"sql:{table}:seq", "write")
 
 
+def _execute_with_retry(original_method: Any, cursor: Any, operation: Any, parameters: Any = None) -> Any:
+    """Execute a DB-API method, retrying transient SQLite lock errors."""
+    for i in range(50):
+        try:
+            if parameters is not None:
+                return original_method(cursor, operation, parameters)
+            return original_method(cursor, operation)
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower():
+                raise
+            time.sleep(0.01 * (i + 1))
+
+    if parameters is not None:
+        return original_method(cursor, operation, parameters)
+    return original_method(cursor, operation)
+
+
 def _intercept_execute(
     original_method: Any,
     self: Any,
@@ -471,15 +488,9 @@ def _intercept_execute(
 
     if reported:
         with _suppress_endpoint_io():
-            if parameters is not None:
-                result = original_method(self, operation, parameters)
-            else:
-                result = original_method(self, operation)
+            result = _execute_with_retry(original_method, self, operation, parameters)
     else:
-        if parameters is not None:
-            result = original_method(self, operation, parameters)
-        else:
-            result = original_method(self, operation)
+        result = _execute_with_retry(original_method, self, operation, parameters)
 
     # Post-INSERT: capture lastrowid and record indexical alias
     if insert_match is not None and not is_executemany and reported:
@@ -714,6 +725,7 @@ def reset_connection_state() -> None:
     for attr in ("_in_transaction", "_tx_buffer", "_tx_savepoints", "_pending_row_locks"):
         if hasattr(_io_tls, attr):
             delattr(_io_tls, attr)
+    clear_insert_tracker()
 
 
 def clear_sql_metadata() -> None:
