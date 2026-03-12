@@ -203,6 +203,16 @@ def _release_dpor_row_locks() -> None:
         ctx[0].release_row_locks(ctx[1])
 
 
+# Global to track primary column set per table for cross-column conflict detection.
+# Initialized to the first column set seen for each table in the current session.
+_table_primary_colset: dict[str, tuple[str, ...]] = {}
+
+
+def _get_primary_colset(table: str, colset: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the primary column set for a table, initializing it if necessary."""
+    return _table_primary_colset.setdefault(table, colset)
+
+
 def _sql_resource_id(table: str, predicates: list[Any], temporal: str | None = None) -> str:
     """Build a resource ID from table name and optional predicates."""
     if temporal:
@@ -293,12 +303,50 @@ def _report_sql_access(
                     pred_rows = rows
                     has_row_level = True
 
-            # SELECT FOR UPDATE signals write intent immediately so the DPOR
-            # engine can learn about conflicts before C-level blocking occurs.
             lock_update = access.lock_intent is LockIntent.UPDATE
+
+            # Track which tables already reported their bridge resource in this op.
+            reported_bridges: set[str] = set()
 
             def report_or_buffer(table: str, kind: str, rows: list[list[Any]]) -> None:
                 temporal = access.temporal_clauses.get(table) if access.temporal_clauses else None
+
+                # Conservative Column-Set Partitioning (Defect #1):
+                # When using row-level predicates, we must ensure that accesses using
+                # DIFFERENT sets of columns (e.g. SELECT by username vs UPDATE by id)
+                # properly conflict. We do this by reporting a "bridge" resource (sql:<table>)
+                # for every row-level access.
+                #
+                # To preserve row-level benefits for the most common column set (usually the PK),
+                # we designate the first column set seen for each table as "primary".
+                # - Primary colset accesses report a READ on the bridge resource.
+                # - Non-primary colset accesses report a WRITE on the bridge resource.
+                # - Table-level accesses report their actual kind (READ/WRITE) on the bridge.
+                #
+                # Result:
+                # - Primary vs Primary: both READ bridge -> NO conflict on bridge. Row-level works!
+                # - Primary vs Non-primary: READ vs WRITE bridge -> CONFLICT. Correct.
+                # - Non-primary vs Non-primary: WRITE vs WRITE bridge -> CONFLICT (table-level).
+                if table not in reported_bridges:
+                    if rows and rows[0]:
+                        colset = tuple(sorted(p.column for p in rows[0]))
+                        primary = _get_primary_colset(table, colset)
+
+                        if colset == primary:
+                            # Primary colset uses READ on the bridge to preserve
+                            # row-level independence for the common access pattern.
+                            bridge_kind = "read"
+                        else:
+                            # Non-primary colset conflicts conservatively at table scope.
+                            bridge_kind = "write"
+
+                        _report_or_buffer(reporter, f"sql:{table}", bridge_kind, force_immediate=lock_update)
+                        reported_bridges.add(table)
+                    elif not rows or not rows[0]:
+                        # Table-level access
+                        _report_or_buffer(reporter, f"sql:{table}", kind, force_immediate=lock_update)
+                        reported_bridges.add(table)
+
                 for row_preds in rows:
                     # Check if any predicate value matches a captured INSERT ID
                     alias = None
@@ -666,6 +714,14 @@ def reset_connection_state() -> None:
     for attr in ("_in_transaction", "_tx_buffer", "_tx_savepoints", "_pending_row_locks"):
         if hasattr(_io_tls, attr):
             delattr(_io_tls, attr)
+
+
+def clear_sql_metadata() -> None:
+    """Reset all global SQL resource tracking metadata.
+
+    Call this between DPOR exploration sessions to ensure test isolation.
+    """
+    _table_primary_colset.clear()
 
 
 def unpatch_sql() -> None:

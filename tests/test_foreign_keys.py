@@ -88,5 +88,6 @@ def test_fk_dependency_row_level(reporter):
 
     # The predicate for users should be id=42
     # We don't assert exact string format as it might change, but check content
-    assert "id" in users_reads[0]
-    assert "42" in users_reads[0]
+    # The first read is the bridge resource, the second is the fine-grained one
+    assert any("id" in res for res in users_reads)
+    assert any("42" in res for res in users_reads)
