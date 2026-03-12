@@ -696,11 +696,20 @@ def _intercept_execute(
         if _dpor_ctx is not None:
             _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
 
-    if reported:
-        with _suppress_endpoint_io():
+    try:
+        if reported:
+            with _suppress_endpoint_io():
+                result = _execute_with_retry(original_method, self, operation, parameters)
+        else:
             result = _execute_with_retry(original_method, self, operation, parameters)
-    else:
-        result = _execute_with_retry(original_method, self, operation, parameters)
+    except Exception:
+        # Release row locks on execution failure to prevent framework-induced
+        # deadlocks.  Without this, if a SQL statement raises (e.g.,
+        # OperationalError from SQLite lock contention), any row locks
+        # acquired by _acquire_pending_row_locks remain held until thread
+        # exit, blocking other DPOR threads indefinitely.
+        _release_dpor_row_locks()
+        raise
 
     # Post-INSERT: capture lastrowid and record indexical alias
     if insert_match is not None and not is_executemany and reported:
