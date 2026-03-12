@@ -331,17 +331,35 @@ class DporScheduler:
         self._row_lock_ids: dict[str, int] = {}
         self._row_lock_next_id: int = 0
 
+        # Threads currently blocked waiting for a DPOR row lock.
+        # Maps blocked_thread_id → holder_thread_id.  Used by
+        # _schedule_next() to skip blocked threads and schedule their
+        # holders instead, preventing the scheduler from cycling
+        # indefinitely between a blocked thread and its holder.
+        self._row_lock_blocked: dict[int, int] = {}
+
         # Request the first scheduling decision
         self._current_thread = self._schedule_next()
 
     def _schedule_next(self) -> int | None:
-        """Ask the DPOR engine which thread to run next."""
+        """Ask the DPOR engine which thread to run next.
+
+        If the engine selects a thread that is blocked on a DPOR row lock,
+        override the decision and schedule the lock holder instead.  This
+        prevents the scheduler from cycling between a blocked thread and
+        its holder (defect #6).
+        """
         with self._engine_lock:
             runnable = self.execution.runnable_threads()
             if not runnable:
                 return None
 
-            return self.engine.schedule(self.execution)
+            scheduled = self.engine.schedule(self.execution)
+            if scheduled is not None and scheduled in self._row_lock_blocked:
+                holder = self._row_lock_blocked[scheduled]
+                if holder not in self._threads_done:
+                    return holder
+            return scheduled
 
     def wait_for_turn(self, thread_id: int) -> bool:
         """Block until it's this thread's turn. Returns False when done."""
@@ -534,6 +552,10 @@ class DporScheduler:
                                 self._error = err
                             self._condition.notify_all()
                             raise SchedulerAbort(str(err))
+                    # Register this thread as row-lock-blocked so that
+                    # _schedule_next() skips it and schedules the holder
+                    # instead of cycling (defect #6).
+                    self._row_lock_blocked[thread_id] = holder
                     # Yield scheduling to the holder so it can run and
                     # either release the lock or block on one of ours
                     # (triggering WaitForGraph cycle detection).
@@ -542,6 +564,7 @@ class DporScheduler:
                         self._condition.notify_all()
                     # Wait for the holder to release
                     if not self._condition.wait(timeout=self.deadlock_timeout):
+                        self._row_lock_blocked.pop(thread_id, None)
                         if graph is not None:
                             graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
                         if self._finished or self._error:
@@ -549,6 +572,7 @@ class DporScheduler:
                         # Timeout — the holder is probably blocked in C too.
                         # Let the C call proceed; lock_timeout safety net will handle it.
                         return
+                    self._row_lock_blocked.pop(thread_id, None)
                     if graph is not None:
                         graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
                     if self._finished or self._error:
@@ -1949,15 +1973,20 @@ def explore_dpor(
                     # detect_io is already False for replays anyway.
                     _set_preload_pipe_fd(-1)
 
-                    # Re-apply SQL patching during replay when lock_timeout
-                    # is set.  unpatch_sql() was called after the DPOR execution,
-                    # so replay connections would not get lock_timeout injected.
-                    # Without this, the replay can deadlock on PG row locks
-                    # (the exact scenario lock_timeout is meant to prevent).
-                    _replay_sql_patched = False
-                    if lock_timeout is not None:
-                        patch_sql()
-                        _replay_sql_patched = True
+                    # Re-apply SQL patching during replay to inject
+                    # lock_timeout on new PG connections.  unpatch_sql() was
+                    # called after the DPOR execution, so replay connections
+                    # would not get lock_timeout.  The replay uses
+                    # OpcodeScheduler (not DporScheduler) which lacks row
+                    # lock arbitration, so PG row lock contention during
+                    # replay causes kernel-level deadlocks.  Always set a
+                    # safety lock_timeout during replay even if the user
+                    # didn't request one — replays reproduce racy schedules
+                    # that are likely to hit row lock contention.
+                    _replay_lock_timeout = lock_timeout if lock_timeout is not None else 5000
+                    _prev_lt = get_lock_timeout()
+                    set_lock_timeout(_replay_lock_timeout)
+                    patch_sql()
 
                     successes = 0
                     try:
@@ -1984,8 +2013,8 @@ def explore_dpor(
                             except Exception:
                                 pass  # timeout / crash during replay — not a reproduction
                     finally:
-                        if _replay_sql_patched:
-                            unpatch_sql()
+                        unpatch_sql()
+                        set_lock_timeout(_prev_lt)
                     result.reproduction_attempts = reproduce_on_failure
                     result.reproduction_successes = successes
 

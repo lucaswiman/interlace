@@ -133,10 +133,14 @@ def _report_or_buffer(reporter: Any, res_id: str, kind: str, *, force_immediate:
     else:
         reporter(res_id, kind)
 
-    # Track resources that need row-lock arbitration (SELECT FOR UPDATE).
-    # Only when inside a transaction — outside a tx the DB releases the lock
-    # immediately so there's no blocking risk.
-    if force_immediate and in_tx:
+    # Track resources that need row-lock arbitration.
+    # SELECT FOR UPDATE (force_immediate) always needs arbitration.
+    # Any write inside a transaction (INSERT, UPDATE, DELETE) also needs
+    # arbitration because PG row locks (e.g. from UNIQUE constraints or
+    # row-level locks) can cause the cooperative scheduler to deadlock
+    # when one thread blocks in the kernel waiting for another's lock
+    # (defect #6).
+    if in_tx and (force_immediate or kind == "write"):
         pending = getattr(_io_tls, "_pending_row_locks", None)
         if pending is None:
             pending = []
