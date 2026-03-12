@@ -536,7 +536,8 @@ class TestSameTableReadReadIndependent:
             t.join()
 
         stats_events = [(r, k) for r, k in all_events if (r == "sql:stats" or r.startswith("sql:stats:"))]
-        assert len(stats_events) == 5, f"Expected 5 read events (one per thread), got {len(stats_events)}"
+        # Each thread reports 2 reads: table-level + :seq for phantom detection
+        assert len(stats_events) == 10, f"Expected 10 read events (2 per thread), got {len(stats_events)}"
         assert all(k == "read" for _, k in stats_events)
 
 

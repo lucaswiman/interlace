@@ -65,9 +65,10 @@ class SqlAccessResult(NamedTuple):
     tx_op: TxControl | None
     temporal_clauses: dict[str, str] | None
     ast: Any | None = None  # Pre-parsed sqlglot AST (when available from _sqlglot_parse)
+    delete_tables: set[str] | None = None  # Tables targeted by DELETE (for phantom read detection)
 
 
-_EMPTY = SqlAccessResult(set(), set(), None, None, None, None)
+_EMPTY = SqlAccessResult(set(), set(), None, None, None, None, None)
 
 
 # Precompiled patterns — matches the leading keyword + first table name.
@@ -224,7 +225,7 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
         tbl = _strip_quotes(m_delete.group(1))
         write.add(tbl)
         read.add(tbl)
-        return SqlAccessResult(read, write, lock_intent, None, None)
+        return SqlAccessResult(read, write, lock_intent, None, None, None, {tbl})
 
     if _RE_SELECT.search(no_literals):
         for m in _RE_FROM.finditer(no_literals):
@@ -319,6 +320,7 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
 
     all_write: set[str] = set()
     all_read: set[str] = set()
+    all_delete: set[str] = set()
     all_lock_intent: LockIntent | None = None
     all_tx_op: TxControl | None = None
     all_temporal: dict[str, str] | None = None
@@ -418,6 +420,8 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
                 if isinstance(tbl, exp.Table):
                     write.add(tbl.name)
                     read.add(tbl.name)
+                    if isinstance(ast, exp.Delete):
+                        all_delete.add(tbl.name)
                 for t in ast.find_all(exp.Table):
                     if t.name not in write:
                         read.add(t.name)
@@ -449,7 +453,10 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
 
     # For single-statement SQL, attach AST so callers can avoid re-parsing
     result_ast = first_ast if len([e for e in expressions if e is not None]) == 1 else None
-    return SqlAccessResult(all_read, all_write, all_lock_intent, all_tx_op, all_temporal, result_ast)
+    return SqlAccessResult(
+        all_read, all_write, all_lock_intent, all_tx_op, all_temporal, result_ast,
+        all_delete if all_delete else None,
+    )
 
 
 def parse_sql_access(sql: str) -> SqlAccessResult:

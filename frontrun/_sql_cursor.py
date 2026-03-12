@@ -550,11 +550,61 @@ def _report_sql_access(
             for table in access.write_tables:
                 report_or_buffer(table, "write", pred_rows)
 
+            # Phantom read detection (sequence-number tracking):
+            # SELECT depends on which rows exist in a table.  If a concurrent
+            # INSERT adds a row (or DELETE removes one), the SELECT's result
+            # changes.  Row-level conflict tracking misses this because the
+            # new/removed row has a different resource ID than the SELECT's
+            # table-level or row-level resource.
+            #
+            # Fix: use the table's :seq resource as a "membership" marker.
+            # - Pure-read tables (SELECT) report READ on :seq.
+            # - INSERT tables report WRITE on :seq (moved here from
+            #   _capture_insert_id so the write is flushed at the INSERT's
+            #   scheduling point, not left as orphaned pending_io).
+            # - DELETE tables report WRITE on :seq.
+            # - UPDATE is excluded: it doesn't change table membership, and
+            #   adding :seq writes would cause false conflicts between
+            #   UPDATEs to different rows.
+            #
+            # This creates READ-WRITE conflicts between SELECT and
+            # INSERT/DELETE, detecting phantom read races.
+            pure_read_tables = access.read_tables - access.write_tables
+            for table in pure_read_tables:
+                _report_or_buffer(
+                    reporter,
+                    _sql_sequence_resource_id(table, db_scope=db_scope),
+                    "read",
+                )
+            # INSERT targets: in write_tables but NOT in read_tables (INSERT
+            # doesn't read the target table, unlike UPDATE/DELETE).
+            insert_tables = access.write_tables - access.read_tables
+            for table in insert_tables:
+                _report_or_buffer(
+                    reporter,
+                    _sql_sequence_resource_id(table, db_scope=db_scope),
+                    "write",
+                )
+            delete_tables = access.delete_tables or set()
+            for table in delete_tables:
+                _report_or_buffer(
+                    reporter,
+                    _sql_sequence_resource_id(table, db_scope=db_scope),
+                    "write",
+                )
+
     return reported
 
 
 def _capture_insert_id(cursor: Any, table: str) -> None:
-    """Capture lastrowid after INSERT and report indexical alias + sequence resource."""
+    """Capture lastrowid after INSERT and report indexical alias.
+
+    The shared sequence resource (sql:<table>:seq) WRITE is now reported
+    in ``_report_sql_access`` instead of here.  This ensures the :seq write
+    is flushed at the INSERT's scheduling point (via ``report_and_wait``),
+    rather than being left as orphaned ``pending_io`` when the INSERT is
+    the last operation before the thread exits.
+    """
     reporter = get_io_reporter()
     if reporter is None:
         return
@@ -564,9 +614,8 @@ def _capture_insert_id(cursor: Any, table: str) -> None:
 
     alias = record_insert(table, lastrowid, db_scope=db_scope)
 
-    # Report the logical alias and shared sequence resource as writes
+    # Report the logical alias as a write (indexical tracking for determinism)
     _report_or_buffer(reporter, alias, "write")
-    _report_or_buffer(reporter, _sql_sequence_resource_id(table, db_scope=db_scope), "write")
 
 
 def _execute_with_retry(original_method: Any, cursor: Any, operation: Any, parameters: Any = None) -> Any:
