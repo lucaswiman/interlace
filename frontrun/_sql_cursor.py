@@ -208,14 +208,16 @@ def _release_dpor_row_locks() -> None:
         ctx[0].release_row_locks(ctx[1])
 
 
-# Global to track primary column set per table for cross-column conflict detection.
-# Initialized to the first column set seen for each table in the current session.
-_table_primary_colset: dict[str, tuple[str, ...]] = {}
+# Global to track primary column set per (db_scope, table) for cross-column
+# conflict detection.  Keyed by (db_scope, table) rather than just table to
+# avoid cross-database contamination when the same table name exists in
+# multiple databases with different schemas/access patterns.
+_table_primary_colset: dict[tuple[str | None, str], tuple[str, ...]] = {}
 
 
-def _get_primary_colset(table: str, colset: tuple[str, ...]) -> tuple[str, ...]:
+def _get_primary_colset(table: str, colset: tuple[str, ...], *, db_scope: str | None = None) -> tuple[str, ...]:
     """Return the primary column set for a table, initializing it if necessary."""
-    return _table_primary_colset.setdefault(table, colset)
+    return _table_primary_colset.setdefault((db_scope, table), colset)
 
 
 def _stable_db_scope(identity: str) -> str:
@@ -472,7 +474,7 @@ def _report_sql_access(
                 # - Non-primary vs Non-primary: WRITE vs WRITE bridge -> CONFLICT (table-level).
                 if dpor_ctx is not None and table not in reported_bridges and has_row_level_predicates:
                     colset = tuple(sorted(p.column for p in rows[0]))
-                    primary = _get_primary_colset(table, colset)
+                    primary = _get_primary_colset(table, colset, db_scope=db_scope)
 
                     if colset == primary:
                         # Primary row-level reads use a shared READ bridge so
