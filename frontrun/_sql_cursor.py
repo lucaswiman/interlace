@@ -802,6 +802,21 @@ _PATCHES: list[tuple[Any, str, Any]] = []
 # For the factory-based approach we store the original connect function here.
 _ORIGINAL_METHODS: dict[tuple[type, str], Any] = {}
 
+# Global lock_timeout (milliseconds) to inject on new PostgreSQL connections.
+# Set by explore_dpor(lock_timeout=...) and cleared after exploration.
+_lock_timeout_ms: int | None = None
+
+
+def set_lock_timeout(ms: int | None) -> None:
+    """Set the global lock_timeout that will be injected on new PG connections."""
+    global _lock_timeout_ms  # noqa: PLW0603
+    _lock_timeout_ms = ms
+
+
+def get_lock_timeout() -> int | None:
+    """Return the current global lock_timeout (milliseconds), or None."""
+    return _lock_timeout_ms
+
 
 # ---------------------------------------------------------------------------
 # sqlite3 patching
@@ -916,6 +931,18 @@ def patch_sql() -> None:
                 identity = _normalize_mapping_db_identity(driver, relevant)
             if identity is not None:
                 _register_connection_db_scope(conn, identity)
+            # Inject SET lock_timeout if configured (defect #6 workaround).
+            # Use the *original* cursor class to avoid triggering DPOR
+            # scheduling points during connection setup.
+            if _lock_timeout_ms is not None and driver in ("psycopg2", "psycopg"):
+                _was_autocommit = conn.autocommit
+                conn.autocommit = True
+                _lt_cur = conn.cursor(cursor_factory=default_cursor_cls)
+                try:
+                    _lt_cur.execute(f"SET lock_timeout = '{int(_lock_timeout_ms)}ms'")
+                finally:
+                    _lt_cur.close()
+                conn.autocommit = _was_autocommit
             return conn
 
         return patched_connect

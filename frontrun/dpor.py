@@ -1753,6 +1753,7 @@ def explore_dpor(
     reproduce_on_failure: int = 10,
     total_timeout: float | None = None,
     warn_nondeterministic_sql: bool = True,
+    lock_timeout: int | None = None,
 ) -> InterleavingResult:
     """Systematically explore interleavings using DPOR.
 
@@ -1792,6 +1793,13 @@ def explore_dpor(
             failed (e.g. psycopg2 without RETURNING).  Set to False to
             suppress.  When capture succeeds, INSERTs use stable
             indexical resource IDs automatically.
+        lock_timeout: If set, automatically execute
+            ``SET lock_timeout = '<N>ms'`` on every new PostgreSQL
+            connection created through the patched ``psycopg2.connect``
+            (or ``psycopg.connect``).  This prevents the cooperative
+            scheduler from deadlocking when two threads contend on the
+            same PostgreSQL row lock (defect #6).  Value is in
+            milliseconds; 2000 (2 seconds) is a good default.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample found.
@@ -1841,6 +1849,13 @@ def explore_dpor(
         preload_dispatcher.start()
 
     clear_sql_metadata()
+
+    # Inject SET lock_timeout on new PG connections (defect #6 workaround).
+    from frontrun._sql_cursor import get_lock_timeout, set_lock_timeout
+
+    prev_lock_timeout = get_lock_timeout() if lock_timeout is not None else None
+    if lock_timeout is not None:
+        set_lock_timeout(lock_timeout)
 
     try:
         while True:
@@ -1934,29 +1949,43 @@ def explore_dpor(
                     # detect_io is already False for replays anyway.
                     _set_preload_pipe_fd(-1)
 
+                    # Re-apply SQL patching during replay when lock_timeout
+                    # is set.  unpatch_sql() was called after the DPOR execution,
+                    # so replay connections would not get lock_timeout injected.
+                    # Without this, the replay can deadlock on PG row locks
+                    # (the exact scenario lock_timeout is meant to prevent).
+                    _replay_sql_patched = False
+                    if lock_timeout is not None:
+                        patch_sql()
+                        _replay_sql_patched = True
+
                     successes = 0
-                    for _ in range(reproduce_on_failure):
-                        try:
-                            # DPOR processes I/O events within the same scheduling
-                            # step as the triggering opcode (via pending_io), so
-                            # its schedule is pure opcode-level.  The bytecode
-                            # shuffler's _io_reporter adds extra scheduling steps
-                            # for each I/O event, which would desync the replay.
-                            # Disable detect_io during replay so the step counts
-                            # match; the actual I/O still happens as a side effect
-                            # of opcode execution.
-                            replay_state = run_with_schedule(
-                                schedule_list,
-                                setup,
-                                threads,
-                                timeout=timeout_per_run,
-                                detect_io=False,
-                                deadlock_timeout=deadlock_timeout,
-                            )
-                            if not invariant(replay_state):
-                                successes += 1
-                        except Exception:
-                            pass  # timeout / crash during replay — not a reproduction
+                    try:
+                        for _ in range(reproduce_on_failure):
+                            try:
+                                # DPOR processes I/O events within the same scheduling
+                                # step as the triggering opcode (via pending_io), so
+                                # its schedule is pure opcode-level.  The bytecode
+                                # shuffler's _io_reporter adds extra scheduling steps
+                                # for each I/O event, which would desync the replay.
+                                # Disable detect_io during replay so the step counts
+                                # match; the actual I/O still happens as a side effect
+                                # of opcode execution.
+                                replay_state = run_with_schedule(
+                                    schedule_list,
+                                    setup,
+                                    threads,
+                                    timeout=timeout_per_run,
+                                    detect_io=False,
+                                    deadlock_timeout=deadlock_timeout,
+                                )
+                                if not invariant(replay_state):
+                                    successes += 1
+                            except Exception:
+                                pass  # timeout / crash during replay — not a reproduction
+                    finally:
+                        if _replay_sql_patched:
+                            unpatch_sql()
                     result.reproduction_attempts = reproduce_on_failure
                     result.reproduction_successes = successes
 
@@ -1988,6 +2017,8 @@ def explore_dpor(
                 if not engine.next_execution():
                     break
     finally:
+        if lock_timeout is not None:
+            set_lock_timeout(prev_lock_timeout)
         if preload_dispatcher is not None:
             preload_dispatcher.stop()
 
