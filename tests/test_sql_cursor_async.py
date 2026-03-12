@@ -150,7 +150,7 @@ async def test_select_reports_read() -> None:
         log.clear()
         await conn.execute("SELECT * FROM users")
 
-    assert ("sql:users", "read") in log.events
+    assert any(r.startswith("sql:users") and k == "read" for r, k in log.events)
 
 
 @pytest.mark.asyncio
@@ -164,7 +164,7 @@ async def test_insert_reports_write() -> None:
         log.clear()
         await conn.execute("INSERT INTO users VALUES (1, 'Alice')")
 
-    assert ("sql:users", "write") in log.events
+    assert any(r.startswith("sql:users") and k == "write" for r, k in log.events)
 
 
 @pytest.mark.asyncio
@@ -227,8 +227,8 @@ async def test_multi_table_join() -> None:
         log.clear()
         await conn.execute("SELECT * FROM users JOIN orders ON users.id = orders.user_id")
 
-    assert ("sql:users", "read") in log.events
-    assert ("sql:orders", "read") in log.events
+    assert any(r.startswith("sql:users") and k == "read" for r, k in log.events)
+    assert any(r.startswith("sql:orders") and k == "read" for r, k in log.events)
 
 
 @pytest.mark.asyncio
@@ -259,7 +259,7 @@ async def test_executemany() -> None:
         log.clear()
         await conn.executemany("INSERT INTO users VALUES (?, ?)", [(1, "Alice"), (2, "Bob")])
 
-    assert ("sql:users", "write") in log.events
+    assert any(r.startswith("sql:users") and k == "write" for r, k in log.events)
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +279,7 @@ async def test_cursor_execute_reports() -> None:
         cursor = await conn.execute("SELECT * FROM t")
         assert cursor is not None
 
-    assert ("sql:t", "read") in log.events
+    assert any(r.startswith("sql:t") and k == "read" for r, k in log.events)
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +380,7 @@ def test_report_sql_access_returns_true_for_data_sql() -> None:
     log = IOLog()
     set_io_reporter(log)
     assert _report_sql_access("SELECT * FROM users") is True
-    assert ("sql:users", "read") in log.events
+    assert any(r.startswith("sql:users") and k == "read" for r, k in log.events)
 
 
 def test_report_sql_access_returns_false_without_reporter() -> None:
@@ -422,7 +422,7 @@ async def test_intercept_async_calls_original() -> None:
     result = await _intercept_execute_async(fake_execute, None, "SELECT * FROM t", None, paramstyle="qmark")
     assert result == "ok"
     assert call_log == [("SELECT * FROM t", None)]
-    assert ("sql:t", "read") in log.events
+    assert any(r.startswith("sql:t") and k == "read" for r, k in log.events)
 
 
 @pytest.mark.asyncio
@@ -481,7 +481,7 @@ async def test_full_query_workflow() -> None:
         rows = await cursor.fetchall()
 
     assert rows == [("Alice",), ("Bob",)]
-    assert ("sql:users", "read") in log.events
+    assert any(r.startswith("sql:users") and k == "read" for r, k in log.events)
 
 
 @pytest.mark.asyncio

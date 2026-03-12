@@ -82,6 +82,14 @@ class TestResolveAlias:
         assert resolve_alias("users", 42) == "sql:users:setup_ins0"
         assert resolve_alias("users", "42") == "sql:users:setup_ins0"
 
+    def test_resolve_alias_is_scoped_by_database_identity(self) -> None:
+        record_insert("users", 42, db_scope="db_a")
+        record_insert("users", 42, db_scope="db_b")
+
+        assert resolve_alias("users", 42, db_scope="db_a") == "sql:users:db=db_a:setup_ins0"
+        assert resolve_alias("users", 42, db_scope="db_b") == "sql:users:db=db_b:setup_ins0"
+        assert resolve_alias("users", 42) is None
+
     def test_resolve_unknown_id(self) -> None:
         record_insert("users", 42)
         assert resolve_alias("users", 99) is None
@@ -222,11 +230,12 @@ class TestInsertCaptureViaCursor:
         assert records[0].table == "users"
         assert records[0].concrete_id == 1  # SQLite autoincrement starts at 1
         assert records[0].captured is True
-        assert records[0].logical_alias == "sql:users:setup_ins0"
+        assert records[0].logical_alias.startswith("sql:users:")
+        assert records[0].logical_alias.endswith("setup_ins0")
 
         # Should have reported the alias and sequence resource
-        alias_writes = [(r, k) for r, k in reported if r.startswith("sql:users:setup_ins")]
-        seq_writes = [(r, k) for r, k in reported if r == "sql:users:seq"]
+        alias_writes = [(r, k) for r, k in reported if r.startswith("sql:users:") and "setup_ins0" in r]
+        seq_writes = [(r, k) for r, k in reported if r.startswith("sql:users:") and r.endswith(":seq")]
         assert len(alias_writes) >= 1
         assert len(seq_writes) >= 1
 
@@ -251,7 +260,9 @@ class TestInsertCaptureViaCursor:
             set_io_reporter(None)
 
         # The SELECT should have resolved id=1 to the alias
-        select_reports = [(r, k) for r, k in reported if r == "sql:users:setup_ins0" and k == "read"]
+        select_reports = [
+            (r, k) for r, k in reported if r.startswith("sql:users:") and "setup_ins0" in r and k == "read"
+        ]
         assert len(select_reports) >= 1
 
     def test_select_not_tracked_as_insert(self) -> None:

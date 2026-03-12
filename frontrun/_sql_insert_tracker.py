@@ -23,6 +23,7 @@ class InsertRecord:
     """One captured INSERT event."""
 
     table: str
+    db_scope: str | None
     thread_id: int | None  # None = main/setup thread (no scheduler context)
     seq: int  # per-(thread, table) counter
     concrete_id: Any | None  # lastrowid value (None if capture failed)
@@ -35,8 +36,8 @@ class _TrackerState:
     """Mutable state for the INSERT tracker, cleared between executions."""
 
     records: list[InsertRecord] = field(default_factory=list)
-    concrete_to_alias: dict[tuple[str, Any], str] = field(default_factory=dict)
-    thread_table_seq: dict[tuple[int | None, str], int] = field(default_factory=dict)
+    concrete_to_alias: dict[tuple[str | None, str, Any], str] = field(default_factory=dict)
+    thread_table_seq: dict[tuple[str | None, int | None, str], int] = field(default_factory=dict)
     uncaptured_tables: set[str] = field(default_factory=set)
 
 
@@ -52,13 +53,16 @@ def _get_thread_id() -> int | None:
     return None
 
 
-def _make_alias(table: str, thread_id: int | None, seq: int) -> str:
+def _make_alias(table: str, thread_id: int | None, seq: int, db_scope: str | None = None) -> str:
     """Build a logical alias string for an INSERT."""
     tid = "setup" if thread_id is None else f"t{thread_id}"
-    return f"sql:{table}:{tid}_ins{seq}"
+    base = f"sql:{table}"
+    if db_scope is not None:
+        base = f"{base}:db={db_scope}"
+    return f"{base}:{tid}_ins{seq}"
 
 
-def record_insert(table: str, concrete_id: Any | None) -> str:
+def record_insert(table: str, concrete_id: Any | None, *, db_scope: str | None = None) -> str:
     """Record an INSERT and return its logical alias.
 
     Called after INSERT execution with the captured ``lastrowid`` (or None
@@ -66,15 +70,16 @@ def record_insert(table: str, concrete_id: Any | None) -> str:
     """
     thread_id = _get_thread_id()
     with _lock:
-        key = (thread_id, table)
+        key = (db_scope, thread_id, table)
         seq = _state.thread_table_seq.get(key, 0)
         _state.thread_table_seq[key] = seq + 1
 
-        alias = _make_alias(table, thread_id, seq)
+        alias = _make_alias(table, thread_id, seq, db_scope=db_scope)
         captured = concrete_id is not None
 
         record = InsertRecord(
             table=table,
+            db_scope=db_scope,
             thread_id=thread_id,
             seq=seq,
             concrete_id=concrete_id,
@@ -87,21 +92,21 @@ def record_insert(table: str, concrete_id: Any | None) -> str:
             # Map (table, concrete_id) -> alias for downstream resolution.
             # Use str() for the concrete_id to handle int/str mismatches in
             # predicate values (SQL predicates are always strings).
-            _state.concrete_to_alias[(table, str(concrete_id))] = alias
+            _state.concrete_to_alias[(db_scope, table, str(concrete_id))] = alias
         else:
             _state.uncaptured_tables.add(table)
 
         return alias
 
 
-def resolve_alias(table: str, concrete_id: Any) -> str | None:
+def resolve_alias(table: str, concrete_id: Any, *, db_scope: str | None = None) -> str | None:
     """Look up the logical alias for a concrete ID produced by an INSERT.
 
     Returns the alias string (e.g. ``"sql:users:t0_ins0"``) or ``None`` if
     the concrete ID was not produced by a tracked INSERT.
     """
     with _lock:
-        return _state.concrete_to_alias.get((table, str(concrete_id)))
+        return _state.concrete_to_alias.get((db_scope, table, str(concrete_id)))
 
 
 def get_uncaptured_tables() -> set[str]:

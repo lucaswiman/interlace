@@ -51,7 +51,9 @@ async def _intercept_execute_async(
     """
     insert_match = _RE_INSERT_TABLE.match(operation) if isinstance(operation, str) else None
     _detect_autobegin(self)
-    reported = _report_sql_access(operation, parameters, is_executemany=is_executemany, paramstyle=paramstyle)
+    reported = _report_sql_access(
+        operation, parameters, db_obj=self, is_executemany=is_executemany, paramstyle=paramstyle
+    )
 
     # Block if another DPOR thread holds a conflicting row lock
     _acquire_pending_row_locks()
@@ -97,7 +99,7 @@ async def _intercept_asyncpg_execute(
     a single parameters collection.  We report at table level (no parameter
     resolution for asyncpg's binary protocol parameters).
     """
-    reported = _report_sql_access(operation, None, is_executemany=False, paramstyle="dollar")
+    reported = _report_sql_access(operation, None, db_obj=self, is_executemany=False, paramstyle="dollar")
 
     # Force a DPOR scheduling point so the engine can interleave between
     # SQL operations.  Without this, all code inside frontrun/ is skipped
@@ -191,7 +193,7 @@ def _patch_psycopg_async() -> None:
 
         def _make_patched(orig: Any, is_em: bool) -> Any:
             async def _patched(self: Any, query: Any, params: Any = None, /, **kwargs: Any) -> Any:
-                reported = _report_sql_access(query, params, is_executemany=is_em, paramstyle="format")
+                reported = _report_sql_access(query, params, db_obj=self, is_executemany=is_em, paramstyle="format")
                 if reported:
                     with _suppress_endpoint_io():
                         return await orig(self, query, params, **kwargs)
@@ -234,7 +236,7 @@ def _patch_aiomysql() -> None:
 
         def _make_patched(orig: Any, is_em: bool) -> Any:
             async def _patched(self: Any, query: Any, args: Any = None, *extra: Any, **kwargs: Any) -> Any:
-                reported = _report_sql_access(query, args, is_executemany=is_em, paramstyle="pyformat")
+                reported = _report_sql_access(query, args, db_obj=self, is_executemany=is_em, paramstyle="pyformat")
                 if reported:
                     with _suppress_endpoint_io():
                         return await orig(self, query, args, *extra, **kwargs)
