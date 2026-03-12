@@ -14,6 +14,11 @@ import os
 
 import pytest
 
+try:
+    import sqlalchemy  # noqa: F401
+except ImportError:
+    pytest.skip("sqlalchemy not installed", allow_module_level=True)
+
 _DB_NAME = os.environ.get("FRONTRUN_TEST_DB", "frontrun_test")
 _DB_URL = f"postgresql:///{_DB_NAME}"
 

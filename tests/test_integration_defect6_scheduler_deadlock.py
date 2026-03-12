@@ -32,9 +32,13 @@ from __future__ import annotations
 
 import os
 
-import psycopg2
 import pytest
-from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+
+try:
+    import psycopg2
+    from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+except ImportError:
+    pytest.skip("psycopg2 not installed", allow_module_level=True)
 
 from frontrun.dpor import explore_dpor
 
