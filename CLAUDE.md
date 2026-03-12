@@ -12,29 +12,29 @@ Deterministic concurrency testing library. Three approaches: trace markers (`# f
 
 ## Environment setup
 
-Use the Makefile to build virtualenvs. Prefer working in the **3.14t** (free-threaded) virtualenv:
+Use the Makefile to build virtualenvs. Prefer working in the **3.14** virtualenv:
 
-- `make build-dpor-3.14t` — build the 3.14t venv with Rust DPOR extension (preferred)
+- `make build-dpor-3.14` — build the 3.14 venv with Rust DPOR extension (preferred)
 - `make build-dpor-3.10` / `make build-dpor-3.14` — other versions
 - `make build-io` — build the LD_PRELOAD I/O interception library (libfrontrun_io.so)
 - Virtualenvs live at `.venv-3.14t/`, `.venv-3.10/`, `.venv-3.14/`
-- Run tools via e.g. `.venv-3.14t/bin/pytest`, `.venv-3.14t/bin/python`
+- Run tools via e.g. `.venv-3.14/bin/pytest`, `.venv-3.14/bin/python`
 - Use `frontrun` CLI to run commands with I/O interception: `frontrun pytest -v tests/`
 
 ## Running tests
 
-Always use `make test-<version>` to run tests. This builds the DPOR extension and I/O library, then runs pytest through the `frontrun` CLI wrapper (which sets up `LD_PRELOAD` for C-level I/O interception). Do **not** run `.venv-3.14t/bin/pytest` directly — tests that use `explore_dpor()` will be skipped or misconfigured without the `frontrun` wrapper.
+Always use `make test-<version>` to run tests. This builds the DPOR extension and I/O library, then runs pytest through the `frontrun` CLI wrapper (which sets up `LD_PRELOAD` for C-level I/O interception). Do **not** run `.venv-3.14/bin/pytest` directly — tests that use `explore_dpor()` will be skipped or misconfigured without the `frontrun` wrapper.
 
-- `make test-3.14t` / `make test-3.10` / `make test-3.14` — single version
+- `make test-3.14` / `make test-3.10` / `make test-3.14t` — single version
 - `make test` — all Python versions (3.10, 3.14, 3.14t)
-- Override pytest args: `make test-3.14t PYTEST_ARGS="-v --timeout=120 -k test_name"`
+- Override pytest args: `make test-3.14 PYTEST_ARGS="-v --timeout=120 -k test_name"`
 
 ### Integration tests (Redis, HTTP, ORM)
 
 Integration tests require additional packages and services:
 
-- `make build-integration-3.14t` / `make build-integration-3.10` — install redis, requests, sqlalchemy, psycopg2-binary
-- `make test-integration-3.14t` — run integration tests only
+- `make build-integration-3.14` / `make build-integration-3.10` — install redis, requests, sqlalchemy, psycopg2-binary
+- `make test-integration-3.14` — run integration tests only
 - Redis and Postgres are available but not running by default. Start them with:
   - `redis-server --daemonize yes`
   - `sudo pg_ctlcluster 16 main start`
@@ -52,3 +52,9 @@ Integration tests require additional packages and services:
 - ruff (E, F, W, I, N, UP, A, C4, ISC, PIE, Q, LOG, PERF), pyright strict
 - Tests: pytest + hypothesis
 - Rust extensions: maturin (PyO3) for DPOR (`crates/dpor/`), cargo for LD_PRELOAD library (`crates/io/`)
+
+## Development workflow
+
+* Start out a session with `make rebuild` — cleans and rebuilds everything, only outputs on failure or success. This is important since sometimes development is done on MacOS and sometimes in a docker container so incompatible binaries may be present.
+* Always use red/green TDD: create a failing test case (or failing manual test procedure), then verify that it fails for the right reason. Commit the failing test. Then fix the failing test and commit that.
+* Make sure that `make check` passes at the very end before declaring a task done. If possible, use a cheap subagent with a fresh context.

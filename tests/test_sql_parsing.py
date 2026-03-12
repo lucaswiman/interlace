@@ -237,8 +237,9 @@ class TestRegexParse:
         sql = "MERGE INTO target USING source ON target.id = source.id WHEN MATCHED THEN UPDATE SET target.v = source.v"
         assert _regex_parse(sql) is None
 
-    def test_returning_falls_through(self):
-        assert _regex_parse("INSERT INTO orders (total) VALUES (100) RETURNING id") is None
+    def test_returning_succeeds_regex(self):
+        r, w, *_ = _regex_parse("INSERT INTO orders (total) VALUES (100) RETURNING id")
+        assert r == set() and w == {"orders"}
 
     def test_with_cte_select_falls_through(self):
         assert _regex_parse("WITH t AS (SELECT 1) SELECT * FROM t") is None
@@ -570,3 +571,25 @@ class TestMultiStatementSql:
         r, w, lock, tx, *_ = parse_sql_access(sql)
         assert tx is TxOp.COMMIT  # returns last tx_op
         assert "accounts" in w
+
+
+class TestDjangoPlaceholders:
+    def test_delete_with_placeholders(self):
+        # DELETE: formerly failed because of %s and IN (
+        sql = 'DELETE FROM "t" WHERE "t"."id" IN (%s)'
+        result = parse_sql_access(sql)
+        assert "t" in result.read_tables
+        assert "t" in result.write_tables
+
+    def test_insert_with_placeholders(self):
+        # INSERT: formerly failed because of %s and RETURNING
+        sql = 'INSERT INTO "t" ("a", "b") VALUES (%s, %s) RETURNING "t"."id"'
+        result = parse_sql_access(sql)
+        assert result.read_tables == set()
+        assert "t" in result.write_tables
+
+    def test_named_placeholders(self):
+        # Test %(name)s style
+        sql = "SELECT * FROM t WHERE id = %(id)s"
+        result = parse_sql_access(sql)
+        assert "t" in result.read_tables

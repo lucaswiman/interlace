@@ -1,4 +1,4 @@
-.PHONY: test clean docs docs-clean docs-html docs-clean-build lint type-check check test-integration
+.PHONY: test clean docs docs-clean docs-html docs-clean-build lint type-check check test-integration build-all
 
 # Python versions to test
 PYTHON_VERSIONS := 3.14t 3.10 3.14
@@ -71,6 +71,10 @@ test-integration-%: build-integration-% build-io
 
 # Integration tests for all Python versions
 test-integration: $(addprefix test-integration-,$(PYTHON_VERSIONS))
+
+.PHONY: rebuild
+rebuild:
+	@bash scripts/rebuild.sh
 
 lint: default-venv
 	$(VENV_BIN)ruff check frontrun tests
