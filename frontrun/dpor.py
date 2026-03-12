@@ -59,7 +59,7 @@ from frontrun._io_detection import (
     unpatch_io,
 )
 from frontrun._sql_anomaly import classify_sql_anomaly
-from frontrun._sql_cursor import is_tid_suppressed, patch_sql, unpatch_sql
+from frontrun._sql_cursor import clear_sql_metadata, is_tid_suppressed, patch_sql, unpatch_sql
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
@@ -1819,6 +1819,8 @@ def explore_dpor(
         preload_bridge = _PreloadBridge(dispatcher=preload_dispatcher)
         preload_dispatcher.add_listener(preload_bridge.listener)
         preload_dispatcher.start()
+
+    clear_sql_metadata()
 
     try:
         while True:

@@ -865,7 +865,9 @@ def test_create_table_reported() -> None:
     conn.execute("CREATE TABLE foo (x INTEGER)")
 
     assert len(log.events) == 1
-    assert log.events[0] == ("sql:foo", "write")
+    resource_id, kind = log.events[0]
+    assert kind == "write"
+    assert resource_id.startswith("sql:foo")
     conn.close()
 
 

@@ -28,7 +28,6 @@ import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from socketserver import ThreadingMixIn
 
 import pytest
 
@@ -81,8 +80,16 @@ class _KVHandler(BaseHTTPRequestHandler):
         pass  # Suppress request logging
 
 
-class _ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-    daemon_threads = True
+class _TestHTTPServer(HTTPServer):
+    """Single-threaded server used from a dedicated background thread.
+
+    The races in this file are in the client-side read/modify/write logic
+    across multiple HTTP requests, not in the server implementation.
+    Using a plain ``HTTPServer`` avoids spawning request-handler threads
+    while frontrun has patched ``threading`` primitives, which is flaky on
+    free-threaded Python builds.
+    """
+
     allow_reuse_address = True
 
 
@@ -126,7 +133,7 @@ def http_server():
         {"store": store, "store_lock": lock},
     )
 
-    server = _ThreadedHTTPServer(("127.0.0.1", port), handler_class)
+    server = _TestHTTPServer(("127.0.0.1", port), handler_class)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 

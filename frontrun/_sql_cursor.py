@@ -17,10 +17,13 @@ drivers like pymysql, direct class patching is used as a fallback.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib
+import os
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Generator
 from typing import Any
 
@@ -76,6 +79,8 @@ _RE_INSERT_TABLE = re.compile(r"^\s*INSERT\s+INTO\s+[`\"\[]?(\w+)", re.I)
 # The LD_PRELOAD bridge listener checks this to skip endpoint-level reports.
 _suppress_tids: set[int] = set()
 _suppress_lock = _rt.lock()  # Real lock (not cooperative)
+_DB_SCOPE_ATTR = "_frontrun_db_scope"
+_CONNECTION_DB_SCOPES: dict[int, str] = {}
 
 
 @contextlib.contextmanager
@@ -203,20 +208,165 @@ def _release_dpor_row_locks() -> None:
         ctx[0].release_row_locks(ctx[1])
 
 
-def _sql_resource_id(table: str, predicates: list[Any], temporal: str | None = None) -> str:
+# Global to track primary column set per table for cross-column conflict detection.
+# Initialized to the first column set seen for each table in the current session.
+_table_primary_colset: dict[str, tuple[str, ...]] = {}
+
+
+def _get_primary_colset(table: str, colset: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the primary column set for a table, initializing it if necessary."""
+    return _table_primary_colset.setdefault(table, colset)
+
+
+def _stable_db_scope(identity: str) -> str:
+    """Return a short deterministic token for a database identity string."""
+    return hashlib.sha1(identity.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
+
+
+def _register_connection_db_scope(connection: Any, identity: str) -> str:
+    """Associate a stable database scope with a connection object."""
+    scope = _stable_db_scope(identity)
+    _CONNECTION_DB_SCOPES[id(connection)] = scope
+    try:
+        setattr(connection, _DB_SCOPE_ATTR, scope)
+    except AttributeError:
+        pass
+    return scope
+
+
+def _normalize_sqlite_db_identity(*args: Any, **kwargs: Any) -> str | None:
+    """Best-effort canonical identity for a sqlite3 connection target."""
+    database = kwargs.get("database")
+    if database is None and args:
+        database = args[0]
+    if database is None:
+        return None
+
+    database_path = os.fspath(database)
+    if isinstance(database_path, bytes):
+        database_str = database_path.decode("utf-8", errors="surrogateescape")
+    else:
+        database_str = database_path
+    use_uri = bool(kwargs.get("uri"))
+    if database_str == ":memory:" and not use_uri:
+        return None
+    if use_uri or database_str.startswith("file:"):
+        return f"sqlite-uri:{database_str}"
+    return f"sqlite-path:{os.path.abspath(database_str)}"
+
+
+def _normalize_mapping_db_identity(driver: str, mapping: dict[str, Any]) -> str | None:
+    """Build a canonical DB identity from connect kwargs or driver info dicts."""
+    items = [(key, value) for key, value in sorted(mapping.items()) if value not in (None, "")]
+    if not items:
+        return None
+    return f"{driver}:{repr(items)}"
+
+
+def _infer_db_identity_from_connection(connection: Any) -> str | None:
+    """Infer a stable database identity from a live connection object."""
+    info = getattr(connection, "info", None)
+    dsn_params = getattr(info, "dsn_parameters", None)
+    if isinstance(dsn_params, dict):
+        relevant = {key: dsn_params.get(key) for key in ("host", "port", "dbname") if dsn_params.get(key)}
+        identity = _normalize_mapping_db_identity("postgres", relevant)
+        if identity is not None:
+            return identity
+
+    dsn = getattr(connection, "dsn", None)
+    if isinstance(dsn, str) and dsn:
+        return f"dsn:{dsn}"
+
+    relevant = {
+        "host": getattr(connection, "host", None),
+        "port": getattr(connection, "port", None),
+        "database": getattr(connection, "database", None),
+        "db": getattr(connection, "db", None),
+        "dbname": getattr(getattr(connection, "info", None), "dbname", None),
+    }
+    identity = _normalize_mapping_db_identity("dbapi", relevant)
+    if identity is not None:
+        return identity
+
+    path = getattr(connection, "filename", None)
+    if isinstance(path, str) and path:
+        return f"sqlite-path:{os.path.abspath(path)}"
+
+    return None
+
+
+def _get_connection_db_scope(db_obj: Any) -> str | None:
+    """Resolve the stable database scope for a cursor/connection-like object."""
+    if db_obj is None:
+        return None
+    if type(db_obj).__module__.startswith("unittest.mock"):
+        return None
+
+    seen: set[int] = set()
+    pending = [db_obj]
+    while pending:
+        candidate = pending.pop(0)
+        if type(candidate).__module__.startswith("unittest.mock"):
+            continue
+        candidate_id = id(candidate)
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+
+        scope = getattr(candidate, _DB_SCOPE_ATTR, None)
+        if isinstance(scope, str):
+            return scope
+
+        mapped_scope = _CONNECTION_DB_SCOPES.get(candidate_id)
+        if mapped_scope is not None:
+            return mapped_scope
+
+        for attr in ("connection", "_conn", "_connection"):
+            nested = getattr(candidate, attr, None)
+            if nested is not None:
+                pending.append(nested)
+
+    connection = getattr(db_obj, "connection", None)
+    if connection is None:
+        connection = getattr(db_obj, "_conn", None)
+    if connection is None:
+        connection = db_obj
+
+    identity = _infer_db_identity_from_connection(connection)
+    if identity is None:
+        return None
+    return _register_connection_db_scope(connection, identity)
+
+
+def _sql_resource_id(
+    table: str,
+    predicates: list[Any],
+    temporal: str | None = None,
+    *,
+    db_scope: str | None = None,
+) -> str:
     """Build a resource ID from table name and optional predicates."""
+    resource = f"sql:{table}"
     if temporal:
-        table = f"{table}:history:{temporal}"
+        resource = f"{resource}:history:{temporal}"
+    if db_scope is not None:
+        resource = f"{resource}:db={db_scope}"
     if not predicates:
-        return f"sql:{table}"
+        return resource
     pred_key = tuple(sorted((p.column, p.value) for p in predicates))
-    return f"sql:{table}:{pred_key}"
+    return f"{resource}:{pred_key}"
+
+
+def _sql_sequence_resource_id(table: str, *, db_scope: str | None = None) -> str:
+    """Build the shared sequence resource ID for INSERT ordering on a table."""
+    return f"{_sql_resource_id(table, [], db_scope=db_scope)}:seq"
 
 
 def _report_sql_access(
     operation: Any,
     parameters: Any = None,
     *,
+    db_obj: Any = None,
     is_executemany: bool = False,
     paramstyle: str = "format",
 ) -> bool:
@@ -277,6 +427,8 @@ def _report_sql_access(
         if access.read_tables or access.write_tables:
             reported = True
             all_tables = access.read_tables | access.write_tables
+            dpor_ctx = _get_dpor_context()
+            db_scope = _get_connection_db_scope(db_obj)
 
             # Row-level predicate extraction (WHERE equality, IN-lists, and INSERT VALUES)
             # Reuses the pre-parsed AST from parse_sql_access when available (avoids
@@ -293,21 +445,69 @@ def _report_sql_access(
                     pred_rows = rows
                     has_row_level = True
 
-            # SELECT FOR UPDATE signals write intent immediately so the DPOR
-            # engine can learn about conflicts before C-level blocking occurs.
             lock_update = access.lock_intent is LockIntent.UPDATE
+
+            # Track which tables already reported their bridge resource in this op.
+            reported_bridges: set[str] = set()
 
             def report_or_buffer(table: str, kind: str, rows: list[list[Any]]) -> None:
                 temporal = access.temporal_clauses.get(table) if access.temporal_clauses else None
+                has_row_level_predicates = bool(rows and rows[0])
+
+                # Conservative Column-Set Partitioning (Defect #1):
+                # When using row-level predicates, we must ensure that accesses using
+                # DIFFERENT sets of columns (e.g. SELECT by username vs UPDATE by id)
+                # properly conflict. We do this by reporting a "bridge" resource (sql:<table>)
+                # for every row-level access.
+                #
+                # To preserve row-level benefits for the most common column set (usually the PK),
+                # we designate the first column set seen for each table as "primary".
+                # - Primary colset accesses report a READ on the bridge resource.
+                # - Non-primary colset accesses report a WRITE on the bridge resource.
+                # - Table-level accesses report their actual kind (READ/WRITE) on the bridge.
+                #
+                # Result:
+                # - Primary vs Primary: both READ bridge -> NO conflict on bridge. Row-level works!
+                # - Primary vs Non-primary: READ vs WRITE bridge -> CONFLICT. Correct.
+                # - Non-primary vs Non-primary: WRITE vs WRITE bridge -> CONFLICT (table-level).
+                if dpor_ctx is not None and table not in reported_bridges and has_row_level_predicates:
+                    colset = tuple(sorted(p.column for p in rows[0]))
+                    primary = _get_primary_colset(table, colset)
+
+                    if colset == primary:
+                        # Primary row-level reads use a shared READ bridge so
+                        # they still conflict conservatively with non-primary
+                        # accesses, while primary row-level writes stay fully
+                        # row-granular.
+                        if kind == "read":
+                            _report_or_buffer(
+                                reporter,
+                                _sql_resource_id(table, [], db_scope=db_scope),
+                                "read",
+                                force_immediate=lock_update,
+                            )
+                            reported_bridges.add(table)
+                    else:
+                        # Non-primary colset conflicts conservatively at table scope.
+                        _report_or_buffer(
+                            reporter,
+                            _sql_resource_id(table, [], db_scope=db_scope),
+                            "write",
+                            force_immediate=lock_update,
+                        )
+                        reported_bridges.add(table)
+
                 for row_preds in rows:
                     # Check if any predicate value matches a captured INSERT ID
                     alias = None
                     for pred in row_preds:
                         if isinstance(pred, EqualityPredicate):
-                            alias = resolve_alias(table, pred.value)
+                            alias = resolve_alias(table, pred.value, db_scope=db_scope)
                             if alias is not None:
                                 break
-                    res_id = alias if alias is not None else _sql_resource_id(table, row_preds, temporal)
+                    res_id = (
+                        alias if alias is not None else _sql_resource_id(table, row_preds, temporal, db_scope=db_scope)
+                    )
                     _report_or_buffer(reporter, res_id, kind, force_immediate=lock_update)
 
             # Report explicit reads
@@ -360,12 +560,30 @@ def _capture_insert_id(cursor: Any, table: str) -> None:
         return
 
     lastrowid = getattr(cursor, "lastrowid", None)
+    db_scope = _get_connection_db_scope(cursor)
 
-    alias = record_insert(table, lastrowid)
+    alias = record_insert(table, lastrowid, db_scope=db_scope)
 
     # Report the logical alias and shared sequence resource as writes
     _report_or_buffer(reporter, alias, "write")
-    _report_or_buffer(reporter, f"sql:{table}:seq", "write")
+    _report_or_buffer(reporter, _sql_sequence_resource_id(table, db_scope=db_scope), "write")
+
+
+def _execute_with_retry(original_method: Any, cursor: Any, operation: Any, parameters: Any = None) -> Any:
+    """Execute a DB-API method, retrying transient SQLite lock errors."""
+    for i in range(50):
+        try:
+            if parameters is not None:
+                return original_method(cursor, operation, parameters)
+            return original_method(cursor, operation)
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower():
+                raise
+            time.sleep(0.01 * (i + 1))
+
+    if parameters is not None:
+        return original_method(cursor, operation, parameters)
+    return original_method(cursor, operation)
 
 
 def _intercept_execute(
@@ -407,7 +625,13 @@ def _intercept_execute(
     # already seen an explicit BEGIN.
     _detect_autobegin(self)
 
-    reported = _report_sql_access(operation, parameters, is_executemany=is_executemany, paramstyle=paramstyle)
+    reported = _report_sql_access(
+        operation,
+        parameters,
+        db_obj=self,
+        is_executemany=is_executemany,
+        paramstyle=paramstyle,
+    )
 
     # Block if another DPOR thread holds a conflicting row lock
     _acquire_pending_row_locks()
@@ -423,15 +647,9 @@ def _intercept_execute(
 
     if reported:
         with _suppress_endpoint_io():
-            if parameters is not None:
-                result = original_method(self, operation, parameters)
-            else:
-                result = original_method(self, operation)
+            result = _execute_with_retry(original_method, self, operation, parameters)
     else:
-        if parameters is not None:
-            result = original_method(self, operation, parameters)
-        else:
-            result = original_method(self, operation)
+        result = _execute_with_retry(original_method, self, operation, parameters)
 
     # Post-INSERT: capture lastrowid and record indexical alias
     if insert_match is not None and not is_executemany and reported:
@@ -538,7 +756,12 @@ def _patch_sqlite3() -> None:
     def patched_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
         if "factory" not in kwargs:
             kwargs["factory"] = traced_conn_cls
-        return orig_connect(*args, **kwargs)
+        conn = orig_connect(*args, **kwargs)
+        identity = _normalize_sqlite_db_identity(*args, **kwargs)
+        if identity is None:
+            identity = f"sqlite-memory:{id(conn)}"
+        _register_connection_db_scope(conn, identity)
+        return conn
 
     sqlite3.connect = patched_connect  # type: ignore[assignment]
     _PATCHES.append((sqlite3, "connect", orig_connect))
@@ -608,7 +831,7 @@ def patch_sql() -> None:
         except (ImportError, AttributeError):
             pass  # driver not installed — skip silently
 
-    def _make_patched_connect(orig: Any, default_cursor_cls: type, paramstyle: str) -> Any:
+    def _make_patched_connect(orig: Any, default_cursor_cls: type, paramstyle: str, driver: str) -> Any:
         # Cache traced subclasses by (caller-provided cursor_factory class) to avoid
         # creating a new class on every connect() call.
         _cache: dict[type, type] = {}
@@ -620,7 +843,20 @@ def patch_sql() -> None:
             if user_factory not in _cache:
                 _cache[user_factory] = _make_traced_cursor_class(user_factory, paramstyle=paramstyle)
             kwargs["cursor_factory"] = _cache[user_factory]
-            return orig(*args, **kwargs)
+            conn = orig(*args, **kwargs)
+            identity = _infer_db_identity_from_connection(conn)
+            if identity is None and args and isinstance(args[0], str):
+                identity = f"{driver}-dsn:{args[0]}"
+            if identity is None:
+                relevant = {
+                    "host": kwargs.get("host"),
+                    "port": kwargs.get("port"),
+                    "dbname": kwargs.get("dbname") or kwargs.get("database") or kwargs.get("db"),
+                }
+                identity = _normalize_mapping_db_identity(driver, relevant)
+            if identity is not None:
+                _register_connection_db_scope(conn, identity)
+            return conn
 
         return patched_connect
 
@@ -631,7 +867,11 @@ def patch_sql() -> None:
 
         orig_cursor_cls = _pg2ext.cursor
         orig_connect = _pg2mod.connect
-        setattr(_pg2mod, "connect", _make_patched_connect(orig_connect, orig_cursor_cls, paramstyle="pyformat"))
+        setattr(
+            _pg2mod,
+            "connect",
+            _make_patched_connect(orig_connect, orig_cursor_cls, paramstyle="pyformat", driver="psycopg2"),
+        )
         _PATCHES.append((_pg2mod, "connect", orig_connect))
         _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
         _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
@@ -645,7 +885,11 @@ def patch_sql() -> None:
         orig_cursor_cls = _pg3mod.Cursor
         orig_connect = _pg3mod.connect
         # Psycopg 3 uses 'format' as default paramstyle (client-side)
-        setattr(_pg3mod, "connect", _make_patched_connect(orig_connect, orig_cursor_cls, paramstyle="format"))
+        setattr(
+            _pg3mod,
+            "connect",
+            _make_patched_connect(orig_connect, orig_cursor_cls, paramstyle="format", driver="psycopg"),
+        )
         _PATCHES.append((_pg3mod, "connect", orig_connect))
         _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
         _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
@@ -663,9 +907,18 @@ def reset_connection_state() -> None:
     from leaking across logical sessions.  Safe to call even when no
     transaction is active (it's a no-op in that case).
     """
-    for attr in ("_in_transaction", "_tx_buffer", "_tx_savepoints", "_pending_row_locks"):
+    for attr in ("_in_transaction", "_is_autobegin", "_tx_buffer", "_tx_savepoints", "_pending_row_locks"):
         if hasattr(_io_tls, attr):
             delattr(_io_tls, attr)
+
+
+def clear_sql_metadata() -> None:
+    """Reset all global SQL resource tracking metadata.
+
+    Call this between DPOR exploration sessions to ensure test isolation.
+    """
+    _table_primary_colset.clear()
+    _CONNECTION_DB_SCOPES.clear()
 
 
 def unpatch_sql() -> None:

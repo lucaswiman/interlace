@@ -8,6 +8,7 @@ import pytest
 
 from frontrun._io_detection import _io_tls
 from frontrun._sql_cursor import _intercept_execute, reset_connection_state
+from frontrun._sql_insert_tracker import clear_insert_tracker, record_insert, resolve_alias
 
 
 @pytest.fixture
@@ -19,10 +20,12 @@ def reporter():
 
 @pytest.fixture(autouse=True)
 def clean_tls():
+    clear_insert_tracker()
     for attr in ("_in_transaction", "_tx_buffer", "_tx_savepoints", "_sql_suppress"):
         if hasattr(_io_tls, attr):
             delattr(_io_tls, attr)
     yield
+    clear_insert_tracker()
     for attr in ("_in_transaction", "_tx_buffer", "_tx_savepoints", "_sql_suppress"):
         if hasattr(_io_tls, attr):
             delattr(_io_tls, attr)
@@ -97,3 +100,12 @@ class TestResetConnectionState:
         reporter.reset_mock()
         _intercept_execute(cursor.execute, cursor, "SELECT * FROM users WHERE id = 1")
         reporter.assert_called_once()
+
+    def test_reset_does_not_clear_insert_aliases_from_other_logical_sessions(self, reporter):
+        """Pool reset is per-connection state; it must not wipe global INSERT alias tracking."""
+        record_insert("users", 42)
+        assert resolve_alias("users", 42) == "sql:users:setup_ins0"
+
+        reset_connection_state()
+
+        assert resolve_alias("users", 42) == "sql:users:setup_ins0"

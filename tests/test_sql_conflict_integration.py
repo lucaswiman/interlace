@@ -107,6 +107,42 @@ def _cleanup_sql_patch() -> Generator[None, None, None]:
 class TestSqlConflictIsolation:
     """Verify that SQL detection correctly isolates threads touching different tables."""
 
+    def test_same_table_name_in_different_databases_reports_distinct_resources(self) -> None:
+        """Independent databases should not collapse to the same sql:<table> resource."""
+        patch_sql()
+
+        db_uri_a = "file:memdb_identity_a?mode=memory&cache=shared"
+        db_uri_b = "file:memdb_identity_b?mode=memory&cache=shared"
+
+        conn_a = sqlite3.connect(db_uri_a, timeout=30, uri=True, check_same_thread=False)
+        conn_b = sqlite3.connect(db_uri_b, timeout=30, uri=True, check_same_thread=False)
+
+        execute_with_retry(conn_a, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+        execute_with_retry(conn_b, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
+        execute_with_retry(conn_a, "INSERT INTO users VALUES (1, 'alice')")
+        execute_with_retry(conn_b, "INSERT INTO users VALUES (1, 'bob')")
+        conn_a.commit()
+        conn_b.commit()
+
+        log_a = IOLog()
+        log_b = IOLog()
+
+        set_io_reporter(log_a)
+        execute_with_retry(conn_a, "SELECT * FROM users")
+
+        set_io_reporter(log_b)
+        execute_with_retry(conn_b, "SELECT * FROM users")
+
+        res_a = {r for r, _ in log_a.events}
+        res_b = {r for r, _ in log_b.events}
+
+        assert res_a
+        assert res_b
+        assert res_a.isdisjoint(res_b), (res_a, res_b)
+
+        conn_a.close()
+        conn_b.close()
+
     def test_different_tables_independent_report_distinct_resources(self) -> None:
         """Two threads touching different tables → distinct resource IDs."""
         patch_sql()
