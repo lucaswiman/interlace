@@ -173,3 +173,28 @@ def test_workaround_with_lock_timeout(_pg_available) -> None:
         f"Expected race to be detected (invariant violated by PG error).\n"
         f"num_explored={result.num_explored}\n{result.explanation}"
     )
+
+
+def test_explore_dpor_lock_timeout_parameter(_pg_available) -> None:
+    """Test that explore_dpor's lock_timeout parameter automatically injects
+    SET lock_timeout on PostgreSQL connections, preventing the DPOR/PG deadlock.
+
+    Threads do NOT set lock_timeout themselves — explore_dpor handles it.
+    Without the lock_timeout parameter, this scenario hangs (see
+    test_deadlock_without_lock_timeout). With it, PG raises an error on the
+    blocked thread, allowing it to return to a DPOR scheduling point.
+    """
+    result = explore_dpor(
+        setup=_State,
+        threads=[_make_thread_fn(0, use_lock_timeout=False),
+                 _make_thread_fn(1, use_lock_timeout=False)],
+        invariant=_invariant,
+        deadlock_timeout=10.0,
+        timeout_per_run=15.0,
+        lock_timeout=2000,
+    )
+
+    assert not result.property_holds, (
+        f"Expected race to be detected with explore_dpor lock_timeout.\n"
+        f"num_explored={result.num_explored}\n{result.explanation}"
+    )
