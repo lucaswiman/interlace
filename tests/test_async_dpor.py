@@ -18,7 +18,7 @@ class TestAsyncDporBasic:
     def test_finds_lost_update(self) -> None:
         """DPOR should systematically find the lost-update race."""
         require_active("test_async_dpor_lost_update")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class Counter:
             def __init__(self) -> None:
@@ -26,7 +26,7 @@ class TestAsyncDporBasic:
 
         async def increment(counter: Counter) -> None:
             temp = counter.value
-            await await_point()
+            await asyncio.sleep(0)
             counter.value = temp + 1
 
         result = asyncio.run(
@@ -69,7 +69,7 @@ class TestAsyncDporBasic:
     def test_three_tasks(self) -> None:
         """DPOR should handle three concurrent tasks."""
         require_active("test_async_dpor_three_tasks")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class Counter:
             def __init__(self) -> None:
@@ -77,7 +77,7 @@ class TestAsyncDporBasic:
 
         async def increment(counter: Counter) -> None:
             temp = counter.value
-            await await_point()
+            await asyncio.sleep(0)
             counter.value = temp + 1
 
         result = asyncio.run(
@@ -94,7 +94,7 @@ class TestAsyncDporBasic:
     def test_multiple_await_points(self) -> None:
         """DPOR should explore interleavings with multiple await points per task."""
         require_active("test_async_dpor_multiple_awaits")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class State:
             def __init__(self) -> None:
@@ -102,14 +102,14 @@ class TestAsyncDporBasic:
 
         async def task_a(state: State) -> None:
             state.log.append("a1")
-            await await_point()
+            await asyncio.sleep(0)
             state.log.append("a2")
-            await await_point()
+            await asyncio.sleep(0)
             state.log.append("a3")
 
         async def task_b(state: State) -> None:
             state.log.append("b1")
-            await await_point()
+            await asyncio.sleep(0)
             state.log.append("b2")
 
         result = asyncio.run(
@@ -128,7 +128,7 @@ class TestAsyncDporBasic:
     def test_stop_on_first(self) -> None:
         """stop_on_first=True should stop after finding the first violation."""
         require_active("test_async_dpor_stop_on_first")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class Counter:
             def __init__(self) -> None:
@@ -136,7 +136,7 @@ class TestAsyncDporBasic:
 
         async def increment(counter: Counter) -> None:
             temp = counter.value
-            await await_point()
+            await asyncio.sleep(0)
             counter.value = temp + 1
 
         result = asyncio.run(
@@ -168,7 +168,7 @@ class TestAsyncDporDeadlock:
         interleaving and report it — not actually deadlock.
         """
         require_active("test_async_dpor_two_coroutine_deadlock")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class State:
             def __init__(self) -> None:
@@ -178,7 +178,7 @@ class TestAsyncDporDeadlock:
         async def coroutine1(state: State) -> None:
             await state.row1.acquire()
             try:
-                await await_point()
+                await asyncio.sleep(0)
                 await state.row2.acquire()
                 state.row2.release()
             finally:
@@ -187,7 +187,7 @@ class TestAsyncDporDeadlock:
         async def coroutine2(state: State) -> None:
             await state.row2.acquire()
             try:
-                await await_point()
+                await asyncio.sleep(0)
                 await state.row1.acquire()
                 state.row1.release()
             finally:
@@ -214,7 +214,7 @@ class TestAsyncDporDeadlock:
         lock and waits for its second.
         """
         require_active("test_async_dpor_three_coroutine_deadlock")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class State:
             def __init__(self) -> None:
@@ -225,7 +225,7 @@ class TestAsyncDporDeadlock:
         async def coroutine1(state: State) -> None:
             await state.row1.acquire()
             try:
-                await await_point()
+                await asyncio.sleep(0)
                 await state.row2.acquire()
                 state.row2.release()
             finally:
@@ -234,7 +234,7 @@ class TestAsyncDporDeadlock:
         async def coroutine2(state: State) -> None:
             await state.row2.acquire()
             try:
-                await await_point()
+                await asyncio.sleep(0)
                 await state.row3.acquire()
                 state.row3.release()
             finally:
@@ -243,7 +243,7 @@ class TestAsyncDporDeadlock:
         async def coroutine3(state: State) -> None:
             await state.row3.acquire()
             try:
-                await await_point()
+                await asyncio.sleep(0)
                 await state.row1.acquire()
                 state.row1.release()
             finally:
@@ -281,7 +281,7 @@ class TestAsyncDporDeadlock:
 
         import aiosqlite  # type: ignore[import-untyped]
 
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         fd, db_path = tempfile.mkstemp(suffix=".db")
         os.close(fd)
@@ -303,7 +303,7 @@ class TestAsyncDporDeadlock:
                 await db.execute("BEGIN")
                 await db.execute("UPDATE t SET v = 1 WHERE id = 1")
                 # Row lock on sql:t:(('id', 1)) is now held by this task
-                await await_point()
+                await asyncio.sleep(0)
                 # Try to acquire the asyncio.Lock — may block if C2 holds it
                 await state.app_lock.acquire()
                 state.app_lock.release()
@@ -313,7 +313,7 @@ class TestAsyncDporDeadlock:
             # Acquire the app lock first, then try to get the SQL row lock
             await state.app_lock.acquire()
             try:
-                await await_point()
+                await asyncio.sleep(0)
                 async with aiosqlite.connect(state.db_path) as db:
                     await db.execute("BEGIN")
                     # This tries to acquire the same row lock held by C1
@@ -349,7 +349,7 @@ class TestAsyncDporDeadlock:
         The partial deadlock should still be detected even though C3 finishes.
         """
         require_active("test_async_dpor_partial_deadlock")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class State:
             def __init__(self) -> None:
@@ -360,7 +360,7 @@ class TestAsyncDporDeadlock:
         async def coroutine1(state: State) -> None:
             await state.lock_a.acquire()
             try:
-                await await_point()
+                await asyncio.sleep(0)
                 await state.lock_b.acquire()
                 state.lock_b.release()
             finally:
@@ -369,14 +369,14 @@ class TestAsyncDporDeadlock:
         async def coroutine2(state: State) -> None:
             await state.lock_b.acquire()
             try:
-                await await_point()
+                await asyncio.sleep(0)
                 await state.lock_a.acquire()
                 state.lock_a.release()
             finally:
                 state.lock_b.release()
 
         async def coroutine3(state: State) -> None:
-            await await_point()
+            await asyncio.sleep(0)
             state.c3_done = True
 
         result = asyncio.run(
@@ -398,7 +398,7 @@ class TestAsyncDporDeadlock:
         so no cycle is possible.
         """
         require_active("test_async_dpor_no_deadlock")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class State:
             def __init__(self) -> None:
@@ -408,7 +408,7 @@ class TestAsyncDporDeadlock:
         async def coroutine1(state: State) -> None:
             await state.lock_a.acquire()
             try:
-                await await_point()
+                await asyncio.sleep(0)
                 await state.lock_b.acquire()
                 state.lock_b.release()
             finally:
@@ -417,7 +417,7 @@ class TestAsyncDporDeadlock:
         async def coroutine2(state: State) -> None:
             await state.lock_a.acquire()
             try:
-                await await_point()
+                await asyncio.sleep(0)
                 await state.lock_b.acquire()
                 state.lock_b.release()
             finally:
@@ -442,7 +442,7 @@ class TestAsyncDporDeadlock:
         by the same coroutine is an instant deadlock.
         """
         require_active("test_async_dpor_self_deadlock")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class State:
             def __init__(self) -> None:
@@ -450,14 +450,14 @@ class TestAsyncDporDeadlock:
 
         async def coroutine1(state: State) -> None:
             await state.lock.acquire()
-            await await_point()
+            await asyncio.sleep(0)
             # Re-acquire the same non-reentrant lock — instant self-deadlock
             await state.lock.acquire()
             state.lock.release()
             state.lock.release()
 
         async def coroutine2(state: State) -> None:
-            await await_point()
+            await asyncio.sleep(0)
 
         result = asyncio.run(
             explore_async_dpor(
@@ -478,7 +478,7 @@ class TestAsyncDporDeadlock:
         to reach the state where both hold one lock.
         """
         require_active("test_async_dpor_asymmetric_deadlock")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class State:
             def __init__(self) -> None:
@@ -489,15 +489,15 @@ class TestAsyncDporDeadlock:
         async def coroutine1(state: State) -> None:
             # Several await points of work before acquiring locks
             state.log.append("c1_step1")
-            await await_point()
+            await asyncio.sleep(0)
             state.log.append("c1_step2")
-            await await_point()
+            await asyncio.sleep(0)
             state.log.append("c1_step3")
-            await await_point()
+            await asyncio.sleep(0)
             # Now do the lock-order-inversion pattern
             await state.lock_a.acquire()
             try:
-                await await_point()
+                await asyncio.sleep(0)
                 await state.lock_b.acquire()
                 state.lock_b.release()
             finally:
@@ -506,10 +506,10 @@ class TestAsyncDporDeadlock:
         async def coroutine2(state: State) -> None:
             # Only one await point before locking
             state.log.append("c2_step1")
-            await await_point()
+            await asyncio.sleep(0)
             await state.lock_b.acquire()
             try:
-                await await_point()
+                await asyncio.sleep(0)
                 await state.lock_a.acquire()
                 state.lock_a.release()
             finally:
@@ -537,7 +537,7 @@ class TestAsyncDporDeadlock:
         where C1 sets the flag before C2 reads it triggers the deadlock.
         """
         require_active("test_async_dpor_data_dependent_deadlock")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class State:
             def __init__(self) -> None:
@@ -547,22 +547,22 @@ class TestAsyncDporDeadlock:
 
         async def coroutine1(state: State) -> None:
             state.reverse_order = True
-            await await_point()
+            await asyncio.sleep(0)
             await state.lock_a.acquire()
             try:
-                await await_point()
+                await asyncio.sleep(0)
                 await state.lock_b.acquire()
                 state.lock_b.release()
             finally:
                 state.lock_a.release()
 
         async def coroutine2(state: State) -> None:
-            await await_point()
+            await asyncio.sleep(0)
             if state.reverse_order:
                 # Opposite order from C1 → deadlock possible
                 await state.lock_b.acquire()
                 try:
-                    await await_point()
+                    await asyncio.sleep(0)
                     await state.lock_a.acquire()
                     state.lock_a.release()
                 finally:
@@ -571,7 +571,7 @@ class TestAsyncDporDeadlock:
                 # Same order as C1 → safe
                 await state.lock_a.acquire()
                 try:
-                    await await_point()
+                    await asyncio.sleep(0)
                     await state.lock_b.acquire()
                     state.lock_b.release()
                 finally:
@@ -598,7 +598,7 @@ class TestAsyncDporDeadlock:
         enough interleavings).
         """
         require_active("test_async_dpor_dining_philosophers")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         num_philosophers = 3
 
@@ -612,7 +612,7 @@ class TestAsyncDporDeadlock:
                 right = (i + 1) % num_philosophers
                 await state.forks[left].acquire()
                 try:
-                    await await_point()
+                    await asyncio.sleep(0)
                     await state.forks[right].acquire()
                     state.forks[right].release()
                 finally:
@@ -741,7 +741,7 @@ class TestAsyncDporExplanation:
         NOT for invariant violations. The explanation field stays None.
         """
         require_active("test_async_dpor_invariant_explanation")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class Counter:
             def __init__(self) -> None:
@@ -749,7 +749,7 @@ class TestAsyncDporExplanation:
 
         async def increment(counter: Counter) -> None:
             temp = counter.value
-            await await_point()
+            await asyncio.sleep(0)
             counter.value = temp + 1
 
         result = asyncio.run(
@@ -773,7 +773,7 @@ class TestAsyncDporExplanation:
         at which points, making it possible to understand the race condition.
         """
         require_active("test_async_dpor_explanation_content")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class Counter:
             def __init__(self) -> None:
@@ -781,7 +781,7 @@ class TestAsyncDporExplanation:
 
         async def increment(counter: Counter) -> None:
             temp = counter.value
-            await await_point()
+            await asyncio.sleep(0)
             counter.value = temp + 1
 
         result = asyncio.run(
