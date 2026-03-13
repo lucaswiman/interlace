@@ -259,6 +259,14 @@ class AsyncDporScheduler(InterleavedLoop):
         # Pending I/O accesses per task (from SQL interception)
         self._pending_io: dict[int, list[tuple[int, str]]] = {i: [] for i in range(num_tasks)}
 
+        # Row lock tracking: resource_id → holding task_id
+        self._active_row_locks: dict[str, int] = {}
+        # task_id → set of held resource_ids
+        self._task_row_locks: dict[int, set[str]] = {}
+        # resource_id → integer ID for WaitForGraph
+        self._row_lock_ids: dict[str, int] = {}
+        self._row_lock_next_id: int = 0
+
         # Request the first scheduling decision
         self._current_task = self._schedule_next()
 
@@ -398,11 +406,60 @@ class AsyncDporScheduler(InterleavedLoop):
         if self._detect_sql:
             set_io_reporter(None)
 
+    def _row_lock_int_id(self, res_id: str) -> int:
+        """Return a stable integer ID for *res_id* (allocated on first call)."""
+        lid = self._row_lock_ids.get(res_id)
+        if lid is None:
+            lid = self._row_lock_next_id
+            self._row_lock_next_id += 1
+            self._row_lock_ids[res_id] = lid
+        return lid
+
     def acquire_row_locks(self, thread_id: int, resource_ids: list[str]) -> None:
-        """No-op for async DPOR (row locks are handled at the DB level)."""
+        """Track SQL row locks in the async WaitForGraph for cross-resource deadlock detection.
+
+        In the async single-threaded context we cannot block waiting for a
+        holder to release.  Instead we:
+        - Record the holding edge when the lock is free (or already ours).
+        - Detect cycles instantly via WaitForGraph when another task holds
+          the lock, raising DeadlockError so explore_async_dpor reports it.
+        """
+        graph = _async_wait_graph
+        for res_id in resource_ids:
+            lock_int_id = self._row_lock_int_id(res_id)
+            holder = self._active_row_locks.get(res_id)
+            if holder is not None and holder != thread_id:
+                # Another task holds this — check for deadlock cycle
+                if graph is not None:
+                    cycle = graph.add_waiting(thread_id, lock_int_id, kind="row_lock")
+                    if cycle is not None:
+                        graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
+                        desc = format_cycle(cycle, {v: k for k, v in self._row_lock_ids.items()})
+                        raise DeadlockError(f"Row-lock deadlock detected: {desc}", desc)
+                    # No cycle but contention — remove waiting edge (we can't
+                    # actually block in async), let the SQL proceed.  The DB
+                    # will handle the actual blocking and lock_timeout safety
+                    # net prevents indefinite hangs.
+                    graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
+                # Even without a graph, record ownership optimistically so
+                # that the DPOR engine can explore alternative interleavings.
+            self._active_row_locks[res_id] = thread_id
+            self._task_row_locks.setdefault(thread_id, set()).add(res_id)
+            if graph is not None:
+                graph.add_holding(thread_id, lock_int_id, kind="row_lock")
 
     def release_row_locks(self, thread_id: int) -> None:
-        """No-op for async DPOR (row locks are handled at the DB level)."""
+        """Release all row locks held by *thread_id* (called on COMMIT/ROLLBACK)."""
+        graph = _async_wait_graph
+        held = self._task_row_locks.pop(thread_id, None)
+        if not held:
+            return
+        for res_id in held:
+            self._active_row_locks.pop(res_id, None)
+            if graph is not None:
+                lid = self._row_lock_ids.get(res_id)
+                if lid is not None:
+                    graph.remove_holding(thread_id, lid, kind="row_lock")
 
     def _flush_pending_io(self, task_id: int) -> None:
         """Flush pending I/O accesses to the DPOR engine."""

@@ -263,52 +263,80 @@ class TestAsyncDporDeadlock:
         assert result.explanation is not None
         assert "deadlock" in result.explanation.lower()
 
-    def test_combined_asyncio_lock_and_row_lock_deadlock(self) -> None:
-        """Mixed resource deadlock: one coroutine holds a row lock and waits
-        for an asyncio.Lock, the other holds the asyncio.Lock and waits for
-        the row lock.
+    def test_combined_asyncio_lock_and_sql_deadlock(self) -> None:
+        """Mixed resource deadlock: one coroutine holds a real SQL row lock
+        and waits for an asyncio.Lock, the other holds the asyncio.Lock and
+        waits for the same SQL row lock.
 
         This cross-resource deadlock is invisible to both the DB backend
         (which only sees row locks) and asyncio (which only sees asyncio.Lock).
-        Only the DPOR scheduler can detect it.
+        Only the DPOR scheduler can detect it because it tracks both resource
+        types in a unified WaitForGraph.
+
+        Uses aiosqlite so no external database is needed.
         """
         require_active("test_async_dpor_combined_lock_deadlock")
+        import os
+        import tempfile
+
+        import aiosqlite  # type: ignore[import-untyped]
+
         from frontrun.async_dpor import await_point, explore_async_dpor
+
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
 
         class State:
             def __init__(self) -> None:
-                self.row_lock = asyncio.Lock()  # simulated DB row lock
-                self.app_lock = asyncio.Lock()  # application-level asyncio.Lock
+                self.app_lock = asyncio.Lock()
+                self.db_path = db_path
+
+        async def _setup_db() -> None:
+            async with aiosqlite.connect(db_path) as db:
+                await db.execute("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, v INTEGER)")
+                await db.execute("INSERT OR REPLACE INTO t (id, v) VALUES (1, 0)")
+                await db.commit()
 
         async def coroutine1(state: State) -> None:
-            # Acquire the "row lock" first, then try the app lock
-            await state.row_lock.acquire()
-            try:
+            # Acquire a SQL row lock (UPDATE inside tx), then try the app lock
+            async with aiosqlite.connect(state.db_path) as db:
+                await db.execute("BEGIN")
+                await db.execute("UPDATE t SET v = 1 WHERE id = 1")
+                # Row lock on sql:t:(('id', 1)) is now held by this task
                 await await_point()
+                # Try to acquire the asyncio.Lock — may block if C2 holds it
                 await state.app_lock.acquire()
                 state.app_lock.release()
-            finally:
-                state.row_lock.release()
+                await db.execute("COMMIT")
 
         async def coroutine2(state: State) -> None:
-            # Acquire the app lock first, then try the row lock
+            # Acquire the app lock first, then try to get the SQL row lock
             await state.app_lock.acquire()
             try:
                 await await_point()
-                await state.row_lock.acquire()
-                state.row_lock.release()
+                async with aiosqlite.connect(state.db_path) as db:
+                    await db.execute("BEGIN")
+                    # This tries to acquire the same row lock held by C1
+                    await db.execute("UPDATE t SET v = 2 WHERE id = 1")
+                    await db.execute("COMMIT")
             finally:
                 state.app_lock.release()
 
-        result = asyncio.run(
-            explore_async_dpor(
+        async def run() -> object:
+            await _setup_db()
+            return await explore_async_dpor(
                 setup=State,
                 tasks=[coroutine1, coroutine2],
                 invariant=lambda s: True,
+                detect_sql=True,
                 deadlock_timeout=2.0,
-                timeout_per_run=3.0,
+                timeout_per_run=5.0,
             )
-        )
+
+        try:
+            result = asyncio.run(run())
+        finally:
+            os.unlink(db_path)
 
         assert not result.property_holds, "Cross-resource deadlock should set property_holds=False"
         assert result.explanation is not None
