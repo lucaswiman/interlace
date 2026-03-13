@@ -66,6 +66,70 @@ class TestAsyncDporBasic:
         assert result.property_holds, f"No race expected: {result.counterexample}"
         assert result.num_explored >= 1
 
+    def test_tracks_stale_read_across_await(self) -> None:
+        """DPOR should catch a stale read carried across an await boundary."""
+        require_active("test_async_dpor_stale_read_across_await")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class Counter:
+            def __init__(self) -> None:
+                self.value = 0
+                self.audit_log: list[int] = []
+
+        async def increment(counter: Counter) -> None:
+            initial = counter.value
+            await asyncio.sleep(0)
+            counter.audit_log.append(initial)
+            counter.value += initial + 1
+            counter.audit_log.append(counter.value)
+            await asyncio.sleep(0)
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=Counter,
+                tasks=[increment, increment],
+                invariant=lambda c: c.value == 2,
+                deadlock_timeout=5.0,
+            )
+        )
+
+        assert not result.property_holds, "Async DPOR should find the stale-read lost update"
+        assert result.num_explored >= 1
+
+    def test_independent_objects_collapse_to_one_execution(self) -> None:
+        """Independent await-delimited blocks should not create extra executions."""
+        require_active("test_async_dpor_independent_objects")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                self.a = 0
+                self.b = 0
+
+        async def set_a(state: State) -> None:
+            await asyncio.sleep(0)
+            state.a = 1
+            await asyncio.sleep(0)
+
+        async def set_b(state: State) -> None:
+            await asyncio.sleep(0)
+            state.b = 1
+            await asyncio.sleep(0)
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[set_a, set_b],
+                invariant=lambda s: s.a == 1 and s.b == 1,
+                preemption_bound=None,
+                max_executions=100,
+                deadlock_timeout=5.0,
+            )
+        )
+
+        assert result.property_holds
+        assert result.num_explored == 1
+
     def test_three_tasks(self) -> None:
         """DPOR should handle three concurrent tasks."""
         require_active("test_async_dpor_three_tasks")
