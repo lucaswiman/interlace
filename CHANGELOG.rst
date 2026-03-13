@@ -17,9 +17,10 @@ cursor patching, so asyncpg, aiosqlite, and aiomysql queries are detected as
 conflicts automatically.
 
 - New module: ``frontrun.async_dpor`` (``explore_async_dpor``, ``await_point``).
-- Contrib helpers: ``frontrun.contrib.async_django`` (``async_django_dpor``)
-  and ``frontrun.contrib.async_sqlalchemy`` (``async_sqlalchemy_dpor``,
-  ``get_connection``).
+- Contrib helpers merged into packages: ``frontrun.contrib.django``
+  (``django_dpor``, ``async_django_dpor``) and ``frontrun.contrib.sqlalchemy``
+  (``sqlalchemy_dpor``, ``async_sqlalchemy_dpor``, ``get_connection``,
+  ``get_async_connection``).
 - Integration tests against asyncpg, SQLAlchemy async, and Django async ORM.
 
 **SQL conflict detection in DPOR**

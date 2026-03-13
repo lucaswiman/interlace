@@ -5,7 +5,7 @@ and optional lock_timeout injection automatically.
 
 Example::
 
-    from frontrun.contrib.async_sqlalchemy import async_sqlalchemy_dpor, get_connection
+    from frontrun.contrib.sqlalchemy import async_sqlalchemy_dpor, get_async_connection
 
     result = await async_sqlalchemy_dpor(
         engine=async_engine,
@@ -18,7 +18,7 @@ Example::
 
 Inside a task function, retrieve the per-task connection with::
 
-    conn = get_connection()
+    conn = get_async_connection()
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ T = TypeVar("T")
 _current_connection: contextvars.ContextVar[Any] = contextvars.ContextVar("_async_sa_connection")
 
 
-def get_connection() -> Any:
+def get_async_connection() -> Any:
     """Return the per-task async SQLAlchemy connection set by ``async_sqlalchemy_dpor``."""
     return _current_connection.get()
 
@@ -56,7 +56,7 @@ async def async_sqlalchemy_dpor(
         setup: Called once per execution to create fresh shared state.
         tasks: List of async callables, each receiving the shared state.
             Each task gets its own async connection.
-            Use :func:`get_connection` inside the task to access it.
+            Use :func:`get_async_connection` inside the task to access it.
         invariant: Predicate over shared state after all tasks complete.
         lock_timeout: If set, execute ``SET lock_timeout = <N>ms`` on each
             task's connection.

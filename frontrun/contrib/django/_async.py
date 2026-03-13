@@ -5,7 +5,7 @@ connection management and optional lock_timeout injection automatically.
 
 Example::
 
-    from frontrun.contrib.async_django import async_django_dpor
+    from frontrun.contrib.django import async_django_dpor
 
     result = await async_django_dpor(
         setup=_State,

@@ -26,6 +26,11 @@ Bytecode exploration::
 Async bytecode exploration::
 
     from frontrun.async_bytecode import explore_interleavings, await_point
+
+Contrib helpers::
+
+    from frontrun.contrib.django import django_dpor, async_django_dpor
+    from frontrun.contrib.sqlalchemy import sqlalchemy_dpor, async_sqlalchemy_dpor, get_connection, get_async_connection
 """
 
 from importlib.metadata import version as _metadata_version
