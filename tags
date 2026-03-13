@@ -192,7 +192,7 @@ AsyncBuggyCounter	tests/buggy_programs.py	/^class AsyncBuggyCounter:$/;"	c
 AsyncBuggyCounterBytecode	tests/buggy_programs.py	/^class AsyncBuggyCounterBytecode:$/;"	c
 AsyncBuggyResourceManager	tests/buggy_programs.py	/^class AsyncBuggyResourceManager:$/;"	c
 AsyncBuggyResourceManagerBytecode	tests/buggy_programs.py	/^class AsyncBuggyResourceManagerBytecode:$/;"	c
-AsyncBytecodeShuffler	frontrun/async_bytecode.py	/^class AsyncBytecodeShuffler:$/;"	c
+AsyncShuffler	frontrun/async_shuffler.py	/^class AsyncShuffler:$/;"	c
 AsyncTraceExecutor	frontrun/async_trace_markers.py	/^class AsyncTraceExecutor:$/;"	c
 AtomicCounter	tests/test_dpor.py	/^        class AtomicCounter:$/;"	c	member:TestExploreDpor.test_atomic_increment_no_bug	file:
 AttemptNumberLostUpdateState	docs/case_studies/tests/test_tenacity_concurrency.py	/^class AttemptNumberLostUpdateState:$/;"	c
@@ -202,7 +202,7 @@ Automatic I/O Detection	docs/approaches.rst	/^Automatic I\/O Detection$/;"	c	tit
 Automatic Race Finding with Bytecode Exploration	docs/examples.rst	/^Automatic Race Finding with Bytecode Exploration$/;"	c	title:Examples
 Automatic Race Finding with DPOR	docs/examples.rst	/^Automatic Race Finding with DPOR$/;"	c	title:Examples
 Available Parsers	ideas/tla_plus_integration.md	/^### Available Parsers$/;"	S	section:Frontrun + TLA+: Integration Brainstorm""9. Parsing TLA+ Specs from Python: Extracting Entity Mappings
-AwaitScheduler	frontrun/async_bytecode.py	/^class AwaitScheduler(InterleavedLoop):$/;"	c
+AwaitScheduler	frontrun/async_shuffler.py	/^class AwaitScheduler(InterleavedLoop):$/;"	c
 BUG_TESTS	docs/case_studies/tests/test_cachetools_concurrency.py	/^BUG_TESTS = [$/;"	v
 BUG_TESTS	docs/case_studies/tests/test_tenacity_concurrency.py	/^BUG_TESTS = [$/;"	v
 BUILDDIR	docs/Makefile	/^BUILDDIR      ?= _build$/;"	m
@@ -210,7 +210,7 @@ Backtrack	crates/dpor/src/thread.rs	/^    Backtrack,$/;"	e	enum:ThreadStatus
 Backtracking	docs/dpor.rst	/^Backtracking$/;"	s	chapter:The exploration tree
 Bank	tests/test_dpor.py	/^        class Bank:$/;"	c	member:TestExploreDpor.test_bank_account_transfer	file:
 Bank Account Transfer (Lost Update)	docs/examples.rst	/^Bank Account Transfer (Lost Update)$/;"	c	title:Examples
-BankAccount	tests/test_async_bytecode.py	/^class BankAccount:$/;"	c
+BankAccount	tests/test_async_shuffler.py	/^class BankAccount:$/;"	c
 BankAccount	tests/test_async_trace_markers.py	/^class BankAccount:$/;"	c
 BankAccount	tests/test_bytecode.py	/^class BankAccount:$/;"	c
 BankAccount	tests/test_dpor.py	/^        class BankAccount:$/;"	c	member:TestExploreDpor.test_bank_account_transfer	file:
@@ -304,7 +304,7 @@ Core Algorithms (Phase 1: Table-Level Detection)	ideas/sql_conflict/00_overview_
 Core Design Documents (Read in Order)	ideas/sql_conflict/00_overview_and_sections.md	/^### Core Design Documents (Read in Order)$/;"	S	section:SQL Resource Conflict Detection — Implementation Plan""Table of Contents
 Correct Synchronization with Locks	docs/examples.rst	/^Correct Synchronization with Locks$/;"	c	title:Examples
 Correctness Argument	ideas/sql_conflict/11_correctness_argument.md	/^# Correctness Argument$/;"	c
-Counter	tests/test_async_bytecode.py	/^class Counter:$/;"	c
+Counter	tests/test_async_shuffler.py	/^class Counter:$/;"	c
 Counter	tests/test_async_trace_markers.py	/^    class Counter:$/;"	c	function:test_synchronous_function_bodies	file:
 Counter	tests/test_bugfixes.py	/^        class Counter:$/;"	c	member:TestDporStopOnFirst.test_stop_on_first_false_explores_all	file:
 Counter	tests/test_bugfixes.py	/^        class Counter:$/;"	c	member:TestDporStopOnFirst.test_stop_on_first_reduces_exploration	file:
@@ -660,7 +660,7 @@ Safe-Area Results (4 invariants verified)	docs/CASE_STUDIES.rst	/^Safe-Area Resu
 Safe-Area Results (4 invariants verified)	docs/CASE_STUDIES.rst	/^Safe-Area Results (4 invariants verified)$/;"	S	chapter:12. tenacity (exploration)
 Safe-Area Tests (4/4 held)	docs/case_studies/tests/CACHETOOLS_TENACITY_REPORT.md	/^### Safe-Area Tests (4\/4 held)$/;"	S	section:Cachetools & Tenacity Concurrency Bug Exploration Report""cachetools Results (12 tests)
 Safe-Area Tests (4/4 held)	docs/case_studies/tests/CACHETOOLS_TENACITY_REPORT.md	/^### Safe-Area Tests (4\/4 held)$/;"	S	section:Cachetools & Tenacity Concurrency Bug Exploration Report""tenacity Results (10 tests)
-SafeCounter	tests/test_async_bytecode.py	/^class SafeCounter:$/;"	c
+SafeCounter	tests/test_async_shuffler.py	/^class SafeCounter:$/;"	c
 SafeCounter	tests/test_bytecode.py	/^class SafeCounter:$/;"	c
 SafeCounter	tests/test_trace_format.py	/^        class SafeCounter:$/;"	c	member:TestBytecodeIntegration.test_safe_counter_no_explanation	file:
 SafeLedger	tests/test_dpor_io.py	/^        class SafeLedger:$/;"	c	member:TestFileFlagRace.test_locked_balance_update_is_safe	file:
@@ -1258,8 +1258,8 @@ __init__	frontrun/_cooperative.py	/^    def __init__(self, value: int = 1) -> No
 __init__	frontrun/_deadlock.py	/^    def __init__(self) -> None:$/;"	m	class:WaitForGraph	typeref:typename:None
 __init__	frontrun/_preload_io.py	/^    def __init__(self) -> None:$/;"	m	class:IOEventDispatcher	typeref:typename:None
 __init__	frontrun/_trace_format.py	/^    def __init__(self, *, enabled: bool = True) -> None:$/;"	m	class:TraceRecorder	typeref:typename:None
-__init__	frontrun/async_bytecode.py	/^    def __init__(self, schedule: list[int], num_tasks: int, *, deadlock_timeout: float = 5.0):$/;"	m	class:AwaitScheduler
-__init__	frontrun/async_bytecode.py	/^    def __init__(self, scheduler: AwaitScheduler):$/;"	m	class:AsyncBytecodeShuffler
+__init__	frontrun/async_shuffler.py	/^    def __init__(self, schedule: list[int], num_tasks: int, *, deadlock_timeout: float = 5.0):$/;"	m	class:AwaitScheduler
+__init__	frontrun/async_shuffler.py	/^    def __init__(self, scheduler: AwaitScheduler):$/;"	m	class:AsyncShuffler
 __init__	frontrun/async_scheduler.py	/^    def __init__(self, *, deadlock_timeout: float = 5.0):$/;"	m	class:InterleavedLoop
 __init__	frontrun/async_trace_markers.py	/^    def __init__(self, schedule: Schedule, *, deadlock_timeout: float = 5.0):$/;"	m	class:AsyncTraceExecutor
 __init__	frontrun/bytecode.py	/^    def __init__($/;"	m	class:OpcodeScheduler
@@ -1285,9 +1285,9 @@ __init__	tests/buggy_programs.py	/^    def __init__(self):$/;"	m	class:BuggyCoun
 __init__	tests/buggy_programs.py	/^    def __init__(self):$/;"	m	class:BuggyCounterBytecode
 __init__	tests/buggy_programs.py	/^    def __init__(self):$/;"	m	class:BuggyResourceManager
 __init__	tests/buggy_programs.py	/^    def __init__(self):$/;"	m	class:BuggyResourceManagerBytecode
-__init__	tests/test_async_bytecode.py	/^    def __init__(self, balance=0):$/;"	m	class:BankAccount
-__init__	tests/test_async_bytecode.py	/^    def __init__(self, value=0):$/;"	m	class:Counter
-__init__	tests/test_async_bytecode.py	/^    def __init__(self, value=0):$/;"	m	class:SafeCounter
+__init__	tests/test_async_shuffler.py	/^    def __init__(self, balance=0):$/;"	m	class:BankAccount
+__init__	tests/test_async_shuffler.py	/^    def __init__(self, value=0):$/;"	m	class:Counter
+__init__	tests/test_async_shuffler.py	/^    def __init__(self, value=0):$/;"	m	class:SafeCounter
 __init__	tests/test_async_trace_markers.py	/^        def __init__(self):$/;"	m	class:test_complex_race_scenario.SharedCounter
 __init__	tests/test_async_trace_markers.py	/^        def __init__(self):$/;"	m	class:test_synchronous_function_bodies.Counter
 __init__	tests/test_async_trace_markers.py	/^    def __init__(self, balance=0):$/;"	m	class:BankAccount
@@ -1491,7 +1491,7 @@ _check_thread_cleanup	tests/conftest.py	/^def _check_thread_cleanup(request):$/;
 _cleanup_io_patches	tests/test_io_detection.py	/^def _cleanup_io_patches():$/;"	f
 _cleanup_sql_patch	tests/test_sql_conflict_integration.py	/^def _cleanup_sql_patch() -> Generator[None, None, None]:$/;"	f	typeref:typename:Generator[None,None,None]
 _cleanup_sql_patch	tests/test_sql_cursor.py	/^def _cleanup_sql_patch() -> Generator[None, None, None]:$/;"	f	typeref:typename:Generator[None,None,None]
-_cleanup_task_context	frontrun/async_bytecode.py	/^    def _cleanup_task_context(self, task_id: Any) -> None:$/;"	m	class:AwaitScheduler	typeref:typename:None
+_cleanup_task_context	frontrun/async_shuffler.py	/^    def _cleanup_task_context(self, task_id: Any) -> None:$/;"	m	class:AwaitScheduler	typeref:typename:None
 _cleanup_task_context	frontrun/async_scheduler.py	/^    def _cleanup_task_context(self, task_id: Any) -> None:$/;"	m	class:InterleavedLoop	typeref:typename:None
 _collapse_runs	frontrun/_trace_format.py	/^def _collapse_runs(lines: list[SourceLineEvent], *, max_lines: int) -> list[SourceLineEvent | Co/;"	f	typeref:typename:list[SourceLineEvent|CollapsedRun]
 _condition_invariant	docs/case_studies/tests/test_cachetools_concurrency.py	/^def _condition_invariant(s):$/;"	f
@@ -1512,7 +1512,7 @@ _exec_global_counter	tests/test_tricky_races.py	/^_exec_global_counter: int = 0$
 _expand_slice_reads	frontrun/dpor.py	/^def _expand_slice_reads($/;"	f	typeref:typename:None
 _extend_schedule	frontrun/bytecode.py	/^    def _extend_schedule(self) -> bool:$/;"	m	class:OpcodeScheduler	typeref:typename:bool
 _extract_sql_events	frontrun/_sql_anomaly.py	/^def _extract_sql_events(events: list[TraceEvent]) -> list[tuple[int, str, str, str]]:$/;"	f	typeref:typename:list[tuple[int,str,str,str]]
-_fair_schedule	frontrun/async_bytecode.py	/^    def _fair_schedule(draw: st.DrawFn) -> list[int]:  # type: ignore[attr-defined,name-defined]$/;"	f	function:schedule_strategy	typeref:typename:list[int]	file:
+_fair_schedule	frontrun/async_shuffler.py	/^    def _fair_schedule(draw: st.DrawFn) -> list[int]:  # type: ignore[attr-defined,name-defined]$/;"	f	function:schedule_strategy	typeref:typename:list[int]	file:
 _fair_schedule	frontrun/bytecode.py	/^    def _fair_schedule(draw: st.DrawFn) -> list[int]:$/;"	f	function:schedule_strategy	typeref:typename:list[int]	file:
 _file_resource_id	frontrun/_io_detection.py	/^def _file_resource_id(path: str) -> str:$/;"	f	typeref:typename:str
 _find_conflicting_keys	frontrun/_trace_format.py	/^def _find_conflicting_keys(events: list[SourceLineEvent]) -> set[tuple[str | None, str | None]]:$/;"	f	typeref:typename:set[tuple[str|None,str|None]]
@@ -1538,7 +1538,7 @@ _global_via_subscript	tests/test_tricky_races.py	/^_global_via_subscript: int = 
 _graph_lock	frontrun/_deadlock.py	/^_graph_lock = _real_lock()$/;"	v
 _guess_socket_resource_from_frame	frontrun/_io_detection.py	/^def _guess_socket_resource_from_frame(frame: Any) -> str | None:$/;"	f	typeref:typename:str|None
 _handle_all_waiting_deadlock	frontrun/async_scheduler.py	/^    def _handle_all_waiting_deadlock(self, task_id: Any, marker: Any = None) -> None:$/;"	m	class:InterleavedLoop	typeref:typename:None
-_handle_timeout	frontrun/async_bytecode.py	/^    def _handle_timeout(self, task_id: Any, marker: Any = None) -> None:$/;"	m	class:AwaitScheduler	typeref:typename:None
+_handle_timeout	frontrun/async_shuffler.py	/^    def _handle_timeout(self, task_id: Any, marker: Any = None) -> None:$/;"	m	class:AwaitScheduler	typeref:typename:None
 _handle_timeout	frontrun/async_scheduler.py	/^    def _handle_timeout(self, task_id: Any, marker: Any = None) -> None:$/;"	m	class:InterleavedLoop	typeref:typename:None
 _handler	docs/case_studies/tests/case_study_helpers.py	/^    def _handler(signum, frame):$/;"	f	function:timeout_minutes	file:
 _handler	docs/case_studies/tests/test_cachetools_concurrency.py	/^    def _handler(signum, frame):$/;"	f	function:timeout_minutes	file:
@@ -1695,7 +1695,7 @@ _safe_global_lock	tests/test_tricky_safe.py	/^_safe_global_lock = threading.Lock
 _save	tests/test_dpor_io.py	/^            def _save(self, data: dict[str, int]) -> None:$/;"	m	class:TestReadModifyWrite.test_concurrent_json_update.JsonStore	typeref:typename:None
 _schedule_next	frontrun/dpor.py	/^    def _schedule_next(self) -> int | None:$/;"	m	class:DporScheduler	typeref:typename:int|None
 _scheduler_tls	frontrun/_cooperative.py	/^_scheduler_tls = threading.local()$/;"	v
-_scheduler_var	frontrun/async_bytecode.py	/^_scheduler_var: contextvars.ContextVar[Optional["AwaitScheduler"]] = contextvars.ContextVar("_sc/;"	v	typeref:typename:contextvars.ContextVar[Optional["AwaitScheduler"]]
+_scheduler_var	frontrun/async_shuffler.py	/^_scheduler_var: contextvars.ContextVar[Optional["AwaitScheduler"]] = contextvars.ContextVar("_sc/;"	v	typeref:typename:contextvars.ContextVar[Optional["AwaitScheduler"]]
 _scoped_clear_invariant	docs/case_studies/tests/test_sqlalchemy_concurrency.py	/^def _scoped_clear_invariant(s):$/;"	f
 _scoped_registry_invariant	docs/case_studies/tests/test_sqlalchemy_concurrency.py	/^def _scoped_registry_invariant(s):$/;"	f
 _select_mod	frontrun/_preload_io.py	/^import select as _select_mod$/;"	I	nameref:module:select
@@ -1714,7 +1714,7 @@ _setup_io_reporter	frontrun/bytecode.py	/^    def _setup_io_reporter(self, threa
 _setup_monitoring	frontrun/bytecode.py	/^    def _setup_monitoring(self) -> None:$/;"	m	class:BytecodeShuffler	typeref:typename:None
 _setup_monitoring	frontrun/dpor.py	/^    def _setup_monitoring(self) -> None:$/;"	m	class:DporBytecodeRunner	typeref:typename:None
 _setup_table	examples/orm_race.py	/^def _setup_table() -> None:$/;"	f	typeref:typename:None
-_setup_task_context	frontrun/async_bytecode.py	/^    def _setup_task_context(self, task_id: Any) -> None:$/;"	m	class:AwaitScheduler	typeref:typename:None
+_setup_task_context	frontrun/async_shuffler.py	/^    def _setup_task_context(self, task_id: Any) -> None:$/;"	m	class:AwaitScheduler	typeref:typename:None
 _setup_task_context	frontrun/async_scheduler.py	/^    def _setup_task_context(self, task_id: Any) -> None:$/;"	m	class:InterleavedLoop	typeref:typename:None
 _shared_copy_invariant	docs/case_studies/tests/test_tenacity_concurrency.py	/^def _shared_copy_invariant(s):$/;"	f
 _short_filename	frontrun/_trace_format.py	/^def _short_filename(path: str) -> str:$/;"	f	typeref:typename:str
@@ -1737,22 +1737,22 @@ _subscript_key_name	frontrun/dpor.py	/^def _subscript_key_name(key: Any) -> Any:
 _suppress_lock	frontrun/_sql_cursor.py	/^_suppress_lock = threading.Lock()  # Real lock (not cooperative)$/;"	v
 _suppress_tids	frontrun/_sql_cursor.py	/^_suppress_tids: set[int] = set()$/;"	v	typeref:typename:set[int]
 _sync_reporter	frontrun/dpor.py	/^        def _sync_reporter(event: str, obj_id: int) -> None:$/;"	f	member:DporBytecodeRunner._setup_dpor_tls	typeref:typename:None	file:
-_task_id_var	frontrun/async_bytecode.py	/^_task_id_var: contextvars.ContextVar[int | None] = contextvars.ContextVar("_task_id", default=No/;"	v	typeref:typename:contextvars.ContextVar[int | None]
+_task_id_var	frontrun/async_shuffler.py	/^_task_id_var: contextvars.ContextVar[int | None] = contextvars.ContextVar("_task_id", default=No/;"	v	typeref:typename:contextvars.ContextVar[int | None]
 _teardown_dpor_tls	frontrun/dpor.py	/^    def _teardown_dpor_tls(self) -> None:$/;"	m	class:DporBytecodeRunner	typeref:typename:None
 _teardown_io_reporter	frontrun/bytecode.py	/^    def _teardown_io_reporter(self) -> None:$/;"	m	class:BytecodeShuffler	typeref:typename:None
 _teardown_monitoring	frontrun/bytecode.py	/^    def _teardown_monitoring(self) -> None:$/;"	m	class:BytecodeShuffler	typeref:typename:None
 _teardown_monitoring	frontrun/dpor.py	/^    def _teardown_monitoring(self) -> None:$/;"	m	class:DporBytecodeRunner	typeref:typename:None
-_test	tests/test_async_bytecode.py	/^    async def _test():$/;"	f	function:test_bank_account_race_reproduced	file:
-_test	tests/test_async_bytecode.py	/^    async def _test():$/;"	f	function:test_bank_account_sequential_correct	file:
-_test	tests/test_async_bytecode.py	/^    async def _test():$/;"	f	function:test_controlled_interleaving_basic	file:
-_test	tests/test_async_bytecode.py	/^    async def _test():$/;"	f	function:test_explore_bank_account_race	file:
-_test	tests/test_async_bytecode.py	/^    async def _test():$/;"	f	function:test_explore_finds_counter_race	file:
-_test	tests/test_async_bytecode.py	/^    async def _test():$/;"	f	function:test_explore_three_tasks	file:
-_test	tests/test_async_bytecode.py	/^    async def _test():$/;"	f	function:test_explore_with_seed_is_reproducible	file:
-_test	tests/test_async_bytecode.py	/^    async def _test():$/;"	f	function:test_run_with_schedule_returns_state	file:
-_test	tests/test_async_bytecode.py	/^    async def _test():$/;"	f	function:test_scheduler_basic_round_robin	file:
-_test	tests/test_async_bytecode.py	/^    async def _test():$/;"	f	function:test_scheduler_had_error	file:
-_test	tests/test_async_bytecode.py	/^    async def _test():$/;"	f	function:test_scheduler_skips_done_tasks	file:
+_test	tests/test_async_shuffler.py	/^    async def _test():$/;"	f	function:test_bank_account_race_reproduced	file:
+_test	tests/test_async_shuffler.py	/^    async def _test():$/;"	f	function:test_bank_account_sequential_correct	file:
+_test	tests/test_async_shuffler.py	/^    async def _test():$/;"	f	function:test_controlled_interleaving_basic	file:
+_test	tests/test_async_shuffler.py	/^    async def _test():$/;"	f	function:test_explore_bank_account_race	file:
+_test	tests/test_async_shuffler.py	/^    async def _test():$/;"	f	function:test_explore_finds_counter_race	file:
+_test	tests/test_async_shuffler.py	/^    async def _test():$/;"	f	function:test_explore_three_tasks	file:
+_test	tests/test_async_shuffler.py	/^    async def _test():$/;"	f	function:test_explore_with_seed_is_reproducible	file:
+_test	tests/test_async_shuffler.py	/^    async def _test():$/;"	f	function:test_run_with_schedule_returns_state	file:
+_test	tests/test_async_shuffler.py	/^    async def _test():$/;"	f	function:test_scheduler_basic_round_robin	file:
+_test	tests/test_async_shuffler.py	/^    async def _test():$/;"	f	function:test_scheduler_had_error	file:
+_test	tests/test_async_shuffler.py	/^    async def _test():$/;"	f	function:test_scheduler_skips_done_tasks	file:
 _test_dir	docs/case_studies/tests/test_amqtt_real.py	/^_test_dir = os.path.dirname(os.path.abspath(__file__))$/;"	v
 _test_dir	docs/case_studies/tests/test_cachetools_concurrency.py	/^_test_dir = os.path.dirname(os.path.abspath(__file__))$/;"	v
 _test_dir	docs/case_studies/tests/test_pybreaker_real.py	/^_test_dir = os.path.dirname(os.path.abspath(__file__))$/;"	v
@@ -1880,7 +1880,7 @@ autoclass_content	docs/conf.py	/^autoclass_content = "both"$/;"	v
 autodoc_member_order	docs/conf.py	/^autodoc_member_order = "bysource"$/;"	v
 autodoc_typehints	docs/conf.py	/^autodoc_typehints = "description"$/;"	v
 available_events	ideas/experiments/test_monitoring_c_call.py	/^available_events = dir(mon.events)$/;"	v
-await_point	frontrun/async_bytecode.py	/^async def await_point():$/;"	f
+await_point	frontrun/async_shuffler.py	/^async def await_point():$/;"	f
 backtrack	crates/dpor/src/path.rs	/^    pub fn backtrack(&mut self, path_id: usize, thread_id: usize) {$/;"	P	implementation:Path
 balance	tests/test_dpor_io.py	/^            def balance(self) -> int:$/;"	m	class:TestFileFlagRace.test_concurrent_balance_update.Ledger	typeref:typename:int
 balance	tests/test_dpor_io.py	/^            def balance(self) -> int:$/;"	m	class:TestFileFlagRace.test_locked_balance_update_is_safe.SafeLedger	typeref:typename:int
@@ -2031,7 +2031,7 @@ consumer	tests/test_tricky_safe.py	/^        def consumer(state: _MixedSyncState
 consumer	tests/test_tricky_safe.py	/^        def consumer(state: _QueueCommState) -> None:$/;"	f	member:TestQueueCommunication.test_bytecode_safe	typeref:typename:None	file:
 consumer	tests/test_tricky_safe.py	/^        def consumer(state: _QueueCommState) -> None:$/;"	f	member:TestQueueCommunication.test_dpor_safe	typeref:typename:None	file:
 content	ideas/experiments/test_class_reassignment.py	/^    content = sio.getvalue()$/;"	v
-controlled_interleaving	frontrun/async_bytecode.py	/^async def controlled_interleaving($/;"	f	typeref:typename:AsyncGenerator[AsyncBytecodeShuffler,None]
+controlled_interleaving	frontrun/async_shuffler.py	/^async def controlled_interleaving($/;"	f	typeref:typename:AsyncGenerator[AsyncShuffler,None]
 controlled_interleaving	frontrun/bytecode.py	/^def controlled_interleaving(schedule: list[int], num_threads: int = 2):$/;"	f
 copier	tests/test_tricky_races.py	/^        def copier(state: _ShallowCopyState) -> None:$/;"	f	member:TestShallowCopyRace.test_dpor_detects_shallow_copy_race	typeref:typename:None	file:
 copyright	docs/conf.py	/^copyright = "2026, Lucas Wiman"  # noqa: A001$/;"	v
@@ -2142,7 +2142,7 @@ executions_completed	crates/dpor/src/lib.rs	/^    fn executions_completed(&self)
 expensive	docs/case_studies/tests/test_sqlalchemy_concurrency.py	/^        def expensive(target_self):$/;"	f	member:MemoizedPropertyState.__init__	file:
 explanation	frontrun/common.py	/^    explanation: str | None = None$/;"	v	class:InterleavingResult	typeref:typename:str|None
 explore_dpor	frontrun/dpor.py	/^def explore_dpor($/;"	f	typeref:typename:InterleavingResult
-explore_interleavings	frontrun/async_bytecode.py	/^async def explore_interleavings($/;"	f	typeref:typename:InterleavingResult
+explore_interleavings	frontrun/async_shuffler.py	/^async def explore_interleavings($/;"	f	typeref:typename:InterleavingResult
 explore_interleavings	frontrun/bytecode.py	/^def explore_interleavings($/;"	f	typeref:typename:InterleavingResult
 extensions	docs/conf.py	/^extensions = [$/;"	v
 extract_equality_predicates	frontrun/_sql_cursor.py	/^    def extract_equality_predicates(sql: str) -> list:  # type: ignore[misc]$/;"	f	typeref:typename:list
@@ -2254,9 +2254,9 @@ frontrun_write	crates/io/src/lib.rs	/^    pub unsafe extern "C" fn frontrun_writ
 frontrun_writev	crates/io/src/lib.rs	/^    pub unsafe extern "C" fn frontrun_writev($/;"	f	module:macos_intercept
 fstring_capture	tests/test_tricky_races.py	/^        def fstring_capture(state: _FStringState) -> None:$/;"	f	member:TestFStringEvaluationRace.test_dpor_detects_fstring_evaluation_race	typeref:typename:None	file:
 full	frontrun/_cooperative.py	/^    def full(self) -> bool:$/;"	m	class:CooperativeQueue	typeref:typename:bool
-func_a	tests/test_async_bytecode.py	/^        async def func_a():$/;"	f	function:test_controlled_interleaving_basic._test	file:
+func_a	tests/test_async_shuffler.py	/^        async def func_a():$/;"	f	function:test_controlled_interleaving_basic._test	file:
 func_a	tests/test_bytecode.py	/^    def func_a():$/;"	f	function:test_controlled_interleaving_basic	file:
-func_b	tests/test_async_bytecode.py	/^        async def func_b():$/;"	f	function:test_controlled_interleaving_basic._test	file:
+func_b	tests/test_async_shuffler.py	/^        async def func_b():$/;"	f	function:test_controlled_interleaving_basic._test	file:
 func_b	tests/test_bytecode.py	/^    def func_b():$/;"	f	function:test_controlled_interleaving_basic	file:
 garbage	ideas/experiments/test_gc_referrers.py	/^garbage = [{"key": i, "data": list(range(100))} for i in range(10000)]$/;"	v
 get	crates/dpor/src/vv.rs	/^    pub fn get(&self, thread_id: usize) -> u32 {$/;"	P	implementation:VersionVec
@@ -2292,7 +2292,7 @@ get_wait_for_graph	frontrun/_deadlock.py	/^def get_wait_for_graph() -> WaitForGr
 getpeername	crates/io/src/lib.rs	/^    pub unsafe fn getpeername($/;"	f	module:raw_syscall
 getpid	crates/io/src/lib.rs	/^    pub unsafe fn getpid() -> c_int {$/;"	f	module:raw_syscall
 gettext	docs/Makefile	/^gettext:$/;"	t
-had_error	frontrun/async_bytecode.py	/^    def had_error(self) -> bool:$/;"	m	class:AwaitScheduler	typeref:typename:bool
+had_error	frontrun/async_shuffler.py	/^    def had_error(self) -> bool:$/;"	m	class:AwaitScheduler	typeref:typename:bool
 had_error	frontrun/async_scheduler.py	/^    def had_error(self) -> bool:$/;"	m	class:InterleavedLoop	typeref:typename:bool
 had_error	frontrun/bytecode.py	/^    def had_error(self) -> bool:$/;"	m	class:OpcodeScheduler	typeref:typename:bool
 handle_call	ideas/experiments/test_monitoring_c_call.py	/^def handle_call(code, instruction_offset, callable_obj, arg0):$/;"	f
@@ -2366,8 +2366,8 @@ increment	tests/buggy_programs.py	/^    async def increment(self):$/;"	m	class:A
 increment	tests/buggy_programs.py	/^    async def increment(self):$/;"	m	class:AsyncBuggyCounterBytecode
 increment	tests/buggy_programs.py	/^    def increment(self):$/;"	m	class:BuggyCounter
 increment	tests/buggy_programs.py	/^    def increment(self):$/;"	m	class:BuggyCounterBytecode
-increment	tests/test_async_bytecode.py	/^    async def increment(self):$/;"	m	class:Counter
-increment	tests/test_async_bytecode.py	/^    async def increment(self):$/;"	m	class:SafeCounter
+increment	tests/test_async_shuffler.py	/^    async def increment(self):$/;"	m	class:Counter
+increment	tests/test_async_shuffler.py	/^    async def increment(self):$/;"	m	class:SafeCounter
 increment	tests/test_async_trace_markers.py	/^        async def increment(self):$/;"	m	class:test_synchronous_function_bodies.Counter
 increment	tests/test_bugfixes.py	/^            def increment(self):$/;"	m	class:TestDporStopOnFirst.test_stop_on_first_false_explores_all.Counter
 increment	tests/test_bugfixes.py	/^            def increment(self):$/;"	m	class:TestDporStopOnFirst.test_stop_on_first_reduces_exploration.Counter
@@ -2582,7 +2582,7 @@ obj_type_name	frontrun/_trace_format.py	/^    obj_type_name: str | None = None  
 obj_type_name	frontrun/_trace_format.py	/^    obj_type_name: str | None = None$/;"	v	class:SourceLineEvent	typeref:typename:str|None
 object	crates/dpor/src/lib.rs	/^pub mod object;$/;"	n
 objects	crates/dpor/src/engine.rs	/^    pub objects: HashMap<ObjectId, ObjectState>,$/;"	m	struct:Execution
-on_proceed	frontrun/async_bytecode.py	/^    def on_proceed(self, task_id: Any, marker: Any = None) -> None:$/;"	m	class:AwaitScheduler	typeref:typename:None
+on_proceed	frontrun/async_shuffler.py	/^    def on_proceed(self, task_id: Any, marker: Any = None) -> None:$/;"	m	class:AwaitScheduler	typeref:typename:None
 on_proceed	frontrun/async_scheduler.py	/^    def on_proceed(self, task_id: Any, marker: Any = None) -> None:$/;"	m	class:InterleavedLoop	typeref:typename:None
 on_receive	docs/case_studies/tests/test_pykka_real.py	/^            def on_receive(self, message):$/;"	m	class:PykkaGhostMessageState.__init__.DaemonActor
 open	crates/io/src/lib.rs	/^    pub unsafe fn open(path: *const c_char, flags: c_int, mode: c_int) -> c_int {$/;"	f	module:raw_syscall
@@ -2787,7 +2787,7 @@ result_conn	ideas/experiments/test_class_reassignment.py	/^result_conn = use_con
 results_summary	docs/case_studies/tests/test_sqlalchemy_concurrency.py	/^    results_summary = []$/;"	v
 reverser	tests/test_tricky_races.py	/^        def reverser(state: _ListSortReverseState) -> None:$/;"	f	member:TestListSortReverseRace.test_dpor_detects_list_sort_reverse_race	typeref:typename:None	file:
 rlock	frontrun/_real_threading.py	/^rlock = threading.RLock$/;"	v
-run	frontrun/async_bytecode.py	/^    async def run($/;"	m	class:AsyncBytecodeShuffler
+run	frontrun/async_shuffler.py	/^    async def run($/;"	m	class:AsyncShuffler
 run	frontrun/async_trace_markers.py	/^    def run(self, tasks: dict[str, Callable[[], Coroutine[Any, Any, None]]], timeout: float = 10/;"	m	class:AsyncTraceExecutor	typeref:typename:None
 run	frontrun/bytecode.py	/^    def run($/;"	m	class:BytecodeShuffler	typeref:typename:None
 run	frontrun/dpor.py	/^    def run($/;"	m	class:DporBytecodeRunner	typeref:typename:None
@@ -2804,7 +2804,7 @@ run_sweep	docs/case_studies/tests/test_sqlalchemy_concurrency.py	/^def run_sweep
 run_threadpoolctl	docs/tests/run_external_tests.py	/^def run_threadpoolctl():$/;"	f
 run_tpool	docs/tests/run_external_tests.py	/^def run_tpool():$/;"	f
 run_with_hypothesis_schedule	tests/test_concurrency_bug_classes.py	/^    async def run_with_hypothesis_schedule():$/;"	f	function:test_async_suspension_point_race_hypothesis	file:
-run_with_schedule	frontrun/async_bytecode.py	/^async def run_with_schedule($/;"	f	typeref:typename:Any
+run_with_schedule	frontrun/async_shuffler.py	/^async def run_with_schedule($/;"	f	typeref:typename:Any
 run_with_schedule	frontrun/bytecode.py	/^def run_with_schedule($/;"	f	typeref:typename:T
 runnable_threads	crates/dpor/src/engine.rs	/^    pub fn runnable_threads(&self) -> Vec<usize> {$/;"	P	implementation:Execution
 runnable_threads	crates/dpor/src/lib.rs	/^    fn runnable_threads(&self) -> Vec<usize> {$/;"	P	implementation:PyExecution
@@ -2817,7 +2817,7 @@ scan_frame	frontrun/trace_markers.py	/^    def scan_frame(self, frame: Any) -> N
 schedule	crates/dpor/src/engine.rs	/^    pub fn schedule(&mut self, execution: &mut Execution) -> Option<usize> {$/;"	P	implementation:DporEngine
 schedule	crates/dpor/src/lib.rs	/^    fn schedule(&mut self, execution: &mut PyExecution) -> Option<usize> {$/;"	P	implementation:PyDporEngine
 schedule	crates/dpor/src/path.rs	/^    pub fn schedule($/;"	P	implementation:Path
-schedule_strategy	frontrun/async_bytecode.py	/^def schedule_strategy(num_tasks: int, max_ops: int = 100) -> Any:  # type: ignore[name-defined]$/;"	f	typeref:typename:Any
+schedule_strategy	frontrun/async_shuffler.py	/^def schedule_strategy(num_tasks: int, max_ops: int = 100) -> Any:  # type: ignore[name-defined]$/;"	f	typeref:typename:Any
 schedule_strategy	frontrun/bytecode.py	/^def schedule_strategy(num_threads: int, max_ops: int = 300):$/;"	f
 schedule_trace	crates/dpor/src/engine.rs	/^    pub schedule_trace: Vec<usize>,$/;"	m	struct:Execution
 schedule_trace	crates/dpor/src/lib.rs	/^    fn schedule_trace(&self) -> Vec<usize> {$/;"	P	implementation:PyExecution
@@ -2847,7 +2847,7 @@ set_value	tests/test_async_trace_markers.py	/^        async def set_value(self, 
 setter	tests/test_bugfixes.py	/^        def setter():$/;"	f	member:TestCooperativeConditionWaitFor.test_wait_for_with_timeout_retries	file:
 setter	tests/test_threading_primitives.py	/^    def setter(self):$/;"	m	class:EventCoordinator
 setup_io_log	frontrun/_preload_io.py	/^def setup_io_log() -> str:$/;"	f	typeref:typename:str
-should_proceed	frontrun/async_bytecode.py	/^    def should_proceed(self, task_id: Any, marker: Any = None) -> bool:$/;"	m	class:AwaitScheduler	typeref:typename:bool
+should_proceed	frontrun/async_shuffler.py	/^    def should_proceed(self, task_id: Any, marker: Any = None) -> bool:$/;"	m	class:AwaitScheduler	typeref:typename:bool
 should_proceed	frontrun/async_scheduler.py	/^    def should_proceed(self, task_id: Any, marker: Any = None) -> bool:$/;"	m	class:InterleavedLoop	typeref:typename:bool
 should_trace_file	frontrun/_tracing.py	/^def should_trace_file(filename: str) -> bool:$/;"	f	typeref:typename:bool
 singlehtml	docs/Makefile	/^singlehtml:$/;"	t
@@ -2873,7 +2873,7 @@ sql_cursor_mod	tests/test_sql_cursor.py	/^import frontrun._sql_cursor as sql_cur
 sql_extract	crates/io/src/lib.rs	/^mod sql_extract;$/;"	n
 sqlglot	tests/test_sql_predicates.py	/^sqlglot = pytest.importorskip("sqlglot")$/;"	v
 sqlite_events	ideas/experiments/test_audit_hook.py	/^sqlite_events = [(e, a) for e, a in audit_events if e.startswith("sqlite3")]$/;"	v
-st	frontrun/async_bytecode.py	/^    from hypothesis import strategies as st  # type: ignore[import-not-found]$/;"	Y	function:schedule_strategy	file:	nameref:unknown:strategies
+st	frontrun/async_shuffler.py	/^    from hypothesis import strategies as st  # type: ignore[import-not-found]$/;"	Y	function:schedule_strategy	file:	nameref:unknown:strategies
 st	frontrun/bytecode.py	/^    from hypothesis import strategies as st$/;"	Y	function:schedule_strategy	file:	nameref:unknown:strategies
 start	frontrun/_preload_io.py	/^    def start(self) -> None:$/;"	m	class:IOEventDispatcher	typeref:typename:None
 status	docs/case_studies/tests/test_sqlalchemy_concurrency.py	/^            status = "RACE FOUND" if not result.property_holds else "No race"$/;"	v
@@ -2894,12 +2894,12 @@ syscall6	crates/io/src/lib.rs	/^    unsafe fn syscall6(num: u64, a0: u64, a1: u6
 t0	docs/case_studies/tests/test_cachetools_concurrency.py	/^        t0 = _time.monotonic()$/;"	v
 t0	docs/case_studies/tests/test_tenacity_concurrency.py	/^        t0 = _time.monotonic()$/;"	v
 t0	ideas/experiments/test_gc_referrers.py	/^t0 = time.perf_counter_ns()$/;"	v
-t1	tests/test_async_bytecode.py	/^            async def t1():$/;"	f	function:test_bank_account_race_reproduced._test	file:
-t1	tests/test_async_bytecode.py	/^        async def t1():$/;"	f	function:test_bank_account_sequential_correct._test	file:
+t1	tests/test_async_shuffler.py	/^            async def t1():$/;"	f	function:test_bank_account_race_reproduced._test	file:
+t1	tests/test_async_shuffler.py	/^        async def t1():$/;"	f	function:test_bank_account_sequential_correct._test	file:
 t1	tests/test_bytecode.py	/^        def t1(acc=account):$/;"	f	function:test_bank_account_race_reproduced	file:
 t1	tests/test_bytecode.py	/^    def t1():$/;"	f	function:test_bank_account_sequential_correct	file:
-t2	tests/test_async_bytecode.py	/^            async def t2():$/;"	f	function:test_bank_account_race_reproduced._test	file:
-t2	tests/test_async_bytecode.py	/^        async def t2():$/;"	f	function:test_bank_account_sequential_correct._test	file:
+t2	tests/test_async_shuffler.py	/^            async def t2():$/;"	f	function:test_bank_account_race_reproduced._test	file:
+t2	tests/test_async_shuffler.py	/^        async def t2():$/;"	f	function:test_bank_account_sequential_correct._test	file:
 t2	tests/test_bytecode.py	/^        def t2(acc=account):$/;"	f	function:test_bank_account_race_reproduced	file:
 t2	tests/test_bytecode.py	/^    def t2():$/;"	f	function:test_bank_account_sequential_correct	file:
 tables_accessed	tests/test_sql_conflict_integration.py	/^    def tables_accessed(self) -> set[str]:$/;"	m	class:IOLog	typeref:typename:set[str]
@@ -2943,9 +2943,9 @@ test_b7_cache_set_del	docs/case_studies/tests/test_cachetools_concurrency.py	/^d
 test_b8_timer_nesting	docs/case_studies/tests/test_cachetools_concurrency.py	/^def test_b8_timer_nesting(max_attempts=500, max_ops=200):$/;"	f
 test_backtick_quoted	tests/test_sql_parsing.py	/^    def test_backtick_quoted(self):$/;"	m	class:TestStripQuotes
 test_backtrack_and_step	crates/dpor/src/path.rs	/^    fn test_backtrack_and_step() {$/;"	f	module:tests
-test_bank_account_race_reproduced	tests/test_async_bytecode.py	/^def test_bank_account_race_reproduced():$/;"	f
+test_bank_account_race_reproduced	tests/test_async_shuffler.py	/^def test_bank_account_race_reproduced():$/;"	f
 test_bank_account_race_reproduced	tests/test_bytecode.py	/^def test_bank_account_race_reproduced():$/;"	f
-test_bank_account_sequential_correct	tests/test_async_bytecode.py	/^def test_bank_account_sequential_correct():$/;"	f
+test_bank_account_sequential_correct	tests/test_async_shuffler.py	/^def test_bank_account_sequential_correct():$/;"	f
 test_bank_account_sequential_correct	tests/test_bytecode.py	/^def test_bank_account_sequential_correct():$/;"	f
 test_bank_account_transfer	tests/test_dpor.py	/^    def test_bank_account_transfer(self) -> None:$/;"	m	class:TestExploreDpor	typeref:typename:None
 test_barrier_proves_augmented_assign_race_is_real	tests/test_dpor.py	/^    def test_barrier_proves_augmented_assign_race_is_real(self) -> None:$/;"	m	class:TestGlobalVariableRace	typeref:typename:None
@@ -3030,7 +3030,7 @@ test_concurrent_selects_read_correct_data	tests/test_sql_conflict_integration.py
 test_concurrent_suppression_cleanup	tests/test_sql_cursor.py	/^def test_concurrent_suppression_cleanup() -> None:$/;"	f	typeref:typename:None
 test_condition_race_condition	tests/test_threading_primitives.py	/^def test_condition_race_condition():$/;"	f
 test_context_manager	tests/test_preload_io.py	/^    def test_context_manager(self):$/;"	m	class:TestIOEventDispatcher
-test_controlled_interleaving_basic	tests/test_async_bytecode.py	/^def test_controlled_interleaving_basic():$/;"	f
+test_controlled_interleaving_basic	tests/test_async_shuffler.py	/^def test_controlled_interleaving_basic():$/;"	f
 test_controlled_interleaving_basic	tests/test_bytecode.py	/^def test_controlled_interleaving_basic():$/;"	f
 test_convenience_function	tests/test_async_trace_markers.py	/^def test_convenience_function():$/;"	f
 test_convenience_function	tests/test_trace_markers.py	/^def test_convenience_function():$/;"	f
@@ -3225,17 +3225,17 @@ test_executemany_via_cursor_works	tests/test_sql_cursor.py	/^def test_executeman
 test_executemany_works	tests/test_sql_cursor.py	/^def test_executemany_works() -> None:$/;"	f	typeref:typename:None
 test_existing_connection_not_traced	tests/test_sql_cursor.py	/^def test_existing_connection_not_traced() -> None:$/;"	f	typeref:typename:None
 test_exists_subquery	tests/test_sql_parsing_todo.py	/^    def test_exists_subquery(self):$/;"	m	class:TestExistsNotExistsTodo
-test_explore_bank_account_race	tests/test_async_bytecode.py	/^def test_explore_bank_account_race():$/;"	f
+test_explore_bank_account_race	tests/test_async_shuffler.py	/^def test_explore_bank_account_race():$/;"	f
 test_explore_bank_account_race	tests/test_bytecode.py	/^def test_explore_bank_account_race():$/;"	f
 test_explore_counter_has_explanation	tests/test_trace_format.py	/^    def test_explore_counter_has_explanation(self) -> None:$/;"	m	class:TestBytecodeIntegration	typeref:typename:None
 test_explore_counter_reproduction_stats	tests/test_trace_format.py	/^    def test_explore_counter_reproduction_stats(self) -> None:$/;"	m	class:TestBytecodeIntegration	typeref:typename:None
 test_explore_counter_skip_reproduction	tests/test_trace_format.py	/^    def test_explore_counter_skip_reproduction(self) -> None:$/;"	m	class:TestBytecodeIntegration	typeref:typename:None
-test_explore_finds_counter_race	tests/test_async_bytecode.py	/^def test_explore_finds_counter_race():$/;"	f
+test_explore_finds_counter_race	tests/test_async_shuffler.py	/^def test_explore_finds_counter_race():$/;"	f
 test_explore_finds_counter_race	tests/test_bytecode.py	/^def test_explore_finds_counter_race():$/;"	f
 test_explore_interleavings_with_io	tests/test_io_detection.py	/^def test_explore_interleavings_with_io():$/;"	f
-test_explore_three_tasks	tests/test_async_bytecode.py	/^def test_explore_three_tasks():$/;"	f
+test_explore_three_tasks	tests/test_async_shuffler.py	/^def test_explore_three_tasks():$/;"	f
 test_explore_three_threads	tests/test_bytecode.py	/^def test_explore_three_threads():$/;"	f
-test_explore_with_seed_is_reproducible	tests/test_async_bytecode.py	/^def test_explore_with_seed_is_reproducible():$/;"	f
+test_explore_with_seed_is_reproducible	tests/test_async_shuffler.py	/^def test_explore_with_seed_is_reproducible():$/;"	f
 test_explore_with_seed_is_reproducible	tests/test_bytecode.py	/^def test_explore_with_seed_is_reproducible():$/;"	f
 test_extra_patch_unpatch	tests/test_pytest_plugin.py	/^    def test_extra_patch_unpatch(self):$/;"	m	class:TestPatchLocksRefCounting
 test_extra_predicates_ok	tests/test_sql_predicates.py	/^    def test_extra_predicates_ok(self):$/;"	m	class:TestCanUseRowLevel
@@ -3629,7 +3629,7 @@ test_reversed_operands	tests/test_sql_predicates.py	/^    def test_reversed_oper
 test_rlock_race_condition	tests/test_threading_primitives.py	/^def test_rlock_race_condition():$/;"	f
 test_rollback_transaction_boundary	tests/test_sql_parsing_todo.py	/^    def test_rollback_transaction_boundary(self):$/;"	m	class:TestTransactionBoundariesTodo
 test_routes_events_by_tid	tests/test_dpor_preload.py	/^    def test_routes_events_by_tid(self) -> None:$/;"	m	class:TestPreloadBridge	typeref:typename:None
-test_run_with_schedule_returns_state	tests/test_async_bytecode.py	/^def test_run_with_schedule_returns_state():$/;"	f
+test_run_with_schedule_returns_state	tests/test_async_shuffler.py	/^def test_run_with_schedule_returns_state():$/;"	f
 test_run_with_schedule_returns_state	tests/test_bytecode.py	/^def test_run_with_schedule_returns_state():$/;"	f
 test_runnable_threads	tests/test_dpor.py	/^    def test_runnable_threads(self) -> None:$/;"	m	class:TestPyDporEngine	typeref:typename:None
 test_s1_cached_locked_stats	docs/case_studies/tests/test_cachetools_concurrency.py	/^def test_s1_cached_locked_stats(max_attempts=15000, max_ops=400):$/;"	f
@@ -3647,12 +3647,12 @@ test_same_resource_yields_same_object_key	tests/test_dpor_preload.py	/^    def t
 test_savepoint_tracking	tests/test_sql_parsing_todo.py	/^    def test_savepoint_tracking(self):$/;"	m	class:TestTransactionBoundariesTodo
 test_schedule_prefers_current_thread	crates/dpor/src/path.rs	/^    fn test_schedule_prefers_current_thread() {$/;"	f	module:tests
 test_schedule_trace	tests/test_dpor.py	/^    def test_schedule_trace(self) -> None:$/;"	m	class:TestPyDporEngine	typeref:typename:None
-test_scheduler_basic_round_robin	tests/test_async_bytecode.py	/^def test_scheduler_basic_round_robin():$/;"	f
+test_scheduler_basic_round_robin	tests/test_async_shuffler.py	/^def test_scheduler_basic_round_robin():$/;"	f
 test_scheduler_basic_round_robin	tests/test_bytecode.py	/^def test_scheduler_basic_round_robin():$/;"	f
 test_scheduler_extends_schedule	tests/test_bytecode.py	/^def test_scheduler_extends_schedule():$/;"	f
-test_scheduler_had_error	tests/test_async_bytecode.py	/^def test_scheduler_had_error():$/;"	f
+test_scheduler_had_error	tests/test_async_shuffler.py	/^def test_scheduler_had_error():$/;"	f
 test_scheduler_had_error	tests/test_bytecode.py	/^def test_scheduler_had_error():$/;"	f
-test_scheduler_skips_done_tasks	tests/test_async_bytecode.py	/^def test_scheduler_skips_done_tasks():$/;"	f
+test_scheduler_skips_done_tasks	tests/test_async_shuffler.py	/^def test_scheduler_skips_done_tasks():$/;"	f
 test_scheduler_skips_done_threads	tests/test_bytecode.py	/^def test_scheduler_skips_done_threads():$/;"	f
 test_schema_qualified	tests/test_sql_parsing.py	/^    def test_schema_qualified(self):$/;"	m	class:TestRegexParse
 test_schema_qualified_double_quoted	tests/test_sql_parsing.py	/^    def test_schema_qualified_double_quoted(self):$/;"	m	class:TestStripQuotes
@@ -3973,7 +3973,7 @@ trace_func	tests/test_trace_markers.py	/^    def trace_func(frame, event, arg):$
 trace_function	frontrun/async_trace_markers.py	/^        def trace_function(frame: Any, event: str, arg: Any) -> Any:$/;"	f	member:AsyncTraceExecutor._create_trace_function	typeref:typename:Any	file:
 trace_function	frontrun/trace_markers.py	/^        def trace_function(frame: Any, event: str, arg: Any) -> Any:  # type: ignore[name-define/;"	f	member:TraceExecutor._create_trace_function	typeref:typename:Any	file:
 traced	frontrun/_io_detection.py	/^    def traced(self: socket.socket, *args: Any, **kwargs: Any) -> Any:$/;"	f	function:_make_traced_socket_method	typeref:typename:Any	file:
-transfer	tests/test_async_bytecode.py	/^    async def transfer(self, amount):$/;"	m	class:BankAccount
+transfer	tests/test_async_shuffler.py	/^    async def transfer(self, amount):$/;"	m	class:BankAccount
 transfer	tests/test_async_trace_markers.py	/^    async def transfer(self, amount):$/;"	m	class:BankAccount
 transfer	tests/test_bytecode.py	/^    def transfer(self, amount):$/;"	m	class:BankAccount
 transfer	tests/test_dpor.py	/^            def transfer(self, amount: int) -> None:$/;"	m	class:TestExploreDpor.test_bank_account_transfer.Bank	typeref:typename:None

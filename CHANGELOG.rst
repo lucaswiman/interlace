@@ -6,6 +6,9 @@ All releases: https://github.com/lucaswiman/frontrun/releases
 0.2.0 (unreleased)
 -------------------
 
+- Cutover rename: ``frontrun.async_bytecode`` is now ``frontrun.async_shuffler``,
+  and ``AsyncBytecodeShuffler`` is now ``AsyncShuffler``.
+
 **Async DPOR**
 
 ``explore_async_dpor()`` brings systematic interleaving exploration to async

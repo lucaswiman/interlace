@@ -8,10 +8,10 @@ scheduling granularity.
 from __future__ import annotations
 
 import asyncio
+
 import pytest
 
 from frontrun.cli import require_active
-
 
 _async_global_counter = 0
 _async_global_augmented = 0

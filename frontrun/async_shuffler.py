@@ -17,7 +17,7 @@ and there are far fewer of them than in threaded code.
 Example — find a race condition with random schedule exploration:
 
     >>> import asyncio
-    >>> from frontrun.async_bytecode import explore_interleavings, await_point
+    >>> from frontrun.async_shuffler import explore_interleavings, await_point
     >>>
     >>> class Counter:
     ...     def __init__(self):
@@ -84,7 +84,7 @@ async def await_point():
     switch point. For testing race conditions, replace strategic awaits
     with `await await_point()` to allow the scheduler to control ordering.
 
-    If no scheduler is active (i.e., not running under AsyncBytecodeShuffler),
+    If no scheduler is active (i.e., not running under AsyncShuffler),
     this function returns immediately without blocking.
     """
     scheduler = _scheduler_var.get()
@@ -152,7 +152,7 @@ class AwaitScheduler(InterleavedLoop):
         return self._error is not None
 
 
-class AsyncBytecodeShuffler:
+class AsyncShuffler:
     """Run concurrent async functions with await-point-level interleaving control.
 
     Creates asyncio tasks for each function and delegates to the
@@ -196,9 +196,7 @@ class AsyncBytecodeShuffler:
 
 
 @asynccontextmanager
-async def controlled_interleaving(
-    schedule: list[int], num_tasks: int = 2
-) -> AsyncGenerator[AsyncBytecodeShuffler, None]:
+async def controlled_interleaving(schedule: list[int], num_tasks: int = 2) -> AsyncGenerator[AsyncShuffler, None]:
     """Context manager for running async code under a specific interleaving.
 
     Args:
@@ -206,14 +204,14 @@ async def controlled_interleaving(
         num_tasks: Number of tasks.
 
     Yields:
-        AsyncBytecodeShuffler runner.
+        AsyncShuffler runner.
 
     Example:
         >>> async with controlled_interleaving([0, 1, 0, 1], num_tasks=2) as runner:
         ...     await runner.run([coro1, coro2])
     """
     scheduler = AwaitScheduler(schedule, num_tasks)
-    runner = AsyncBytecodeShuffler(scheduler)
+    runner = AsyncShuffler(scheduler)
     yield runner
 
 
@@ -251,7 +249,7 @@ async def run_with_schedule(
         patch_sql_async()
     try:
         scheduler = AwaitScheduler(schedule, len(tasks), deadlock_timeout=deadlock_timeout)
-        runner = AsyncBytecodeShuffler(scheduler)
+        runner = AsyncShuffler(scheduler)
 
         state = setup()
         funcs: list[Callable[..., Coroutine[Any, Any, None]]] = [lambda s=state, t=t: t(s) for t in tasks]  # type: ignore[assignment]
@@ -356,7 +354,7 @@ def schedule_strategy(num_tasks: int, max_ops: int = 100) -> Any:  # type: ignor
     For use with hypothesis @given decorator in your own tests:
 
         >>> from hypothesis import given
-        >>> from frontrun.async_bytecode import schedule_strategy, run_with_schedule
+        >>> from frontrun.async_shuffler import schedule_strategy, run_with_schedule
         >>> import asyncio
         >>>
         >>> @given(schedule=schedule_strategy(2))

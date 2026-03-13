@@ -49,7 +49,7 @@ Async Trace Markers
 Async Bytecode Instrumentation
 --------------------------------
 
-.. automodule:: frontrun.async_bytecode
+.. automodule:: frontrun.async_shuffler
    :members:
    :undoc-members:
    :show-inheritance:

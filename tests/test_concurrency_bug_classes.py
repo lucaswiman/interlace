@@ -3,8 +3,8 @@ Tests demonstrating frontrun's ability to detect four classes of concurrency bug
 
 For each bug class, we have three types of tests:
 1. Exact reproduction using trace_markers/async_trace_markers with a specific Schedule
-2. Property-based exploration using bytecode/async_bytecode with explore_interleavings
-3. Hypothesis-based testing using bytecode/async_bytecode with schedule_strategy
+2. Property-based exploration using bytecode/async_shuffler with explore_interleavings
+3. Hypothesis-based testing using bytecode/async_shuffler with schedule_strategy
 
 Bug classes covered:
 1. Atomicity Violation - Read-modify-write without locking
@@ -18,13 +18,13 @@ import asyncio
 import pytest
 from hypothesis import Phase, given, settings
 
-from frontrun.async_bytecode import (
+from frontrun.async_shuffler import (
     explore_interleavings as async_explore_interleavings,
 )
-from frontrun.async_bytecode import (
+from frontrun.async_shuffler import (
     run_with_schedule as async_run_with_schedule,
 )
-from frontrun.async_bytecode import (
+from frontrun.async_shuffler import (
     schedule_strategy as async_schedule_strategy,
 )
 from frontrun.async_trace_markers import AsyncTraceExecutor
@@ -298,7 +298,7 @@ def test_async_suspension_point_race_exact_schedule():
 
 def test_async_suspension_point_race_exploration():
     """
-    Test async suspension-point race using async_bytecode exploration.
+    Test async suspension-point race using async_shuffler exploration.
 
     Explores task interleavings to find the race condition.
     """
@@ -384,7 +384,7 @@ def test_async_order_violation_exact_schedule():
 
 def test_async_order_violation_exploration():
     """
-    Test async order violation using async_bytecode exploration.
+    Test async order violation using async_shuffler exploration.
     """
 
     async def run_exploration():
