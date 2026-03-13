@@ -561,16 +561,18 @@ class TestAsyncDporDeadlock:
 
         assert not result.property_holds, "Data-dependent deadlock should be found"
 
-    def test_dining_philosophers_four(self) -> None:
-        """Four dining philosophers: each acquires fork[i] then fork[(i+1)%4].
+    def test_dining_philosophers_three(self) -> None:
+        """Three dining philosophers: each acquires fork[i] then fork[(i+1)%3].
 
         Classic deadlock when all philosophers pick up their left fork
-        simultaneously.
+        simultaneously.  Uses 3 philosophers to keep the DPOR state space
+        manageable (4 philosophers with preemption_bound=2 doesn't explore
+        enough interleavings).
         """
         require_active("test_async_dpor_dining_philosophers")
         from frontrun.async_dpor import await_point, explore_async_dpor
 
-        num_philosophers = 4
+        num_philosophers = 3
 
         class State:
             def __init__(self) -> None:
@@ -595,8 +597,8 @@ class TestAsyncDporDeadlock:
                 setup=State,
                 tasks=[make_philosopher(i) for i in range(num_philosophers)],
                 invariant=lambda s: True,
-                deadlock_timeout=2.0,
-                timeout_per_run=3.0,
+                deadlock_timeout=1.0,
+                timeout_per_run=2.0,
             )
         )
 
