@@ -9,16 +9,20 @@ exactly once.
 The approach:
 1. A Rust DPOR engine (frontrun._dpor) manages the exploration tree,
    vector clocks, and backtrack set computation.
-2. Python drives execution: runs async tasks under an InterleavedLoop
-   that pauses at each ``await await_point()`` call.
-3. At each await point, the scheduler reports the await as an access
-   to the DPOR engine and asks it which task to run next.
-4. SQL queries are intercepted via async cursor patching and reported
+2. Python drives execution: each task's coroutine is wrapped with
+   ``_AutoPauseCoroutine`` which intercepts every ``await`` yield and
+   inserts a DPOR scheduling decision.  No user code changes needed.
+3. At each yield, the scheduler reports the access to the DPOR engine
+   and asks it which task to run next.
+4. ``asyncio.Lock`` is monkey-patched to a cooperative version with
+   deadlock detection (WaitForGraph) and explicit scheduling points.
+5. SQL queries are intercepted via async cursor patching and reported
    as I/O resource accesses to the DPOR engine.
 
 Usage::
 
-    from frontrun.async_dpor import explore_async_dpor, await_point
+    import asyncio
+    from frontrun.async_dpor import explore_async_dpor
 
     class Counter:
         def __init__(self):
@@ -26,7 +30,7 @@ Usage::
 
         async def increment(self):
             temp = self.value
-            await await_point()
+            await asyncio.sleep(0)  # any natural await works
             self.value = temp + 1
 
     result = await explore_async_dpor(
@@ -79,6 +83,15 @@ _scheduler_var: contextvars.ContextVar[AsyncDporScheduler | None] = contextvars.
     "_async_dpor_scheduler", default=None
 )
 _task_id_var: contextvars.ContextVar[int | None] = contextvars.ContextVar("_async_dpor_task_id", default=None)
+
+# When True, the coroutine wrapper handles scheduling automatically.
+# _CooperativeAsyncLock checks this to avoid double-scheduling.
+_auto_pause_active: contextvars.ContextVar[bool] = contextvars.ContextVar("_auto_pause_active", default=False)
+
+# When >0, the _AutoPauseIterator should NOT insert scheduling points.
+# Incremented by scheduler.pause() so the wrapper doesn't double-schedule
+# on the pause's own yields (sleep(0), condition.wait()).
+_in_scheduler_pause: contextvars.ContextVar[int] = contextvars.ContextVar("_in_scheduler_pause", default=0)
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +155,10 @@ class _CooperativeAsyncLock:
         # this, asyncio.Lock.acquire() on a free lock completes
         # synchronously and DPOR never sees the interleaving where
         # two tasks hold conflicting locks simultaneously.
+        #
+        # The scheduler.pause() call sets _in_scheduler_pause so the
+        # coroutine wrapper won't insert a redundant scheduling point
+        # for the pause's own yields.
         scheduler = _scheduler_var.get()
         if scheduler is not None and task_id is not None:
             await scheduler.pause(task_id)
@@ -246,17 +263,114 @@ def _unpatch_asyncio_lock() -> None:
 async def await_point() -> None:
     """Yield to the DPOR scheduler at an await point.
 
-    Call this at every point where a context switch could happen in your
-    async code.  Each call is reported to the DPOR engine as a scheduling
-    point where conflicts can be detected.
+    When auto-pause is active (the default in ``explore_async_dpor``),
+    this is equivalent to ``await asyncio.sleep(0)`` — the coroutine
+    wrapper handles scheduling automatically.  Kept for backward
+    compatibility with code that uses explicit scheduling markers.
 
     If no scheduler is active, this function returns immediately.
     """
+    if _auto_pause_active.get():
+        # The coroutine wrapper intercepts all yields, so a simple
+        # sleep(0) is sufficient to create a scheduling point.
+        await asyncio.sleep(0)
+        return
     scheduler = _scheduler_var.get()
     if scheduler is not None:
         task_id = _task_id_var.get()
         if task_id is not None:
             await scheduler.pause(task_id)
+
+
+# ---------------------------------------------------------------------------
+# Auto-pause coroutine wrapper
+# ---------------------------------------------------------------------------
+
+
+class _AutoPauseIterator:
+    """Wraps a coroutine to insert DPOR scheduling points at every yield.
+
+    Intercepts the coroutine's send/throw protocol.  Before each step of the
+    inner coroutine (i.e. before forwarding a ``send()`` call), the wrapper
+    drives a ``scheduler.pause(task_id)`` coroutine.  This gives the DPOR
+    engine a scheduling decision point at every natural ``await`` expression
+    in user code, without requiring explicit ``await await_point()`` calls.
+
+    The wrapper alternates between two phases:
+    - **Pause phase**: driving the pause coroutine, yielding its futures to
+      the event loop.
+    - **Inner phase**: forwarding the buffered value to the inner coroutine,
+      yielding the inner's future to the event loop.
+
+    There is no recursion risk because the pause coroutine's yields go
+    directly to the event loop (via the wrapper's own ``send`` return),
+    not back through the inner coroutine.
+    """
+
+    __slots__ = ("_inner", "_task_id", "_scheduler", "_pause_iter", "_buffered_value")
+
+    def __init__(self, inner_coro: Any, task_id: int, scheduler: "AsyncDporScheduler") -> None:
+        self._inner = inner_coro
+        self._task_id = task_id
+        self._scheduler = scheduler
+        self._pause_iter: Any | None = None
+        self._buffered_value: Any = None
+
+    def __next__(self) -> Any:
+        return self.send(None)
+
+    def send(self, value: Any) -> Any:
+        # Continue an active pause coroutine
+        if self._pause_iter is not None:
+            try:
+                return self._pause_iter.send(value)
+            except StopIteration:
+                self._pause_iter = None
+                # Pause completed — forward the buffered value to inner
+                return self._inner.send(self._buffered_value)
+
+        # If we're inside a scheduler.pause() call (e.g. from
+        # _CooperativeAsyncLock), don't insert another pause — just
+        # forward to the inner coroutine.
+        if _in_scheduler_pause.get() > 0:
+            return self._inner.send(value)
+
+        # Buffer the incoming value and start a new pause
+        self._buffered_value = value
+        pause_coro = self._scheduler.pause(self._task_id)
+        self._pause_iter = pause_coro.__await__()
+        try:
+            return next(self._pause_iter)
+        except StopIteration:
+            # Pause completed immediately (no scheduler active)
+            self._pause_iter = None
+            return self._inner.send(self._buffered_value)
+
+    def throw(self, typ: Any, val: Any = None, tb: Any = None) -> Any:
+        if self._pause_iter is not None:
+            self._pause_iter.close()
+            self._pause_iter = None
+        if val is None and tb is None:
+            return self._inner.throw(typ)
+        return self._inner.throw(typ, val, tb)
+
+    def close(self) -> None:
+        if self._pause_iter is not None:
+            self._pause_iter.close()
+            self._pause_iter = None
+        self._inner.close()
+
+
+class _AutoPauseCoroutine:
+    """Awaitable wrapper that makes a coroutine auto-schedule via DPOR."""
+
+    __slots__ = ("_iter",)
+
+    def __init__(self, coro: Any, task_id: int, scheduler: "AsyncDporScheduler") -> None:
+        self._iter = _AutoPauseIterator(coro, task_id, scheduler)
+
+    def __await__(self) -> _AutoPauseIterator:
+        return self._iter
 
 
 # ---------------------------------------------------------------------------
@@ -379,21 +493,21 @@ class AsyncDporScheduler(InterleavedLoop):
     ) -> None:
         """Run tasks with DPOR-controlled interleaving.
 
-        Each task pauses at the start before running user code, giving
-        the DPOR engine the opportunity to schedule tasks in any order.
-        Uses explicit event loop yields between user code sections to
-        ensure other tasks can wake up and process their scheduling.
+        Each task's coroutine is wrapped with ``_AutoPauseCoroutine``,
+        which automatically inserts a DPOR scheduling point before every
+        step of the inner coroutine (i.e. at every natural ``await``).
+        No explicit ``await await_point()`` calls are needed.
         """
         if isinstance(task_funcs, list):
             task_funcs = dict(enumerate(task_funcs))
 
-        # Wrap each user function to insert an initial pause
+        # Wrap each user function so every await becomes a DPOR scheduling point
         wrapped: dict[Any, Callable[..., Awaitable[None]]] = {}
         for tid, func in task_funcs.items():
 
             async def _wrapped(f: Callable[..., Awaitable[None]] = func, t: Any = tid) -> None:
-                await self.pause(t)  # DPOR scheduling decision
-                await f()
+                _auto_pause_active.set(True)
+                await _AutoPauseCoroutine(f(), t, self)
 
             wrapped[tid] = _wrapped
 
@@ -406,10 +520,18 @@ class AsyncDporScheduler(InterleavedLoop):
         tasks that were notified can process their condition waits.
         Without this, a single task can reacquire the condition lock
         before other notified tasks, causing false deadlock detection.
+
+        Sets ``_in_scheduler_pause`` so the coroutine wrapper knows not
+        to insert a redundant scheduling point for this pause's yields.
         """
-        # Yield to let any previously-notified tasks process their wakeups
-        await asyncio.sleep(0)
-        await super().pause(task_id, marker)
+        depth = _in_scheduler_pause.get()
+        _in_scheduler_pause.set(depth + 1)
+        try:
+            # Yield to let any previously-notified tasks process their wakeups
+            await asyncio.sleep(0)
+            await super().pause(task_id, marker)
+        finally:
+            _in_scheduler_pause.set(depth)
 
     async def _mark_done(self, task_id: Any) -> None:
         """Mark a task as finished in both InterleavedLoop and the DPOR engine."""
