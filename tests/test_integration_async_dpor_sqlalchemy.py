@@ -111,9 +111,7 @@ class TestAsyncDporSQLAlchemy:
 
                 async def increment(_state: object) -> None:
                     async with engine.connect() as conn:
-                        result = await conn.execute(
-                            text("SELECT value FROM async_sa_counter WHERE id = 1")
-                        )
+                        result = await conn.execute(text("SELECT value FROM async_sa_counter WHERE id = 1"))
                         row = result.fetchone()
                         assert row is not None
                         current = row[0]
@@ -180,11 +178,10 @@ class TestAsyncDporSQLAlchemy:
         async def run_test():
             engine = create_async_engine(_ASYNC_DB_URL)
             try:
+
                 async def read_only(_state: object) -> None:
                     async with engine.connect() as conn:
-                        await conn.execute(
-                            text("SELECT value FROM async_sa_counter WHERE id = 1")
-                        )
+                        await conn.execute(text("SELECT value FROM async_sa_counter WHERE id = 1"))
                         await await_point()
 
                 return await explore_async_dpor(

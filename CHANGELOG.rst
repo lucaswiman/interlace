@@ -6,6 +6,22 @@ All releases: https://github.com/lucaswiman/frontrun/releases
 0.2.0 (unreleased)
 -------------------
 
+**Async DPOR**
+
+``explore_async_dpor()`` brings systematic interleaving exploration to async
+code.  Tasks are async callables scheduled cooperatively; ``await_point()``
+marks explicit yield points where context switches can occur.  The same Rust
+DPOR engine (vector clocks, conflict analysis, backtrack sets) drives the
+exploration.  SQL tracking (``detect_sql=True``) reuses the existing async
+cursor patching, so asyncpg, aiosqlite, and aiomysql queries are detected as
+conflicts automatically.
+
+- New module: ``frontrun.async_dpor`` (``explore_async_dpor``, ``await_point``).
+- Contrib helpers: ``frontrun.contrib.async_django`` (``async_django_dpor``)
+  and ``frontrun.contrib.async_sqlalchemy`` (``async_sqlalchemy_dpor``,
+  ``get_connection``).
+- Integration tests against asyncpg, SQLAlchemy async, and Django async ORM.
+
 **SQL conflict detection in DPOR**
 
 DPOR now understands SQL.  Instead of treating all database traffic to the

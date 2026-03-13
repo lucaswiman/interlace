@@ -135,8 +135,7 @@ class TestAsyncDporDjango:
 
         result = asyncio.run(run_test())
         assert not result.property_holds, (
-            f"Async DPOR should detect the double-activation race. "
-            f"Explored {result.num_explored} interleavings."
+            f"Async DPOR should detect the double-activation race. Explored {result.num_explored} interleavings."
         )
 
     def test_exploration_completes(self, _pg_available) -> None:
