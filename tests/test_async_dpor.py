@@ -648,10 +648,10 @@ class TestAsyncDporCleanup:
         show task 0 as the holder.
         """
         require_active("test_async_dpor_row_lock_cleanup")
-        from frontrun.async_dpor import AsyncDporScheduler, _patch_asyncio_lock, _unpatch_asyncio_lock, await_point
+        from frontrun.async_dpor import AsyncDporScheduler, _patch_asyncio_lock, _unpatch_asyncio_lock
 
         async def run() -> None:
-            from frontrun._dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]
+            from frontrun._dpor import PyDporEngine  # type: ignore[reportAttributeAccessIssue]
 
             _patch_asyncio_lock()
             try:
@@ -720,11 +720,14 @@ class TestAsyncDporCleanup:
             )
         )
 
-        # The invariant should hold: task 1 should always be able to get the lock
-        # after task 0 crashes and its locks are cleaned up.
-        assert result.property_holds, (
-            "Task 1 should acquire the lock after task 0 crashes, "
+        # Task 0 crashes, so "does not crash" meta-invariant should trigger.
+        assert not result.property_holds, (
+            "Task crash should be treated as a property violation, "
             f"but got: property_holds={result.property_holds}, explanation={result.explanation}"
+        )
+        assert result.explanation is not None, "Explanation should be set for task crash"
+        assert "RuntimeError" in result.explanation or "crash" in result.explanation, (
+            f"Explanation should mention the crash, but got: {result.explanation}"
         )
 
 
