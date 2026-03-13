@@ -916,3 +916,91 @@ class TestDeadlockAsInvariantViolation:
         )
 
         assert result.property_holds, "Consistent lock order should not be reported as deadlock"
+
+    def test_three_thread_directed_cycle_deadlock(self) -> None:
+        """Three-thread deadlock: T0→lock_a→lock_b, T1→lock_b→lock_c, T2→lock_c→lock_a.
+
+        Forms the directed cycle T0→T1→T2→T0 when each holds its first
+        lock and waits for its second.
+        """
+
+        class State:
+            def __init__(self) -> None:
+                self.lock_a = threading.Lock()
+                self.lock_b = threading.Lock()
+                self.lock_c = threading.Lock()
+                self.x = 0
+
+        def thread0(s: State) -> None:
+            with s.lock_a:
+                s.x += 1
+                with s.lock_b:
+                    pass
+
+        def thread1(s: State) -> None:
+            with s.lock_b:
+                s.x += 1
+                with s.lock_c:
+                    pass
+
+        def thread2(s: State) -> None:
+            with s.lock_c:
+                s.x += 1
+                with s.lock_a:
+                    pass
+
+        result = explore_dpor(
+            setup=State,
+            threads=[thread0, thread1, thread2],
+            invariant=lambda s: True,
+            max_executions=1000,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=True,
+        )
+
+        assert not result.property_holds, "3-way deadlock should set property_holds=False"
+        assert result.explanation is not None
+        assert "deadlock" in result.explanation.lower()
+
+    def test_partial_deadlock_third_thread_completes(self) -> None:
+        """Three threads: two deadlock (lock-order inversion), third does independent work.
+
+        The partial deadlock should still be detected even though T2 finishes.
+        """
+
+        class State:
+            def __init__(self) -> None:
+                self.lock_a = threading.Lock()
+                self.lock_b = threading.Lock()
+                self.x = 0
+                self.t2_done = False
+
+        def thread0(s: State) -> None:
+            with s.lock_a:
+                s.x += 1
+                with s.lock_b:
+                    pass
+
+        def thread1(s: State) -> None:
+            with s.lock_b:
+                s.x += 1
+                with s.lock_a:
+                    pass
+
+        def thread2(s: State) -> None:
+            s.t2_done = True
+
+        result = explore_dpor(
+            setup=State,
+            threads=[thread0, thread1, thread2],
+            invariant=lambda s: True,
+            max_executions=1000,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=True,
+        )
+
+        assert not result.property_holds, "Partial deadlock should still be detected"
