@@ -83,6 +83,23 @@ _DB_SCOPE_ATTR = "_frontrun_db_scope"
 _CONNECTION_DB_SCOPES: dict[int, str] = {}
 
 
+def _warm_sql_parsers() -> None:
+    """Load optional SQL parsing dependencies before managed threads start.
+
+    The first row-level SQL statement may lazily import ``sqlglot`` and a large
+    set of helper modules. If that happens inside a DPOR-managed worker thread,
+    the preload bridge observes a burst of unrelated file I/O and exploration
+    can spend its small preemption budget on import noise instead of the user
+    race. Warm the parser stack once on the main thread when patching SQL.
+    """
+    try:
+        extract_row_level_access("SELECT * FROM frontrun_warmup WHERE id = 1")
+    except Exception:
+        # Optional dependency missing or parser warmup failed. The actual SQL
+        # interception path remains best-effort and will fall back naturally.
+        pass
+
+
 @contextlib.contextmanager
 def _suppress_endpoint_io() -> Generator[None, None, None]:
     """Temporarily suppress endpoint-level I/O for the current thread."""
@@ -895,6 +912,8 @@ def patch_sql() -> None:
     global _sql_patched  # noqa: PLW0603
     if _sql_patched:
         return
+
+    _warm_sql_parsers()
 
     # sqlite3 requires factory-injection approach
     _patch_sqlite3()
