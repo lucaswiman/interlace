@@ -631,3 +631,169 @@ class TestAsyncDporDeadlock:
         )
 
         assert not result.property_holds, "Dining philosophers deadlock should be found"
+
+
+class TestAsyncDporCleanup:
+    """Tests for resource cleanup when tasks finish without releasing locks."""
+
+    def test_row_locks_released_on_task_finish(self) -> None:
+        """Row locks should be released from the WaitForGraph when a task finishes.
+
+        Bug: _cleanup_task_context doesn't call release_row_locks(task_id),
+        so stale row lock entries remain in _active_row_locks and the
+        WaitForGraph after a task completes without COMMIT.
+
+        Scenario: Task 0 acquires a row lock and finishes without releasing.
+        After cleanup, the scheduler's _active_row_locks should NOT still
+        show task 0 as the holder.
+        """
+        require_active("test_async_dpor_row_lock_cleanup")
+        from frontrun.async_dpor import AsyncDporScheduler, _patch_asyncio_lock, _unpatch_asyncio_lock, await_point
+
+        async def run() -> None:
+            from frontrun._dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]
+
+            _patch_asyncio_lock()
+            try:
+                engine = PyDporEngine(num_threads=2, preemption_bound=2)
+                execution = engine.begin_execution()
+                scheduler = AsyncDporScheduler(engine, execution, 2, deadlock_timeout=2.0)
+
+                # Simulate task 0 acquiring row locks
+                scheduler.acquire_row_locks(0, ["sql:t:(('id', 1))"])
+                assert "sql:t:(('id', 1))" in scheduler._active_row_locks
+                assert scheduler._active_row_locks["sql:t:(('id', 1))"] == 0
+
+                # Simulate task 0 finishing (as _run's finally block does)
+                scheduler._cleanup_task_context(0)
+
+                # After cleanup, row locks should be released
+                assert "sql:t:(('id', 1))" not in scheduler._active_row_locks, (
+                    "Row lock should be released when task finishes, "
+                    f"but _active_row_locks still contains: {scheduler._active_row_locks}"
+                )
+                assert 0 not in scheduler._task_row_locks, (
+                    "Task's row lock set should be cleared on finish, "
+                    f"but _task_row_locks still contains task 0: {scheduler._task_row_locks}"
+                )
+            finally:
+                _unpatch_asyncio_lock()
+
+        asyncio.run(run())
+
+    def test_asyncio_lock_released_on_task_exception(self) -> None:
+        """asyncio.Lock should be released when a task raises an exception.
+
+        Bug: When a task finishes while holding a _CooperativeAsyncLock
+        (e.g., exception without release()), the WaitForGraph holding edge
+        remains AND the underlying real asyncio.Lock stays locked, blocking
+        any other task that tries to acquire it.
+
+        Scenario: Task 0 acquires a lock and crashes. Task 1 should be able
+        to acquire the same lock without timing out.
+        """
+        require_active("test_async_dpor_lock_cleanup_on_exception")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                self.lock = asyncio.Lock()
+                self.task1_got_lock = False
+
+        async def task0_crashes(state: State) -> None:
+            await state.lock.acquire()
+            raise RuntimeError("intentional crash while holding lock")
+
+        async def task1_acquires(state: State) -> None:
+            # Task 1 should be able to acquire the lock after task 0 crashes
+            await state.lock.acquire()
+            state.task1_got_lock = True
+            state.lock.release()
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[task0_crashes, task1_acquires],
+                invariant=lambda s: s.task1_got_lock,
+                deadlock_timeout=2.0,
+                timeout_per_run=3.0,
+            )
+        )
+
+        # The invariant should hold: task 1 should always be able to get the lock
+        # after task 0 crashes and its locks are cleaned up.
+        assert result.property_holds, (
+            "Task 1 should acquire the lock after task 0 crashes, "
+            f"but got: property_holds={result.property_holds}, explanation={result.explanation}"
+        )
+
+
+class TestAsyncDporExplanation:
+    """Tests for human-readable explanations of invariant violations."""
+
+    def test_explanation_set_for_invariant_violation(self) -> None:
+        """result.explanation should be non-None when an invariant violation is found.
+
+        Bug: explore_async_dpor sets result.explanation for deadlocks but
+        NOT for invariant violations. The explanation field stays None.
+        """
+        require_active("test_async_dpor_invariant_explanation")
+        from frontrun.async_dpor import await_point, explore_async_dpor
+
+        class Counter:
+            def __init__(self) -> None:
+                self.value = 0
+
+        async def increment(counter: Counter) -> None:
+            temp = counter.value
+            await await_point()
+            counter.value = temp + 1
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=Counter,
+                tasks=[increment, increment],
+                invariant=lambda c: c.value == 2,
+                deadlock_timeout=5.0,
+            )
+        )
+
+        assert not result.property_holds
+        assert result.explanation is not None, (
+            "result.explanation should be set for invariant violations, but it is None"
+        )
+
+    def test_explanation_contains_schedule_info(self) -> None:
+        """Explanation should contain information about the interleaving schedule.
+
+        For async DPOR, the explanation should describe which tasks ran
+        at which points, making it possible to understand the race condition.
+        """
+        require_active("test_async_dpor_explanation_content")
+        from frontrun.async_dpor import await_point, explore_async_dpor
+
+        class Counter:
+            def __init__(self) -> None:
+                self.value = 0
+
+        async def increment(counter: Counter) -> None:
+            temp = counter.value
+            await await_point()
+            counter.value = temp + 1
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=Counter,
+                tasks=[increment, increment],
+                invariant=lambda c: c.value == 2,
+                deadlock_timeout=5.0,
+            )
+        )
+
+        assert not result.property_holds
+        assert result.explanation is not None
+        # Explanation should mention tasks/schedule
+        explanation_lower = result.explanation.lower()
+        assert "task" in explanation_lower or "schedule" in explanation_lower or "interleav" in explanation_lower, (
+            f"Explanation should describe the interleaving, got: {result.explanation}"
+        )
