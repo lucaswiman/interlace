@@ -296,11 +296,11 @@ def test_async_counter_lost_update():
 
 ### Async Bytecode Exploration
 
-Async bytecode exploration works at await points instead of opcodes, making schedules stable across Python versions:
+Async shuffler exploration works at await points instead of opcodes, making schedules stable across Python versions:
 
 ```python
 import asyncio
-from frontrun.async_bytecode import explore_interleavings, await_point
+from frontrun.async_shuffler import explore_interleavings, await_point
 
 class Counter:
     def __init__(self):

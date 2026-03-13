@@ -2,7 +2,7 @@
 
 Combines the DPOR engine's systematic interleaving exploration with the
 async scheduler's await-point-level control.  Instead of the random
-schedule sampling used by ``async_bytecode.py``, this module uses the
+schedule sampling used by ``async_shuffler.py``, this module uses the
 Rust DPOR engine to explore every meaningfully distinct interleaving
 exactly once.
 

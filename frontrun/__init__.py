@@ -23,9 +23,9 @@ Bytecode exploration::
 
     from frontrun.bytecode import explore_interleavings
 
-Async bytecode exploration::
+Async shuffler exploration::
 
-    from frontrun.async_bytecode import explore_interleavings, await_point
+    from frontrun.async_shuffler import explore_interleavings, await_point
 
 Contrib helpers::
 

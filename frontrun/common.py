@@ -67,7 +67,7 @@ class InterleavingResult:
     """Result of exploring interleavings.
 
     Returned by :func:`~frontrun.bytecode.explore_interleavings`,
-    :func:`~frontrun.async_bytecode.explore_interleavings`, and
+    :func:`~frontrun.async_shuffler.explore_interleavings`, and
     :func:`~frontrun.dpor.explore_dpor`.
 
     Attributes:

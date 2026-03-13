@@ -202,7 +202,7 @@ class AsyncBuggyCounter:
 
 class AsyncBuggyCounterBytecode:
     """
-    Async counter with suspension-point race for async_bytecode testing.
+    Async counter with suspension-point race for async_shuffler testing.
 
     Same bug as AsyncBuggyCounter but uses await_point() instead of mark().
     """
@@ -212,8 +212,8 @@ class AsyncBuggyCounterBytecode:
 
     async def increment(self):
         """Increment the counter with explicit suspension point."""
-        # Import here to avoid import errors if async_bytecode not available
-        from frontrun.async_bytecode import await_point
+        # Import here to avoid import errors if async_shuffler not available
+        from frontrun.async_shuffler import await_point
 
         current = self.value
         await await_point()
@@ -263,7 +263,7 @@ class AsyncBuggyResourceManager:
 
 class AsyncBuggyResourceManagerBytecode:
     """
-    Async resource manager with order violation for async_bytecode testing.
+    Async resource manager with order violation for async_shuffler testing.
     """
 
     def __init__(self):
@@ -272,14 +272,14 @@ class AsyncBuggyResourceManagerBytecode:
 
     async def init_resource(self, value):
         """Initialize the resource."""
-        from frontrun.async_bytecode import await_point
+        from frontrun.async_shuffler import await_point
 
         await await_point()
         self.resource = value
 
     async def use_resource(self):
         """Use the resource - assumes it's been initialized."""
-        from frontrun.async_bytecode import await_point
+        from frontrun.async_shuffler import await_point
 
         await await_point()
         # Check if resource is None (order violation)
