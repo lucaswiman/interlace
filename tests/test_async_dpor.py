@@ -8,8 +8,13 @@ scheduling granularity.
 from __future__ import annotations
 
 import asyncio
+import pytest
 
 from frontrun.cli import require_active
+
+
+_async_global_counter = 0
+_async_global_augmented = 0
 
 
 class TestAsyncDporBasic:
@@ -121,6 +126,193 @@ class TestAsyncDporBasic:
                 setup=State,
                 tasks=[set_a, set_b],
                 invariant=lambda s: s.a == 1 and s.b == 1,
+                preemption_bound=None,
+                max_executions=100,
+                deadlock_timeout=5.0,
+            )
+        )
+
+        assert result.property_holds
+        assert result.num_explored == 1
+
+    def test_detects_global_race(self) -> None:
+        """Async DPOR should trace LOAD_GLOBAL/STORE_GLOBAL conflicts."""
+        require_active("test_async_dpor_global_race")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                global _async_global_counter
+                _async_global_counter = 0
+
+        async def increment(_state: State) -> None:
+            global _async_global_counter
+            tmp = _async_global_counter
+            await asyncio.sleep(0)
+            _async_global_counter = tmp + 1
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[increment, increment],
+                invariant=lambda _s: _async_global_counter == 2,
+                deadlock_timeout=5.0,
+            )
+        )
+
+        assert not result.property_holds, "Async DPOR should find the global lost update"
+
+    @pytest.mark.xfail(
+        reason="Async DPOR misses some global update patterns with multiple writes in one await-delimited block",
+        strict=True,
+    )
+    def test_detects_augmented_global_race(self) -> None:
+        """Async DPOR should trace global += via LOAD_GLOBAL/STORE_GLOBAL."""
+        require_active("test_async_dpor_global_augassign")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                global _async_global_augmented
+                _async_global_augmented = 0
+
+        async def increment(_state: State) -> None:
+            global _async_global_augmented
+            tmp = _async_global_augmented
+            await asyncio.sleep(0)
+            _async_global_augmented = tmp
+            _async_global_augmented += 1
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[increment, increment],
+                invariant=lambda _s: _async_global_augmented == 2,
+                deadlock_timeout=5.0,
+            )
+        )
+
+        assert not result.property_holds, "Async DPOR should find the global += lost update"
+
+    def test_detects_closure_cell_race(self) -> None:
+        """Async DPOR should trace LOAD_DEREF/STORE_DEREF conflicts."""
+        require_active("test_async_dpor_closure_race")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                self.value = -1
+
+        shared = 0
+
+        async def increment(state: State) -> None:
+            nonlocal shared
+            tmp = shared
+            await asyncio.sleep(0)
+            shared = tmp + 1
+            state.value = shared
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[increment, increment],
+                invariant=lambda _s: shared == 2,
+                deadlock_timeout=5.0,
+            )
+        )
+
+        assert not result.property_holds, "Async DPOR should find the closure-cell lost update"
+
+    def test_traces_sync_helper_inside_coroutine(self) -> None:
+        """Tracing should continue through synchronous helper frames."""
+        require_active("test_async_dpor_sync_helper")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                self.value = 0
+
+        def helper(state: State, value: int) -> None:
+            state.value = value
+
+        async def update(state: State) -> None:
+            snapshot = state.value
+            await asyncio.sleep(0)
+            helper(state, snapshot + 1)
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[update, update],
+                invariant=lambda s: s.value == 2,
+                deadlock_timeout=5.0,
+            )
+        )
+
+        assert not result.property_holds, "Async DPOR should trace helper-frame writes after an await"
+
+    def test_detects_container_method_conflict(self) -> None:
+        """Passthrough builtin reads should conflict with C-level container writes."""
+        require_active("test_async_dpor_container_method_conflict")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                self.items: list[int] = []
+                self.observed = -1
+
+        async def append_item(state: State) -> None:
+            await asyncio.sleep(0)
+            state.items.append(1)
+            await asyncio.sleep(0)
+
+        async def measure_length(state: State) -> None:
+            await asyncio.sleep(0)
+            state.observed = len(state.items)
+            await asyncio.sleep(0)
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[append_item, measure_length],
+                invariant=lambda s: s.observed in (0, 1),
+                preemption_bound=None,
+                max_executions=100,
+                deadlock_timeout=5.0,
+            )
+        )
+
+        assert result.property_holds
+        assert result.num_explored >= 2
+
+    @pytest.mark.xfail(
+        reason="Container-level STORE_SUBSCR tracking still treats disjoint dict-key writes as dependent",
+        strict=True,
+    )
+    def test_disjoint_dict_keys_collapse_to_one_execution(self) -> None:
+        """Disjoint subscript writes should not create extra executions."""
+        require_active("test_async_dpor_disjoint_dict_keys")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                self.mapping = {"a": 0, "b": 0}
+
+        async def set_a(state: State) -> None:
+            await asyncio.sleep(0)
+            state.mapping["a"] = 1
+            await asyncio.sleep(0)
+
+        async def set_b(state: State) -> None:
+            await asyncio.sleep(0)
+            state.mapping["b"] = 1
+            await asyncio.sleep(0)
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[set_a, set_b],
+                invariant=lambda s: s.mapping == {"a": 1, "b": 1},
                 preemption_bound=None,
                 max_executions=100,
                 deadlock_timeout=5.0,
