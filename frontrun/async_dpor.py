@@ -45,12 +45,16 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import sys
 from collections.abc import Awaitable, Callable, Coroutine, Generator
 from typing import Any, TypeVar
 
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
+from frontrun._tracing import is_dynamic_code as _is_dynamic_code
+from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.async_scheduler import InterleavedLoop
 from frontrun.common import InterleavingResult
+from frontrun.dpor import _USE_SYS_MONITORING, ShadowStack, _process_opcode
 
 try:
     from frontrun._dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]
@@ -78,6 +82,17 @@ except ImportError:
 
 T = TypeVar("T")
 
+
+class _NoOpLock:
+    """Context-manager-shaped lock for single-threaded async DPOR engine calls."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+
 # Context variables to track the active scheduler and task ID
 _scheduler_var: contextvars.ContextVar[AsyncDporScheduler | None] = contextvars.ContextVar(
     "_async_dpor_scheduler", default=None
@@ -93,6 +108,10 @@ _auto_pause_active: contextvars.ContextVar[bool] = contextvars.ContextVar("_auto
 # on the pause's own yields (sleep(0), condition.wait()).
 _in_scheduler_pause: contextvars.ContextVar[int] = contextvars.ContextVar("_in_scheduler_pause", default=0)
 
+# Guards against re-entering async opcode tracing while _process_opcode()
+# is already running for the current task.
+_in_trace_processing: contextvars.ContextVar[bool] = contextvars.ContextVar("_in_trace_processing", default=False)
+
 
 # ---------------------------------------------------------------------------
 # Object key helper (shared with sync dpor.py)
@@ -104,10 +123,10 @@ def _make_object_key(obj_id: int, name: Any) -> int:
     return hash((obj_id, name)) & 0xFFFFFFFFFFFFFFFF
 
 
-# A single shared resource key that all tasks write to at every await point.
-# This creates write-write conflicts between all tasks, ensuring DPOR explores
-# all distinct orderings.
-_SHARED_AWAIT_KEY = _make_object_key(0, "__async_dpor_await_point__")
+# Synchronization acquisition points must still be explored even when the
+# individual lock resources differ, because future blocking can make those
+# orderings observably distinct (deadlock, starvation, etc.).
+_SHARED_SYNC_ACQUIRE_KEY = _make_object_key(0, "__async_dpor_sync_acquire__")
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +180,7 @@ class _CooperativeAsyncLock:
         # for the pause's own yields.
         scheduler = _scheduler_var.get()
         if scheduler is not None and task_id is not None:
-            await scheduler.pause(task_id)
+            await scheduler.pause(task_id, ("lock_acquire", id(self)))
 
         if task_id is not None and graph is not None and self._lock.locked():
             lock_id = id(self)
@@ -185,6 +204,9 @@ class _CooperativeAsyncLock:
             _async_lock_owners[lock_id] = task_id
             _async_task_held_locks.setdefault(task_id, set()).add(self)
             graph.add_holding(task_id, lock_id)
+            scheduler = _scheduler_var.get()
+            if scheduler is not None:
+                scheduler.engine.report_sync(scheduler.execution, task_id, "lock_acquire", lock_id)
 
         return result
 
@@ -199,6 +221,9 @@ class _CooperativeAsyncLock:
             held = _async_task_held_locks.get(task_id)
             if held is not None:
                 held.discard(self)
+            scheduler = _scheduler_var.get()
+            if scheduler is not None:
+                scheduler.engine.report_sync(scheduler.execution, task_id, "lock_release", lock_id)
             self._owner = None
         self._lock.release()
 
@@ -382,9 +407,12 @@ class AsyncDporScheduler(InterleavedLoop):
     """Controls async task execution at await-point granularity using DPOR.
 
     Instead of following a fixed schedule, uses the Rust DPOR engine to
-    decide which task runs next.  At each await point, reports the access
-    to the engine and asks it for the next scheduling decision.
+    decide which task runs next.  Shared-memory accesses inside each
+    await-delimited block are traced at opcode/instruction granularity
+    and reported to the engine before the next scheduling decision.
     """
+
+    _TOOL_ID: int | None = None
 
     def __init__(
         self,
@@ -401,6 +429,11 @@ class AsyncDporScheduler(InterleavedLoop):
         self._num_engine_tasks = num_tasks
         self._current_task: int | None = None
         self._detect_sql = detect_sql
+        self._engine_lock = _NoOpLock()
+        self.trace_recorder = None
+        self._iter_to_container: dict[int, Any] = {}
+        self._shadow_stacks: dict[int, ShadowStack] = {}
+        self._monitoring_active = False
         # Pending I/O accesses per task (from SQL interception)
         self._pending_io: dict[int, list[tuple[int, str]]] = {i: [] for i in range(num_tasks)}
 
@@ -433,18 +466,13 @@ class AsyncDporScheduler(InterleavedLoop):
     def on_proceed(self, task_id: Any, marker: Any = None) -> None:
         # Flush any pending I/O accesses before advancing
         self._flush_pending_io(task_id)
-
-        # Report the await point as a WRITE to a single shared resource.
-        # All tasks write to the same "await_point" resource, creating
-        # write-write conflicts that force DPOR to explore alternative
-        # orderings at every await point.  This is the async equivalent
-        # of opcode-level tracing in sync DPOR.
-        self.engine.report_access(
-            self.execution,
-            task_id,
-            _SHARED_AWAIT_KEY,
-            "write",
-        )
+        if isinstance(marker, tuple) and marker and marker[0] == "lock_acquire":
+            self.engine.report_access(
+                self.execution,
+                task_id,
+                _SHARED_SYNC_ACQUIRE_KEY,
+                "write",
+            )
 
         # Schedule next task.  If the engine returns None (no runnable
         # threads), keep _current_task as the current task_id so the
@@ -511,7 +539,20 @@ class AsyncDporScheduler(InterleavedLoop):
 
             wrapped[tid] = _wrapped
 
-        await super().run_all(wrapped, timeout=timeout)
+        if _USE_SYS_MONITORING:
+            self._setup_monitoring()
+            try:
+                await super().run_all(wrapped, timeout=timeout)
+            finally:
+                self._teardown_monitoring()
+                self._shadow_stacks.clear()
+        else:
+            self._setup_settrace()
+            try:
+                await super().run_all(wrapped, timeout=timeout)
+            finally:
+                sys.settrace(None)
+                self._shadow_stacks.clear()
 
     async def pause(self, task_id: Any, marker: Any = None) -> None:
         """DPOR-aware pause that ensures fair task wakeup.
@@ -565,6 +606,110 @@ class AsyncDporScheduler(InterleavedLoop):
         if self._detect_sql:
             set_io_reporter(None)
 
+    def get_shadow_stack(self, frame_id: int) -> ShadowStack:
+        stack = self._shadow_stacks.get(frame_id)
+        if stack is None:
+            stack = ShadowStack()
+            self._shadow_stacks[frame_id] = stack
+        return stack
+
+    def remove_shadow_stack(self, frame_id: int) -> None:
+        self._shadow_stacks.pop(frame_id, None)
+
+    def _trace_user_opcode(self, frame: Any) -> None:
+        task_id = _task_id_var.get()
+        if task_id is None or _scheduler_var.get() is not self or _in_trace_processing.get():
+            return
+        token = _in_trace_processing.set(True)
+        try:
+            with self._engine_lock:
+                _process_opcode(frame, self, task_id)  # type: ignore[arg-type]
+        finally:
+            _in_trace_processing.reset(token)
+
+    def _setup_settrace(self) -> None:
+        def trace(frame: Any, event: str, arg: Any) -> Any:
+            if event == "call":
+                filename = frame.f_code.co_filename
+                if _should_trace_file(filename):
+                    if _is_dynamic_code(filename):
+                        caller = frame.f_back
+                        if caller is None or not _should_trace_file(caller.f_code.co_filename):
+                            return None
+                    frame.f_trace_opcodes = True
+                    return trace
+                return None
+
+            if event == "opcode":
+                self._trace_user_opcode(frame)
+                return trace
+
+            if event == "return":
+                self.remove_shadow_stack(id(frame))
+                return trace
+
+            return trace
+
+        sys.settrace(trace)
+
+    def _setup_monitoring(self) -> None:
+        if not _USE_SYS_MONITORING:
+            return
+
+        mon = sys.monitoring
+        tool_id = mon.PROFILER_ID  # type: ignore[attr-defined]
+        AsyncDporScheduler._TOOL_ID = tool_id
+
+        mon.use_tool_id(tool_id, "frontrun.async_dpor")  # type: ignore[attr-defined]
+        mon.set_events(tool_id, mon.events.PY_START | mon.events.PY_RETURN | mon.events.INSTRUCTION)  # type: ignore[attr-defined]
+
+        def handle_py_start(code: Any, instruction_offset: int) -> Any:
+            if not _should_trace_file(code.co_filename):
+                return mon.DISABLE  # type: ignore[attr-defined]
+            return None
+
+        def handle_py_return(code: Any, instruction_offset: int, retval: Any) -> Any:
+            if not _should_trace_file(code.co_filename):
+                return None
+            if _task_id_var.get() is None or _scheduler_var.get() is not self:
+                return None
+            frame = sys._getframe(1)
+            self.remove_shadow_stack(id(frame))
+            return None
+
+        def handle_instruction(code: Any, instruction_offset: int) -> Any:
+            if not _should_trace_file(code.co_filename):
+                return None
+            if _task_id_var.get() is None or _scheduler_var.get() is not self:
+                return None
+
+            frame = sys._getframe(1)
+            if _is_dynamic_code(code.co_filename):
+                caller = frame.f_back
+                if caller is None or not _should_trace_file(caller.f_code.co_filename):
+                    return None
+
+            self._trace_user_opcode(frame)
+            return None
+
+        mon.register_callback(tool_id, mon.events.PY_START, handle_py_start)  # type: ignore[attr-defined]
+        mon.register_callback(tool_id, mon.events.PY_RETURN, handle_py_return)  # type: ignore[attr-defined]
+        mon.register_callback(tool_id, mon.events.INSTRUCTION, handle_instruction)  # type: ignore[attr-defined]
+        self._monitoring_active = True
+
+    def _teardown_monitoring(self) -> None:
+        if not self._monitoring_active:
+            return
+        mon = sys.monitoring
+        tool_id = AsyncDporScheduler._TOOL_ID
+        if tool_id is not None:
+            mon.set_events(tool_id, 0)  # type: ignore[attr-defined]
+            mon.register_callback(tool_id, mon.events.PY_START, None)  # type: ignore[attr-defined]
+            mon.register_callback(tool_id, mon.events.PY_RETURN, None)  # type: ignore[attr-defined]
+            mon.register_callback(tool_id, mon.events.INSTRUCTION, None)  # type: ignore[attr-defined]
+            mon.free_tool_id(tool_id)  # type: ignore[attr-defined]
+        self._monitoring_active = False
+
     def _row_lock_int_id(self, res_id: str) -> int:
         """Return a stable integer ID for *res_id* (allocated on first call)."""
         lid = self._row_lock_ids.get(res_id)
@@ -584,6 +729,12 @@ class AsyncDporScheduler(InterleavedLoop):
           the lock, raising DeadlockError so explore_async_dpor reports it.
         """
         graph = _async_wait_graph
+        self.engine.report_access(
+            self.execution,
+            thread_id,
+            _SHARED_SYNC_ACQUIRE_KEY,
+            "write",
+        )
         for res_id in resource_ids:
             lock_int_id = self._row_lock_int_id(res_id)
             holder = self._active_row_locks.get(res_id)
