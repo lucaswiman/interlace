@@ -44,6 +44,7 @@ import contextvars
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, TypeVar
 
+from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
 from frontrun.async_scheduler import InterleavedLoop
 from frontrun.common import InterleavingResult
 
@@ -94,6 +95,116 @@ def _make_object_key(obj_id: int, name: Any) -> int:
 # This creates write-write conflicts between all tasks, ensuring DPOR explores
 # all distinct orderings.
 _SHARED_AWAIT_KEY = _make_object_key(0, "__async_dpor_await_point__")
+
+
+# ---------------------------------------------------------------------------
+# Cooperative asyncio.Lock with deadlock detection
+# ---------------------------------------------------------------------------
+
+_real_asyncio_lock = asyncio.Lock
+_async_lock_patched = False
+
+# Per-lock wait-for graph for async DPOR deadlock detection.
+_async_wait_graph: WaitForGraph | None = None
+# Map from lock id(obj) → owning task_id
+_async_lock_owners: dict[int, int] = {}
+
+
+class _CooperativeAsyncLock:
+    """Drop-in asyncio.Lock replacement with wait-for graph deadlock detection.
+
+    When a task tries to acquire a held lock, registers a waiting edge
+    in the global WaitForGraph.  If adding the edge creates a cycle,
+    raises DeadlockError immediately instead of blocking forever.
+
+    Every acquire() is also a DPOR scheduling point (via await_point()).
+    This is necessary because asyncio.Lock.acquire() on a free lock
+    completes synchronously without yielding, which would prevent DPOR
+    from interleaving lock acquisitions across tasks.
+    """
+
+    def __init__(self) -> None:
+        self._lock = _real_asyncio_lock()
+        self._owner: int | None = None
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    async def acquire(self) -> bool:
+        task_id = _task_id_var.get()
+        graph = _async_wait_graph
+
+        # Make lock acquisition a DPOR scheduling point so the engine
+        # can interleave different tasks' lock acquisitions.  Without
+        # this, asyncio.Lock.acquire() on a free lock completes
+        # synchronously and DPOR never sees the interleaving where
+        # two tasks hold conflicting locks simultaneously.
+        scheduler = _scheduler_var.get()
+        if scheduler is not None and task_id is not None:
+            await scheduler.pause(task_id)
+
+        if task_id is not None and graph is not None and self._lock.locked():
+            lock_id = id(self)
+            # Register: this task is waiting for this lock
+            cycle = graph.add_waiting(task_id, lock_id)
+            if cycle is not None:
+                graph.remove_waiting(task_id, lock_id)
+                desc = format_cycle(cycle)
+                raise DeadlockError(f"Async lock deadlock detected: {desc}", desc)
+            try:
+                result = await self._lock.acquire()
+            finally:
+                graph.remove_waiting(task_id, lock_id)
+        else:
+            result = await self._lock.acquire()
+
+        # Record ownership
+        if task_id is not None and graph is not None:
+            lock_id = id(self)
+            self._owner = task_id
+            _async_lock_owners[lock_id] = task_id
+            graph.add_holding(task_id, lock_id)
+
+        return result
+
+    def release(self) -> None:
+        graph = _async_wait_graph
+        if graph is not None and self._owner is not None:
+            lock_id = id(self)
+            graph.remove_holding(self._owner, lock_id)
+            _async_lock_owners.pop(lock_id, None)
+            self._owner = None
+        self._lock.release()
+
+    async def __aenter__(self) -> bool:
+        return await self.acquire()
+
+    async def __aexit__(self, *args: Any) -> None:
+        self.release()
+
+
+def _patch_asyncio_lock() -> None:
+    """Replace asyncio.Lock with cooperative deadlock-detecting version."""
+    global _async_lock_patched, _async_wait_graph  # noqa: PLW0603
+    if _async_lock_patched:
+        return
+    _async_wait_graph = WaitForGraph()
+    _async_lock_owners.clear()
+    asyncio.Lock = _CooperativeAsyncLock  # type: ignore[assignment,misc]
+    _async_lock_patched = True
+
+
+def _unpatch_asyncio_lock() -> None:
+    """Restore original asyncio.Lock."""
+    global _async_lock_patched, _async_wait_graph  # noqa: PLW0603
+    if not _async_lock_patched:
+        return
+    asyncio.Lock = _real_asyncio_lock  # type: ignore[assignment,misc]
+    if _async_wait_graph is not None:
+        _async_wait_graph.clear()
+    _async_wait_graph = None
+    _async_lock_owners.clear()
+    _async_lock_patched = False
 
 
 # ---------------------------------------------------------------------------
@@ -445,9 +556,16 @@ async def explore_async_dpor(
     if detect_sql and _sql_async_available:
         patch_sql_async()
 
+    _patch_asyncio_lock()
+
     try:
         while True:
             execution = engine.begin_execution()
+
+            # Clear wait-for graph between executions
+            if _async_wait_graph is not None:
+                _async_wait_graph.clear()
+            _async_lock_owners.clear()
 
             scheduler = AsyncDporScheduler(
                 engine,
@@ -464,19 +582,55 @@ async def explore_async_dpor(
                 for i, t in enumerate(tasks)
             }
 
+            deadlock_error: DeadlockError | None = None
+            timed_out = False
             try:
                 await scheduler.run_all(task_funcs, timeout=timeout_per_run)  # type: ignore[arg-type]
+            except DeadlockError as e:
+                deadlock_error = e
             except TimeoutError:
-                pass
+                timed_out = True
 
             # Mark any unfinished tasks as done in the DPOR engine
-            for i in range(num_tasks):
-                if i not in scheduler._tasks_done:
-                    scheduler.finish_task(i)
+            unfinished = [i for i in range(num_tasks) if i not in scheduler._tasks_done]
+            for i in unfinished:
+                scheduler.finish_task(i)
 
             result.num_explored += 1
 
-            if not invariant(state):
+            # Check for deadlock: explicit DeadlockError from wait-for
+            # graph cycle detection, or timeout (tasks blocked on locks
+            # get cancelled by run_all and appear "done" via _mark_done
+            # in the finally block, so we can't rely on unfinished alone).
+            is_deadlock = False
+            deadlock_explanation = ""
+            if deadlock_error is not None:
+                is_deadlock = True
+                deadlock_explanation = f"Deadlock detected: {deadlock_error.cycle_description}"
+            elif timed_out:
+                is_deadlock = True
+                if unfinished:
+                    stuck = ", ".join(str(t) for t in unfinished)
+                    deadlock_explanation = (
+                        f"Deadlock detected: tasks [{stuck}] did not complete. "
+                        f"All tasks were blocked and could not make progress."
+                    )
+                else:
+                    deadlock_explanation = (
+                        "Deadlock detected: all tasks were blocked and timed out. "
+                        "Tasks could not make progress (likely waiting on locks held by each other)."
+                    )
+
+            if is_deadlock:
+                result.property_holds = False
+                schedule_list = list(execution.schedule_trace)
+                result.failures.append((result.num_explored, schedule_list))
+                if result.counterexample is None:
+                    result.counterexample = schedule_list
+                    result.explanation = deadlock_explanation
+                if stop_on_first:
+                    return result
+            elif not invariant(state):
                 result.property_holds = False
                 schedule_list = list(execution.schedule_trace)
                 result.failures.append((result.num_explored, schedule_list))
@@ -488,6 +642,7 @@ async def explore_async_dpor(
             if not engine.next_execution():
                 break
     finally:
+        _unpatch_asyncio_lock()
         if detect_sql and _sql_async_available:
             unpatch_sql_async()
 
