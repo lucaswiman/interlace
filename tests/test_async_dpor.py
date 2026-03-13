@@ -406,3 +406,198 @@ class TestAsyncDporDeadlock:
         )
 
         assert result.property_holds, "Consistent lock order should not be reported as deadlock"
+
+    def test_self_deadlock_non_reentrant_lock(self) -> None:
+        """Single coroutine tries to acquire the same non-reentrant asyncio.Lock twice.
+
+        asyncio.Lock is not reentrant, so acquiring it while already held
+        by the same coroutine is an instant deadlock.
+        """
+        require_active("test_async_dpor_self_deadlock")
+        from frontrun.async_dpor import await_point, explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                self.lock = asyncio.Lock()
+
+        async def coroutine1(state: State) -> None:
+            await state.lock.acquire()
+            await await_point()
+            # Re-acquire the same non-reentrant lock — instant self-deadlock
+            await state.lock.acquire()
+            state.lock.release()
+            state.lock.release()
+
+        async def coroutine2(state: State) -> None:
+            await await_point()
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[coroutine1, coroutine2],
+                invariant=lambda s: True,
+                max_executions=20,
+                deadlock_timeout=1.0,
+                timeout_per_run=2.0,
+            )
+        )
+
+        assert not result.property_holds, "Self-deadlock should set property_holds=False"
+
+    def test_asymmetric_await_points_before_deadlock(self) -> None:
+        """Coroutines have different numbers of await points before the
+        deadlocking acquire.  Verifies DPOR explores enough interleavings
+        to reach the state where both hold one lock.
+        """
+        require_active("test_async_dpor_asymmetric_deadlock")
+        from frontrun.async_dpor import await_point, explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                self.lock_a = asyncio.Lock()
+                self.lock_b = asyncio.Lock()
+                self.log: list[str] = []
+
+        async def coroutine1(state: State) -> None:
+            # Several await points of work before acquiring locks
+            state.log.append("c1_step1")
+            await await_point()
+            state.log.append("c1_step2")
+            await await_point()
+            state.log.append("c1_step3")
+            await await_point()
+            # Now do the lock-order-inversion pattern
+            await state.lock_a.acquire()
+            try:
+                await await_point()
+                await state.lock_b.acquire()
+                state.lock_b.release()
+            finally:
+                state.lock_a.release()
+
+        async def coroutine2(state: State) -> None:
+            # Only one await point before locking
+            state.log.append("c2_step1")
+            await await_point()
+            await state.lock_b.acquire()
+            try:
+                await await_point()
+                await state.lock_a.acquire()
+                state.lock_a.release()
+            finally:
+                state.lock_b.release()
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[coroutine1, coroutine2],
+                invariant=lambda s: True,
+                max_executions=50,
+                deadlock_timeout=1.0,
+                timeout_per_run=2.0,
+            )
+        )
+
+        assert not result.property_holds, "Asymmetric deadlock should be found"
+
+    def test_data_dependent_lock_order_deadlock(self) -> None:
+        """Lock acquisition order depends on runtime state.
+
+        C1 always acquires lock_a then lock_b.  C2 reads a shared flag
+        (set by C1) that determines whether it acquires lock_b then lock_a
+        (deadlock) or lock_a then lock_b (safe).  Only the interleaving
+        where C1 sets the flag before C2 reads it triggers the deadlock.
+        """
+        require_active("test_async_dpor_data_dependent_deadlock")
+        from frontrun.async_dpor import await_point, explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                self.lock_a = asyncio.Lock()
+                self.lock_b = asyncio.Lock()
+                self.reverse_order = False
+
+        async def coroutine1(state: State) -> None:
+            state.reverse_order = True
+            await await_point()
+            await state.lock_a.acquire()
+            try:
+                await await_point()
+                await state.lock_b.acquire()
+                state.lock_b.release()
+            finally:
+                state.lock_a.release()
+
+        async def coroutine2(state: State) -> None:
+            await await_point()
+            if state.reverse_order:
+                # Opposite order from C1 → deadlock possible
+                await state.lock_b.acquire()
+                try:
+                    await await_point()
+                    await state.lock_a.acquire()
+                    state.lock_a.release()
+                finally:
+                    state.lock_b.release()
+            else:
+                # Same order as C1 → safe
+                await state.lock_a.acquire()
+                try:
+                    await await_point()
+                    await state.lock_b.acquire()
+                    state.lock_b.release()
+                finally:
+                    state.lock_a.release()
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[coroutine1, coroutine2],
+                invariant=lambda s: True,
+                deadlock_timeout=2.0,
+                timeout_per_run=3.0,
+            )
+        )
+
+        assert not result.property_holds, "Data-dependent deadlock should be found"
+
+    def test_dining_philosophers_four(self) -> None:
+        """Four dining philosophers: each acquires fork[i] then fork[(i+1)%4].
+
+        Classic deadlock when all philosophers pick up their left fork
+        simultaneously.
+        """
+        require_active("test_async_dpor_dining_philosophers")
+        from frontrun.async_dpor import await_point, explore_async_dpor
+
+        num_philosophers = 4
+
+        class State:
+            def __init__(self) -> None:
+                self.forks = [asyncio.Lock() for _ in range(num_philosophers)]
+
+        def make_philosopher(i: int):  # noqa: ANN202
+            async def philosopher(state: State) -> None:
+                left = i
+                right = (i + 1) % num_philosophers
+                await state.forks[left].acquire()
+                try:
+                    await await_point()
+                    await state.forks[right].acquire()
+                    state.forks[right].release()
+                finally:
+                    state.forks[left].release()
+
+            return philosopher
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[make_philosopher(i) for i in range(num_philosophers)],
+                invariant=lambda s: True,
+                deadlock_timeout=2.0,
+                timeout_per_run=3.0,
+            )
+        )
+
+        assert not result.property_holds, "Dining philosophers deadlock should be found"

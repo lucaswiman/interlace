@@ -1004,3 +1004,90 @@ class TestDeadlockAsInvariantViolation:
         )
 
         assert not result.property_holds, "Partial deadlock should still be detected"
+
+    def test_data_dependent_lock_order_deadlock(self) -> None:
+        """Lock acquisition order depends on runtime state.
+
+        T0 always acquires lock_a then lock_b.  T1 reads a shared flag
+        (set by T0) that determines lock order.  Only the interleaving
+        where T0 sets the flag before T1 reads it triggers the deadlock.
+        """
+
+        class State:
+            def __init__(self) -> None:
+                self.lock_a = threading.Lock()
+                self.lock_b = threading.Lock()
+                self.reverse_order = False
+                self.x = 0
+
+        def thread0(s: State) -> None:
+            s.reverse_order = True
+            s.x += 1  # write conflict
+            with s.lock_a:
+                s.x += 1
+                with s.lock_b:
+                    pass
+
+        def thread1(s: State) -> None:
+            s.x += 1  # write conflict
+            if s.reverse_order:
+                with s.lock_b:
+                    s.x += 1
+                    with s.lock_a:
+                        pass
+            else:
+                with s.lock_a:
+                    s.x += 1
+                    with s.lock_b:
+                        pass
+
+        result = explore_dpor(
+            setup=State,
+            threads=[thread0, thread1],
+            invariant=lambda s: True,
+            max_executions=500,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=True,
+        )
+
+        assert not result.property_holds, "Data-dependent deadlock should be found"
+        assert result.explanation is not None
+        assert "deadlock" in result.explanation.lower()
+
+    def test_dining_philosophers_four(self) -> None:
+        """Four dining philosophers with lock-order inversion on a circular set."""
+
+        num_philosophers = 4
+
+        class State:
+            def __init__(self) -> None:
+                self.forks = [threading.Lock() for _ in range(num_philosophers)]
+                self.x = 0
+
+        def make_philosopher(i: int):  # noqa: ANN202
+            def philosopher(s: State) -> None:
+                left = i
+                right = (i + 1) % num_philosophers
+                with s.forks[left]:
+                    s.x += 1  # write conflict
+                    with s.forks[right]:
+                        pass
+
+            return philosopher
+
+        result = explore_dpor(
+            setup=State,
+            threads=[make_philosopher(i) for i in range(num_philosophers)],
+            invariant=lambda s: True,
+            max_executions=2000,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=True,
+        )
+
+        assert not result.property_holds, "Dining philosophers deadlock should be found"
+        assert result.explanation is not None
+        assert "deadlock" in result.explanation.lower()
