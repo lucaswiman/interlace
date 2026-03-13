@@ -382,6 +382,16 @@ class DporScheduler:
 
     def _report_and_wait(self, frame: Any | None, thread_id: int) -> bool:
         with self._condition:
+            def _flush_pending_io() -> None:
+                pending_io: list[tuple[int, str]] | None = getattr(_dpor_tls, "pending_io", None)
+                if pending_io and getattr(_dpor_tls, "lock_depth", 0) == 0:
+                    engine = self.engine
+                    execution = self.execution
+                    for obj_key, io_kind in pending_io:
+                        with self._engine_lock:
+                            engine.report_io_access(execution, thread_id, obj_key, io_kind)
+                    pending_io.clear()
+
             # Merge LD_PRELOAD I/O events (C-level send/recv from e.g.
             # psycopg2) into the thread's pending_io list.  The preload
             # bridge buffers events from the pipe reader thread, keyed by
@@ -403,27 +413,6 @@ class DporScheduler:
                     else:
                         _dpor_tls.pending_io = _io_pairs
                         _pending_io = _io_pairs
-            # Flush deferred I/O reports when the thread is outside all locks.
-            # This must happen at report_and_wait level (not only inside
-            # _process_opcode) to guarantee it fires even when _process_opcode
-            # returns early due to unresolved instructions.
-            #
-            # All events flushed in one report_and_wait share the same
-            # path_id (from the most recent schedule() call).  The Rust
-            # engine's process_io_access uses record_io_access (keeps the
-            # FIRST access per thread, not the latest) so early accesses
-            # like a SELECT recv aren't overwritten by later ones like a
-            # COMMIT ack.  This ensures DPOR backtracks to the earliest
-            # (most useful) position for each thread.
-            if _pending_io and getattr(_dpor_tls, "lock_depth", 0) == 0:
-                _elock = self._engine_lock
-                _engine = self.engine
-                _execution = self.execution
-                for _obj_key, _io_kind in _pending_io:
-                    with _elock:
-                        _engine.report_io_access(_execution, thread_id, _obj_key, _io_kind)
-                _pending_io.clear()
-
             # Skip scheduling if inside an explicit SQL transaction to ensure
             # atomicity.  DPOR will see all transaction operations as a single
             # atomic block occurring at the COMMIT point.
@@ -435,6 +424,9 @@ class DporScheduler:
             from frontrun._io_detection import _io_tls as _iotls
 
             if getattr(_iotls, "_in_transaction", False) and not getattr(_iotls, "_is_autobegin", False):
+                # Explicit transactions remain atomic, but their pending I/O
+                # still belongs to the current thread's scheduling position.
+                _flush_pending_io()
                 if frame is not None:
                     _process_opcode(frame, self, thread_id)
                 return True
@@ -443,6 +435,12 @@ class DporScheduler:
                 if self._finished or self._error:
                     return False
                 if self._current_thread == thread_id:
+                    # Flush deferred I/O only once this thread actually owns
+                    # the current DPOR step. On free-threaded Python a thread
+                    # can reach report_and_wait while another thread still owns
+                    # the step; flushing earlier stamps the access onto the
+                    # wrong path_id and can hide the backtrack point.
+                    _flush_pending_io()
                     # Process opcode accesses only when it's our turn.
                     # Deferring this until the thread is scheduled ensures
                     # that accesses are recorded at the correct path_id
