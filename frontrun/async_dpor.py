@@ -108,6 +108,9 @@ _async_lock_patched = False
 _async_wait_graph: WaitForGraph | None = None
 # Map from lock id(obj) → owning task_id
 _async_lock_owners: dict[int, int] = {}
+# Reverse map: task_id → set of lock objects held by that task.
+# Used to force-release locks when a task finishes without calling release().
+_async_task_held_locks: dict[int, set[Any]] = {}
 
 
 class _CooperativeAsyncLock:
@@ -163,16 +166,22 @@ class _CooperativeAsyncLock:
             lock_id = id(self)
             self._owner = task_id
             _async_lock_owners[lock_id] = task_id
+            _async_task_held_locks.setdefault(task_id, set()).add(self)
             graph.add_holding(task_id, lock_id)
 
         return result
 
     def release(self) -> None:
         graph = _async_wait_graph
-        if graph is not None and self._owner is not None:
+        if self._owner is not None:
+            task_id = self._owner
             lock_id = id(self)
-            graph.remove_holding(self._owner, lock_id)
+            if graph is not None:
+                graph.remove_holding(task_id, lock_id)
             _async_lock_owners.pop(lock_id, None)
+            held = _async_task_held_locks.get(task_id)
+            if held is not None:
+                held.discard(self)
             self._owner = None
         self._lock.release()
 
@@ -181,6 +190,27 @@ class _CooperativeAsyncLock:
 
     async def __aexit__(self, *args: Any) -> None:
         self.release()
+
+
+def _release_task_async_locks(task_id: int) -> None:
+    """Force-release all asyncio.Lock objects held by *task_id*.
+
+    Called when a task finishes (normally or via exception) without
+    explicitly releasing its locks.  Cleans up both the WaitForGraph
+    holding edges and the underlying real asyncio.Lock objects.
+    """
+    held = _async_task_held_locks.pop(task_id, None)
+    if not held:
+        return
+    graph = _async_wait_graph
+    for lock_obj in list(held):
+        lock_id = id(lock_obj)
+        if graph is not None:
+            graph.remove_holding(task_id, lock_id)
+        _async_lock_owners.pop(lock_id, None)
+        lock_obj._owner = None
+        if lock_obj._lock.locked():
+            lock_obj._lock.release()
 
 
 def _patch_asyncio_lock() -> None:
@@ -204,6 +234,7 @@ def _unpatch_asyncio_lock() -> None:
         _async_wait_graph.clear()
     _async_wait_graph = None
     _async_lock_owners.clear()
+    _async_task_held_locks.clear()
     _async_lock_patched = False
 
 
@@ -397,6 +428,12 @@ class AsyncDporScheduler(InterleavedLoop):
         # Flush any remaining pending I/O before cleanup
         self._flush_pending_io(task_id)
 
+        # Release any row locks still held (task finished without COMMIT)
+        self.release_row_locks(task_id)
+
+        # Release any asyncio.Lock objects still held (task crashed without release())
+        _release_task_async_locks(task_id)
+
         _scheduler_var.set(None)
         _task_id_var.set(None)
         from frontrun._io_detection import set_dpor_scheduler, set_dpor_thread_id, set_io_reporter
@@ -556,6 +593,37 @@ async def run_with_schedule_dpor(
     return state
 
 
+def _format_async_trace(schedule: list[int], num_tasks: int) -> str:
+    """Generate a human-readable explanation of an async DPOR interleaving.
+
+    Converts the raw schedule (list of task IDs at each scheduling point)
+    into a readable description of task switches, making it easier to
+    understand the interleaving that caused an invariant violation.
+    """
+    if not schedule:
+        return "Invariant violation detected (empty schedule)."
+
+    lines: list[str] = []
+    lines.append("Invariant violation found after exploring interleaving schedule.")
+    lines.append(f"Tasks: {num_tasks}, Schedule steps: {len(schedule)}")
+    lines.append("")
+    lines.append("Task interleaving (task ID at each scheduling point):")
+
+    # Group consecutive runs by the same task
+    runs: list[tuple[int, int]] = []  # (task_id, count)
+    for tid in schedule:
+        if runs and runs[-1][0] == tid:
+            runs[-1] = (tid, runs[-1][1] + 1)
+        else:
+            runs.append((tid, 1))
+
+    for i, (tid, count) in enumerate(runs):
+        step_label = "step" if count == 1 else "steps"
+        lines.append(f"  [{i + 1}] Task {tid}: {count} {step_label}")
+
+    return "\n".join(lines)
+
+
 async def explore_async_dpor(
     setup: Callable[[], T],
     tasks: list[Callable[[T], Coroutine[Any, Any, None]]],
@@ -619,10 +687,11 @@ async def explore_async_dpor(
         while True:
             execution = engine.begin_execution()
 
-            # Clear wait-for graph between executions
+            # Clear wait-for graph and held-locks tracking between executions
             if _async_wait_graph is not None:
                 _async_wait_graph.clear()
             _async_lock_owners.clear()
+            _async_task_held_locks.clear()
 
             scheduler = AsyncDporScheduler(
                 engine,
@@ -640,6 +709,7 @@ async def explore_async_dpor(
             }
 
             deadlock_error: DeadlockError | None = None
+            task_error: Exception | None = None
             timed_out = False
             try:
                 await scheduler.run_all(task_funcs, timeout=timeout_per_run)  # type: ignore[arg-type]
@@ -647,6 +717,12 @@ async def explore_async_dpor(
                 deadlock_error = e
             except TimeoutError:
                 timed_out = True
+            except Exception as e:
+                # Task raised an exception (not deadlock/timeout).
+                # This is a valid exploration outcome — the cleanup already
+                # happened in _run's finally block, so lock state is clean.
+                # Record it and check the invariant below.
+                task_error = e
 
             # Mark any unfinished tasks as done in the DPOR engine
             unfinished = [i for i in range(num_tasks) if i not in scheduler._tasks_done]
@@ -687,12 +763,23 @@ async def explore_async_dpor(
                     result.explanation = deadlock_explanation
                 if stop_on_first:
                     return result
+            elif task_error is not None:
+                result.property_holds = False
+                schedule_list = list(execution.schedule_trace)
+                result.failures.append((result.num_explored, schedule_list))
+                if result.counterexample is None:
+                    result.counterexample = schedule_list
+                    exc_type = type(task_error).__name__
+                    result.explanation = f"Task crash in execution {result.num_explored}: {exc_type}: {task_error}"
+                if stop_on_first:
+                    return result
             elif not invariant(state):
                 result.property_holds = False
                 schedule_list = list(execution.schedule_trace)
                 result.failures.append((result.num_explored, schedule_list))
                 if result.counterexample is None:
                     result.counterexample = schedule_list
+                    result.explanation = _format_async_trace(schedule_list, num_tasks)
                 if stop_on_first:
                     return result
 
