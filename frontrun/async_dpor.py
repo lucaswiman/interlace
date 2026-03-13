@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Generator
 from typing import Any, TypeVar
 
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
@@ -309,7 +309,7 @@ class _AutoPauseIterator:
 
     __slots__ = ("_inner", "_task_id", "_scheduler", "_pause_iter", "_buffered_value")
 
-    def __init__(self, inner_coro: Any, task_id: int, scheduler: "AsyncDporScheduler") -> None:
+    def __init__(self, inner_coro: Any, task_id: int, scheduler: AsyncDporScheduler) -> None:
         self._inner = inner_coro
         self._task_id = task_id
         self._scheduler = scheduler
@@ -366,11 +366,11 @@ class _AutoPauseCoroutine:
 
     __slots__ = ("_iter",)
 
-    def __init__(self, coro: Any, task_id: int, scheduler: "AsyncDporScheduler") -> None:
+    def __init__(self, coro: Any, task_id: int, scheduler: AsyncDporScheduler) -> None:
         self._iter = _AutoPauseIterator(coro, task_id, scheduler)
 
-    def __await__(self) -> _AutoPauseIterator:
-        return self._iter
+    def __await__(self) -> Generator[Any, Any, None]:
+        return self._iter  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
