@@ -240,6 +240,7 @@ class AsyncDporScheduler(InterleavedLoop):
         # Wrap each user function to insert an initial pause
         wrapped: dict[Any, Callable[..., Awaitable[None]]] = {}
         for tid, func in task_funcs.items():
+
             async def _wrapped(f: Callable[..., Awaitable[None]] = func, t: Any = tid) -> None:
                 await self.pause(t)  # DPOR scheduling decision
                 await f()

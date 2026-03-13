@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from frontrun.cli import require_active
 
 
@@ -46,7 +44,7 @@ class TestAsyncDporBasic:
     def test_no_race_when_atomic(self) -> None:
         """DPOR should verify correctness when there's no race."""
         require_active("test_async_dpor_no_race")
-        from frontrun.async_dpor import await_point, explore_async_dpor
+        from frontrun.async_dpor import explore_async_dpor
 
         class Counter:
             def __init__(self) -> None:

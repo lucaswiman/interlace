@@ -65,8 +65,8 @@ async def async_sqlalchemy_dpor(
     """
     from frontrun.async_dpor import explore_async_dpor
 
-    async def wrapped_setup() -> T:
-        await engine.dispose()
+    def wrapped_setup() -> T:
+        engine.sync_engine.dispose()
         return setup()
 
     def wrap_task(fn: Callable[[T], Coroutine[Any, Any, None]]) -> Callable[[T], Coroutine[Any, Any, None]]:
@@ -84,10 +84,8 @@ async def async_sqlalchemy_dpor(
 
     wrapped_tasks = [wrap_task(fn) for fn in tasks]
 
-    # explore_async_dpor expects a sync setup callable; wrap the async one
-    # by calling setup() synchronously (it creates state, not I/O)
     return await explore_async_dpor(
-        setup=setup,
+        setup=wrapped_setup,
         tasks=wrapped_tasks,
         invariant=invariant,
         detect_sql=detect_sql,
