@@ -382,6 +382,7 @@ class DporScheduler:
 
     def _report_and_wait(self, frame: Any | None, thread_id: int) -> bool:
         with self._condition:
+
             def _flush_pending_io() -> None:
                 pending_io: list[tuple[int, str]] | None = getattr(_dpor_tls, "pending_io", None)
                 if pending_io and getattr(_dpor_tls, "lock_depth", 0) == 0:
