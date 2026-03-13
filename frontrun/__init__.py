@@ -15,6 +15,10 @@ DPOR (Dynamic Partial Order Reduction) systematic exploration::
 
     from frontrun.dpor import explore_dpor
 
+Async DPOR systematic exploration::
+
+    from frontrun.async_dpor import explore_async_dpor, await_point
+
 Bytecode exploration::
 
     from frontrun.bytecode import explore_interleavings
