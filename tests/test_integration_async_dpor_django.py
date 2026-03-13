@@ -1,0 +1,167 @@
+"""Integration tests: async DPOR with Django async ORM against real Postgres.
+
+Tests that explore_async_dpor can detect race conditions using Django's
+async ORM, with await_point() as the scheduling granularity.
+
+Requires a running Postgres with a ``frontrun_test`` database::
+
+    createdb frontrun_test
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+
+import pytest
+
+# Allow sync Django ORM from async context in tests
+os.environ.setdefault("DJANGO_ALLOW_ASYNC_UNSAFE", "true")
+
+try:
+    import django
+    from django.conf import settings
+except ImportError:
+    pytest.skip("django not installed", allow_module_level=True)
+
+try:
+    import psycopg2  # noqa: F401
+except ImportError:
+    pytest.skip("psycopg2 not installed", allow_module_level=True)
+
+_DB_NAME = os.environ.get("FRONTRUN_TEST_DB", "frontrun_test")
+
+if not settings.configured:
+    settings.configure(
+        DATABASES={"default": {"ENGINE": "django.db.backends.postgresql", "NAME": _DB_NAME}},
+        INSTALLED_APPS=["django.contrib.contenttypes", "django.contrib.auth"],
+        DEFAULT_AUTO_FIELD="django.db.models.BigAutoField",
+    )
+    django.setup()
+
+from django.contrib.auth import get_user_model  # noqa: E402
+from django.db import connection  # noqa: E402
+
+from frontrun.async_dpor import await_point, explore_async_dpor  # noqa: E402
+
+User = get_user_model()
+
+
+@pytest.fixture(scope="module")
+def _pg_available():
+    """Ensure Postgres is available and setup test tables."""
+    try:
+        connection.ensure_connection()
+    except Exception:
+        pytest.skip(f"PostgreSQL not available at {_DB_NAME}")
+
+    with connection.cursor() as cur:
+        for tbl in [
+            "auth_user_groups",
+            "auth_user_user_permissions",
+            "auth_user",
+            "auth_group_permissions",
+            "auth_group",
+            "auth_permission",
+            "django_content_type",
+        ]:
+            cur.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE")
+    with connection.schema_editor() as editor:
+        from django.contrib.auth.models import Group, Permission
+        from django.contrib.contenttypes.models import ContentType
+
+        editor.create_model(ContentType)
+        editor.create_model(Permission)
+        editor.create_model(Group)
+        editor.create_model(User)
+    yield
+    with connection.cursor() as cur:
+        for tbl in [
+            "auth_user_groups",
+            "auth_user_user_permissions",
+            "auth_user",
+            "auth_group_permissions",
+            "auth_group",
+            "auth_permission",
+            "django_content_type",
+        ]:
+            cur.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE")
+
+
+class TestAsyncDporDjango:
+    """Async DPOR integration tests with Django async ORM."""
+
+    @pytest.mark.intentionally_leaves_dangling_threads
+    def test_activation_race(self, _pg_available) -> None:
+        """Async DPOR should detect a double-activation race using Django async ORM."""
+
+        class _State:
+            def __init__(self) -> None:
+                User.objects.filter(username="async_testuser").delete()
+                User.objects.create_user(username="async_testuser", is_active=False)
+                self.results: list[str | None] = [None, None]
+
+        async def activate(state: _State, idx: int) -> None:
+            from asgiref.sync import sync_to_async
+
+            user = await sync_to_async(User.objects.get)(username="async_testuser")
+            is_active = user.is_active
+            await await_point()
+            if not is_active:
+                user.is_active = True
+                await sync_to_async(user.save)()
+                state.results[idx] = "activated"
+            else:
+                state.results[idx] = "already_active"
+
+        def make_task(idx: int):
+            async def task(state: _State) -> None:
+                await activate(state, idx)
+
+            return task
+
+        def invariant(state: _State) -> bool:
+            return not (state.results[0] == "activated" and state.results[1] == "activated")
+
+        async def run_test():
+            return await explore_async_dpor(
+                setup=_State,
+                tasks=[make_task(0), make_task(1)],
+                invariant=invariant,
+                detect_sql=True,
+                deadlock_timeout=10.0,
+                timeout_per_run=15.0,
+            )
+
+        result = asyncio.run(run_test())
+        assert not result.property_holds, (
+            f"Async DPOR should detect the double-activation race. "
+            f"Explored {result.num_explored} interleavings."
+        )
+
+    def test_exploration_completes(self, _pg_available) -> None:
+        """Verify exploration completes without deadlock with Django async."""
+
+        class _State:
+            def __init__(self) -> None:
+                User.objects.filter(username="async_testuser2").delete()
+                User.objects.create_user(username="async_testuser2", is_active=False)
+
+        async def read_only(state: _State) -> None:
+            from asgiref.sync import sync_to_async
+
+            await sync_to_async(User.objects.get)(username="async_testuser2")
+            await await_point()
+
+        async def run_test():
+            return await explore_async_dpor(
+                setup=_State,
+                tasks=[read_only, read_only],
+                invariant=lambda s: True,
+                detect_sql=True,
+                deadlock_timeout=10.0,
+            )
+
+        result = asyncio.run(run_test())
+        assert result.property_holds
+        assert result.num_explored >= 1

@@ -286,6 +286,12 @@ class AsyncDporScheduler(InterleavedLoop):
         if self._detect_sql:
             set_io_reporter(None)
 
+    def acquire_row_locks(self, thread_id: int, resource_ids: list[str]) -> None:
+        """No-op for async DPOR (row locks are handled at the DB level)."""
+
+    def release_row_locks(self, thread_id: int) -> None:
+        """No-op for async DPOR (row locks are handled at the DB level)."""
+
     def _flush_pending_io(self, task_id: int) -> None:
         """Flush pending I/O accesses to the DPOR engine."""
         pending = self._pending_io.get(task_id)
