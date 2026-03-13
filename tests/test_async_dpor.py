@@ -178,7 +178,6 @@ class TestAsyncDporDeadlock:
         async def coroutine1(state: State) -> None:
             await state.row1.acquire()
             try:
-                await asyncio.sleep(0)
                 await state.row2.acquire()
                 state.row2.release()
             finally:
@@ -187,7 +186,6 @@ class TestAsyncDporDeadlock:
         async def coroutine2(state: State) -> None:
             await state.row2.acquire()
             try:
-                await asyncio.sleep(0)
                 await state.row1.acquire()
                 state.row1.release()
             finally:
@@ -225,7 +223,6 @@ class TestAsyncDporDeadlock:
         async def coroutine1(state: State) -> None:
             await state.row1.acquire()
             try:
-                await asyncio.sleep(0)
                 await state.row2.acquire()
                 state.row2.release()
             finally:
@@ -234,7 +231,6 @@ class TestAsyncDporDeadlock:
         async def coroutine2(state: State) -> None:
             await state.row2.acquire()
             try:
-                await asyncio.sleep(0)
                 await state.row3.acquire()
                 state.row3.release()
             finally:
@@ -243,7 +239,6 @@ class TestAsyncDporDeadlock:
         async def coroutine3(state: State) -> None:
             await state.row3.acquire()
             try:
-                await asyncio.sleep(0)
                 await state.row1.acquire()
                 state.row1.release()
             finally:
@@ -303,7 +298,6 @@ class TestAsyncDporDeadlock:
                 await db.execute("BEGIN")
                 await db.execute("UPDATE t SET v = 1 WHERE id = 1")
                 # Row lock on sql:t:(('id', 1)) is now held by this task
-                await asyncio.sleep(0)
                 # Try to acquire the asyncio.Lock — may block if C2 holds it
                 await state.app_lock.acquire()
                 state.app_lock.release()
@@ -313,7 +307,6 @@ class TestAsyncDporDeadlock:
             # Acquire the app lock first, then try to get the SQL row lock
             await state.app_lock.acquire()
             try:
-                await asyncio.sleep(0)
                 async with aiosqlite.connect(state.db_path) as db:
                     await db.execute("BEGIN")
                     # This tries to acquire the same row lock held by C1
@@ -360,7 +353,6 @@ class TestAsyncDporDeadlock:
         async def coroutine1(state: State) -> None:
             await state.lock_a.acquire()
             try:
-                await asyncio.sleep(0)
                 await state.lock_b.acquire()
                 state.lock_b.release()
             finally:
@@ -369,14 +361,12 @@ class TestAsyncDporDeadlock:
         async def coroutine2(state: State) -> None:
             await state.lock_b.acquire()
             try:
-                await asyncio.sleep(0)
                 await state.lock_a.acquire()
                 state.lock_a.release()
             finally:
                 state.lock_b.release()
 
         async def coroutine3(state: State) -> None:
-            await asyncio.sleep(0)
             state.c3_done = True
 
         result = asyncio.run(
@@ -408,7 +398,6 @@ class TestAsyncDporDeadlock:
         async def coroutine1(state: State) -> None:
             await state.lock_a.acquire()
             try:
-                await asyncio.sleep(0)
                 await state.lock_b.acquire()
                 state.lock_b.release()
             finally:
@@ -417,7 +406,6 @@ class TestAsyncDporDeadlock:
         async def coroutine2(state: State) -> None:
             await state.lock_a.acquire()
             try:
-                await asyncio.sleep(0)
                 await state.lock_b.acquire()
                 state.lock_b.release()
             finally:
@@ -450,14 +438,13 @@ class TestAsyncDporDeadlock:
 
         async def coroutine1(state: State) -> None:
             await state.lock.acquire()
-            await asyncio.sleep(0)
             # Re-acquire the same non-reentrant lock — instant self-deadlock
             await state.lock.acquire()
             state.lock.release()
             state.lock.release()
 
         async def coroutine2(state: State) -> None:
-            await asyncio.sleep(0)
+            pass
 
         result = asyncio.run(
             explore_async_dpor(
@@ -497,7 +484,6 @@ class TestAsyncDporDeadlock:
             # Now do the lock-order-inversion pattern
             await state.lock_a.acquire()
             try:
-                await asyncio.sleep(0)
                 await state.lock_b.acquire()
                 state.lock_b.release()
             finally:
@@ -509,7 +495,6 @@ class TestAsyncDporDeadlock:
             await asyncio.sleep(0)
             await state.lock_b.acquire()
             try:
-                await asyncio.sleep(0)
                 await state.lock_a.acquire()
                 state.lock_a.release()
             finally:
@@ -550,7 +535,6 @@ class TestAsyncDporDeadlock:
             await asyncio.sleep(0)
             await state.lock_a.acquire()
             try:
-                await asyncio.sleep(0)
                 await state.lock_b.acquire()
                 state.lock_b.release()
             finally:
@@ -562,7 +546,6 @@ class TestAsyncDporDeadlock:
                 # Opposite order from C1 → deadlock possible
                 await state.lock_b.acquire()
                 try:
-                    await asyncio.sleep(0)
                     await state.lock_a.acquire()
                     state.lock_a.release()
                 finally:
@@ -571,7 +554,6 @@ class TestAsyncDporDeadlock:
                 # Same order as C1 → safe
                 await state.lock_a.acquire()
                 try:
-                    await asyncio.sleep(0)
                     await state.lock_b.acquire()
                     state.lock_b.release()
                 finally:
@@ -612,7 +594,6 @@ class TestAsyncDporDeadlock:
                 right = (i + 1) % num_philosophers
                 await state.forks[left].acquire()
                 try:
-                    await asyncio.sleep(0)
                     await state.forks[right].acquire()
                     state.forks[right].release()
                 finally:
