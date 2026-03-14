@@ -49,6 +49,7 @@ from frontrun._cooperative import (
 )
 from frontrun._deadlock import DeadlockError, SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
 from frontrun._io_detection import (
+    _io_tls,
     patch_io,
     set_io_reporter,
     unpatch_io,
@@ -262,6 +263,12 @@ class BytecodeShuffler:
             if event == "opcode":
                 if recorder is not None:
                     recorder.record_from_opcode(thread_id, frame)
+                # Skip scheduling inside explicit SQL transactions to match
+                # DporScheduler.report_and_wait behavior.  DPOR generates
+                # schedules that omit opcodes inside transaction.atomic()
+                # blocks, so the replay must do the same.
+                if getattr(_io_tls, "_in_transaction", False) and not getattr(_io_tls, "_is_autobegin", False):
+                    return trace
                 scheduler.wait_for_turn(thread_id)
                 return trace
 
@@ -325,6 +332,12 @@ class BytecodeShuffler:
                 frame = sys._getframe(1)
                 recorder.record_from_opcode(thread_id, frame)
 
+            # Skip scheduling inside explicit SQL transactions to match
+            # DporScheduler.report_and_wait behavior.  DPOR generates
+            # schedules that omit opcodes inside transaction.atomic()
+            # blocks, so the replay must do the same.
+            if getattr(_io_tls, "_in_transaction", False) and not getattr(_io_tls, "_is_autobegin", False):
+                return None
             scheduler.wait_for_turn(thread_id)
             return None
 
