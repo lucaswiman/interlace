@@ -62,7 +62,9 @@ from frontrun._sql_anomaly import classify_sql_anomaly
 from frontrun._sql_cursor import clear_sql_metadata, is_tid_suppressed, patch_sql, unpatch_sql
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
+from frontrun._tracing import TraceFilter as _TraceFilter
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
+from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.cli import require_active as _require_frontrun_env
 from frontrun.common import InterleavingResult
@@ -1783,6 +1785,7 @@ def explore_dpor(
     total_timeout: float | None = None,
     warn_nondeterministic_sql: bool = True,
     lock_timeout: int | None = None,
+    trace_packages: list[str] | None = None,
 ) -> InterleavingResult:
     """Systematically explore interleavings using DPOR.
 
@@ -1829,6 +1832,10 @@ def explore_dpor(
             scheduler from deadlocking when two threads contend on the
             same PostgreSQL row lock (defect #6).  Value is in
             milliseconds; 2000 (2 seconds) is a good default.
+        trace_packages: List of package name patterns (fnmatch syntax) to
+            trace in addition to user code.  By default, code in
+            site-packages is skipped.  Use this to include specific
+            installed packages, e.g. ``["django_*", "mylib.*"]``.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample found.
@@ -1841,6 +1848,8 @@ def explore_dpor(
        automatically skipped.
     """
     _require_frontrun_env("explore_dpor")
+    if trace_packages:
+        _set_active_trace_filter(_TraceFilter(trace_packages))
     num_threads = len(threads)
     pb = None if preemption_bound is None else preemption_bound
     me = None if max_executions is None else max_executions
@@ -2051,6 +2060,7 @@ def explore_dpor(
                 if not engine.next_execution():
                     break
     finally:
+        _set_active_trace_filter(None)
         set_lock_timeout(prev_lock_timeout)
         if preload_dispatcher is not None:
             preload_dispatcher.stop()

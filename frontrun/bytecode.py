@@ -56,7 +56,9 @@ from frontrun._io_detection import (
 from frontrun._sql_cursor import patch_sql, unpatch_sql
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
+from frontrun._tracing import TraceFilter as _TraceFilter
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
+from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.cli import require_active as _require_frontrun_env
 from frontrun.common import InterleavingResult
@@ -582,6 +584,7 @@ def explore_interleavings(
     reproduce_on_failure: int = 10,
     total_timeout: float | None = None,
     warn_nondeterministic_sql: bool = True,
+    trace_packages: list[str] | None = None,
 ) -> InterleavingResult:
     """Search for interleavings that violate an invariant.
 
@@ -625,6 +628,10 @@ def explore_interleavings(
             failed (e.g. psycopg2 without RETURNING).  Set to False to
             suppress.  When capture succeeds, INSERTs use stable
             indexical resource IDs automatically.
+        trace_packages: List of package name patterns (fnmatch syntax) to
+            trace in addition to user code.  By default, code in
+            site-packages is skipped.  Use this to include specific
+            installed packages, e.g. ``["django_*", "mylib.*"]``.
 
     Returns:
         InterleavingResult with the outcome.  The ``unique_interleavings``
@@ -632,78 +639,83 @@ def explore_interleavings(
         providing a lower bound on exploration coverage.
     """
     _require_frontrun_env("explore_interleavings")
-    rng = random.Random(seed)
-    num_threads = len(threads)
-    result = InterleavingResult(property_holds=True, num_explored=0)
-    seen_schedule_hashes: set[int] = set()
-    total_deadline = time.monotonic() + total_timeout if total_timeout is not None else None
+    if trace_packages:
+        _set_active_trace_filter(_TraceFilter(trace_packages))
+    try:
+        rng = random.Random(seed)
+        num_threads = len(threads)
+        result = InterleavingResult(property_holds=True, num_explored=0)
+        seen_schedule_hashes: set[int] = set()
+        total_deadline = time.monotonic() + total_timeout if total_timeout is not None else None
 
-    for _ in range(max_attempts):
-        if total_deadline is not None and time.monotonic() > total_deadline:
-            break
-        num_rounds = rng.randint(1, max(1, max_ops // num_threads))
-        schedule: list[int] = []
-        for _ in range(num_rounds):
-            round_perm = list(range(num_threads))
-            rng.shuffle(round_perm)
-            schedule.extend(round_perm)
+        for _ in range(max_attempts):
+            if total_deadline is not None and time.monotonic() > total_deadline:
+                break
+            num_rounds = rng.randint(1, max(1, max_ops // num_threads))
+            schedule: list[int] = []
+            for _ in range(num_rounds):
+                round_perm = list(range(num_threads))
+                rng.shuffle(round_perm)
+                schedule.extend(round_perm)
 
-        clear_insert_tracker()
-        if debug:
-            print(f"Running with {schedule=} {threads=}", flush=True)
-        recorder = TraceRecorder()
-        state = run_with_schedule(
-            schedule,
-            setup,
-            threads,
-            timeout=timeout_per_run,
-            detect_io=detect_io,
-            deadlock_timeout=deadlock_timeout,
-            trace_recorder=recorder,
-        )
-        result.num_explored += 1
-        seen_schedule_hashes.add(hash(tuple(schedule)))
-
-        if warn_nondeterministic_sql:
-            check_uncaptured_inserts()
-
-        if not invariant(state):
-            result.property_holds = False
-            result.counterexample = schedule
-            result.unique_interleavings = len(seen_schedule_hashes)
-
-            # Replay the counterexample to measure reproducibility
-            if reproduce_on_failure > 0:
-                successes = 0
-                for _ in range(reproduce_on_failure):
-                    try:
-                        replay_state = run_with_schedule(
-                            schedule,
-                            setup,
-                            threads,
-                            timeout=timeout_per_run,
-                            detect_io=detect_io,
-                            deadlock_timeout=deadlock_timeout,
-                        )
-                        if not invariant(replay_state):
-                            successes += 1
-                    except Exception:
-                        pass  # timeout / crash during replay — not a reproduction
-                result.reproduction_attempts = reproduce_on_failure
-                result.reproduction_successes = successes
-
-            result.explanation = format_trace(
-                recorder.events,
-                num_threads=num_threads,
-                num_explored=result.num_explored,
-                reproduction_attempts=result.reproduction_attempts,
-                reproduction_successes=result.reproduction_successes,
+            clear_insert_tracker()
+            if debug:
+                print(f"Running with {schedule=} {threads=}", flush=True)
+            recorder = TraceRecorder()
+            state = run_with_schedule(
+                schedule,
+                setup,
+                threads,
+                timeout=timeout_per_run,
+                detect_io=detect_io,
+                deadlock_timeout=deadlock_timeout,
+                trace_recorder=recorder,
             )
+            result.num_explored += 1
+            seen_schedule_hashes.add(hash(tuple(schedule)))
 
-            return result
+            if warn_nondeterministic_sql:
+                check_uncaptured_inserts()
 
-    result.unique_interleavings = len(seen_schedule_hashes)
-    return result
+            if not invariant(state):
+                result.property_holds = False
+                result.counterexample = schedule
+                result.unique_interleavings = len(seen_schedule_hashes)
+
+                # Replay the counterexample to measure reproducibility
+                if reproduce_on_failure > 0:
+                    successes = 0
+                    for _ in range(reproduce_on_failure):
+                        try:
+                            replay_state = run_with_schedule(
+                                schedule,
+                                setup,
+                                threads,
+                                timeout=timeout_per_run,
+                                detect_io=detect_io,
+                                deadlock_timeout=deadlock_timeout,
+                            )
+                            if not invariant(replay_state):
+                                successes += 1
+                        except Exception:
+                            pass  # timeout / crash during replay — not a reproduction
+                    result.reproduction_attempts = reproduce_on_failure
+                    result.reproduction_successes = successes
+
+                result.explanation = format_trace(
+                    recorder.events,
+                    num_threads=num_threads,
+                    num_explored=result.num_explored,
+                    reproduction_attempts=result.reproduction_attempts,
+                    reproduction_successes=result.reproduction_successes,
+                )
+
+                return result
+
+        result.unique_interleavings = len(seen_schedule_hashes)
+        return result
+    finally:
+        _set_active_trace_filter(None)
 
 
 def schedule_strategy(num_threads: int, max_ops: int = 300):

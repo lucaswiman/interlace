@@ -23,6 +23,12 @@ from typing import Any, TypeVar
 
 T = TypeVar("T")
 
+#: Default ``trace_packages`` for Django projects.  Traces code inside any
+#: ``django_*`` third-party app (e.g. ``django_filters``, ``django_rest_framework``)
+#: and ``django.contrib.sites`` submodules, since these commonly participate
+#: in race conditions visible during integration tests.
+DJANGO_TRACE_PACKAGES: list[str] = ["django_*", "django.contrib.sites.*"]
+
 
 def django_dpor(
     setup: Callable[[], T],
@@ -32,12 +38,17 @@ def django_dpor(
     db_alias: str = "default",
     lock_timeout: int | None = None,
     detect_io: bool = True,
+    trace_packages: list[str] | None = None,
     **kwargs: Any,
 ) -> Any:
     """Run ``explore_dpor`` with per-thread Django connection management.
 
     Each thread closes the shared Django connection and opens a fresh one,
     ensuring DPOR sees independent connections per thread.
+
+    By default, ``trace_packages`` is set to :data:`DJANGO_TRACE_PACKAGES`
+    so that code inside ``django_*`` apps and ``django.contrib.sites``
+    submodules is traced.  Pass an explicit list (or ``[]``) to override.
 
     Args:
         setup: Called once per execution to create fresh shared state.
@@ -48,11 +59,17 @@ def django_dpor(
         lock_timeout: If set, execute ``SET lock_timeout = <N>ms`` on each
             thread's connection before running the thread.
         detect_io: Passed through to ``explore_dpor`` (default True).
+        trace_packages: Package name patterns (fnmatch syntax) to trace.
+            Defaults to :data:`DJANGO_TRACE_PACKAGES`.  Pass ``[]`` to
+            disable extra tracing beyond user code.
         **kwargs: Forwarded verbatim to ``explore_dpor``.
     """
     from django.db import connections  # type: ignore[import-not-found]
 
     from frontrun.dpor import explore_dpor
+
+    if trace_packages is None:
+        trace_packages = list(DJANGO_TRACE_PACKAGES)
 
     def wrapped_setup() -> T:
         connections.close_all()
@@ -81,5 +98,6 @@ def django_dpor(
         invariant=invariant,
         detect_io=detect_io,
         lock_timeout=lock_timeout,
+        trace_packages=trace_packages,
         **kwargs,
     )

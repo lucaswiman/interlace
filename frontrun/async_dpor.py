@@ -50,7 +50,9 @@ from collections.abc import Awaitable, Callable, Coroutine, Generator
 from typing import Any, TypeVar
 
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
+from frontrun._tracing import TraceFilter as _TraceFilter
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
+from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.async_scheduler import InterleavedLoop
 from frontrun.common import InterleavingResult
@@ -908,6 +910,7 @@ async def explore_async_dpor(
     stop_on_first: bool = True,
     deadlock_timeout: float = 5.0,
     detect_sql: bool = False,
+    trace_packages: list[str] | None = None,
 ) -> InterleavingResult:
     """Systematically explore async interleavings using DPOR.
 
@@ -935,10 +938,16 @@ async def explore_async_dpor(
         stop_on_first: If True (default), stop on first invariant violation.
         deadlock_timeout: Seconds to wait before declaring a deadlock.
         detect_sql: If True, patch async DBAPI drivers for SQL tracking.
+        trace_packages: List of package name patterns (fnmatch syntax) to
+            trace in addition to user code.  By default, code in
+            site-packages is skipped.  Use this to include specific
+            installed packages, e.g. ``["django_*", "mylib.*"]``.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample.
     """
+    if trace_packages:
+        _set_active_trace_filter(_TraceFilter(trace_packages))
     num_tasks = len(tasks)
     pb = None if preemption_bound is None else preemption_bound
     me = None if max_executions is None else max_executions
@@ -1059,6 +1068,7 @@ async def explore_async_dpor(
             if not engine.next_execution():
                 break
     finally:
+        _set_active_trace_filter(None)
         _unpatch_asyncio_lock()
         if detect_sql and _sql_async_available:
             unpatch_sql_async()
