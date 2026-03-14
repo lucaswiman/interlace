@@ -946,7 +946,7 @@ async def explore_async_dpor(
     Returns:
         InterleavingResult with exploration statistics and any counterexample.
     """
-    if trace_packages:
+    if trace_packages is not None:
         _set_active_trace_filter(_TraceFilter(trace_packages))
     num_tasks = len(tasks)
     pb = None if preemption_bound is None else preemption_bound

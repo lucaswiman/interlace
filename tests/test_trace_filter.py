@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 
 import pytest
 
@@ -20,31 +21,46 @@ from frontrun._tracing import (
 # ---------------------------------------------------------------------------
 
 
+def _get_site_packages() -> str:
+    sp_dir = next((d for d in _SKIP_DIRS if "site-packages" in d), None)
+    if sp_dir is None:
+        pytest.skip("no site-packages in _SKIP_DIRS")
+    return sp_dir
+
+
 class TestFilenameToModule:
-    def test_returns_none_for_user_code(self, tmp_path: object) -> None:
+    def test_returns_none_for_user_code(self) -> None:
         assert _filename_to_module("/home/user/myproject/app.py") is None
 
     def test_converts_site_packages_path(self) -> None:
-        # Pick a real site-packages dir from _SKIP_DIRS
-        sp_dir = next((d for d in _SKIP_DIRS if "site-packages" in d), None)
-        if sp_dir is None:
-            pytest.skip("no site-packages in _SKIP_DIRS")
+        sp_dir = _get_site_packages()
         fake = os.path.join(sp_dir, "django_filters", "views.py")
         assert _filename_to_module(fake) == "django_filters.views"
 
     def test_converts_init_py(self) -> None:
-        sp_dir = next((d for d in _SKIP_DIRS if "site-packages" in d), None)
-        if sp_dir is None:
-            pytest.skip("no site-packages in _SKIP_DIRS")
+        sp_dir = _get_site_packages()
         fake = os.path.join(sp_dir, "django_filters", "__init__.py")
         assert _filename_to_module(fake) == "django_filters"
 
     def test_converts_nested_module(self) -> None:
-        sp_dir = next((d for d in _SKIP_DIRS if "site-packages" in d), None)
-        if sp_dir is None:
-            pytest.skip("no site-packages in _SKIP_DIRS")
+        sp_dir = _get_site_packages()
         fake = os.path.join(sp_dir, "django", "contrib", "sites", "models.py")
         assert _filename_to_module(fake) == "django.contrib.sites.models"
+
+    def test_converts_c_extension_with_abi_tag(self) -> None:
+        sp_dir = _get_site_packages()
+        fake = os.path.join(sp_dir, "_sqlite3.cpython-314-x86_64-linux-gnu.so")
+        assert _filename_to_module(fake) == "_sqlite3"
+
+    def test_converts_c_extension_simple_so(self) -> None:
+        sp_dir = _get_site_packages()
+        fake = os.path.join(sp_dir, "mymod.so")
+        assert _filename_to_module(fake) == "mymod"
+
+    def test_converts_nested_c_extension(self) -> None:
+        sp_dir = _get_site_packages()
+        fake = os.path.join(sp_dir, "pkg", "_speedups.cpython-314-x86_64-linux-gnu.so")
+        assert _filename_to_module(fake) == "pkg._speedups"
 
 
 # ---------------------------------------------------------------------------
@@ -58,43 +74,40 @@ class TestTraceFilter:
         assert filt.should_trace_file("/home/user/myproject/app.py") is True
 
     def test_default_skips_site_packages(self) -> None:
+        sp_dir = _get_site_packages()
         filt = TraceFilter()
-        sp_dir = next((d for d in _SKIP_DIRS if "site-packages" in d), None)
-        if sp_dir is None:
-            pytest.skip("no site-packages in _SKIP_DIRS")
         fake = os.path.join(sp_dir, "django_filters", "views.py")
         assert filt.should_trace_file(fake) is False
 
     def test_trace_packages_allows_matching_site_packages(self) -> None:
+        sp_dir = _get_site_packages()
         filt = TraceFilter(trace_packages=["django_*"])
-        sp_dir = next((d for d in _SKIP_DIRS if "site-packages" in d), None)
-        if sp_dir is None:
-            pytest.skip("no site-packages in _SKIP_DIRS")
         fake = os.path.join(sp_dir, "django_filters", "views.py")
         assert filt.should_trace_file(fake) is True
 
     def test_trace_packages_rejects_non_matching(self) -> None:
+        sp_dir = _get_site_packages()
         filt = TraceFilter(trace_packages=["django_*"])
-        sp_dir = next((d for d in _SKIP_DIRS if "site-packages" in d), None)
-        if sp_dir is None:
-            pytest.skip("no site-packages in _SKIP_DIRS")
         fake = os.path.join(sp_dir, "requests", "api.py")
         assert filt.should_trace_file(fake) is False
 
     def test_trace_packages_dot_star_pattern(self) -> None:
+        sp_dir = _get_site_packages()
         filt = TraceFilter(trace_packages=["django.contrib.sites.*"])
-        sp_dir = next((d for d in _SKIP_DIRS if "site-packages" in d), None)
-        if sp_dir is None:
-            pytest.skip("no site-packages in _SKIP_DIRS")
         fake = os.path.join(sp_dir, "django", "contrib", "sites", "models.py")
         assert filt.should_trace_file(fake) is True
         # But django.contrib.auth should NOT match
         fake2 = os.path.join(sp_dir, "django", "contrib", "auth", "models.py")
         assert filt.should_trace_file(fake2) is False
 
-    def test_always_skips_threading(self) -> None:
-        import threading
+    def test_star_matches_nested_modules(self) -> None:
+        """Verify that ``django_*`` matches submodules like ``django_filters.views``."""
+        sp_dir = _get_site_packages()
+        filt = TraceFilter(trace_packages=["django_*"])
+        fake = os.path.join(sp_dir, "django_filters", "views.py")
+        assert filt.should_trace_file(fake) is True
 
+    def test_always_skips_threading(self) -> None:
         filt = TraceFilter(trace_packages=["*"])
         assert filt.should_trace_file(threading.__file__) is False
 
@@ -109,13 +122,20 @@ class TestTraceFilter:
         assert filt.should_trace_file(os.path.join(_FRONTRUN_DIR, "dpor.py")) is False
 
     def test_multiple_patterns(self) -> None:
+        sp_dir = _get_site_packages()
         filt = TraceFilter(trace_packages=["django_*", "requests.*"])
-        sp_dir = next((d for d in _SKIP_DIRS if "site-packages" in d), None)
-        if sp_dir is None:
-            pytest.skip("no site-packages in _SKIP_DIRS")
         assert filt.should_trace_file(os.path.join(sp_dir, "django_filters", "views.py")) is True
         assert filt.should_trace_file(os.path.join(sp_dir, "requests", "api.py")) is True
         assert filt.should_trace_file(os.path.join(sp_dir, "flask", "app.py")) is False
+
+    def test_empty_list_traces_nothing_extra(self) -> None:
+        """Passing ``trace_packages=[]`` should behave like the default (no extra tracing)."""
+        sp_dir = _get_site_packages()
+        filt = TraceFilter(trace_packages=[])
+        fake = os.path.join(sp_dir, "django_filters", "views.py")
+        assert filt.should_trace_file(fake) is False
+        # But user code is still traced
+        assert filt.should_trace_file("/home/user/myproject/app.py") is True
 
 
 # ---------------------------------------------------------------------------
@@ -139,9 +159,7 @@ class TestActiveFilter:
         assert get_active_trace_filter() is not custom
 
     def test_should_trace_file_uses_active_filter(self) -> None:
-        sp_dir = next((d for d in _SKIP_DIRS if "site-packages" in d), None)
-        if sp_dir is None:
-            pytest.skip("no site-packages in _SKIP_DIRS")
+        sp_dir = _get_site_packages()
         fake = os.path.join(sp_dir, "mylib", "core.py")
 
         # Default: should NOT trace
@@ -156,3 +174,22 @@ class TestActiveFilter:
 
         # After reset: should NOT trace again
         assert should_trace_file(fake) is False
+
+    def test_filter_visible_from_worker_thread(self) -> None:
+        """The active filter must be visible from worker threads (not thread-local)."""
+        sp_dir = _get_site_packages()
+        fake = os.path.join(sp_dir, "mylib", "core.py")
+        results: list[bool] = []
+
+        def worker() -> None:
+            results.append(should_trace_file(fake))
+
+        set_active_trace_filter(TraceFilter(trace_packages=["mylib.*"]))
+        try:
+            t = threading.Thread(target=worker)
+            t.start()
+            t.join()
+        finally:
+            set_active_trace_filter(None)
+
+        assert results == [True], "Worker thread should see the active trace filter"

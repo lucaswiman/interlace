@@ -1848,7 +1848,7 @@ def explore_dpor(
        automatically skipped.
     """
     _require_frontrun_env("explore_dpor")
-    if trace_packages:
+    if trace_packages is not None:
         _set_active_trace_filter(_TraceFilter(trace_packages))
     num_threads = len(threads)
     pb = None if preemption_bound is None else preemption_bound

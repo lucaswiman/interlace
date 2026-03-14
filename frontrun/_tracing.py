@@ -28,6 +28,10 @@ _THREADING_FILE = threading.__file__
 # Skip the entire frontrun package directory
 _FRONTRUN_DIR = os.path.dirname(os.path.abspath(__file__)) + os.sep
 
+# Regex matching CPython ABI tag suffixes on C extension filenames,
+# e.g. ".cpython-314-x86_64-linux-gnu" before the final ".so"/".pyd".
+_CPYTHON_ABI_RE = re.compile(r"\.cpython-\d+[^.]*")
+
 
 def _filename_to_module(filename: str) -> str | None:
     """Convert a filename to a dotted module name, or None if not determinable.
@@ -46,7 +50,9 @@ def _filename_to_module(filename: str) -> str | None:
             elif rel.endswith(".py"):
                 rel = rel[:-3]
             else:
-                # .so / .pyd etc — strip the extension
+                # C extension: strip ABI tag + final extension
+                # e.g. "_sqlite3.cpython-314-x86_64-linux-gnu.so" -> "_sqlite3"
+                rel = _CPYTHON_ABI_RE.sub("", rel)
                 dot = rel.rfind(".")
                 if dot != -1:
                     rel = rel[:dot]
@@ -63,7 +69,9 @@ class TraceFilter:
     When ``trace_packages`` is provided, files in site-packages whose
     module names match any of the given patterns are **also** traced.
     Patterns use :func:`fnmatch.fnmatch` syntax (e.g. ``"django_*"``,
-    ``"mylib.*"``).
+    ``"mylib.*"``).  Note that ``*`` in fnmatch matches any characters
+    including dots, so ``"django_*"`` matches both ``django_filters``
+    and ``django_filters.views``.
 
     Example::
 
@@ -74,7 +82,7 @@ class TraceFilter:
     """
 
     def __init__(self, trace_packages: Sequence[str] | None = None) -> None:
-        if trace_packages:
+        if trace_packages is not None and len(trace_packages) > 0:
             # Compile fnmatch patterns to regexes for speed
             combined = "|".join(fnmatch.translate(p) for p in trace_packages)
             self._pattern: re.Pattern[str] | None = re.compile(combined)
@@ -111,22 +119,32 @@ class TraceFilter:
 
 _DEFAULT_FILTER = TraceFilter()
 
-# ---- active filter (context-managed) ----
+# ---- active filter (process-wide) ----
+#
+# The filter is a plain module-level global, NOT a threading.local.
+# Worker threads spawned by explore_dpor/explore_interleavings call
+# should_trace_file() from their sys.settrace/sys.monitoring callbacks
+# and must see the filter installed by the main thread.  The main thread
+# always sets and clears the filter outside the worker-thread window, so
+# there is no concurrent mutation.
 
-_active_filter: threading.local = threading.local()
+_active_filter_lock = threading.Lock()
+_active_filter: TraceFilter | None = None
 
 
 def set_active_trace_filter(filt: TraceFilter | None) -> None:
-    """Set the active trace filter for the current thread.
+    """Set the active trace filter for the entire process.
 
     Pass ``None`` to reset to the default filter.
     """
-    _active_filter.filter = filt
+    global _active_filter  # noqa: PLW0603
+    with _active_filter_lock:
+        _active_filter = filt
 
 
 def get_active_trace_filter() -> TraceFilter:
     """Return the currently active trace filter."""
-    return getattr(_active_filter, "filter", None) or _DEFAULT_FILTER
+    return _active_filter or _DEFAULT_FILTER
 
 
 def should_trace_file(filename: str) -> bool:

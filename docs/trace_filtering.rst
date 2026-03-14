@@ -37,15 +37,23 @@ file's path inside ``site-packages``.  For example, a file at
 ``site-packages/django_filters/views.py`` has module name
 ``django_filters.views``.
 
+.. note::
+
+   In fnmatch syntax, ``*`` matches **any characters including dots**.
+   This means ``django_*`` matches both ``django_filters`` (top-level)
+   and ``django_filters.views`` (submodule).  If you need to match only
+   the top-level package, there is no need — matching submodules is
+   almost always the desired behaviour.
+
 .. list-table:: Pattern examples
    :header-rows: 1
 
    * - Pattern
      - Matches
    * - ``django_*``
-     - ``django_filters``, ``django_rest_framework``, ``django_celery_beat``, etc.
+     - ``django_filters``, ``django_filters.views``, ``django_rest_framework``, etc. (top-level + all submodules)
    * - ``django_filters.*``
-     - ``django_filters.views``, ``django_filters.filters``, etc.
+     - ``django_filters.views``, ``django_filters.filters``, etc. (submodules only, not ``django_filters`` itself)
    * - ``myapp.*``
      - ``myapp.models``, ``myapp.views``, ``myapp.utils.helpers``, etc.
    * - ``*``

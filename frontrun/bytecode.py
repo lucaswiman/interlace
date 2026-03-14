@@ -639,7 +639,7 @@ def explore_interleavings(
         providing a lower bound on exploration coverage.
     """
     _require_frontrun_env("explore_interleavings")
-    if trace_packages:
+    if trace_packages is not None:
         _set_active_trace_filter(_TraceFilter(trace_packages))
     try:
         rng = random.Random(seed)
