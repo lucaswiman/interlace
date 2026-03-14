@@ -32,8 +32,6 @@ from frontrun import _real_threading as _rt
 from frontrun._io_detection import _io_tls, get_io_reporter
 from frontrun._schema import get_schema
 from frontrun._sql_insert_tracker import record_insert, resolve_alias
-from frontrun._trace_format import build_call_chain
-from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun._sql_parsing import (
     LockIntent,
     Release,
@@ -42,6 +40,8 @@ from frontrun._sql_parsing import (
     TxOp,
     parse_sql_access,
 )
+from frontrun._trace_format import build_call_chain
+from frontrun._tracing import should_trace_file as _should_trace_file
 
 # Try to import row-level predicate helpers.  These are always present in the
 # same package, but guard with try/except for robustness.
