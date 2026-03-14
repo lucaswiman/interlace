@@ -358,6 +358,7 @@ async def explore_interleavings(
     seed: int | None = None,
     deadlock_timeout: float = 5.0,
     detect_sql: bool = False,
+    trace_packages: list[str] | None = None,
 ) -> InterleavingResult:
     """Search for async interleavings that violate an invariant.
 
@@ -387,6 +388,9 @@ async def explore_interleavings(
         detect_sql: If ``True``, patch async DBAPI drivers (aiosqlite,
             psycopg AsyncCursor, aiomysql, asyncpg) to intercept SQL
             and report table-level conflicts.
+        trace_packages: Accepted for API compatibility but not used.
+            The async shuffler operates at await-point granularity and
+            does not perform file-level tracing.
 
     Returns:
         InterleavingResult with the outcome.  The ``unique_interleavings``

@@ -22,6 +22,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
 from frontrun.common import InterleavingResult
+from frontrun.contrib.django._sync import DJANGO_TRACE_PACKAGES
 
 T = TypeVar("T")
 
@@ -34,11 +35,16 @@ async def async_django_dpor(
     db_alias: str = "default",
     lock_timeout: int | None = None,
     detect_sql: bool = True,
+    trace_packages: list[str] | None = None,
     **kwargs: Any,
 ) -> InterleavingResult:
     """Run ``explore_async_dpor`` with per-task Django async connection management.
 
     Each task closes the shared Django connection and opens a fresh one.
+
+    By default, ``trace_packages`` is set to :data:`~frontrun.contrib.django._sync.DJANGO_TRACE_PACKAGES`
+    so that code inside ``django_*`` apps and ``django.contrib.sites``
+    submodules is traced.  Pass an explicit list (or ``[]``) to override.
 
     Args:
         setup: Called once per execution to create fresh shared state.
@@ -48,11 +54,17 @@ async def async_django_dpor(
         lock_timeout: If set, execute ``SET lock_timeout = <N>ms`` on each
             task's connection.
         detect_sql: Passed through to ``explore_async_dpor`` (default True).
+        trace_packages: Package name patterns (fnmatch syntax) to trace.
+            Defaults to :data:`~frontrun.contrib.django._sync.DJANGO_TRACE_PACKAGES`.
+            Pass ``[]`` to disable extra tracing beyond user code.
         **kwargs: Forwarded verbatim to ``explore_async_dpor``.
     """
     from django.db import connections  # type: ignore[import-not-found]
 
     from frontrun.async_dpor import explore_async_dpor
+
+    if trace_packages is None:
+        trace_packages = list(DJANGO_TRACE_PACKAGES)
 
     def wrapped_setup() -> T:
         connections.close_all()
@@ -81,5 +93,6 @@ async def async_django_dpor(
         tasks=wrapped_tasks,
         invariant=invariant,
         detect_sql=detect_sql,
+        trace_packages=trace_packages,
         **kwargs,
     )

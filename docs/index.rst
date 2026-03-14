@@ -30,6 +30,7 @@ Three approaches, in order of decreasing interpretability:
    examples
    orm_race
    sql-technical-details
+   trace_filtering
    internals
    api_reference
    CASE_STUDIES

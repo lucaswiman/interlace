@@ -45,5 +45,6 @@ def django_dpor(*args: Any, **kwargs: Any) -> Any:
 
 # Keep async_django_dpor importable for backward compatibility.
 from frontrun.contrib.django._async import async_django_dpor  # noqa: E402, F811
+from frontrun.contrib.django._sync import DJANGO_TRACE_PACKAGES  # noqa: E402
 
-__all__ = ["async_django_dpor", "django_dpor"]
+__all__ = ["DJANGO_TRACE_PACKAGES", "async_django_dpor", "django_dpor"]

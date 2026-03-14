@@ -108,20 +108,10 @@ exploration and DPOR.
 The per-opcode overhead is substantial (a Python function call for every
 single bytecode instruction), which is why both bytecode exploration and
 DPOR filter out stdlib and threading internals via
-``should_trace_file()`` in ``_tracing.py``:
-
-.. code-block:: python
-
-   def should_trace_file(filename: str) -> bool:
-       """Skip stdlib, site-packages, and frontrun internals."""
-       if filename.startswith("<"):
-           return False
-       if filename.startswith(_FRONTRUN_DIR):
-           return False
-       for skip_dir in _SKIP_DIRS:
-           if filename.startswith(skip_dir):
-               return False
-       return True
+``should_trace_file()`` in ``_tracing.py``.  By default, all code in
+``site-packages`` is skipped, but the ``trace_packages`` parameter on
+exploration entry points allows widening the filter to include specific
+installed packages.  See :doc:`trace_filtering` for details.
 
 On Python 3.12+, ``sys.monitoring`` provides a lower-overhead
 alternative to ``sys.settrace`` for opcode-level events.  Frontrun
