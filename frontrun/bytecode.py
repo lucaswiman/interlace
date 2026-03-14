@@ -47,7 +47,7 @@ from frontrun._cooperative import (
     set_context,
     unpatch_locks,
 )
-from frontrun._deadlock import SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
+from frontrun._deadlock import DeadlockError, SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
 from frontrun._io_detection import (
     patch_io,
     set_io_reporter,
@@ -564,6 +564,10 @@ def run_with_schedule(
         except TimeoutError:
             if debug:
                 print(f"Timed out with {timeout=} on {schedule=}", flush=True)
+        # Re-raise DeadlockError so callers (e.g. reproduction logic) can
+        # detect that a deadlock occurred during replay.
+        if isinstance(scheduler._error, DeadlockError):
+            raise scheduler._error
     finally:
         runner._unpatch_io()
         runner._unpatch_locks()

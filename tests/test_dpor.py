@@ -884,6 +884,13 @@ class TestDeadlockAsInvariantViolation:
         assert result.explanation is not None
         assert "deadlock" in result.explanation.lower()
         assert result.counterexample is not None
+        # Deadlock reproduction should be deterministic: 100% reproduction rate
+        assert result.reproduction_attempts == 10, (
+            f"Expected 10 reproduction attempts, got {result.reproduction_attempts}"
+        )
+        assert result.reproduction_successes == 10, (
+            f"Expected 10/10 reproductions, got {result.reproduction_successes}/{result.reproduction_attempts}"
+        )
 
     def test_no_deadlock_is_not_reported(self) -> None:
         """Consistent lock ordering does not cause a false deadlock report."""
@@ -963,6 +970,13 @@ class TestDeadlockAsInvariantViolation:
         assert not result.property_holds, "3-way deadlock should set property_holds=False"
         assert result.explanation is not None
         assert "deadlock" in result.explanation.lower()
+        # Deadlock reproduction should be deterministic: 100% reproduction rate
+        assert result.reproduction_attempts == 10, (
+            f"Expected 10 reproduction attempts, got {result.reproduction_attempts}"
+        )
+        assert result.reproduction_successes == 10, (
+            f"Expected 10/10 reproductions, got {result.reproduction_successes}/{result.reproduction_attempts}"
+        )
 
     def test_partial_deadlock_third_thread_completes(self) -> None:
         """Three threads: two deadlock (lock-order inversion), third does independent work.
@@ -1004,6 +1018,13 @@ class TestDeadlockAsInvariantViolation:
         )
 
         assert not result.property_holds, "Partial deadlock should still be detected"
+        # Deadlock reproduction should be deterministic: 100% reproduction rate
+        assert result.reproduction_attempts == 10, (
+            f"Expected 10 reproduction attempts, got {result.reproduction_attempts}"
+        )
+        assert result.reproduction_successes == 10, (
+            f"Expected 10/10 reproductions, got {result.reproduction_successes}/{result.reproduction_attempts}"
+        )
 
     def test_data_dependent_lock_order_deadlock(self) -> None:
         """Lock acquisition order depends on runtime state.
@@ -1055,6 +1076,13 @@ class TestDeadlockAsInvariantViolation:
         assert not result.property_holds, "Data-dependent deadlock should be found"
         assert result.explanation is not None
         assert "deadlock" in result.explanation.lower()
+        # Deadlock reproduction should be deterministic: 100% reproduction rate
+        assert result.reproduction_attempts == 10, (
+            f"Expected 10 reproduction attempts, got {result.reproduction_attempts}"
+        )
+        assert result.reproduction_successes == 10, (
+            f"Expected 10/10 reproductions, got {result.reproduction_successes}/{result.reproduction_attempts}"
+        )
 
     def test_dining_philosophers_four(self) -> None:
         """Four dining philosophers with lock-order inversion on a circular set."""
@@ -1092,3 +1120,10 @@ class TestDeadlockAsInvariantViolation:
         assert not result.property_holds, "Dining philosophers deadlock should be found"
         assert result.explanation is not None
         assert "deadlock" in result.explanation.lower()
+        # Deadlock reproduction should be deterministic: 100% reproduction rate
+        assert result.reproduction_attempts == 10, (
+            f"Expected 10 reproduction attempts, got {result.reproduction_attempts}"
+        )
+        assert result.reproduction_successes == 10, (
+            f"Expected 10/10 reproductions, got {result.reproduction_successes}/{result.reproduction_attempts}"
+        )
