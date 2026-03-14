@@ -1956,6 +1956,44 @@ def explore_dpor(
                         f"Deadlock detected after {result.num_explored} interleaving(s).\n\n"
                         f"{scheduler._error.cycle_description}"
                     )
+
+                # Replay the counterexample to measure reproducibility
+                if reproduce_on_failure > 0 and result.reproduction_attempts == 0:
+                    from frontrun._preload_io import _set_preload_pipe_fd
+                    from frontrun.bytecode import run_with_schedule
+
+                    _set_preload_pipe_fd(-1)
+
+                    _replay_lock_timeout = lock_timeout if lock_timeout is not None else 5000
+                    _prev_lt = get_lock_timeout()
+                    set_lock_timeout(_replay_lock_timeout)
+                    patch_sql()
+
+                    successes = 0
+                    try:
+                        for _ in range(reproduce_on_failure):
+                            try:
+                                run_with_schedule(
+                                    schedule_list,
+                                    setup,
+                                    threads,
+                                    timeout=timeout_per_run,
+                                    detect_io=False,
+                                    deadlock_timeout=deadlock_timeout,
+                                )
+                            except DeadlockError:
+                                successes += 1
+                            except Exception:
+                                pass  # timeout / crash during replay — not a reproduction
+                    finally:
+                        unpatch_sql()
+                        set_lock_timeout(_prev_lt)
+                    result.reproduction_attempts = reproduce_on_failure
+                    result.reproduction_successes = successes
+
+                    if preload_dispatcher is not None and preload_dispatcher._write_fd is not None:
+                        _set_preload_pipe_fd(preload_dispatcher._write_fd)
+
                 if stop_on_first:
                     with _INSTR_CACHE_LOCK:
                         _INSTR_CACHE.clear()
