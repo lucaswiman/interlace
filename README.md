@@ -251,12 +251,12 @@ with IOEventDispatcher() as dispatcher:
 
 ## Async Support
 
-Trace markers and bytecode exploration have async variants (DPOR does not yet have an async version).
+Trace markers, random interleaving exploration, and DPOR all have async support.
 
 ### Async Trace Markers
 
 ```python
-from frontrun.async_trace_markers import AsyncTraceExecutor
+from frontrun import TraceExecutor
 from frontrun.common import Schedule, Step
 
 class AsyncCounter:
@@ -285,7 +285,7 @@ def test_async_counter_lost_update():
         Step("task2", "write_value"),
     ])
 
-    executor = AsyncTraceExecutor(schedule)
+    executor = TraceExecutor(schedule)
     executor.run({
         "task1": counter.increment,
         "task2": counter.increment,
@@ -296,11 +296,11 @@ def test_async_counter_lost_update():
 
 ### Async Bytecode Exploration
 
-Async shuffler exploration works at await points instead of opcodes, making schedules stable across Python versions:
+Async shuffler exploration works at natural ``await`` boundaries instead of opcodes, making schedules stable across Python versions:
 
 ```python
 import asyncio
-from frontrun.async_shuffler import explore_interleavings, await_point
+from frontrun import explore_interleavings
 
 class Counter:
     def __init__(self):
@@ -308,7 +308,7 @@ class Counter:
 
     async def increment(self):
         temp = self.value
-        await await_point()  # Yield control; race can happen here
+        await asyncio.sleep(0)  # any natural await is a scheduling point
         self.value = temp + 1
 
 async def test_async_counter_race():

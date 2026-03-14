@@ -202,7 +202,7 @@ class ThreadCoordinator:
             return self.completed or self.error is not None
 
 
-class TraceExecutor:
+class _ThreadTraceExecutor:
     """Executes threads with interlaced execution according to a schedule.
 
     This is the main interface for the frontrun library. It sets up tracing
@@ -386,6 +386,95 @@ class TraceExecutor:
         self.thread_errors = {}
         self.coordinator = ThreadCoordinator(self.schedule, deadlock_timeout=self.deadlock_timeout)
         self.marker_registry = MarkerRegistry()
+
+
+class TraceExecutor:
+    """Facade over sync and async marker-based schedule execution.
+
+    Sync usage matches the historical ``TraceExecutor`` API:
+
+    .. code-block:: python
+
+       executor = TraceExecutor(schedule)
+       executor.run("t1", worker1)
+       executor.run("t2", worker2)
+       executor.wait()
+
+    Async usage accepts the async-task mapping directly:
+
+    .. code-block:: python
+
+       executor = TraceExecutor(schedule)
+       executor.run({"task1": coro1, "task2": coro2})
+    """
+
+    def __init__(self, schedule: Schedule, *, deadlock_timeout: float = 5.0):
+        self.schedule = schedule
+        self.deadlock_timeout = deadlock_timeout
+        self._mode: str | None = None
+        self._sync = _ThreadTraceExecutor(schedule, deadlock_timeout=deadlock_timeout)
+        self._async: Any | None = None
+
+    def run(
+        self,
+        execution_name: str | dict[str, Callable[..., Any]],
+        target: Callable[..., None] | None = None,
+        args: tuple[Any, ...] = (),
+        kwargs: dict[str, Any] | None = None,
+        timeout: float = 10.0,
+    ) -> None:
+        if isinstance(execution_name, dict):
+            if target is not None:
+                raise TypeError("TraceExecutor.run() accepts either a task mapping or a named sync target, not both")
+            if self._mode == "sync":
+                raise TypeError("TraceExecutor is already running in sync mode")
+            self._mode = "async"
+            if self._async is None:
+                from frontrun.async_trace_markers import AsyncTraceExecutor
+
+                self._async = AsyncTraceExecutor(self.schedule, deadlock_timeout=self.deadlock_timeout)
+            self._async.run(execution_name, timeout=timeout)
+            return
+
+        if target is None:
+            raise TypeError("TraceExecutor.run() missing target for sync execution")
+        if self._mode == "async":
+            raise TypeError("TraceExecutor is already running in async mode")
+        self._mode = "sync"
+        self._sync.run(execution_name, target, args, kwargs)
+
+    def wait(self, timeout: float | None = None) -> None:
+        if self._mode in (None, "async"):
+            return
+        self._sync.wait(timeout=timeout)
+
+    def reset(self) -> None:
+        self._mode = None
+        self._sync.reset()
+        if self._async is not None:
+            self._async.reset()
+
+    @property
+    def threads(self) -> list[threading.Thread]:
+        return self._sync.threads
+
+    @property
+    def thread_errors(self) -> dict[str, Exception]:
+        return self._sync.thread_errors
+
+    @property
+    def coordinator(self) -> ThreadCoordinator:
+        return self._sync.coordinator
+
+    @property
+    def marker_registry(self) -> MarkerRegistry:
+        return self._sync.marker_registry
+
+    @property
+    def task_errors(self) -> dict[str, Exception]:
+        if self._async is None:
+            return {}
+        return self._async.task_errors
 
 
 def frontrun(
