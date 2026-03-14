@@ -22,6 +22,7 @@ import importlib
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Generator
@@ -39,6 +40,8 @@ from frontrun._sql_parsing import (
     TxOp,
     parse_sql_access,
 )
+from frontrun._trace_format import build_call_chain
+from frontrun._tracing import should_trace_file as _should_trace_file
 
 # Try to import row-level predicate helpers.  These are always present in the
 # same package, but guard with try/except for robustness.
@@ -81,6 +84,7 @@ _suppress_tids: set[int] = set()
 _suppress_lock = _rt.lock()  # Real lock (not cooperative)
 _DB_SCOPE_ATTR = "_frontrun_db_scope"
 _CONNECTION_DB_SCOPES: dict[int, str] = {}
+_ACTIVE_SQL_IO_CONTEXTS: dict[int, tuple[str | None, list[str] | None]] = {}
 
 
 def _warm_sql_parsers() -> None:
@@ -98,6 +102,47 @@ def _warm_sql_parsers() -> None:
         # Optional dependency missing or parser warmup failed. The actual SQL
         # interception path remains best-effort and will fall back naturally.
         pass
+
+
+def _summarize_sql_for_trace(operation: Any, parameters: Any, paramstyle: str) -> str | None:
+    """Return a short SQL summary suitable for trace output."""
+    if not isinstance(operation, str):
+        return None
+    sql = operation
+    try:
+        if parameters is not None:
+            sql = resolve_parameters(operation, parameters, paramstyle)
+    except Exception:
+        sql = operation
+    sql = " ".join(sql.split())
+    if len(sql) > 160:
+        sql = f"{sql[:157]}..."
+    return f"SQL: {sql}"
+
+
+def _current_user_call_chain() -> list[str] | None:
+    """Return a best-effort call chain rooted at the first traced user frame."""
+    frame = sys._getframe(1)
+    while frame is not None and not _should_trace_file(frame.f_code.co_filename):
+        frame = frame.f_back
+    if frame is None:
+        return None
+    return build_call_chain(frame, filter_fn=_should_trace_file)
+
+
+def _set_active_sql_io_context(operation: Any, parameters: Any, paramstyle: str) -> None:
+    """Remember the current SQL statement for C-level socket I/O trace rendering."""
+    tid = threading.get_native_id()
+    summary = _summarize_sql_for_trace(operation, parameters, paramstyle)
+    chain = _current_user_call_chain()
+    with _suppress_lock:
+        _ACTIVE_SQL_IO_CONTEXTS[tid] = (summary, chain)
+
+
+def get_active_sql_io_context(tid: int) -> tuple[str | None, list[str] | None]:
+    """Return the most recent SQL trace context for a native thread id."""
+    with _suppress_lock:
+        return _ACTIVE_SQL_IO_CONTEXTS.get(tid, (None, None))
 
 
 @contextlib.contextmanager
@@ -718,6 +763,7 @@ def _intercept_execute(
     if _dpor_ctx is not None and (reported or isinstance(operation, str)):
         _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
 
+    _set_active_sql_io_context(operation, parameters, paramstyle)
     try:
         if reported:
             with _suppress_endpoint_io():

@@ -44,6 +44,7 @@ class TraceEvent:
     attr_name: str | None = None  # e.g. "value", "balance"
     obj_type_name: str | None = None  # e.g. "Counter", "BankAccount"
     call_chain: list[str] | None = None  # e.g. ["DB.dict", "do_incrs"]
+    detail: str | None = None  # e.g. SQL text summary for C-level DB I/O
 
 
 @dataclass(slots=True)
@@ -59,6 +60,7 @@ class SourceLineEvent:
     attr_name: str | None = None
     obj_type_name: str | None = None
     call_chain: list[str] | None = None
+    detail: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +164,9 @@ class TraceRecorder:
         thread_id: int,
         resource_id: str,
         kind: str,
+        *,
+        call_chain: list[str] | None = None,
+        detail: str | None = None,
     ) -> None:
         """Record an I/O event that has no Python frame (e.g. C-level socket I/O)."""
         if not self.enabled:
@@ -179,6 +184,8 @@ class TraceRecorder:
             access_type=kind,
             attr_name=resource_id,
             obj_type_name="IO",
+            call_chain=call_chain,
+            detail=detail,
         )
         with self._lock:
             self.events.append(ev)
@@ -321,6 +328,7 @@ def deduplicate_to_source_lines(events: list[TraceEvent]) -> list[SourceLineEven
                     attr_name=ev.attr_name,
                     obj_type_name=ev.obj_type_name,
                     call_chain=ev.call_chain,
+                    detail=ev.detail,
                 )
             )
             prev_tid = ev.thread_id
@@ -654,6 +662,9 @@ def format_trace(
                 line_ev.access_type or "", line_ev.access_type or ""
             )
             parts.append(f"  {label} | {io_verb} {resource}")
+            if line_ev.detail:
+                indent = " " * (2 + max_thread_label) + " | "
+                parts.append(f"{indent}{line_ev.detail}")
         else:
             short_file = _short_filename(line_ev.filename)
             loc = f"{short_file}:{line_ev.lineno}"
