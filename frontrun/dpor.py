@@ -416,23 +416,12 @@ class DporScheduler:
                     else:
                         _dpor_tls.pending_io = _io_pairs
                         _pending_io = _io_pairs
-            # Skip scheduling if inside an explicit SQL transaction to ensure
-            # atomicity.  DPOR will see all transaction operations as a single
-            # atomic block occurring at the COMMIT point.
-            #
-            # Autobegin transactions (_is_autobegin=True) are NOT skipped: with
-            # READ COMMITTED isolation (the PostgreSQL default), individual
-            # statements are visible to other transactions, so DPOR must be
-            # able to interleave between them to find races like lost updates.
-            from frontrun._io_detection import _io_tls as _iotls
-
-            if getattr(_iotls, "_in_transaction", False) and not getattr(_iotls, "_is_autobegin", False):
-                # Explicit transactions remain atomic, but their pending I/O
-                # still belongs to the current thread's scheduling position.
-                _flush_pending_io()
-                if frame is not None:
-                    _process_opcode(frame, self, thread_id)
-                return True
+            # NOTE: We intentionally do NOT skip scheduling inside explicit
+            # SQL transactions.  SQL atomicity is handled separately by
+            # _tx_buffer in _sql_cursor.py (SQL events are buffered during
+            # BEGIN...COMMIT and flushed atomically at COMMIT).  Non-SQL
+            # shared state (Python objects) modified inside a transaction
+            # body must still be interleaved by DPOR to find races.
 
             while True:
                 if self._finished or self._error:

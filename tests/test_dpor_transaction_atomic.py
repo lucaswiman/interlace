@@ -17,9 +17,7 @@ from typing import Any
 
 import pytest
 
-from frontrun._io_detection import _io_tls
 from frontrun.dpor import explore_dpor
-
 
 # ---------------------------------------------------------------------------
 # Bug 1: DPOR must still schedule non-SQL opcodes inside transactions
