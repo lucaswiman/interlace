@@ -416,23 +416,12 @@ class DporScheduler:
                     else:
                         _dpor_tls.pending_io = _io_pairs
                         _pending_io = _io_pairs
-            # Skip scheduling if inside an explicit SQL transaction to ensure
-            # atomicity.  DPOR will see all transaction operations as a single
-            # atomic block occurring at the COMMIT point.
-            #
-            # Autobegin transactions (_is_autobegin=True) are NOT skipped: with
-            # READ COMMITTED isolation (the PostgreSQL default), individual
-            # statements are visible to other transactions, so DPOR must be
-            # able to interleave between them to find races like lost updates.
-            from frontrun._io_detection import _io_tls as _iotls
-
-            if getattr(_iotls, "_in_transaction", False) and not getattr(_iotls, "_is_autobegin", False):
-                # Explicit transactions remain atomic, but their pending I/O
-                # still belongs to the current thread's scheduling position.
-                _flush_pending_io()
-                if frame is not None:
-                    _process_opcode(frame, self, thread_id)
-                return True
+            # NOTE: We intentionally do NOT skip scheduling inside explicit
+            # SQL transactions.  SQL atomicity is handled separately by
+            # _tx_buffer in _sql_cursor.py (SQL events are buffered during
+            # BEGIN...COMMIT and flushed atomically at COMMIT).  Non-SQL
+            # shared state (Python objects) modified inside a transaction
+            # body must still be interleaved by DPOR to find races.
 
             while True:
                 if self._finished or self._error:
@@ -722,6 +711,49 @@ import functools as _functools_mod
 _register_passthrough(_functools_mod.reduce, "read", 1, None)
 
 
+def _safe_getattr(obj: Any, attr: str) -> Any:
+    """Get an attribute without triggering property descriptors.
+
+    Uses the instance ``__dict__`` to bypass the descriptor protocol,
+    preventing property getters from firing.  This is critical because
+    ``_process_opcode`` runs inside ``DporScheduler._report_and_wait``'s
+    locked section — a property getter that accesses the DB would call
+    back into ``report_and_wait``, causing a recursive lock deadlock.
+
+    For class-level attributes (methods, class variables), falls back to
+    ``getattr`` only if the attribute is NOT a data descriptor (property,
+    etc.).
+    """
+    # 1. Try instance __dict__ first — bypasses all descriptors
+    try:
+        inst_dict = object.__getattribute__(obj, "__dict__")
+        if attr in inst_dict:
+            return inst_dict[attr]
+    except (AttributeError, TypeError):
+        pass
+
+    # 2. For class-level attributes, check if it's a data descriptor
+    #    (property, cached_property, etc.) and skip to avoid side effects.
+    for cls in type(obj).__mro__:
+        cls_dict = cls.__dict__
+        if attr in cls_dict:
+            candidate = cls_dict[attr]
+            # Data descriptors have __set__ or __delete__ in addition to __get__.
+            # These include property, cached_property, and ORM descriptors.
+            # Skip them to avoid triggering side-effectful getters.
+            if hasattr(candidate, "__set__") or hasattr(candidate, "__delete__"):
+                return None
+            # Non-data descriptors (regular methods, staticmethod, classmethod)
+            # are safe to invoke via getattr.
+            return getattr(obj, attr)
+
+    # 3. Fallback for dynamic attributes (__getattr__ etc.)
+    try:
+        return getattr(obj, attr)
+    except Exception:
+        return None
+
+
 def _make_object_key(obj_id: int, name: Any) -> int:
     """Create a non-negative u64 object key for the Rust engine."""
     return hash((obj_id, name)) & 0xFFFFFFFFFFFFFFFF
@@ -941,7 +973,7 @@ def _process_opcode(
             recorder.record(thread_id, frame, opcode=op, access_type="read", attr_name=attr, obj=obj)
         if obj is not None:
             try:
-                val = getattr(obj, attr)
+                val = _safe_getattr(obj, attr)
                 shadow.push(val)
                 # When the loaded value is a mutable object (but NOT a bound
                 # method), report a READ on the object itself.  This detects
@@ -989,7 +1021,7 @@ def _process_opcode(
             recorder.record(thread_id, frame, opcode=op, access_type="read", attr_name=attr, obj=obj)
         if obj is not None:
             try:
-                shadow.push(getattr(obj, attr))
+                shadow.push(_safe_getattr(obj, attr))
             except Exception:
                 shadow.push(None)
         else:
