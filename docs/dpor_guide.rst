@@ -397,3 +397,37 @@ Inside a thread function, retrieve the per-thread connection with:
 
 Both helpers accept ``detect_io=True`` (the default) and all other
 ``explore_dpor`` keyword arguments.
+
+Async usage
+~~~~~~~~~~~
+
+The same ``django_dpor`` and ``sqlalchemy_dpor`` functions also support
+async code.  Pass ``tasks=`` instead of ``threads=`` and ``await`` the
+result:
+
+.. code-block:: python
+
+   from frontrun.contrib.django import django_dpor
+
+   result = await django_dpor(
+       setup=_State,
+       tasks=[task_a, task_b],
+       invariant=lambda s: s.login_count == 2,
+       lock_timeout=500,
+   )
+   assert result.property_holds, result.explanation
+
+.. code-block:: python
+
+   from frontrun.contrib.sqlalchemy import sqlalchemy_dpor, get_async_connection
+
+   result = await sqlalchemy_dpor(
+       engine=async_engine,
+       setup=_State,
+       tasks=[task_a, task_b],
+       invariant=lambda s: _read_count() == 2,
+       lock_timeout=500,
+   )
+
+Inside an async task, use ``get_async_connection()`` to retrieve the
+per-task connection.

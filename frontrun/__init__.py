@@ -27,10 +27,10 @@ Async shuffler exploration::
 
     from frontrun import explore_interleavings
 
-Contrib helpers::
+Contrib helpers (use threads= for sync, tasks= for async)::
 
-    from frontrun.contrib.django import django_dpor, async_django_dpor
-    from frontrun.contrib.sqlalchemy import sqlalchemy_dpor, async_sqlalchemy_dpor, get_connection, get_async_connection
+    from frontrun.contrib.django import django_dpor
+    from frontrun.contrib.sqlalchemy import sqlalchemy_dpor, get_connection, get_async_connection
 """
 
 from importlib.metadata import version as _metadata_version
