@@ -235,3 +235,30 @@ def test_explore_dpor_lock_timeout_injects_on_connections(_pg_available) -> None
     assert any(lt == "2s" for lt in observed_lock_timeouts), (
         f"Expected lock_timeout='2s' on new connections, got {observed_lock_timeouts}"
     )
+
+
+def test_counterexample_replay_uses_dpor_row_lock_arbitration(_pg_available) -> None:
+    """Counterexample replay should reproduce under the DPOR runner.
+
+    This regression specifically covers the old `0/10` behavior: DPOR found
+    the failing schedule, but replay delegated to OpcodeScheduler, which lacks
+    DPOR's PostgreSQL row-lock arbitration and therefore could not re-run the
+    path reliably.
+    """
+    result = explore_dpor(
+        setup=_State,
+        threads=[_make_thread_fn(0, use_lock_timeout=False), _make_thread_fn(1, use_lock_timeout=False)],
+        invariant=_invariant,
+        deadlock_timeout=10.0,
+        timeout_per_run=15.0,
+        reproduce_on_failure=3,
+        max_executions=50,
+        preemption_bound=2,
+    )
+
+    assert not result.property_holds, "Expected DPOR to detect the insert race"
+    assert result.reproduction_attempts == 3
+    assert result.reproduction_successes > 0, (
+        f"Expected DPOR-native replay to reproduce at least once, got "
+        f"{result.reproduction_successes}/{result.reproduction_attempts}"
+    )

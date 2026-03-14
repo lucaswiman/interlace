@@ -601,6 +601,119 @@ class DporScheduler:
                 self._condition.notify_all()
 
 
+class _ReplayEngine:
+    """No-op engine used when replaying a fixed DPOR schedule."""
+
+    def report_access(self, execution: Any, thread_id: int, object_id: int, kind: str) -> None:
+        return None
+
+    def report_first_access(self, execution: Any, thread_id: int, object_id: int, kind: str) -> None:
+        return None
+
+    def report_io_access(self, execution: Any, thread_id: int, object_id: int, kind: str) -> None:
+        return None
+
+    def report_sync(self, execution: Any, thread_id: int, event_type: str, sync_id: int) -> None:
+        return None
+
+
+class _ReplayExecution:
+    """Minimal execution object for DporBytecodeRunner TLS plumbing."""
+
+    def finish_thread(self, thread_id: int) -> None:
+        return None
+
+    def block_thread(self, thread_id: int) -> None:
+        return None
+
+    def unblock_thread(self, thread_id: int) -> None:
+        return None
+
+
+class _ReplayDporScheduler(DporScheduler):
+    """Replay a fixed DPOR schedule using the DPOR runner and SQL row-lock logic."""
+
+    def __init__(
+        self,
+        schedule: list[int],
+        num_threads: int,
+        *,
+        deadlock_timeout: float = 5.0,
+        trace_recorder: TraceRecorder | None = None,
+        detect_io: bool = False,
+    ) -> None:
+        self._replay_schedule = list(schedule)
+        self._replay_index = 0
+        self._replay_max_ops = len(self._replay_schedule) * 10 + 10_000
+        super().__init__(
+            _ReplayEngine(),  # type: ignore[arg-type]
+            _ReplayExecution(),  # type: ignore[arg-type]
+            num_threads,
+            deadlock_timeout=deadlock_timeout,
+            trace_recorder=trace_recorder,
+            detect_io=detect_io,
+        )
+
+    def _extend_schedule(self) -> bool:
+        if self._replay_index >= self._replay_max_ops:
+            return False
+        active = [t for t in range(self.num_threads) if t not in self._threads_done]
+        if not active:
+            return False
+        self._replay_schedule.extend(active)
+        return True
+
+    def _schedule_next(self) -> int | None:
+        while True:
+            if self._replay_index >= len(self._replay_schedule):
+                if not self._extend_schedule():
+                    return None
+            scheduled = self._replay_schedule[self._replay_index]
+            self._replay_index += 1
+            if scheduled in self._threads_done:
+                continue
+            return scheduled
+
+    def wait_for_turn(self, thread_id: int) -> bool:
+        return self._wait_for_turn(thread_id)
+
+    def report_and_wait(self, frame: Any, thread_id: int) -> bool:
+        return self._wait_for_turn(thread_id)
+
+    def _wait_for_turn(self, thread_id: int) -> bool:
+        with self._condition:
+            while True:
+                if self._finished or self._error:
+                    return False
+
+                if self._current_thread in self._threads_done:
+                    self._current_thread = self._schedule_next()
+                    if self._current_thread is None and len(self._threads_done) >= self.num_threads:
+                        self._finished = True
+                        self._condition.notify_all()
+                        return False
+
+                if self._current_thread == thread_id:
+                    self._current_thread = self._schedule_next()
+                    if self._current_thread is None and len(self._threads_done) >= self.num_threads:
+                        self._finished = True
+                    self._condition.notify_all()
+                    return True
+
+                if not self._condition.wait(timeout=self.deadlock_timeout):
+                    if self._current_thread in self._threads_done:
+                        self._current_thread = self._schedule_next()
+                        if self._current_thread is None and len(self._threads_done) >= self.num_threads:
+                            self._finished = True
+                        self._condition.notify_all()
+                        continue
+                    self._error = TimeoutError(
+                        f"DPOR replay deadlock: waiting for thread {thread_id}, current is {self._current_thread}"
+                    )
+                    self._condition.notify_all()
+                    return False
+
+
 # ---------------------------------------------------------------------------
 # Opcode trace callback with shadow stack access detection
 # ---------------------------------------------------------------------------
@@ -1798,6 +1911,112 @@ class DporBytecodeRunner:
 
 
 # ---------------------------------------------------------------------------
+# Fixed-schedule replay
+# ---------------------------------------------------------------------------
+
+
+def _run_dpor_schedule(
+    schedule: list[int],
+    setup: Callable[[], T],
+    threads: list[Callable[[T], None]],
+    timeout: float = 5.0,
+    detect_io: bool = False,
+    deadlock_timeout: float = 5.0,
+    trace_recorder: TraceRecorder | None = None,
+) -> T:
+    """Replay a DPOR schedule using the DPOR runner rather than OpcodeScheduler."""
+    scheduler = _ReplayDporScheduler(
+        schedule,
+        len(threads),
+        deadlock_timeout=deadlock_timeout,
+        trace_recorder=trace_recorder,
+        detect_io=detect_io,
+    )
+    runner = DporBytecodeRunner(scheduler, detect_io=detect_io)
+
+    runner._patch_locks()
+    runner._patch_io()
+    try:
+        state = setup()
+
+        def make_thread_func(thread_func: Callable[[T], None], thread_state: T) -> Callable[[], None]:
+            def thread_wrapper() -> None:
+                thread_func(thread_state)
+
+            return thread_wrapper
+
+        funcs: list[Callable[[], None]] = [make_thread_func(t, state) for t in threads]
+        try:
+            runner.run(funcs, timeout=timeout)
+        except TimeoutError:
+            pass
+        if isinstance(scheduler._error, DeadlockError):
+            raise scheduler._error
+    finally:
+        runner._unpatch_io()
+        runner._unpatch_locks()
+    return state
+
+
+def _reproduce_dpor_counterexample(
+    *,
+    schedule_list: list[int],
+    setup: Callable[[], T],
+    threads: list[Callable[[T], None]],
+    timeout_per_run: float,
+    deadlock_timeout: float,
+    reproduce_on_failure: int,
+    lock_timeout: int | None,
+    invariant: Callable[[T], bool] | None = None,
+) -> tuple[int, int]:
+    """Measure how often a DPOR counterexample reproduces under the DPOR runner."""
+    from frontrun._preload_io import _set_preload_pipe_fd
+    from frontrun._sql_cursor import get_lock_timeout, patch_sql, set_lock_timeout, unpatch_sql
+
+    def _attempt(*, patch_sql_for_replay: bool, attempts: int) -> int:
+        successes = 0
+        _prev_lt = get_lock_timeout()
+        replay_timeout = timeout_per_run if patch_sql_for_replay else min(timeout_per_run, 5.0)
+        if patch_sql_for_replay:
+            _replay_lock_timeout = lock_timeout if lock_timeout is not None else 5000
+            set_lock_timeout(_replay_lock_timeout)
+            patch_sql()
+        try:
+            for _ in range(attempts):
+                try:
+                    replay_state = _run_dpor_schedule(
+                        schedule_list,
+                        setup,
+                        threads,
+                        timeout=replay_timeout,
+                        detect_io=False,
+                        deadlock_timeout=deadlock_timeout,
+                    )
+                    if invariant is not None and not invariant(replay_state):
+                        successes += 1
+                except DeadlockError:
+                    if invariant is None:
+                        successes += 1
+                except Exception:
+                    pass  # timeout / crash during replay — not a reproduction
+        finally:
+            if patch_sql_for_replay:
+                unpatch_sql()
+                set_lock_timeout(_prev_lt)
+        return successes
+
+    _set_preload_pipe_fd(-1)
+    successes = 0
+    if reproduce_on_failure > 0:
+        quick_success = _attempt(patch_sql_for_replay=False, attempts=1)
+        if quick_success > 0:
+            successes = quick_success + _attempt(patch_sql_for_replay=False, attempts=reproduce_on_failure - 1)
+        else:
+            successes = _attempt(patch_sql_for_replay=True, attempts=reproduce_on_failure)
+    return reproduce_on_failure, successes
+
+
+# ---------------------------------------------------------------------------
 # High-level API
 # ---------------------------------------------------------------------------
 
@@ -1991,37 +2210,20 @@ def explore_dpor(
 
                 # Replay the counterexample to measure reproducibility
                 if reproduce_on_failure > 0 and result.reproduction_attempts == 0:
-                    from frontrun._preload_io import _set_preload_pipe_fd
-                    from frontrun.bytecode import run_with_schedule
-
-                    _set_preload_pipe_fd(-1)
-
-                    _replay_lock_timeout = lock_timeout if lock_timeout is not None else 5000
-                    _prev_lt = get_lock_timeout()
-                    set_lock_timeout(_replay_lock_timeout)
-                    patch_sql()
-
-                    successes = 0
-                    try:
-                        for _ in range(reproduce_on_failure):
-                            try:
-                                run_with_schedule(
-                                    schedule_list,
-                                    setup,
-                                    threads,
-                                    timeout=timeout_per_run,
-                                    detect_io=False,
-                                    deadlock_timeout=deadlock_timeout,
-                                )
-                            except DeadlockError:
-                                successes += 1
-                            except Exception:
-                                pass  # timeout / crash during replay — not a reproduction
-                    finally:
-                        unpatch_sql()
-                        set_lock_timeout(_prev_lt)
-                    result.reproduction_attempts = reproduce_on_failure
+                    attempts, successes = _reproduce_dpor_counterexample(
+                        schedule_list=schedule_list,
+                        setup=setup,
+                        threads=threads,
+                        timeout_per_run=timeout_per_run,
+                        deadlock_timeout=deadlock_timeout,
+                        reproduce_on_failure=reproduce_on_failure,
+                        lock_timeout=lock_timeout,
+                        invariant=None,
+                    )
+                    result.reproduction_attempts = attempts
                     result.reproduction_successes = successes
+
+                    from frontrun._preload_io import _set_preload_pipe_fd
 
                     if preload_dispatcher is not None and preload_dispatcher._write_fd is not None:
                         _set_preload_pipe_fd(preload_dispatcher._write_fd)
@@ -2045,64 +2247,22 @@ def explore_dpor(
 
                 # Replay the counterexample to measure reproducibility
                 if reproduce_on_failure > 0 and result.reproduction_attempts == 0:
-                    from frontrun._preload_io import _set_preload_pipe_fd
-                    from frontrun.bytecode import run_with_schedule
-
-                    # Pause LD_PRELOAD pipe writes during replay.  The replay
-                    # threads do file I/O that the LD_PRELOAD library intercepts,
-                    # generating pipe events.  If the pipe buffer fills up (64 KB),
-                    # the LD_PRELOAD write() blocks the worker thread while the
-                    # reader thread may block on FD_MAP held by that same worker
-                    # — a deadlock.  Disabling the pipe fd avoids this entirely;
-                    # detect_io is already False for replays anyway.
-                    _set_preload_pipe_fd(-1)
-
-                    # Re-apply SQL patching during replay to inject
-                    # lock_timeout on new PG connections.  unpatch_sql() was
-                    # called after the DPOR execution, so replay connections
-                    # would not get lock_timeout.  The replay uses
-                    # OpcodeScheduler (not DporScheduler) which lacks row
-                    # lock arbitration, so PG row lock contention during
-                    # replay causes kernel-level deadlocks.  Always set a
-                    # safety lock_timeout during replay even if the user
-                    # didn't request one — replays reproduce racy schedules
-                    # that are likely to hit row lock contention.
-                    _replay_lock_timeout = lock_timeout if lock_timeout is not None else 5000
-                    _prev_lt = get_lock_timeout()
-                    set_lock_timeout(_replay_lock_timeout)
-                    patch_sql()
-
-                    successes = 0
-                    try:
-                        for _ in range(reproduce_on_failure):
-                            try:
-                                # DPOR processes I/O events within the same scheduling
-                                # step as the triggering opcode (via pending_io), so
-                                # its schedule is pure opcode-level.  The bytecode
-                                # shuffler's _io_reporter adds extra scheduling steps
-                                # for each I/O event, which would desync the replay.
-                                # Disable detect_io during replay so the step counts
-                                # match; the actual I/O still happens as a side effect
-                                # of opcode execution.
-                                replay_state = run_with_schedule(
-                                    schedule_list,
-                                    setup,
-                                    threads,
-                                    timeout=timeout_per_run,
-                                    detect_io=False,
-                                    deadlock_timeout=deadlock_timeout,
-                                )
-                                if not invariant(replay_state):
-                                    successes += 1
-                            except Exception:
-                                pass  # timeout / crash during replay — not a reproduction
-                    finally:
-                        unpatch_sql()
-                        set_lock_timeout(_prev_lt)
-                    result.reproduction_attempts = reproduce_on_failure
+                    attempts, successes = _reproduce_dpor_counterexample(
+                        schedule_list=schedule_list,
+                        setup=setup,
+                        threads=threads,
+                        timeout_per_run=timeout_per_run,
+                        deadlock_timeout=deadlock_timeout,
+                        reproduce_on_failure=reproduce_on_failure,
+                        lock_timeout=lock_timeout,
+                        invariant=invariant,
+                    )
+                    result.reproduction_attempts = attempts
                     result.reproduction_successes = successes
 
                     # Re-enable pipe writes for subsequent DPOR executions.
+                    from frontrun._preload_io import _set_preload_pipe_fd
+
                     if preload_dispatcher is not None and preload_dispatcher._write_fd is not None:
                         _set_preload_pipe_fd(preload_dispatcher._write_fd)
 
