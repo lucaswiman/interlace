@@ -8,6 +8,7 @@ Demonstrates both:
 
 import threading
 
+from frontrun import explore_interleavings as explore_interleavings_api
 from frontrun.bytecode import (
     BytecodeShuffler,
     OpcodeScheduler,
@@ -192,6 +193,24 @@ def test_explore_finds_counter_race():
     assert not result.property_holds, (
         f"Expected to find a race condition, but invariant held across {result.num_explored} interleavings"
     )
+    assert result.counterexample is not None
+
+
+def test_top_level_explore_interleavings_dispatches_to_bytecode():
+    """The package-level explore_interleavings wrapper should dispatch sync threads."""
+    result = explore_interleavings_api(
+        setup=lambda: Counter(value=0),
+        threads=[
+            lambda c: c.increment(),
+            lambda c: c.increment(),
+        ],
+        invariant=lambda c: c.value == 2,
+        max_attempts=200,
+        max_ops=50,
+        seed=42,
+    )
+
+    assert not result.property_holds
     assert result.counterexample is not None
 
 

@@ -343,6 +343,23 @@ vector clocks and only explores alternative orderings at conflict points.
 Optionally adds ``sys.setprofile`` for C-call detection and
 monkey-patched I/O.
 
+**Async shuffler** does *not* use opcode tracing.  It stays entirely in a
+single asyncio event loop and uses ``InterleavedLoop`` plus
+``contextvars`` to control tasks at natural coroutine suspension points.
+``explore_interleavings()`` generates random schedules over those await
+boundaries and checks the invariant afterward.  It does not try to
+understand which schedules are equivalent; it simply samples them.
+
+**Async DPOR** also stays in a single asyncio event loop, but the
+scheduler wraps each task coroutine so that every *natural* ``await``
+becomes a scheduling boundary.  Within each await-delimited block it
+installs ``sys.monitoring`` (3.12+) or ``sys.settrace`` opcode events on
+user-code frames and reuses the same shadow-stack/opcode processor as
+sync DPOR.  The important distinction is that async DPOR does **not**
+preempt in the middle of a block; the tracing is used only to tell the
+Rust DPOR engine which await-boundary reorderings actually conflict and
+which are independent.
+
 **``LD_PRELOAD`` interception** is orthogonal to the Python-level
 mechanisms.  It runs whenever the ``frontrun`` CLI is used, regardless
 of which approach (or no approach) is active on the Python side.  Events
@@ -411,9 +428,87 @@ from the Rust interception library are available via
      - Yes
      -
 
+.. list-table:: Mechanism usage by async approach
+   :header-rows: 1
+   :widths: 34 18 18
+
+   * - Mechanism
+     - Async shuffler
+     - Async DPOR
+   * - ``InterleavedLoop`` / asyncio.Condition gating
+     - Yes
+     - Yes
+   * - Explicit ``await_point()`` markers
+     - Yes
+     - Optional compatibility only
+   * - Automatic scheduling at natural ``await``
+     -
+     - Yes
+   * - Opcode/instruction tracing of Python accesses
+     -
+     - Yes
+   * - DPOR conflict reduction / vector clocks
+     -
+     - Yes
+   * - Async lock monkey-patching / wait-for graph
+     -
+     - Yes
+   * - Async SQL interception
+     - Optional
+     - Optional
+
 
 What each layer can and cannot see
 ------------------------------------
+
+Async approaches: shuffler vs async DPOR
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The two async implementations share a scheduler foundation but differ in
+how much they observe and how they choose schedules.
+
+**Async shuffler** (``frontrun.async_shuffler``):
+
+- User tasks are wrapped so every natural ``await`` becomes a scheduling
+  boundary.
+- ``await_point()`` is optional; it just adds an extra explicit yield.
+- ``AwaitScheduler`` follows a concrete list of task indices, or
+  ``explore_interleavings()`` samples random such lists.
+- No Python opcode tracing runs inside the block between two
+  await boundaries.
+- This makes the implementation simple and the schedules stable across
+  Python versions, but it also means the tool does not reduce equivalent
+  schedules based on actual conflicts.
+
+**Async DPOR** (``frontrun.async_dpor``):
+
+- User tasks are wrapped in ``_AutoPauseCoroutine``.  Before each step of
+  the inner coroutine, the wrapper drives ``scheduler.pause(task_id)``,
+  so every natural coroutine suspension becomes a scheduling boundary.
+- While a task is running between two such boundaries, opcode-level
+  tracing is enabled for user-code frames only.  ``_process_opcode()``
+  maintains shadow stacks and reports reads/writes (attributes,
+  subscripts, globals, closure cells, selected C-method surrogates, and
+  so on) to the Rust DPOR engine.
+- When the task reaches the next ``await``, the scheduler asks the DPOR
+  engine which task should run next.  The engine has already seen the
+  accesses performed in the completed block, so it can backtrack only on
+  await-boundary reorderings whose blocks actually conflict.
+- Tasks are still atomic *between* awaits from the scheduler's point of
+  view.  Async DPOR does not create new mid-block preemption points; the
+  tracing only informs reduction.
+- ``asyncio.Lock`` is monkey-patched to a cooperative version that adds
+  explicit acquisition scheduling points, reports lock acquire/release
+  synchronization to the engine, and uses a wait-for graph for deadlock
+  detection.
+- Async SQL interception buffers I/O/resource accesses and flushes them
+  at the next scheduling boundary, so SQL conflicts participate in the
+  same DPOR search.
+
+This difference explains the naming split:
+
+- async shuffler: await-point schedule generation/sampling
+- async DPOR: await-boundary scheduling plus traced conflict reduction
 
 Understanding these boundaries explains why DPOR misses database-level
 races and why bytecode exploration sometimes finds bugs DPOR can't.

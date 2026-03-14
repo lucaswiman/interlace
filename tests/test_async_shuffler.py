@@ -8,6 +8,7 @@ Demonstrates both:
 
 import asyncio
 
+from frontrun import explore_interleavings as explore_interleavings_api
 from frontrun.async_shuffler import (
     AsyncShuffler,
     AwaitScheduler,
@@ -55,6 +56,18 @@ class SafeCounter:
             temp = self.value
             await await_point()
             self.value = temp + 1
+
+
+class NaturalCounter:
+    """Counter that uses a natural await instead of explicit await_point()."""
+
+    def __init__(self, value=0):
+        self.value = value
+
+    async def increment(self):
+        temp = self.value
+        await asyncio.sleep(0)
+        self.value = temp + 1
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +270,50 @@ def test_explore_bank_account_race():
         assert not result.property_holds, (
             f"Expected to find lost-update race, but invariant held across {result.num_explored} interleavings"
         )
+
+    asyncio.run(_test())
+
+
+def test_explore_finds_natural_await_race():
+    """Random exploration should treat natural awaits as scheduling points."""
+
+    async def _test():
+        result = await explore_interleavings(
+            setup=lambda: NaturalCounter(value=0),
+            tasks=[
+                lambda c: c.increment(),
+                lambda c: c.increment(),
+            ],
+            invariant=lambda c: c.value == 2,
+            max_attempts=200,
+            max_ops=50,
+            seed=42,
+        )
+
+        assert not result.property_holds
+        assert result.counterexample is not None
+
+    asyncio.run(_test())
+
+
+def test_top_level_explore_interleavings_dispatches_to_async_shuffler():
+    """The package-level explore_interleavings wrapper should dispatch async tasks."""
+
+    async def _test():
+        result = await explore_interleavings_api(
+            setup=lambda: NaturalCounter(value=0),
+            tasks=[
+                lambda c: c.increment(),
+                lambda c: c.increment(),
+            ],
+            invariant=lambda c: c.value == 2,
+            max_attempts=200,
+            max_ops=50,
+            seed=42,
+        )
+
+        assert not result.property_holds
+        assert result.counterexample is not None
 
     asyncio.run(_test())
 
