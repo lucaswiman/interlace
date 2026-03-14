@@ -110,6 +110,21 @@ class TestTraceRecorder:
 
         assert [ev.step_index for ev in recorder.events] == [0, 1, 2]
 
+    def test_record_io_captures_detail_and_call_chain(self) -> None:
+        """C-level I/O events can carry SQL detail and call chain context."""
+        recorder = TraceRecorder()
+        recorder.record_io(
+            thread_id=0,
+            resource_id="socket:unix:/var/run/postgresql/.s.PGSQL.5432",
+            kind="read",
+            detail="SQL: SELECT * FROM users WHERE id = 1",
+            call_chain=["QuerySet.get", "AcquireUserView.post"],
+        )
+
+        ev = recorder.events[0]
+        assert ev.detail == "SQL: SELECT * FROM users WHERE id = 1"
+        assert ev.call_chain == ["QuerySet.get", "AcquireUserView.post"]
+
 
 # ---------------------------------------------------------------------------
 # Filtering
@@ -477,6 +492,40 @@ class TestCallChainFormatting:
         lines = deduplicate_to_source_lines(events)
         assert len(lines) == 1
         assert lines[0].call_chain == ["DB.dict", "main"]
+
+    def test_io_detail_shown_in_trace(self) -> None:
+        """format_trace includes detail lines for C-level I/O events."""
+        events = [
+            TraceEvent(
+                0,
+                0,
+                "<C extension>",
+                0,
+                "",
+                "IO",
+                "read",
+                "socket:unix:/var/run/postgresql/.s.PGSQL.5432",
+                "IO",
+                ["QuerySet.get", "AcquireUserView.post"],
+                "SQL: SELECT * FROM auth_user WHERE id = 1",
+            ),
+            TraceEvent(
+                1,
+                1,
+                "<C extension>",
+                0,
+                "",
+                "IO",
+                "write",
+                "socket:unix:/var/run/postgresql/.s.PGSQL.5432",
+                "IO",
+                ["QuerySet.get", "AcquireUserView.post"],
+                "SQL: SELECT * FROM auth_user WHERE id = 1",
+            ),
+        ]
+        output = format_trace(events, num_threads=2, num_explored=1)
+        assert "SQL: SELECT * FROM auth_user WHERE id = 1" in output
+        assert "Called from QuerySet.get <- AcquireUserView.post" in output
 
 
 # ---------------------------------------------------------------------------

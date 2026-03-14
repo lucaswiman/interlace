@@ -59,7 +59,13 @@ from frontrun._io_detection import (
     unpatch_io,
 )
 from frontrun._sql_anomaly import classify_sql_anomaly
-from frontrun._sql_cursor import clear_sql_metadata, is_tid_suppressed, patch_sql, unpatch_sql
+from frontrun._sql_cursor import (
+    clear_sql_metadata,
+    get_active_sql_io_context,
+    is_tid_suppressed,
+    patch_sql,
+    unpatch_sql,
+)
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
 from frontrun._tracing import TraceFilter as _TraceFilter
@@ -186,7 +192,7 @@ class _PreloadBridge:
     def __init__(self, dispatcher: Any = None) -> None:
         self._lock = real_lock()
         self._tid_to_dpor: dict[int, int] = {}
-        self._pending: dict[int, list[tuple[int, str, str]]] = {}
+        self._pending: dict[int, list[tuple[int, str, str, str | None, list[str] | None]]] = {}
         self._active = False
         self._dispatcher = dispatcher  # IOEventDispatcher (for poll())
 
@@ -238,12 +244,13 @@ class _PreloadBridge:
             # the send/recv pairs to reach the critical interleaving.
             kind = "write" if event.kind == "write" else "read"
             obj_key = _make_object_key(hash(event.resource_id), event.resource_id)
-            self._pending.setdefault(dpor_id, []).append((obj_key, kind, event.resource_id))
+            detail, call_chain = get_active_sql_io_context(event.tid)
+            self._pending.setdefault(dpor_id, []).append((obj_key, kind, event.resource_id, detail, call_chain))
 
-    def drain(self, dpor_id: int) -> list[tuple[int, str, str]]:
+    def drain(self, dpor_id: int) -> list[tuple[int, str, str, str | None, list[str] | None]]:
         """Return and clear buffered events for a DPOR thread.
 
-        Each item is ``(object_key, kind, resource_id)``.
+        Each item is ``(object_key, kind, resource_id, detail, call_chain)``.
 
         On free-threaded Python the background reader may not have
         processed pipe data yet, so we poll the dispatcher first to
@@ -407,10 +414,16 @@ class DporScheduler:
                     # come from C extensions (e.g. libpq) with no Python frame.
                     _recorder = self.trace_recorder
                     if _recorder is not None:
-                        for _, _kind, _resource_id in _preload_events:
-                            _recorder.record_io(thread_id, _resource_id, _kind)
+                        for _, _kind, _resource_id, _detail, _call_chain in _preload_events:
+                            _recorder.record_io(
+                                thread_id,
+                                _resource_id,
+                                _kind,
+                                call_chain=_call_chain,
+                                detail=_detail,
+                            )
                     # Convert 3-tuples to 2-tuples for the pending list
-                    _io_pairs = [(_key, _kind) for _key, _kind, _ in _preload_events]
+                    _io_pairs = [(_key, _kind) for _key, _kind, _, _, _ in _preload_events]
                     if _pending_io is not None:
                         _pending_io.extend(_io_pairs)
                     else:
