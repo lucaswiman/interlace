@@ -3,11 +3,11 @@
 Wraps ``explore_async_dpor`` to handle per-task Django async database
 connection management and optional lock_timeout injection automatically.
 
-Example::
+Prefer the unified ``django_dpor`` dispatcher (pass ``tasks=`` for async)::
 
-    from frontrun.contrib.django import async_django_dpor
+    from frontrun.contrib.django import django_dpor
 
-    result = await async_django_dpor(
+    result = await django_dpor(
         setup=_State,
         tasks=[task_a, task_b],
         invariant=_invariant,

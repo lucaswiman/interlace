@@ -21,9 +21,9 @@ conflicts automatically.
 
 - New module: ``frontrun.async_dpor`` (``explore_async_dpor``, ``await_point``).
 - Contrib helpers merged into packages: ``frontrun.contrib.django``
-  (``django_dpor``, ``async_django_dpor``) and ``frontrun.contrib.sqlalchemy``
-  (``sqlalchemy_dpor``, ``async_sqlalchemy_dpor``, ``get_connection``,
-  ``get_async_connection``).
+  (``django_dpor``) and ``frontrun.contrib.sqlalchemy``
+  (``sqlalchemy_dpor``, ``get_connection``, ``get_async_connection``).
+  Both accept ``threads=`` for sync or ``tasks=`` for async.
 - Integration tests against asyncpg, SQLAlchemy async, and Django async ORM.
 
 **SQL conflict detection in DPOR**

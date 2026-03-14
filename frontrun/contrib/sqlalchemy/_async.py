@@ -3,11 +3,11 @@
 Wraps ``explore_async_dpor`` to handle per-task async connection management
 and optional lock_timeout injection automatically.
 
-Example::
+Prefer the unified ``sqlalchemy_dpor`` dispatcher (pass ``tasks=`` for async)::
 
-    from frontrun.contrib.sqlalchemy import async_sqlalchemy_dpor, get_async_connection
+    from frontrun.contrib.sqlalchemy import sqlalchemy_dpor, get_async_connection
 
-    result = await async_sqlalchemy_dpor(
+    result = await sqlalchemy_dpor(
         engine=async_engine,
         setup=_State,
         tasks=[task_a, task_b],
