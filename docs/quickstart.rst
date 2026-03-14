@@ -139,7 +139,7 @@ scheduled tasks.
 
 .. code-block:: python
 
-   from frontrun.async_trace_markers import AsyncTraceExecutor
+   from frontrun import TraceExecutor
    from frontrun.common import Schedule, Step
 
    class AsyncCounter:
@@ -169,7 +169,7 @@ scheduled tasks.
            Step("task2", "write_value"),
        ])
 
-       executor = AsyncTraceExecutor(schedule)
+       executor = TraceExecutor(schedule)
        executor.run({
            "task1": counter.increment,
            "task2": counter.increment,
@@ -189,7 +189,7 @@ scheduled tasks.
            Step("task2", "write_value"),
        ])
 
-       executor = AsyncTraceExecutor(schedule)
+       executor = TraceExecutor(schedule)
        executor.run({
            "task1": counter.increment,
            "task2": counter.increment,

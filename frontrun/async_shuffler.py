@@ -17,14 +17,14 @@ and there are far fewer of them than in threaded code.
 Example — find a race condition with random schedule exploration:
 
     >>> import asyncio
-    >>> from frontrun.async_bytecode import explore_interleavings, await_point
+    >>> from frontrun import explore_interleavings
     >>>
     >>> class Counter:
     ...     def __init__(self):
     ...         self.value = 0
     ...     async def increment(self):
     ...         temp = self.value
-    ...         await await_point()  # Yield control; race can happen here
+    ...         await asyncio.sleep(0)  # any natural await is a scheduling point
     ...         self.value = temp + 1
     >>>
     >>> result = asyncio.run(explore_interleavings(
@@ -34,19 +34,15 @@ Example — find a race condition with random schedule exploration:
     ... ))
     >>> assert result.property_holds, result.explanation  # fails — lost update!
 
-The await_point() function marks explicit yield points where context switches
-can occur. This is analogous to bytecode.py's opcode-level tracing, but for
-async code the number of interleaving points is much smaller and more explicit.
-
-In production async code, every `await` is a potential context switch point.
-For testing, call `await await_point()` at each location where a race
-condition could manifest.
+Any natural ``await`` in user code is a scheduling point.  ``await_point()``
+is still available as an explicit extra yield when a test wants to force
+an additional checkpoint.
 """
 
 import asyncio
 import contextvars
 import random
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine, Generator
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -72,26 +68,95 @@ except ImportError:
 _scheduler_var: contextvars.ContextVar[Optional["AwaitScheduler"]] = contextvars.ContextVar("_scheduler", default=None)
 _task_id_var: contextvars.ContextVar[int | None] = contextvars.ContextVar("_task_id", default=None)
 
+# When True, the coroutine wrapper handles scheduling automatically.
+_auto_pause_active: contextvars.ContextVar[bool] = contextvars.ContextVar("_auto_pause_active", default=False)
+
+# When >0, the auto-pause wrapper should not insert a second scheduling point.
+_in_scheduler_pause: contextvars.ContextVar[int] = contextvars.ContextVar("_in_scheduler_pause", default=0)
+
 
 async def await_point():
     """Yield to the scheduler at an await point.
 
-    Call this at every point where a context switch could happen in your
-    async code. This is the async equivalent of a bytecode opcode — the
-    atomic unit of interleaving.
+    Use this when you want an *extra* explicit yield in addition to the
+    natural ``await`` expressions already present in the coroutine.
 
-    In typical async code, every `await` statement is a potential context
-    switch point. For testing race conditions, replace strategic awaits
-    with `await await_point()` to allow the scheduler to control ordering.
+    When auto-pause is active (the default in ``AsyncShuffler``), this is
+    equivalent to ``await asyncio.sleep(0)`` — the coroutine wrapper
+    already treats every natural ``await`` as a scheduling boundary.
 
-    If no scheduler is active (i.e., not running under AsyncBytecodeShuffler),
-    this function returns immediately without blocking.
+    If no scheduler is active, this function returns immediately without blocking.
     """
+    if _auto_pause_active.get():
+        await asyncio.sleep(0)
+        return
     scheduler = _scheduler_var.get()
     if scheduler is not None:
         task_id = _task_id_var.get()
         if task_id is not None:
             await scheduler.pause(task_id)
+
+
+class _AutoPauseIterator:
+    """Wrap a coroutine so every natural await becomes a scheduling boundary."""
+
+    __slots__ = ("_inner", "_task_id", "_scheduler", "_pause_iter", "_buffered_value")
+
+    def __init__(self, inner_coro: Any, task_id: int, scheduler: "AwaitScheduler") -> None:
+        self._inner = inner_coro
+        self._task_id = task_id
+        self._scheduler = scheduler
+        self._pause_iter: Any | None = None
+        self._buffered_value: Any = None
+
+    def __next__(self) -> Any:
+        return self.send(None)
+
+    def send(self, value: Any) -> Any:
+        if self._pause_iter is not None:
+            try:
+                return self._pause_iter.send(value)
+            except StopIteration:
+                self._pause_iter = None
+                return self._inner.send(self._buffered_value)
+
+        if _in_scheduler_pause.get() > 0:
+            return self._inner.send(value)
+
+        self._buffered_value = value
+        pause_coro = self._scheduler.pause(self._task_id)
+        self._pause_iter = pause_coro.__await__()
+        try:
+            return next(self._pause_iter)
+        except StopIteration:
+            self._pause_iter = None
+            return self._inner.send(self._buffered_value)
+
+    def throw(self, typ: Any, val: Any = None, tb: Any = None) -> Any:
+        if self._pause_iter is not None:
+            self._pause_iter.close()
+            self._pause_iter = None
+        if val is None and tb is None:
+            return self._inner.throw(typ)
+        return self._inner.throw(typ, val, tb)
+
+    def close(self) -> None:
+        if self._pause_iter is not None:
+            self._pause_iter.close()
+            self._pause_iter = None
+        self._inner.close()
+
+
+class _AutoPauseCoroutine:
+    """Awaitable wrapper that auto-schedules on natural awaits."""
+
+    __slots__ = ("_iter",)
+
+    def __init__(self, coro: Any, task_id: int, scheduler: "AwaitScheduler") -> None:
+        self._iter = _AutoPauseIterator(coro, task_id, scheduler)
+
+    def __await__(self) -> Generator[Any, Any, None]:
+        return self._iter  # type: ignore[return-value]
 
 
 class AwaitScheduler(InterleavedLoop):
@@ -146,13 +211,22 @@ class AwaitScheduler(InterleavedLoop):
         _scheduler_var.set(None)
         _task_id_var.set(None)
 
+    async def pause(self, task_id: Any, marker: Any = None) -> None:
+        depth = _in_scheduler_pause.get()
+        _in_scheduler_pause.set(depth + 1)
+        try:
+            await asyncio.sleep(0)
+            await super().pause(task_id, marker)
+        finally:
+            _in_scheduler_pause.set(depth)
+
     @property
     def had_error(self) -> bool:
         """Check if an error occurred during execution."""
         return self._error is not None
 
 
-class AsyncBytecodeShuffler:
+class AsyncShuffler:
     """Run concurrent async functions with await-point-level interleaving control.
 
     Creates asyncio tasks for each function and delegates to the
@@ -189,16 +263,23 @@ class AsyncBytecodeShuffler:
             for i, (func, a, kw) in enumerate(zip(funcs, args, kwargs))
         }
 
+        wrapped_funcs: dict[int, Callable[..., Coroutine[Any, Any, None]]] = {}
+        for tid, func in task_funcs.items():
+
+            async def _wrapped(f: Callable[..., Coroutine[Any, Any, None]] = func, t: int = tid) -> None:
+                _auto_pause_active.set(True)
+                await _AutoPauseCoroutine(f(), t, self.scheduler)
+
+            wrapped_funcs[tid] = _wrapped
+
         try:
-            await self.scheduler.run_all(task_funcs, timeout=timeout)  # type: ignore[arg-type]
+            await self.scheduler.run_all(wrapped_funcs, timeout=timeout)  # type: ignore[arg-type]
         except TimeoutError:
             pass  # match original behavior: swallow timeout in runner
 
 
 @asynccontextmanager
-async def controlled_interleaving(
-    schedule: list[int], num_tasks: int = 2
-) -> AsyncGenerator[AsyncBytecodeShuffler, None]:
+async def controlled_interleaving(schedule: list[int], num_tasks: int = 2) -> AsyncGenerator[AsyncShuffler, None]:
     """Context manager for running async code under a specific interleaving.
 
     Args:
@@ -206,14 +287,14 @@ async def controlled_interleaving(
         num_tasks: Number of tasks.
 
     Yields:
-        AsyncBytecodeShuffler runner.
+        AsyncShuffler runner.
 
     Example:
         >>> async with controlled_interleaving([0, 1, 0, 1], num_tasks=2) as runner:
         ...     await runner.run([coro1, coro2])
     """
     scheduler = AwaitScheduler(schedule, num_tasks)
-    runner = AsyncBytecodeShuffler(scheduler)
+    runner = AsyncShuffler(scheduler)
     yield runner
 
 
@@ -251,7 +332,7 @@ async def run_with_schedule(
         patch_sql_async()
     try:
         scheduler = AwaitScheduler(schedule, len(tasks), deadlock_timeout=deadlock_timeout)
-        runner = AsyncBytecodeShuffler(scheduler)
+        runner = AsyncShuffler(scheduler)
 
         state = setup()
         funcs: list[Callable[..., Coroutine[Any, Any, None]]] = [lambda s=state, t=t: t(s) for t in tasks]  # type: ignore[assignment]
@@ -356,7 +437,7 @@ def schedule_strategy(num_tasks: int, max_ops: int = 100) -> Any:  # type: ignor
     For use with hypothesis @given decorator in your own tests:
 
         >>> from hypothesis import given
-        >>> from frontrun.async_bytecode import schedule_strategy, run_with_schedule
+        >>> from frontrun.async_shuffler import schedule_strategy, run_with_schedule
         >>> import asyncio
         >>>
         >>> @given(schedule=schedule_strategy(2))

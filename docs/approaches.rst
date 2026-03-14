@@ -164,8 +164,9 @@ debugging this library or building tooling on top of it, rather than for general
    interleaving on 3.13. Counterexample schedules returned by ``explore_interleavings``
    are likewise best treated as ephemeral debugging artifacts rather than long-lived test fixtures.
 
-   The async variant (``frontrun.async_bytecode``) uses ``await_point()`` markers rather
-   than opcodes, so its schedules are stable --- see that module for details.
+   The async variant (``frontrun.async_shuffler``) uses natural ``await``
+   boundaries rather than opcodes, so its schedules are stable --- see that
+   module for details.
 
 
 Trace Markers
@@ -221,7 +222,7 @@ The synchronization contract:
 
 .. code-block:: python
 
-   from frontrun.async_trace_markers import AsyncTraceExecutor
+   from frontrun import TraceExecutor
    from frontrun.common import Schedule, Step
 
    class AsyncCounter:

@@ -191,7 +191,7 @@ Async trace markers let you control interleaving at ``await`` boundaries:
 
 .. code-block:: python
 
-   from frontrun.async_trace_markers import AsyncTraceExecutor
+   from frontrun import TraceExecutor
    from frontrun.common import Schedule, Step
 
    class AsyncBankAccount:
@@ -220,7 +220,7 @@ Async trace markers let you control interleaving at ``await`` boundaries:
        Step("task2", "write_balance"),
    ])
 
-   executor = AsyncTraceExecutor(schedule)
+   executor = TraceExecutor(schedule)
    executor.run({
        "task1": lambda: account.transfer(50),
        "task2": lambda: account.transfer(50),

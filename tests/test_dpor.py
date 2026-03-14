@@ -916,3 +916,179 @@ class TestDeadlockAsInvariantViolation:
         )
 
         assert result.property_holds, "Consistent lock order should not be reported as deadlock"
+
+    def test_three_thread_directed_cycle_deadlock(self) -> None:
+        """Three-thread deadlock: T0→lock_a→lock_b, T1→lock_b→lock_c, T2→lock_c→lock_a.
+
+        Forms the directed cycle T0→T1→T2→T0 when each holds its first
+        lock and waits for its second.
+        """
+
+        class State:
+            def __init__(self) -> None:
+                self.lock_a = threading.Lock()
+                self.lock_b = threading.Lock()
+                self.lock_c = threading.Lock()
+                self.x = 0
+
+        def thread0(s: State) -> None:
+            with s.lock_a:
+                s.x += 1
+                with s.lock_b:
+                    pass
+
+        def thread1(s: State) -> None:
+            with s.lock_b:
+                s.x += 1
+                with s.lock_c:
+                    pass
+
+        def thread2(s: State) -> None:
+            with s.lock_c:
+                s.x += 1
+                with s.lock_a:
+                    pass
+
+        result = explore_dpor(
+            setup=State,
+            threads=[thread0, thread1, thread2],
+            invariant=lambda s: True,
+            max_executions=1000,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=True,
+        )
+
+        assert not result.property_holds, "3-way deadlock should set property_holds=False"
+        assert result.explanation is not None
+        assert "deadlock" in result.explanation.lower()
+
+    def test_partial_deadlock_third_thread_completes(self) -> None:
+        """Three threads: two deadlock (lock-order inversion), third does independent work.
+
+        The partial deadlock should still be detected even though T2 finishes.
+        """
+
+        class State:
+            def __init__(self) -> None:
+                self.lock_a = threading.Lock()
+                self.lock_b = threading.Lock()
+                self.x = 0
+                self.t2_done = False
+
+        def thread0(s: State) -> None:
+            with s.lock_a:
+                s.x += 1
+                with s.lock_b:
+                    pass
+
+        def thread1(s: State) -> None:
+            with s.lock_b:
+                s.x += 1
+                with s.lock_a:
+                    pass
+
+        def thread2(s: State) -> None:
+            s.t2_done = True
+
+        result = explore_dpor(
+            setup=State,
+            threads=[thread0, thread1, thread2],
+            invariant=lambda s: True,
+            max_executions=1000,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=True,
+        )
+
+        assert not result.property_holds, "Partial deadlock should still be detected"
+
+    def test_data_dependent_lock_order_deadlock(self) -> None:
+        """Lock acquisition order depends on runtime state.
+
+        T0 always acquires lock_a then lock_b.  T1 reads a shared flag
+        (set by T0) that determines lock order.  Only the interleaving
+        where T0 sets the flag before T1 reads it triggers the deadlock.
+        """
+
+        class State:
+            def __init__(self) -> None:
+                self.lock_a = threading.Lock()
+                self.lock_b = threading.Lock()
+                self.reverse_order = False
+                self.x = 0
+
+        def thread0(s: State) -> None:
+            s.reverse_order = True
+            s.x += 1  # write conflict
+            with s.lock_a:
+                s.x += 1
+                with s.lock_b:
+                    pass
+
+        def thread1(s: State) -> None:
+            s.x += 1  # write conflict
+            if s.reverse_order:
+                with s.lock_b:
+                    s.x += 1
+                    with s.lock_a:
+                        pass
+            else:
+                with s.lock_a:
+                    s.x += 1
+                    with s.lock_b:
+                        pass
+
+        result = explore_dpor(
+            setup=State,
+            threads=[thread0, thread1],
+            invariant=lambda s: True,
+            max_executions=500,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=True,
+        )
+
+        assert not result.property_holds, "Data-dependent deadlock should be found"
+        assert result.explanation is not None
+        assert "deadlock" in result.explanation.lower()
+
+    def test_dining_philosophers_four(self) -> None:
+        """Four dining philosophers with lock-order inversion on a circular set."""
+
+        num_philosophers = 4
+
+        class State:
+            def __init__(self) -> None:
+                self.forks = [threading.Lock() for _ in range(num_philosophers)]
+                self.x = 0
+
+        def make_philosopher(i: int):  # noqa: ANN202
+            def philosopher(s: State) -> None:
+                left = i
+                right = (i + 1) % num_philosophers
+                with s.forks[left]:
+                    s.x += 1  # write conflict
+                    with s.forks[right]:
+                        pass
+
+            return philosopher
+
+        result = explore_dpor(
+            setup=State,
+            threads=[make_philosopher(i) for i in range(num_philosophers)],
+            invariant=lambda s: True,
+            # Note: high executions / preemption bounds required since finding the 4-cycle takes many more interleavings that most simple races.
+            max_executions=2000,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=True,
+        )
+
+        assert not result.property_holds, "Dining philosophers deadlock should be found"
+        assert result.explanation is not None
+        assert "deadlock" in result.explanation.lower()

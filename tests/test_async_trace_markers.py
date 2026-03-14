@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from frontrun import TraceExecutor as UnifiedTraceExecutor
 from frontrun.async_trace_markers import AsyncTraceExecutor, async_frontrun
 from frontrun.common import Schedule, Step
 
@@ -161,6 +162,34 @@ def test_convenience_function():
     )
 
     async_frontrun(schedule=schedule, tasks={"t1": worker1, "t2": worker2}, timeout=5.0)
+
+    assert results == ["t1", "t2"]
+
+
+def test_unified_trace_executor_supports_async_tasks():
+    """The public TraceExecutor facade should dispatch async task mappings."""
+    results = []
+
+    async def worker1():
+        # frontrun: mark
+        await asyncio.sleep(0)
+        results.append("t1")
+
+    async def worker2():
+        # frontrun: mark
+        await asyncio.sleep(0)
+        results.append("t2")
+
+    schedule = Schedule(
+        [
+            Step("t1", "mark"),
+            Step("t2", "mark"),
+        ]
+    )
+
+    executor = UnifiedTraceExecutor(schedule)
+    executor.run({"t1": worker1, "t2": worker2})
+    executor.wait()
 
     assert results == ["t1", "t2"]
 

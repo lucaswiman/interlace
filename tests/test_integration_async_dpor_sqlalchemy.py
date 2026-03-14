@@ -1,0 +1,199 @@
+"""Integration tests: async DPOR with SQLAlchemy async against real Postgres.
+
+Tests that explore_async_dpor can detect SQL-level race conditions
+using SQLAlchemy's async engine, with await_point() as the scheduling
+granularity.
+
+Requires a running Postgres with a ``frontrun_test`` database::
+
+    createdb frontrun_test
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+
+import pytest
+
+try:
+    from sqlalchemy import String, text
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+    from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+except ImportError:
+    pytest.skip("sqlalchemy[asyncio] not installed", allow_module_level=True)
+
+try:
+    import asyncpg  # noqa: F401
+except ImportError:
+    pytest.skip("asyncpg not installed (needed for async postgres driver)", allow_module_level=True)
+
+from frontrun.async_dpor import await_point, explore_async_dpor
+
+_DB_NAME = os.environ.get("FRONTRUN_TEST_DB", "frontrun_test")
+_ASYNC_DB_URL = f"postgresql+asyncpg:///{_DB_NAME}"
+_SYNC_DSN = f"postgresql:///{_DB_NAME}"
+
+
+# ---------------------------------------------------------------------------
+# SQLAlchemy async model
+# ---------------------------------------------------------------------------
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class AsyncCounter(Base):
+    __tablename__ = "async_sa_counter"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    value: Mapped[int] = mapped_column(default=0)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def _pg_available():
+    """Create test table using sync psycopg2 (avoids event loop issues)."""
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(f"dbname={_DB_NAME}")
+    except Exception:
+        pytest.skip(f"Postgres not available at {_DB_NAME}")
+
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS async_sa_counter")
+        cur.execute("""
+            CREATE TABLE async_sa_counter (
+                id INTEGER PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                value INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        cur.execute("INSERT INTO async_sa_counter (id, name, value) VALUES (1, 'test', 0)")
+    conn.close()
+    yield
+
+    try:
+        conn = psycopg2.connect(f"dbname={_DB_NAME}")
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS async_sa_counter")
+        conn.close()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncDporSQLAlchemy:
+    """Async DPOR integration tests with SQLAlchemy async."""
+
+    def test_finds_lost_update_core(self, _pg_available) -> None:
+        """Async DPOR should detect a lost-update race via SQLAlchemy Core."""
+
+        async def run_test():
+            engine = create_async_engine(_ASYNC_DB_URL)
+            try:
+                # Reset
+                async with engine.begin() as conn:
+                    await conn.execute(text("UPDATE async_sa_counter SET value = 0 WHERE id = 1"))
+
+                async def increment(_state: object) -> None:
+                    async with engine.connect() as conn:
+                        result = await conn.execute(text("SELECT value FROM async_sa_counter WHERE id = 1"))
+                        row = result.fetchone()
+                        assert row is not None
+                        current = row[0]
+                        await await_point()
+                        await conn.execute(
+                            text("UPDATE async_sa_counter SET value = :val WHERE id = 1"),
+                            {"val": current + 1},
+                        )
+                        await conn.commit()
+
+                return await explore_async_dpor(
+                    setup=object,
+                    tasks=[increment, increment],
+                    invariant=lambda s: True,
+                    detect_sql=True,
+                    deadlock_timeout=10.0,
+                    timeout_per_run=15.0,
+                )
+            finally:
+                await engine.dispose()
+
+        result = asyncio.run(run_test())
+        assert result.num_explored >= 1
+
+    def test_finds_lost_update_orm(self, _pg_available) -> None:
+        """Async DPOR should detect a lost-update race via SQLAlchemy async ORM."""
+
+        async def run_test():
+            engine = create_async_engine(_ASYNC_DB_URL)
+            try:
+                # Reset
+                async with AsyncSession(engine) as session:
+                    counter = await session.get(AsyncCounter, 1)
+                    if counter is not None:
+                        counter.value = 0
+                        await session.commit()
+
+                async def increment(_state: object) -> None:
+                    async with AsyncSession(engine) as session:
+                        counter = await session.get(AsyncCounter, 1)
+                        assert counter is not None
+                        current = counter.value
+                        await await_point()
+                        counter.value = current + 1
+                        await session.commit()
+
+                return await explore_async_dpor(
+                    setup=object,
+                    tasks=[increment, increment],
+                    invariant=lambda s: True,
+                    detect_sql=True,
+                    deadlock_timeout=10.0,
+                    timeout_per_run=15.0,
+                )
+            finally:
+                await engine.dispose()
+
+        result = asyncio.run(run_test())
+        assert result.num_explored >= 1
+
+    def test_exploration_completes(self, _pg_available) -> None:
+        """Verify the exploration completes without deadlock."""
+
+        async def run_test():
+            engine = create_async_engine(_ASYNC_DB_URL)
+            try:
+
+                async def read_only(_state: object) -> None:
+                    async with engine.connect() as conn:
+                        await conn.execute(text("SELECT value FROM async_sa_counter WHERE id = 1"))
+                        await await_point()
+
+                return await explore_async_dpor(
+                    setup=object,
+                    tasks=[read_only, read_only],
+                    invariant=lambda s: True,
+                    detect_sql=True,
+                    deadlock_timeout=10.0,
+                )
+            finally:
+                await engine.dispose()
+
+        result = asyncio.run(run_test())
+        assert result.property_holds
+        assert result.num_explored >= 1

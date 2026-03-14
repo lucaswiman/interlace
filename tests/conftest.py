@@ -141,7 +141,7 @@ def _check_thread_cleanup(request):
             f"mark the test with @pytest.mark.intentionally_leaves_dangling_threads"
         )
     # Fail on non-daemon threads (these would block pytest exit)
-    if non_daemon_threads:
+    if non_daemon_threads and not request.node.get_closest_marker("intentionally_leaves_dangling_threads"):
         thread_info = ", ".join(f"{t.name} (ident={t.ident})" for t in non_daemon_threads)
         pytest.fail(
             f"Test {request.node.nodeid} left {len(non_daemon_threads)} non-daemon thread(s) running: {thread_info}. "

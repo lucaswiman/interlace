@@ -16,7 +16,7 @@ policy says it's their turn.
 
 Both async approaches build on this abstraction:
 - async_trace_markers (comment annotations): marker-based scheduling
-- async_bytecode (property-based): index-based scheduling
+- async_shuffler (property-based): index-based scheduling
 
 Each POC subclasses InterleavedLoop and implements two methods:
 - should_proceed(task_id, marker): return True when a task should resume
