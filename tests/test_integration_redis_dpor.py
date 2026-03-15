@@ -874,3 +874,147 @@ class TestAsyncRedisHashRace:
             )
         )
         assert not result.property_holds, "Async DPOR should detect hash lost-update"
+
+
+# ---------------------------------------------------------------------------
+# 12. Multi-resource race: Redis + SQLite + in-memory state
+# ---------------------------------------------------------------------------
+
+
+class TestMultiResourceRace:
+    """Race condition spanning Redis, SQLite, and in-memory state.
+
+    Scenario: A user registration system where:
+    - Redis is used as a cache/rate-limiter (check if username is taken)
+    - SQLite stores the authoritative user database
+    - In-memory counter tracks total registrations
+
+    The race: two threads try to register the same username concurrently.
+    Both check Redis cache (miss), both check SQLite (not found), both insert.
+    """
+
+    def test_dpor_detects_multi_resource_race(self, redis_port: int) -> None:
+        """DPOR should detect the race across Redis + SQLite + in-memory state."""
+        import sqlite3
+        import tempfile
+
+        port = redis_port
+
+        class State:
+            def __init__(self) -> None:
+                self.registration_count = 0
+                # Fresh SQLite DB per run
+                self.db_file = tempfile.mktemp(suffix=".db")
+                conn = sqlite3.connect(self.db_file)
+                conn.execute("CREATE TABLE users (username TEXT UNIQUE, email TEXT)")
+                conn.commit()
+                conn.close()
+                # Clear Redis cache
+                r = redis_lib.Redis(port=port, decode_responses=True)
+                r.delete("user:alice")
+                r.close()
+
+        def register_user(state: State, email: str) -> None:
+            r = redis_lib.Redis(port=port, decode_responses=True)
+            # Step 1: Check Redis cache for username
+            cached = r.get("user:alice")
+            if cached is not None:
+                r.close()
+                return  # Already registered
+
+            # Step 2: Check SQLite database
+            conn = sqlite3.connect(state.db_file)
+            cursor = conn.execute("SELECT COUNT(*) FROM users WHERE username = ?", ("alice",))
+            count = cursor.fetchone()[0]
+
+            if count == 0:
+                # Step 3: Insert into SQLite (race can cause duplicate)
+                conn.execute("INSERT OR IGNORE INTO users (username, email) VALUES (?, ?)", ("alice", email))
+                conn.commit()
+                # Step 4: Update Redis cache
+                r.set("user:alice", email)
+                # Step 5: Update in-memory counter (this is the bug — both threads increment)
+                state.registration_count += 1
+
+            conn.close()
+            r.close()
+
+        def invariant(state: State) -> bool:
+            # registration_count should be 1 if only one thread registered
+            return state.registration_count == 1
+
+        result = explore_dpor(
+            setup=State,
+            threads=[
+                lambda s: register_user(s, "alice@a.com"),
+                lambda s: register_user(s, "alice@b.com"),
+            ],
+            invariant=invariant,
+            detect_io=True,
+            max_executions=50,
+            deadlock_timeout=15.0,
+            reproduce_on_failure=0,
+        )
+        assert not result.property_holds, "DPOR should detect multi-resource registration race"
+
+    def test_multi_resource_with_lock_is_safe(self, redis_port: int) -> None:
+        """Registration protected by a lock is safe across all resource types."""
+        import sqlite3
+        import tempfile
+
+        port = redis_port
+
+        class State:
+            def __init__(self) -> None:
+                self.lock = threading.Lock()
+                self.registration_count = 0
+                self.db_file = tempfile.mktemp(suffix=".db")
+                conn = sqlite3.connect(self.db_file)
+                conn.execute("CREATE TABLE users (username TEXT UNIQUE, email TEXT)")
+                conn.commit()
+                conn.close()
+                r = redis_lib.Redis(port=port, decode_responses=True)
+                r.delete("user:alice")
+                r.close()
+
+        def register_user(state: State, email: str) -> None:
+            with state.lock:
+                r = redis_lib.Redis(port=port, decode_responses=True)
+                cached = r.get("user:alice")
+                if cached is not None:
+                    r.close()
+                    return
+
+                conn = sqlite3.connect(state.db_file)
+                cursor = conn.execute("SELECT COUNT(*) FROM users WHERE username = ?", ("alice",))
+                count = cursor.fetchone()[0]
+
+                if count == 0:
+                    conn.execute("INSERT INTO users (username, email) VALUES (?, ?)", ("alice", email))
+                    conn.commit()
+                    r.set("user:alice", email)
+                    state.registration_count += 1
+
+                conn.close()
+                r.close()
+
+        def invariant(state: State) -> bool:
+            conn = sqlite3.connect(state.db_file)
+            cursor = conn.execute("SELECT COUNT(*) FROM users WHERE username = ?", ("alice",))
+            db_count = cursor.fetchone()[0]
+            conn.close()
+            return db_count == 1 and state.registration_count == 1
+
+        result = explore_dpor(
+            setup=State,
+            threads=[
+                lambda s: register_user(s, "alice@a.com"),
+                lambda s: register_user(s, "alice@b.com"),
+            ],
+            invariant=invariant,
+            detect_io=True,
+            max_executions=50,
+            deadlock_timeout=15.0,
+            reproduce_on_failure=0,
+        )
+        assert result.property_holds, result.explanation

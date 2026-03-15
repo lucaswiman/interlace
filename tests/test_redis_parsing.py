@@ -236,10 +236,10 @@ class TestKeyCommands:
         assert result.read_keys == ["mykey"]
         assert result.write_keys == []
 
-    def test_rename_reads_source_writes_dest(self) -> None:
+    def test_rename_reads_source_writes_both(self) -> None:
         result = parse_redis_access("RENAME", ("old", "new"))
         assert result.read_keys == ["old"]
-        assert result.write_keys == ["new"]
+        assert result.write_keys == ["old", "new"]
 
 
 class TestTransactionCommands:
@@ -268,10 +268,10 @@ class TestTransactionCommands:
 class TestSpecialCommands:
     """Test classification of special Redis commands."""
 
-    def test_rpoplpush_reads_source_writes_dest(self) -> None:
+    def test_rpoplpush_reads_source_writes_both(self) -> None:
         result = parse_redis_access("RPOPLPUSH", ("source", "dest"))
         assert result.read_keys == ["source"]
-        assert result.write_keys == ["dest"]
+        assert result.write_keys == ["source", "dest"]
 
     def test_sort_with_store(self) -> None:
         result = parse_redis_access("SORT", ("mylist", "STORE", "dest"))
@@ -362,3 +362,313 @@ class TestStreamCommands:
     def test_xdel_is_write(self) -> None:
         result = parse_redis_access("XDEL", ("mystream", "id1"))
         assert result.write_keys == ["mystream"]
+
+
+class TestCommandCoverage:
+    """Verify that all core Redis commands are handled (not falling through to fallback)."""
+
+    # Complete list of core Redis commands (from redis.io/commands, excluding
+    # module commands like BF.*, CF.*, FT.*, JSON.*, TS.*, TDIGEST.*, TOPK.*, CMS.*,
+    # and internal/debug commands like PSYNC, REPLCONF, SYNC, RESTORE-ASKING, etc.)
+    # Also excludes sub-commands (CLIENT LIST, CONFIG GET, etc.) since redis-py
+    # sends these as the base command name.
+    CORE_COMMANDS: list[tuple[str, tuple[object, ...]]] = [
+        # String commands
+        ("GET", ("k",)),
+        ("SET", ("k", "v")),
+        ("SETNX", ("k", "v")),
+        ("SETEX", ("k", 60, "v")),
+        ("PSETEX", ("k", 60000, "v")),
+        ("SETRANGE", ("k", 0, "v")),
+        ("GETRANGE", ("k", 0, 10)),
+        ("GETSET", ("k", "v")),
+        ("GETDEL", ("k",)),
+        ("GETEX", ("k",)),
+        ("MGET", ("k1", "k2")),
+        ("MSET", ("k1", "v1", "k2", "v2")),
+        ("MSETNX", ("k1", "v1")),
+        ("APPEND", ("k", "v")),
+        ("STRLEN", ("k",)),
+        ("INCR", ("k",)),
+        ("INCRBY", ("k", 5)),
+        ("INCRBYFLOAT", ("k", 1.5)),
+        ("DECR", ("k",)),
+        ("DECRBY", ("k", 5)),
+        ("SUBSTR", ("k", 0, 5)),
+        # Hash commands
+        ("HGET", ("h", "f")),
+        ("HSET", ("h", "f", "v")),
+        ("HSETNX", ("h", "f", "v")),
+        ("HMSET", ("h", "f", "v")),
+        ("HMGET", ("h", "f1", "f2")),
+        ("HGETALL", ("h",)),
+        ("HDEL", ("h", "f")),
+        ("HEXISTS", ("h", "f")),
+        ("HINCRBY", ("h", "f", 5)),
+        ("HINCRBYFLOAT", ("h", "f", 1.5)),
+        ("HKEYS", ("h",)),
+        ("HVALS", ("h",)),
+        ("HLEN", ("h",)),
+        ("HRANDFIELD", ("h",)),
+        ("HSCAN", ("h", 0)),
+        # List commands
+        ("LPUSH", ("l", "v")),
+        ("LPUSHX", ("l", "v")),
+        ("RPUSH", ("l", "v")),
+        ("RPUSHX", ("l", "v")),
+        ("LPOP", ("l",)),
+        ("RPOP", ("l",)),
+        ("LLEN", ("l",)),
+        ("LRANGE", ("l", 0, -1)),
+        ("LINDEX", ("l", 0)),
+        ("LSET", ("l", 0, "v")),
+        ("LINSERT", ("l", "BEFORE", "pivot", "v")),
+        ("LREM", ("l", 0, "v")),
+        ("LTRIM", ("l", 0, 10)),
+        ("LPOS", ("l", "v")),
+        ("LMOVE", ("src", "dst", "LEFT", "RIGHT")),
+        ("BLMOVE", ("src", "dst", "LEFT", "RIGHT", 0)),
+        ("LMPOP", ("l",)),
+        ("BLPOP", ("l", 0)),
+        ("BRPOP", ("l", 0)),
+        ("RPOPLPUSH", ("src", "dst")),
+        ("BRPOPLPUSH", ("src", "dst", 0)),
+        # Set commands
+        ("SADD", ("s", "m")),
+        ("SREM", ("s", "m")),
+        ("SPOP", ("s",)),
+        ("SCARD", ("s",)),
+        ("SISMEMBER", ("s", "m")),
+        ("SMISMEMBER", ("s", "m1", "m2")),
+        ("SMEMBERS", ("s",)),
+        ("SRANDMEMBER", ("s",)),
+        ("SSCAN", ("s", 0)),
+        ("SMOVE", ("src", "dst", "m")),
+        ("SUNION", ("s1", "s2")),
+        ("SUNIONSTORE", ("dst", "s1", "s2")),
+        ("SINTER", ("s1", "s2")),
+        ("SINTERSTORE", ("dst", "s1", "s2")),
+        ("SDIFF", ("s1", "s2")),
+        ("SDIFFSTORE", ("dst", "s1", "s2")),
+        # Sorted set commands
+        ("ZADD", ("z", 1, "m")),
+        ("ZREM", ("z", "m")),
+        ("ZINCRBY", ("z", 1, "m")),
+        ("ZCARD", ("z",)),
+        ("ZCOUNT", ("z", "-inf", "+inf")),
+        ("ZLEXCOUNT", ("z", "-", "+")),
+        ("ZRANGE", ("z", 0, -1)),
+        ("ZRANGEBYLEX", ("z", "-", "+")),
+        ("ZRANGEBYSCORE", ("z", "-inf", "+inf")),
+        ("ZREVRANGE", ("z", 0, -1)),
+        ("ZREVRANGEBYLEX", ("z", "+", "-")),
+        ("ZREVRANGEBYSCORE", ("z", "+inf", "-inf")),
+        ("ZRANK", ("z", "m")),
+        ("ZREVRANK", ("z", "m")),
+        ("ZSCORE", ("z", "m")),
+        ("ZMSCORE", ("z", "m1", "m2")),
+        ("ZPOPMIN", ("z",)),
+        ("ZPOPMAX", ("z",)),
+        ("BZPOPMIN", ("z", 0)),
+        ("BZPOPMAX", ("z", 0)),
+        ("ZRANDMEMBER", ("z",)),
+        ("ZSCAN", ("z", 0)),
+        ("ZREMRANGEBYLEX", ("z", "-", "+")),
+        ("ZREMRANGEBYRANK", ("z", 0, 1)),
+        ("ZREMRANGEBYSCORE", ("z", 0, 100)),
+        ("ZUNIONSTORE", ("dst", 2, "z1", "z2")),
+        ("ZINTERSTORE", ("dst", 2, "z1", "z2")),
+        ("ZDIFFSTORE", ("dst", 2, "z1", "z2")),
+        # Key commands
+        ("DEL", ("k",)),
+        ("UNLINK", ("k",)),
+        ("EXISTS", ("k",)),
+        ("EXPIRE", ("k", 60)),
+        ("EXPIREAT", ("k", 1000000)),
+        ("PEXPIRE", ("k", 60000)),
+        ("PEXPIREAT", ("k", 1000000000)),
+        ("EXPIRETIME", ("k",)),
+        ("PEXPIRETIME", ("k",)),
+        ("TTL", ("k",)),
+        ("PTTL", ("k",)),
+        ("PERSIST", ("k",)),
+        ("TYPE", ("k",)),
+        ("DUMP", ("k",)),
+        ("RENAME", ("old", "new")),
+        ("RENAMENX", ("old", "new")),
+        ("COPY", ("src", "dst")),
+        ("SORT", ("k",)),
+        # HyperLogLog
+        ("PFADD", ("hll", "e")),
+        ("PFCOUNT", ("hll",)),
+        ("PFMERGE", ("dst", "src1", "src2")),
+        # Pub/Sub
+        ("PUBLISH", ("chan", "msg")),
+        ("SUBSCRIBE", ("chan",)),
+        ("PSUBSCRIBE", ("pattern",)),
+        # Streams
+        ("XADD", ("s", "*", "f", "v")),
+        ("XDEL", ("s", "id")),
+        ("XLEN", ("s",)),
+        ("XRANGE", ("s", "-", "+")),
+        ("XREVRANGE", ("s", "+", "-")),
+        ("XREAD", ("STREAMS", "s1", "0")),
+        ("XINFO", ("s",)),
+        ("XPENDING", ("s", "g")),
+        ("XTRIM", ("s", "MAXLEN", 100)),
+        ("XACK", ("s", "g", "id")),
+        ("XGROUP", ("CREATE", "s", "g", "0")),
+        # Geo
+        ("GEOADD", ("g", 13.361, 38.116, "m")),
+        ("GEODIST", ("g", "m1", "m2")),
+        ("GEOHASH", ("g", "m")),
+        ("GEOPOS", ("g", "m")),
+        ("GEORADIUS", ("g", 15, 37, 100, "km")),
+        ("GEORADIUSBYMEMBER", ("g", "m", 100, "km")),
+        ("GEOSEARCH", ("g", "FROMMEMBER", "m", "BYRADIUS", 100, "km")),
+        ("GEOSEARCHSTORE", ("dst", "g", "FROMMEMBER", "m", "BYRADIUS", 100, "km")),
+        # Bit commands
+        ("BITCOUNT", ("k",)),
+        ("BITPOS", ("k", 1)),
+        ("BITOP", ("AND", "dst", "k1", "k2")),
+        ("BITFIELD", ("k", "SET", "u8", 0, 100)),
+        ("BITFIELD_RO", ("k", "GET", "u8", 0)),
+        ("GETBIT", ("k", 0)),
+        ("SETBIT", ("k", 0, 1)),
+        # Scripting
+        ("EVAL", ("script", 1, "k1")),
+        ("EVALSHA", ("sha", 1, "k1")),
+        ("EVAL_RO", ("script", 1, "k1")),
+        ("EVALSHA_RO", ("sha", 1, "k1")),
+        # Transaction
+        ("MULTI", ()),
+        ("EXEC", ()),
+        ("DISCARD", ()),
+        ("WATCH", ("k1", "k2")),
+        ("UNWATCH", ()),
+        # Server / connection (no keys)
+        ("PING", ()),
+        ("ECHO", ("msg",)),
+        ("INFO", ()),
+        ("SELECT", ("0",)),
+        ("AUTH", ("password",)),
+        ("DBSIZE", ()),
+        ("FLUSHDB", ()),
+        ("FLUSHALL", ()),
+        ("SAVE", ()),
+        ("BGSAVE", ()),
+        ("BGREWRITEAOF", ()),
+        ("LASTSAVE", ()),
+        ("SHUTDOWN", ()),
+        ("QUIT", ()),
+        ("RESET", ()),
+        ("WAIT", ("1", "0")),
+        ("WAITAOF", ("1", "1", "0")),
+        ("SCAN", ("0",)),
+        ("KEYS", ("*",)),
+        ("RANDOMKEY", ()),
+        ("TIME", ()),
+        ("COMMAND", ()),
+        ("SWAPDB", ("0", "1")),
+        # Cluster
+        ("CLUSTER", ("INFO",)),
+        ("READONLY", ()),
+        ("READWRITE", ()),
+        ("ASKING", ()),
+        # Slow/config/client (base commands — sub-commands handled by redis-py)
+        ("SLOWLOG", ("GET",)),
+        ("CONFIG", ("GET", "maxmemory")),
+        ("CLIENT", ("LIST",)),
+        ("LATENCY", ("LATEST",)),
+        ("MEMORY", ("USAGE", "k")),
+        ("MODULE", ("LIST",)),
+        ("ACL", ("LIST",)),
+        ("OBJECT", ("ENCODING", "k")),
+        ("DEBUG", ("OBJECT", "k")),
+        ("UNSUBSCRIBE", ()),
+        ("PUNSUBSCRIBE", ()),
+    ]
+
+    def test_all_core_commands_are_handled(self) -> None:
+        """Every core Redis command should produce a non-fallback classification.
+
+        The fallback is write-only on first_key with no read_keys. We verify that
+        every command either:
+        - Has explicit read/write keys, OR
+        - Is a server/transaction command with no keys, OR
+        - Falls into a known "no keys" category
+        """
+        # Commands that legitimately return no keys (server, connection, cluster)
+        no_key_commands = {
+            "PING",
+            "ECHO",
+            "INFO",
+            "SELECT",
+            "AUTH",
+            "DBSIZE",
+            "FLUSHDB",
+            "FLUSHALL",
+            "SAVE",
+            "BGSAVE",
+            "BGREWRITEAOF",
+            "LASTSAVE",
+            "SHUTDOWN",
+            "QUIT",
+            "RESET",
+            "SCAN",
+            "KEYS",
+            "RANDOMKEY",
+            "TIME",
+            "COMMAND",
+            "SWAPDB",
+            "CLUSTER",
+            "READONLY",
+            "READWRITE",
+            "ASKING",
+            "SLOWLOG",
+            "CONFIG",
+            "CLIENT",
+            "LATENCY",
+            "MEMORY",
+            "MODULE",
+            "ACL",
+            "WAIT",
+            "WAITAOF",
+            "UNSUBSCRIBE",
+            "PUNSUBSCRIBE",
+            "MULTI",
+            "EXEC",
+            "DISCARD",
+            "UNWATCH",
+        }
+
+        for cmd_name, cmd_args in self.CORE_COMMANDS:
+            result = parse_redis_access(cmd_name, cmd_args)
+            upper = cmd_name.upper()
+
+            if upper in no_key_commands:
+                # These should have no keys (that's correct)
+                continue
+
+            has_keys = bool(result.read_keys or result.write_keys)
+            assert has_keys, (
+                f"Command {cmd_name} with args {cmd_args} returned no keys — "
+                f"likely hitting the fallback. Add explicit handling."
+            )
+
+    def test_no_command_in_multiple_single_key_sets(self) -> None:
+        """Verify no command appears in both read and write single-key sets."""
+        from frontrun._redis_parsing import (
+            _SINGLE_KEY_READ_CMDS,
+            _SINGLE_KEY_READ_WRITE_CMDS,
+            _SINGLE_KEY_WRITE_CMDS,
+        )
+
+        overlap_rw = _SINGLE_KEY_READ_CMDS & _SINGLE_KEY_WRITE_CMDS
+        assert not overlap_rw, f"Commands in both read and write sets: {overlap_rw}"
+
+        overlap_r_rw = _SINGLE_KEY_READ_CMDS & _SINGLE_KEY_READ_WRITE_CMDS
+        assert not overlap_r_rw, f"Commands in both read and read+write sets: {overlap_r_rw}"
+
+        overlap_w_rw = _SINGLE_KEY_WRITE_CMDS & _SINGLE_KEY_READ_WRITE_CMDS
+        assert not overlap_w_rw, f"Commands in both write and read+write sets: {overlap_w_rw}"

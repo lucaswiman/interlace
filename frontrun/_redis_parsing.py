@@ -89,7 +89,6 @@ _SINGLE_KEY_READ_CMDS: frozenset[str] = frozenset(
         "XINFO",
         "XPENDING",
         "PFCOUNT",
-        "LMPOP",
         "GETEX",
         "EXPIRETIME",
         "PEXPIRETIME",
@@ -146,6 +145,7 @@ _SINGLE_KEY_WRITE_CMDS: frozenset[str] = frozenset(
         "XTRIM",
         "XACK",
         "PFADD",
+        "LMPOP",
     }
 )
 
@@ -239,27 +239,27 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
         keys = [str(cmd_args[i]) for i in range(0, len(cmd_args), 2)]
         return RedisAccessResult(read_keys=[], write_keys=keys, is_transaction_control=False)
 
-    # RENAME / RENAMENX — reads source, writes destination.
+    # RENAME / RENAMENX — reads+deletes source, writes destination.
     if upper in ("RENAME", "RENAMENX") and len(cmd_args) >= 2:
         return RedisAccessResult(
             read_keys=[first_key],
-            write_keys=[str(cmd_args[1])],
+            write_keys=[first_key, str(cmd_args[1])],
             is_transaction_control=False,
         )
 
-    # RPOPLPUSH / LMOVE / SMOVE — reads source, writes destination.
+    # RPOPLPUSH / LMOVE — pops from source (read+write), pushes to destination (write).
     if upper in ("RPOPLPUSH", "LMOVE", "BRPOPLPUSH", "BLMOVE") and len(cmd_args) >= 2:
         return RedisAccessResult(
             read_keys=[first_key],
-            write_keys=[str(cmd_args[1])],
+            write_keys=[first_key, str(cmd_args[1])],
             is_transaction_control=False,
         )
 
-    # SMOVE — source, destination, member
+    # SMOVE — removes from source (read+write), adds to destination (write).
     if upper == "SMOVE" and len(cmd_args) >= 2:
         return RedisAccessResult(
             read_keys=[first_key],
-            write_keys=[str(cmd_args[1])],
+            write_keys=[first_key, str(cmd_args[1])],
             is_transaction_control=False,
         )
 
