@@ -22,6 +22,10 @@ pub struct ObjectState {
     per_thread_read: HashMap<usize, Access>,
     /// Per-thread most recent write access.
     per_thread_write: HashMap<usize, Access>,
+    /// Per-thread most recent weak-write access.
+    per_thread_weak_write: HashMap<usize, Access>,
+    /// Per-thread most recent weak-read access.
+    per_thread_weak_read: HashMap<usize, Access>,
 }
 
 impl ObjectState {
@@ -29,6 +33,8 @@ impl ObjectState {
         Self {
             per_thread_read: HashMap::new(),
             per_thread_write: HashMap::new(),
+            per_thread_weak_write: HashMap::new(),
+            per_thread_weak_read: HashMap::new(),
         }
     }
 
@@ -42,27 +48,85 @@ impl ObjectState {
     pub fn dependent_accesses(&self, kind: AccessKind, current_thread: usize) -> Vec<&Access> {
         match kind {
             AccessKind::Read => {
-                self.per_thread_write
-                    .iter()
-                    .filter(|(tid, _)| **tid != current_thread)
-                    .map(|(_, access)| access)
-                    .collect()
+                // Read depends on Write and WeakWrite from other threads.
+                let mut result: Vec<&Access> = Vec::new();
+                for (tid, access) in &self.per_thread_write {
+                    if *tid != current_thread {
+                        result.push(access);
+                    }
+                }
+                for (tid, access) in &self.per_thread_weak_write {
+                    if *tid != current_thread {
+                        let dominated = self.per_thread_write.get(tid).is_some_and(|w| {
+                            w.path_id == access.path_id
+                        });
+                        if !dominated {
+                            result.push(access);
+                        }
+                    }
+                }
+                result
             }
             AccessKind::Write => {
+                // Write depends on Read, Write, WeakWrite, and WeakRead.
                 let mut result: Vec<&Access> = Vec::new();
-                // Latest read from each other thread
                 for (tid, access) in &self.per_thread_read {
                     if *tid != current_thread {
                         result.push(access);
                     }
                 }
-                // Latest write from each other thread (may duplicate a
-                // thread already covered by a read, but at a different
-                // path_id — both backtrack targets matter).
                 for (tid, access) in &self.per_thread_write {
                     if *tid != current_thread {
-                        // Only add if it's a genuinely different backtrack
-                        // target from the read we already included.
+                        let dominated = self.per_thread_read.get(tid).is_some_and(|r| {
+                            r.path_id == access.path_id
+                        });
+                        if !dominated {
+                            result.push(access);
+                        }
+                    }
+                }
+                for (tid, access) in &self.per_thread_weak_write {
+                    if *tid != current_thread {
+                        let dominated_by_read = self.per_thread_read.get(tid).is_some_and(|r| {
+                            r.path_id == access.path_id
+                        });
+                        let dominated_by_write = self.per_thread_write.get(tid).is_some_and(|w| {
+                            w.path_id == access.path_id
+                        });
+                        if !dominated_by_read && !dominated_by_write {
+                            result.push(access);
+                        }
+                    }
+                }
+                for (tid, access) in &self.per_thread_weak_read {
+                    if *tid != current_thread {
+                        let dominated_by_read = self.per_thread_read.get(tid).is_some_and(|r| {
+                            r.path_id == access.path_id
+                        });
+                        let dominated_by_write = self.per_thread_write.get(tid).is_some_and(|w| {
+                            w.path_id == access.path_id
+                        });
+                        let dominated_by_ww = self.per_thread_weak_write.get(tid).is_some_and(|w| {
+                            w.path_id == access.path_id
+                        });
+                        if !dominated_by_read && !dominated_by_write && !dominated_by_ww {
+                            result.push(access);
+                        }
+                    }
+                }
+                result
+            }
+            AccessKind::WeakWrite => {
+                // WeakWrite depends on Read and Write, but NOT WeakWrite
+                // or WeakRead.
+                let mut result: Vec<&Access> = Vec::new();
+                for (tid, access) in &self.per_thread_read {
+                    if *tid != current_thread {
+                        result.push(access);
+                    }
+                }
+                for (tid, access) in &self.per_thread_write {
+                    if *tid != current_thread {
                         let dominated = self.per_thread_read.get(tid).is_some_and(|r| {
                             r.path_id == access.path_id
                         });
@@ -72,6 +136,15 @@ impl ObjectState {
                     }
                 }
                 result
+            }
+            AccessKind::WeakRead => {
+                // WeakRead depends only on Write (not Read, WeakWrite, or
+                // other WeakRead).
+                self.per_thread_write
+                    .iter()
+                    .filter(|(tid, _)| **tid != current_thread)
+                    .map(|(_, access)| access)
+                    .collect()
             }
         }
     }
@@ -84,6 +157,12 @@ impl ObjectState {
             }
             AccessKind::Write => {
                 self.per_thread_write.insert(thread_id, access);
+            }
+            AccessKind::WeakWrite => {
+                self.per_thread_weak_write.insert(thread_id, access);
+            }
+            AccessKind::WeakRead => {
+                self.per_thread_weak_read.insert(thread_id, access);
             }
         }
     }
@@ -100,6 +179,12 @@ impl ObjectState {
             }
             AccessKind::Write => {
                 self.per_thread_write.entry(thread_id).or_insert(access);
+            }
+            AccessKind::WeakWrite => {
+                self.per_thread_weak_write.entry(thread_id).or_insert(access);
+            }
+            AccessKind::WeakRead => {
+                self.per_thread_weak_read.entry(thread_id).or_insert(access);
             }
         }
     }

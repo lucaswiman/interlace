@@ -65,7 +65,7 @@ impl PyDporEngine {
         self.inner.schedule(&mut execution.inner)
     }
 
-    /// Report a shared memory access. `kind` is "read" or "write".
+    /// Report a shared memory access. `kind` is "read", "write", or "weak_write".
     fn report_access(
         &mut self,
         execution: &mut PyExecution,
@@ -73,15 +73,7 @@ impl PyDporEngine {
         object_id: u64,
         kind: &str,
     ) -> PyResult<()> {
-        let access_kind = match kind {
-            "read" => AccessKind::Read,
-            "write" => AccessKind::Write,
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    format!("kind must be 'read' or 'write', got '{kind}'"),
-                ))
-            }
-        };
+        let access_kind = Self::parse_access_kind(kind)?;
         self.inner.process_access(&mut execution.inner, thread_id, object_id, access_kind);
         Ok(())
     }
@@ -98,15 +90,7 @@ impl PyDporEngine {
         object_id: u64,
         kind: &str,
     ) -> PyResult<()> {
-        let access_kind = match kind {
-            "read" => AccessKind::Read,
-            "write" => AccessKind::Write,
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    format!("kind must be 'read' or 'write', got '{kind}'"),
-                ))
-            }
-        };
+        let access_kind = Self::parse_access_kind(kind)?;
         self.inner.process_first_access(&mut execution.inner, thread_id, object_id, access_kind);
         Ok(())
     }
@@ -121,15 +105,7 @@ impl PyDporEngine {
         object_id: u64,
         kind: &str,
     ) -> PyResult<()> {
-        let access_kind = match kind {
-            "read" => AccessKind::Read,
-            "write" => AccessKind::Write,
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    format!("kind must be 'read' or 'write', got '{kind}'"),
-                ))
-            }
-        };
+        let access_kind = Self::parse_access_kind(kind)?;
         self.inner.process_io_access(&mut execution.inner, thread_id, object_id, access_kind);
         Ok(())
     }
@@ -181,6 +157,20 @@ impl PyDporEngine {
     #[getter]
     fn num_threads(&self) -> usize {
         self.inner.num_threads()
+    }
+}
+
+impl PyDporEngine {
+    fn parse_access_kind(kind: &str) -> PyResult<AccessKind> {
+        match kind {
+            "read" => Ok(AccessKind::Read),
+            "write" => Ok(AccessKind::Write),
+            "weak_write" => Ok(AccessKind::WeakWrite),
+            "weak_read" => Ok(AccessKind::WeakRead),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(
+                format!("kind must be 'read', 'write', 'weak_write', or 'weak_read', got '{kind}'"),
+            )),
+        }
     }
 }
 

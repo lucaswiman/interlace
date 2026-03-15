@@ -281,9 +281,6 @@ class TestAsyncDporBasic:
         assert result.property_holds
         assert result.num_explored >= 2
 
-    @pytest.mark.xfail(
-        strict=True, reason="opcode tracer sees container-level __cmethods__ conflicts for dict subscripts"
-    )
     def test_disjoint_dict_keys_collapse_to_one_execution(self) -> None:
         """Disjoint subscript writes should not create extra executions."""
         require_active("test_async_dpor_disjoint_dict_keys")
