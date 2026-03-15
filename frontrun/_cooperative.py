@@ -47,6 +47,10 @@ real_condition = _rt.condition
 real_queue = _rt.queue_
 real_lifo_queue = _rt.lifo_queue
 real_priority_queue = _rt.priority_queue
+make_real_event = _rt.make_event
+make_real_queue = _rt.make_queue
+make_real_lifo_queue = _rt.make_lifo_queue
+make_real_priority_queue = _rt.make_priority_queue
 
 # ---------------------------------------------------------------------------
 # Thread-local scheduler context
@@ -549,7 +553,7 @@ class CooperativeEvent:
     """An Event that yields scheduler turns instead of blocking on wait()."""
 
     def __init__(self) -> None:
-        self._event = real_event()
+        self._event = make_real_event()
 
     def wait(self, timeout: float | None = None) -> bool:
 
@@ -756,6 +760,7 @@ class CooperativeQueue:
     """A Queue that yields scheduler turns instead of blocking on get()/put()."""
 
     _queue_class = real_queue
+    _queue_factory = staticmethod(make_real_queue)
     _queue: Any
 
     @classmethod
@@ -764,7 +769,7 @@ class CooperativeQueue:
         return cls
 
     def __init__(self, maxsize: int = 0) -> None:
-        self._queue = self._queue_class(maxsize)
+        self._queue = self._queue_factory(maxsize)
 
     def get(self, block: bool = True, timeout: float | None = None) -> Any:
 
@@ -878,12 +883,14 @@ class CooperativeLifoQueue(CooperativeQueue):
     """LifoQueue variant of the cooperative queue."""
 
     _queue_class = real_lifo_queue
+    _queue_factory = staticmethod(make_real_lifo_queue)
 
 
 class CooperativePriorityQueue(CooperativeQueue):
     """PriorityQueue variant of the cooperative queue."""
 
     _queue_class = real_priority_queue
+    _queue_factory = staticmethod(make_real_priority_queue)
 
 
 # ---------------------------------------------------------------------------

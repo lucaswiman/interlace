@@ -325,3 +325,25 @@ class TestPatchLocksConcurrentFutures:
             assert result == 42
         finally:
             unpatch_locks()
+
+    def test_patch_locks_thread_start_event_handshake(self):
+        """Thread.start() should complete when cooperative patching is enabled."""
+        from frontrun._cooperative import patch_locks, unpatch_locks
+
+        started = threading.Event()
+        finished = threading.Event()
+
+        def worker() -> None:
+            started.set()
+            finished.wait(1.0)
+
+        patch_locks()
+        try:
+            t = threading.Thread(target=worker)
+            t.start()
+            assert started.wait(1.0)
+            finished.set()
+            t.join(timeout=1.0)
+            assert not t.is_alive()
+        finally:
+            unpatch_locks()

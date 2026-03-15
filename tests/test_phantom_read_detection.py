@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from typing import Any
+from uuid import uuid4
 
 from frontrun._sql_cursor import patch_sql, unpatch_sql
 from frontrun._tracing import _FRONTRUN_DIR
@@ -217,52 +218,55 @@ class TestDporPhantomReadDetection:
         either INSERT, detecting the invariant violation.
         """
 
-        db_uri = "file:phantom_dpor_test?mode=memory&cache=shared"
+        db_uri = f"file:phantom_dpor_test_{uuid4().hex}?mode=memory&cache=shared"
 
         # Keep a connection alive so the shared-cache DB survives across
         # setup/thread/invariant calls.
         _keeper = sqlite3.connect(db_uri, uri=True, check_same_thread=False, isolation_level=None)
-        _keeper.execute(
-            "CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, token TEXT)"
-        )
+        try:
+            _keeper.execute(
+                "CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, token TEXT)"
+            )
 
-        class State:
-            pass
+            class State:
+                pass
 
-        def thread_fn(state: State) -> None:
-            conn = sqlite3.connect(db_uri, uri=True, check_same_thread=False, isolation_level=None)
-            cur = conn.cursor()
-            _check_and_insert_token(cur, user_id=1, token_value=f"tok_{id(state)}")
-            conn.close()
+            def thread_fn(state: State) -> None:
+                conn = sqlite3.connect(db_uri, uri=True, check_same_thread=False, isolation_level=None)
+                cur = conn.cursor()
+                _check_and_insert_token(cur, user_id=1, token_value=f"tok_{id(state)}")
+                conn.close()
 
-        def setup() -> State:
-            _keeper.execute("DELETE FROM tokens")
-            return State()
+            def setup() -> State:
+                _keeper.execute("DELETE FROM tokens")
+                return State()
 
-        def invariant(state: State) -> bool:
-            conn = sqlite3.connect(db_uri, uri=True, check_same_thread=False, isolation_level=None)
-            cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM tokens WHERE user_id = 1")
-            count = cur.fetchone()[0]
-            conn.close()
-            # Token limit is 1 — should never have more than 1 token
-            return count <= 1
+            def invariant(state: State) -> bool:
+                conn = sqlite3.connect(db_uri, uri=True, check_same_thread=False, isolation_level=None)
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM tokens WHERE user_id = 1")
+                count = cur.fetchone()[0]
+                conn.close()
+                # Token limit is 1 — should never have more than 1 token
+                return count <= 1
 
-        result = explore_dpor(
-            setup=setup,
-            threads=[thread_fn, thread_fn],
-            invariant=invariant,
-            detect_io=True,
-            reproduce_on_failure=0,
-            max_executions=50,
-            preemption_bound=2,
-        )
+            result = explore_dpor(
+                setup=setup,
+                threads=[thread_fn, thread_fn],
+                invariant=invariant,
+                detect_io=True,
+                reproduce_on_failure=0,
+                max_executions=50,
+                preemption_bound=2,
+            )
 
-        # DPOR must find the interleaving where both threads pass the COUNT
-        # check before either INSERT, violating the token limit invariant.
-        assert not result.property_holds, (
-            f"DPOR should detect the phantom read race (token limit bypass) "
-            f"but explored {result.num_explored} interleavings without finding "
-            f"an invariant violation. This indicates the SELECT + INSERT "
-            f"conflict is not being detected."
-        )
+            # DPOR must find the interleaving where both threads pass the COUNT
+            # check before either INSERT, violating the token limit invariant.
+            assert not result.property_holds, (
+                f"DPOR should detect the phantom read race (token limit bypass) "
+                f"but explored {result.num_explored} interleavings without finding "
+                f"an invariant violation. This indicates the SELECT + INSERT "
+                f"conflict is not being detected."
+            )
+        finally:
+            _keeper.close()
