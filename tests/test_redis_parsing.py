@@ -65,8 +65,14 @@ class TestStringCommands:
         assert result.read_keys == []
         assert result.write_keys == ["key1", "key2"]
 
-    def test_getset_is_write(self) -> None:
+    def test_getset_is_read_write(self) -> None:
         result = parse_redis_access("GETSET", ("mykey", "newvalue"))
+        assert result.read_keys == ["mykey"]
+        assert result.write_keys == ["mykey"]
+
+    def test_getdel_is_read_write(self) -> None:
+        result = parse_redis_access("GETDEL", ("mykey",))
+        assert result.read_keys == ["mykey"]
         assert result.write_keys == ["mykey"]
 
 

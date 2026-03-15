@@ -90,7 +90,6 @@ _SINGLE_KEY_READ_CMDS: frozenset[str] = frozenset(
         "XPENDING",
         "PFCOUNT",
         "LMPOP",
-        "GETDEL",
         "GETEX",
         "EXPIRETIME",
         "PEXPIRETIME",
@@ -147,7 +146,6 @@ _SINGLE_KEY_WRITE_CMDS: frozenset[str] = frozenset(
         "XTRIM",
         "XACK",
         "PFADD",
-        "GETSET",
     }
 )
 
@@ -432,9 +430,7 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
         "BGREWRITEAOF",
         "SAVE",
         "LASTSAVE",
-        "SUBSCRIBE",
         "UNSUBSCRIBE",
-        "PSUBSCRIBE",
         "PUNSUBSCRIBE",
     ):
         return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=False)
