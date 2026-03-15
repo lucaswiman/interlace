@@ -162,10 +162,6 @@ class TestAsyncDporBasic:
 
         assert not result.property_holds, "Async DPOR should find the global lost update"
 
-    @pytest.mark.xfail(
-        reason="Async DPOR misses some global update patterns with multiple writes in one await-delimited block",
-        strict=True,
-    )
     def test_detects_augmented_global_race(self) -> None:
         """Async DPOR should trace global += via LOAD_GLOBAL/STORE_GLOBAL."""
         require_active("test_async_dpor_global_augassign")
@@ -286,8 +282,7 @@ class TestAsyncDporBasic:
         assert result.num_explored >= 2
 
     @pytest.mark.xfail(
-        reason="Container-level STORE_SUBSCR tracking still treats disjoint dict-key writes as dependent",
-        strict=True,
+        strict=True, reason="opcode tracer sees container-level __cmethods__ conflicts for dict subscripts"
     )
     def test_disjoint_dict_keys_collapse_to_one_execution(self) -> None:
         """Disjoint subscript writes should not create extra executions."""

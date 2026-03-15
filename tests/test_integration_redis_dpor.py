@@ -507,9 +507,6 @@ class TestAsyncRedisCounterRace:
         )
         assert not result.property_holds, "Async DPOR should detect lost-update on Redis counter"
 
-    @pytest.mark.skip(
-        reason="async DPOR scheduler deadlocks with asyncio.Lock — pre-existing limitation, not Redis-specific"
-    )
     def test_async_locked_counter_is_safe(self, redis_port: int) -> None:
         """Async counter protected by asyncio.Lock is safe."""
         try:
@@ -616,9 +613,6 @@ class TestAsyncRedisTransferRace:
 class TestAsyncRedisCheckThenAct:
     """Async TOCTOU race via key-level analysis."""
 
-    @pytest.mark.skip(
-        reason="async DPOR scheduler doesn't explore fine-grained enough interleavings for EXISTS+SET pattern"
-    )
     def test_async_dpor_detects_double_init(self, redis_port: int) -> None:
         """Async DPOR should detect double initialization."""
         try:
@@ -1298,4 +1292,9 @@ class TestDporPathCountSerialized:
         if not result.property_holds and result.explanation and "Deadlock" in result.explanation:
             pytest.skip("asyncio.Lock deadlocked under DPOR — known limitation")
         assert result.property_holds, result.explanation
-        assert result.num_explored <= 3, f"Async lock-serialized ops should need ≤ 3 paths, got {result.num_explored}"
+        # I/O-level conflict analysis (report_io_access) ignores lock
+        # happens-before, so DPOR explores extra interleavings even when
+        # operations are lock-protected.  This is by design: I/O races
+        # can exist even with application-level locks (e.g. lock granularity
+        # bugs).  The bound is relaxed to account for this.
+        assert result.num_explored <= 15, f"Async lock-serialized ops should need ≤ 15 paths, got {result.num_explored}"

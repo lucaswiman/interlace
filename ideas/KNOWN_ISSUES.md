@@ -11,6 +11,4 @@ Even when Redis keys (or other I/O resources) are completely independent between
 
 **Consequence:** `explore_async_dpor()` with `detect_redis=True` on two tasks writing to completely disjoint Redis keys will explore more than 1 DPOR path. The Rust DPOR engine itself correctly handles I/O independence (verified by direct engine unit tests in `test_redis_parsing.py::TestDporEngineIoIndependence`), but the opcode tracer's shared-state detection adds false backtrack points.
 
-**Workaround:** None currently. The extra exploration is bounded by `max_executions` and does not produce false positives (the invariant still holds on all explored paths). It just means DPOR does more work than theoretically necessary for independent I/O operations.
-
-**Potential fix:** Exclude library code (site-packages) from opcode tracing when `detect_redis=True` or `detect_sql=True` is the primary conflict source, or add a mechanism to suppress opcode-level backtracking for accesses that occur entirely within library frames. This would require changes to the `_AutoPauseCoroutine` / `_process_opcode` interaction, not the Redis/SQL analysis layer.
+**Fix (applied):** When `detect_redis=True` or `detect_sql=True`, opcode-level access reporting via `_process_opcode` is skipped entirely. The I/O-level reporters (Redis key-level, SQL table-level) capture the real conflicts. This eliminates false backtrack points from shared Python state and reduces DPOR exploration to only the interleavings that matter for I/O-level conflicts.
