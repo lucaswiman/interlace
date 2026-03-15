@@ -51,6 +51,8 @@ from collections.abc import Awaitable, Callable, Coroutine, Generator
 from typing import Any, TypeVar
 
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
+from frontrun._sql_cursor import clear_sql_metadata, get_lock_timeout, set_lock_timeout
+from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._tracing import TraceFilter as _TraceFilter
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
@@ -991,6 +993,8 @@ async def explore_async_dpor(
     trace_packages: list[str] | None = None,
     reproduce_on_failure: int = 10,
     total_timeout: float | None = None,
+    warn_nondeterministic_sql: bool = True,
+    lock_timeout: int | None = None,
 ) -> InterleavingResult:
     """Systematically explore async interleavings using DPOR.
 
@@ -1027,6 +1031,19 @@ async def explore_async_dpor(
             Set to 0 to skip.
         total_timeout: Maximum total time in seconds for the entire
             exploration.  None means no global deadline.
+        warn_nondeterministic_sql: If True (default), raise
+            :class:`~frontrun.common.NondeterministicSQLError` when SQL
+            INSERT statements are detected but ``lastrowid`` capture
+            failed (e.g. psycopg2 without RETURNING).  Set to False to
+            suppress.  When capture succeeds, INSERTs use stable
+            indexical resource IDs automatically.
+        lock_timeout: If set, automatically execute
+            ``SET lock_timeout = '<N>ms'`` on every new PostgreSQL
+            connection created through the patched ``psycopg2.connect``
+            (or ``psycopg.connect``).  This prevents the cooperative
+            scheduler from deadlocking when two tasks contend on the
+            same PostgreSQL row lock.  Value is in milliseconds;
+            2000 (2 seconds) is a good default.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample.
@@ -1049,12 +1066,20 @@ async def explore_async_dpor(
     if detect_sql and _sql_async_available:
         patch_sql_async()
 
+    clear_sql_metadata()
+
+    # Inject SET lock_timeout on new PG connections (defect #6 workaround).
+    prev_lock_timeout = get_lock_timeout()
+    if lock_timeout is not None:
+        set_lock_timeout(lock_timeout)
+
     _patch_asyncio_lock()
 
     try:
         while True:
             if total_deadline is not None and time.monotonic() > total_deadline:
                 break
+            clear_insert_tracker()
             execution = engine.begin_execution()
 
             # Clear wait-for graph and held-locks tracking between executions
@@ -1156,7 +1181,11 @@ async def explore_async_dpor(
                     result.explanation = f"Task crash in execution {result.num_explored}: {exc_type}: {task_error}"
                 if stop_on_first:
                     return result
-            elif not invariant(state):
+
+            if warn_nondeterministic_sql:
+                check_uncaptured_inserts()
+
+            if not is_deadlock and task_error is None and not invariant(state):
                 result.property_holds = False
                 schedule_list = list(execution.schedule_trace)
                 result.failures.append((result.num_explored, schedule_list))
@@ -1183,6 +1212,7 @@ async def explore_async_dpor(
                 break
     finally:
         _set_active_trace_filter(None)
+        set_lock_timeout(prev_lock_timeout)
         _unpatch_asyncio_lock()
         if detect_sql and _sql_async_available:
             unpatch_sql_async()
