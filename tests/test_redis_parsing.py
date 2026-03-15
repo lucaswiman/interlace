@@ -154,6 +154,16 @@ class TestListCommands:
         assert result.read_keys == ["mylist"]
         assert result.write_keys == []
 
+    def test_lmpop_uses_numkeys(self) -> None:
+        """LMPOP numkeys key [key ...] LEFT|RIGHT — first arg is numkeys, not a key."""
+        result = parse_redis_access("LMPOP", (2, "list1", "list2", "LEFT"))
+        assert result.write_keys == ["list1", "list2"]
+        assert result.read_keys == []
+
+    def test_lmpop_single_key(self) -> None:
+        result = parse_redis_access("LMPOP", (1, "mylist", "LEFT"))
+        assert result.write_keys == ["mylist"]
+
 
 class TestSetCommands:
     """Test classification of Redis set commands."""
@@ -208,6 +218,18 @@ class TestSortedSetCommands:
         result = parse_redis_access("ZINCRBY", ("myzset", 1, "member1"))
         assert result.write_keys == ["myzset"]
 
+    def test_zmpop_uses_numkeys(self) -> None:
+        """ZMPOP numkeys key [key ...] MIN|MAX — first arg is numkeys."""
+        result = parse_redis_access("ZMPOP", (2, "zset1", "zset2", "MIN"))
+        assert result.write_keys == ["zset1", "zset2"]
+        assert result.read_keys == []
+
+    def test_bzmpop_uses_numkeys(self) -> None:
+        """BZMPOP timeout numkeys key [key ...] MIN|MAX — second arg is numkeys."""
+        result = parse_redis_access("BZMPOP", (0, 2, "zset1", "zset2", "MIN"))
+        assert result.write_keys == ["zset1", "zset2"]
+        assert result.read_keys == []
+
 
 class TestKeyCommands:
     """Test classification of Redis key commands."""
@@ -240,6 +262,18 @@ class TestKeyCommands:
         result = parse_redis_access("RENAME", ("old", "new"))
         assert result.read_keys == ["old"]
         assert result.write_keys == ["old", "new"]
+
+    def test_persist_is_read_write(self) -> None:
+        """PERSIST modifies TTL metadata — should be read+write."""
+        result = parse_redis_access("PERSIST", ("mykey",))
+        assert result.read_keys == ["mykey"]
+        assert result.write_keys == ["mykey"]
+
+    def test_getex_is_read_write(self) -> None:
+        """GETEX reads value and may modify TTL — should be read+write."""
+        result = parse_redis_access("GETEX", ("mykey",))
+        assert result.read_keys == ["mykey"]
+        assert result.write_keys == ["mykey"]
 
 
 class TestTransactionCommands:
@@ -363,6 +397,44 @@ class TestStreamCommands:
         result = parse_redis_access("XDEL", ("mystream", "id1"))
         assert result.write_keys == ["mystream"]
 
+    def test_xreadgroup_is_read_write(self) -> None:
+        """XREADGROUP advances consumer group state — should be read+write."""
+        result = parse_redis_access("XREADGROUP", ("GROUP", "mygroup", "consumer1", "STREAMS", "stream1", ">"))
+        assert result.read_keys == ["stream1"]
+        assert result.write_keys == ["stream1"]
+
+    def test_xread_is_read_only(self) -> None:
+        """XREAD is pure read (no consumer group state mutation)."""
+        result = parse_redis_access("XREAD", ("STREAMS", "stream1", "0"))
+        assert result.read_keys == ["stream1"]
+        assert result.write_keys == []
+
+
+class TestGeoCommands:
+    """Test classification of Redis geo commands."""
+
+    def test_georadius_read_only(self) -> None:
+        result = parse_redis_access("GEORADIUS", ("geo", 15, 37, 100, "km"))
+        assert result.read_keys == ["geo"]
+        assert result.write_keys == []
+
+    def test_georadius_with_store(self) -> None:
+        """GEORADIUS with STORE writes a destination key."""
+        result = parse_redis_access("GEORADIUS", ("geo", 15, 37, 100, "km", "STORE", "dest"))
+        assert result.read_keys == ["geo"]
+        assert result.write_keys == ["dest"]
+
+    def test_georadius_with_storedist(self) -> None:
+        """GEORADIUS with STOREDIST writes a destination key."""
+        result = parse_redis_access("GEORADIUS", ("geo", 15, 37, 100, "km", "STOREDIST", "dest"))
+        assert result.read_keys == ["geo"]
+        assert result.write_keys == ["dest"]
+
+    def test_georadiusbymember_with_store(self) -> None:
+        result = parse_redis_access("GEORADIUSBYMEMBER", ("geo", "member", 100, "km", "STORE", "dest"))
+        assert result.read_keys == ["geo"]
+        assert result.write_keys == ["dest"]
+
 
 class TestCommandCoverage:
     """Verify that all core Redis commands are handled (not falling through to fallback)."""
@@ -428,7 +500,7 @@ class TestCommandCoverage:
         ("LPOS", ("l", "v")),
         ("LMOVE", ("src", "dst", "LEFT", "RIGHT")),
         ("BLMOVE", ("src", "dst", "LEFT", "RIGHT", 0)),
-        ("LMPOP", ("l",)),
+        ("LMPOP", (1, "l", "LEFT")),
         ("BLPOP", ("l", 0)),
         ("BRPOP", ("l", 0)),
         ("RPOPLPUSH", ("src", "dst")),
@@ -479,6 +551,8 @@ class TestCommandCoverage:
         ("ZUNIONSTORE", ("dst", 2, "z1", "z2")),
         ("ZINTERSTORE", ("dst", 2, "z1", "z2")),
         ("ZDIFFSTORE", ("dst", 2, "z1", "z2")),
+        ("ZMPOP", (1, "z", "MIN")),
+        ("BZMPOP", (0, 1, "z", "MIN")),
         # Key commands
         ("DEL", ("k",)),
         ("UNLINK", ("k",)),
@@ -513,6 +587,7 @@ class TestCommandCoverage:
         ("XRANGE", ("s", "-", "+")),
         ("XREVRANGE", ("s", "+", "-")),
         ("XREAD", ("STREAMS", "s1", "0")),
+        ("XREADGROUP", ("GROUP", "g", "c", "STREAMS", "s1", ">")),
         ("XINFO", ("s",)),
         ("XPENDING", ("s", "g")),
         ("XTRIM", ("s", "MAXLEN", 100)),

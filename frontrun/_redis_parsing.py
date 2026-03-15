@@ -79,7 +79,6 @@ _SINGLE_KEY_READ_CMDS: frozenset[str] = frozenset(
         "TYPE",
         "TTL",
         "PTTL",
-        "PERSIST",
         "DUMP",
         "XLEN",
         "XRANGE",
@@ -87,7 +86,6 @@ _SINGLE_KEY_READ_CMDS: frozenset[str] = frozenset(
         "XINFO",
         "XPENDING",
         "PFCOUNT",
-        "GETEX",
         "EXPIRETIME",
         "PEXPIRETIME",
     }
@@ -143,7 +141,6 @@ _SINGLE_KEY_WRITE_CMDS: frozenset[str] = frozenset(
         "XTRIM",
         "XACK",
         "PFADD",
-        "LMPOP",
     }
 )
 
@@ -153,6 +150,8 @@ _SINGLE_KEY_READ_WRITE_CMDS: frozenset[str] = frozenset(
     {
         "GETSET",
         "GETDEL",
+        "PERSIST",  # Reads key, mutates TTL metadata.
+        "GETEX",  # Reads value, may mutate TTL with EX/PX/EXAT/PXAT/PERSIST options.
     }
 )
 
@@ -261,6 +260,24 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
             is_transaction_control=False,
         )
 
+    # LMPOP / ZMPOP — numkeys key [key ...] LEFT|RIGHT [COUNT count]
+    if upper in ("LMPOP", "ZMPOP") and len(cmd_args) >= 2:
+        try:
+            numkeys = int(str(cmd_args[0]))
+        except (ValueError, TypeError):
+            numkeys = 1
+        keys = [str(cmd_args[1 + i]) for i in range(min(numkeys, len(cmd_args) - 1))]
+        return RedisAccessResult(read_keys=[], write_keys=keys, is_transaction_control=False)
+
+    # BZMPOP — timeout numkeys key [key ...] MIN|MAX [COUNT count]
+    if upper == "BZMPOP" and len(cmd_args) >= 3:
+        try:
+            numkeys = int(str(cmd_args[1]))
+        except (ValueError, TypeError):
+            numkeys = 1
+        keys = [str(cmd_args[2 + i]) for i in range(min(numkeys, len(cmd_args) - 2))]
+        return RedisAccessResult(read_keys=[], write_keys=keys, is_transaction_control=False)
+
     # Blocking pop commands — first arg(s) are keys, last is timeout.
     if upper in ("BLPOP", "BRPOP"):
         # Args: key [key ...] timeout
@@ -312,16 +329,26 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
             is_transaction_control=False,
         )
 
-    # XREAD / XREADGROUP — complex args, extract key names after STREAMS keyword.
-    if upper in ("XREAD", "XREADGROUP"):
+    # XREAD — read-only stream consumption.
+    if upper == "XREAD":
         args_upper = [str(a).upper() for a in cmd_args]
         if "STREAMS" in args_upper:
             streams_idx = args_upper.index("STREAMS")
             remaining = list(cmd_args[streams_idx + 1 :])
-            # After STREAMS, args are: key1 key2 ... id1 id2 ...
             n_streams = len(remaining) // 2
             keys = [str(remaining[i]) for i in range(n_streams)]
             return RedisAccessResult(read_keys=keys, write_keys=[], is_transaction_control=False)
+        return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=False)
+
+    # XREADGROUP — advances consumer group last-delivered-ID (read + write).
+    if upper == "XREADGROUP":
+        args_upper = [str(a).upper() for a in cmd_args]
+        if "STREAMS" in args_upper:
+            streams_idx = args_upper.index("STREAMS")
+            remaining = list(cmd_args[streams_idx + 1 :])
+            n_streams = len(remaining) // 2
+            keys = [str(remaining[i]) for i in range(n_streams)]
+            return RedisAccessResult(read_keys=keys, write_keys=keys, is_transaction_control=False)
         return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=False)
 
     # XGROUP — subcommand with key.
@@ -350,8 +377,19 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
         channels = [f"channel:{a}" for a in cmd_args]
         return RedisAccessResult(read_keys=channels, write_keys=[], is_transaction_control=False)
 
-    # GEORADIUS / GEOSEARCH — read commands with key.
-    if upper in ("GEORADIUS", "GEORADIUSBYMEMBER", "GEOSEARCH", "GEODIST", "GEOPOS", "GEOHASH"):
+    # GEODIST, GEOPOS, GEOHASH, GEOSEARCH — pure read commands.
+    if upper in ("GEODIST", "GEOPOS", "GEOHASH", "GEOSEARCH"):
+        return RedisAccessResult(read_keys=[first_key], write_keys=[], is_transaction_control=False)
+
+    # GEORADIUS / GEORADIUSBYMEMBER — read, but STORE/STOREDIST writes a destination key.
+    if upper in ("GEORADIUS", "GEORADIUSBYMEMBER"):
+        args_upper = [str(a).upper() for a in cmd_args]
+        for store_kw in ("STORE", "STOREDIST"):
+            if store_kw in args_upper:
+                store_idx = args_upper.index(store_kw)
+                if store_idx + 1 < len(cmd_args):
+                    dest = str(cmd_args[store_idx + 1])
+                    return RedisAccessResult(read_keys=[first_key], write_keys=[dest], is_transaction_control=False)
         return RedisAccessResult(read_keys=[first_key], write_keys=[], is_transaction_control=False)
 
     # GEOADD / GEOSEARCHSTORE — write commands.

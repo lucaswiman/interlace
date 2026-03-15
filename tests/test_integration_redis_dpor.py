@@ -117,6 +117,7 @@ class TestRedisCounterRaceKeyLevel:
             reproduce_on_failure=0,
         )
         assert not result.property_holds, "DPOR should detect lost-update on Redis counter"
+        assert result.num_explored >= 2, "DPOR must explore multiple interleavings to find the race"
         assert result.explanation is not None
 
     def test_locked_counter_is_safe(self, redis_port: int) -> None:
@@ -1021,7 +1022,51 @@ class TestMultiResourceRace:
 
 
 # ---------------------------------------------------------------------------
-# 13. DPOR path-count: independent operations → single path
+# 13. Pipeline integration test
+# ---------------------------------------------------------------------------
+
+
+class TestRedisPipelineKeyLevel:
+    """Verify DPOR detects races through pipelined Redis commands."""
+
+    def test_dpor_detects_pipeline_lost_update(self, redis_port: int) -> None:
+        """Pipeline GET+SET should still be detected as a race."""
+        port = redis_port
+
+        class State:
+            def __init__(self) -> None:
+                r = redis_lib.Redis(port=port, decode_responses=True)
+                r.set("pipe_counter", "0")
+                r.close()
+
+        def increment_via_pipeline(state: State) -> None:
+            r = redis_lib.Redis(port=port, decode_responses=True)
+            val = int(r.get("pipe_counter"))  # type: ignore[arg-type]
+            pipe = r.pipeline()
+            pipe.set("pipe_counter", str(val + 1))
+            pipe.execute()
+            r.close()
+
+        def invariant(state: State) -> bool:
+            r = redis_lib.Redis(port=port, decode_responses=True)
+            result = int(r.get("pipe_counter"))  # type: ignore[arg-type]
+            r.close()
+            return result == 2
+
+        result = explore_dpor(
+            setup=State,
+            threads=[increment_via_pipeline, increment_via_pipeline],
+            invariant=invariant,
+            detect_io=True,
+            max_executions=50,
+            deadlock_timeout=15.0,
+            reproduce_on_failure=0,
+        )
+        assert not result.property_holds, "DPOR should detect lost-update through pipeline"
+
+
+# ---------------------------------------------------------------------------
+# 14. DPOR path-count: independent operations → single path
 # ---------------------------------------------------------------------------
 
 
