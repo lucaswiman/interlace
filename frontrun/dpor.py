@@ -58,6 +58,11 @@ from frontrun._io_detection import (
     set_io_reporter,
     unpatch_io,
 )
+from frontrun._redis_client import (
+    is_redis_tid_suppressed,
+    patch_redis,
+    unpatch_redis,
+)
 from frontrun._sql_anomaly import classify_sql_anomaly
 from frontrun._sql_cursor import (
     clear_sql_metadata,
@@ -226,8 +231,8 @@ class _PreloadBridge:
         # force DPOR to explore uninteresting interleavings first.
         if event.kind == "close":
             return
-        # Skip if this thread's cursor.execute() already reported at SQL level
-        if is_tid_suppressed(event.tid):
+        # Skip if this thread's cursor.execute() or Redis client already reported at a higher level
+        if is_tid_suppressed(event.tid) or is_redis_tid_suppressed(event.tid):
             return
         with self._lock:
             dpor_id = self._tid_to_dpor.get(event.tid)
@@ -1545,10 +1550,12 @@ class DporBytecodeRunner:
             return
         patch_io()
         patch_sql()
+        patch_redis()
         self._io_patched = True
 
     def _unpatch_io(self) -> None:
         if self._io_patched:
+            unpatch_redis()
             unpatch_sql()
             unpatch_io()
             self._io_patched = False
