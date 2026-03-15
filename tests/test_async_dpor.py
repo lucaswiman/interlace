@@ -1178,3 +1178,229 @@ class TestAsyncDporTotalTimeout:
 
         assert result.property_holds
         assert elapsed < 3.0, f"total_timeout=0.5 but took {elapsed:.1f}s"
+
+
+class TestAsyncDporWarnNondeterministicSQL:
+    """Tests for warn_nondeterministic_sql parameter on explore_async_dpor."""
+
+    def test_parameter_accepted(self) -> None:
+        """explore_async_dpor should accept warn_nondeterministic_sql parameter."""
+        require_active("test_async_dpor_warn_nondeterministic_sql")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class Counter:
+            def __init__(self) -> None:
+                self.value = 0
+
+        async def increment(counter: Counter) -> None:
+            counter.value += 1
+            await asyncio.sleep(0)
+
+        # Should not raise — parameter should be accepted
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=Counter,
+                tasks=[increment, increment],
+                invariant=lambda c: c.value == 2,
+                deadlock_timeout=5.0,
+                warn_nondeterministic_sql=False,
+            )
+        )
+        assert result.property_holds
+
+    def test_raises_on_uncaptured_inserts(self) -> None:
+        """When warn_nondeterministic_sql=True (default), should raise NondeterministicSQLError."""
+        require_active("test_async_dpor_warn_nondeterministic_sql_raises")
+        from frontrun._sql_insert_tracker import clear_insert_tracker, record_insert
+        from frontrun.async_dpor import explore_async_dpor
+        from frontrun.common import NondeterministicSQLError
+
+        class State:
+            def __init__(self) -> None:
+                self.value = 0
+
+        async def task_with_uncaptured_insert(state: State) -> None:
+            # Simulate an INSERT with uncaptured lastrowid (concrete_id=None)
+            record_insert("test_table", None)
+            state.value += 1
+            await asyncio.sleep(0)
+
+        with pytest.raises(NondeterministicSQLError, match="test_table"):
+            asyncio.run(
+                explore_async_dpor(
+                    setup=State,
+                    tasks=[task_with_uncaptured_insert],
+                    invariant=lambda s: True,
+                    deadlock_timeout=5.0,
+                    detect_sql=True,
+                    warn_nondeterministic_sql=True,
+                )
+            )
+
+        # Clean up
+        clear_insert_tracker()
+
+    def test_suppressed_when_false(self) -> None:
+        """When warn_nondeterministic_sql=False, should NOT raise on uncaptured INSERTs."""
+        require_active("test_async_dpor_warn_nondeterministic_sql_suppressed")
+        from frontrun._sql_insert_tracker import clear_insert_tracker, record_insert
+        from frontrun.async_dpor import explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                self.value = 0
+
+        async def task_with_uncaptured_insert(state: State) -> None:
+            record_insert("test_table", None)
+            state.value += 1
+            await asyncio.sleep(0)
+
+        # Should NOT raise
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[task_with_uncaptured_insert],
+                invariant=lambda s: True,
+                deadlock_timeout=5.0,
+                detect_sql=True,
+                warn_nondeterministic_sql=False,
+            )
+        )
+        assert result.property_holds
+
+        # Clean up
+        clear_insert_tracker()
+
+    def test_clears_insert_tracker_between_executions(self) -> None:
+        """Insert tracker should be cleared between DPOR executions."""
+        require_active("test_async_dpor_clears_insert_tracker")
+        from frontrun._sql_insert_tracker import get_records
+        from frontrun.async_dpor import explore_async_dpor
+
+        class Counter:
+            def __init__(self) -> None:
+                self.value = 0
+
+        records_during_run: list[int] = []
+
+        async def increment(counter: Counter) -> None:
+            # Record how many insert records exist at the start of this execution
+            records_during_run.append(len(get_records()))
+            temp = counter.value
+            await asyncio.sleep(0)
+            counter.value = temp + 1
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=Counter,
+                tasks=[increment, increment],
+                invariant=lambda c: c.value == 2,
+                deadlock_timeout=5.0,
+                warn_nondeterministic_sql=False,
+                max_executions=5,
+            )
+        )
+
+        # All recorded counts should be 0 (tracker cleared between executions)
+        assert all(c == 0 for c in records_during_run), (
+            f"Insert tracker was not cleared between executions: {records_during_run}"
+        )
+
+
+class TestAsyncDporLockTimeout:
+    """Tests for lock_timeout parameter on explore_async_dpor."""
+
+    def test_parameter_accepted(self) -> None:
+        """explore_async_dpor should accept lock_timeout parameter."""
+        require_active("test_async_dpor_lock_timeout")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class Counter:
+            def __init__(self) -> None:
+                self.value = 0
+
+        async def increment(counter: Counter) -> None:
+            counter.value += 1
+            await asyncio.sleep(0)
+
+        # Should not raise — parameter should be accepted
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=Counter,
+                tasks=[increment, increment],
+                invariant=lambda c: c.value == 2,
+                deadlock_timeout=5.0,
+                lock_timeout=2000,
+            )
+        )
+        assert result.property_holds
+
+    def test_sets_global_lock_timeout(self) -> None:
+        """lock_timeout should be set during exploration and restored after."""
+        require_active("test_async_dpor_lock_timeout_global")
+        from frontrun._sql_cursor import get_lock_timeout
+        from frontrun.async_dpor import explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                self.value = 0
+
+        lock_timeout_during: list[int | None] = []
+
+        async def check_lock_timeout(state: State) -> None:
+            lock_timeout_during.append(get_lock_timeout())
+            state.value += 1
+            await asyncio.sleep(0)
+
+        # Verify lock_timeout is None before
+        assert get_lock_timeout() is None
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[check_lock_timeout],
+                invariant=lambda s: True,
+                deadlock_timeout=5.0,
+                lock_timeout=1500,
+            )
+        )
+        assert result.property_holds
+
+        # During exploration, lock_timeout should have been 1500
+        assert all(lt == 1500 for lt in lock_timeout_during), (
+            f"lock_timeout was not set during exploration: {lock_timeout_during}"
+        )
+
+        # After exploration, lock_timeout should be restored to None
+        assert get_lock_timeout() is None, "lock_timeout was not restored after exploration"
+
+    def test_restores_previous_lock_timeout(self) -> None:
+        """lock_timeout should restore the previous value, not just None."""
+        require_active("test_async_dpor_lock_timeout_restore")
+        from frontrun._sql_cursor import get_lock_timeout, set_lock_timeout
+        from frontrun.async_dpor import explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                self.value = 0
+
+        async def noop_task(state: State) -> None:
+            state.value += 1
+            await asyncio.sleep(0)
+
+        # Set a pre-existing lock_timeout
+        set_lock_timeout(999)
+        try:
+            result = asyncio.run(
+                explore_async_dpor(
+                    setup=State,
+                    tasks=[noop_task],
+                    invariant=lambda s: True,
+                    deadlock_timeout=5.0,
+                    lock_timeout=2000,
+                )
+            )
+            assert result.property_holds
+            assert get_lock_timeout() == 999, "Previous lock_timeout was not restored"
+        finally:
+            set_lock_timeout(None)
