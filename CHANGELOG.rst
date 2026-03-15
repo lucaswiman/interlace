@@ -9,6 +9,37 @@ All releases: https://github.com/lucaswiman/frontrun/releases
 - Cutover rename: ``frontrun.async_bytecode`` is now ``frontrun.async_shuffler``,
   and ``AsyncBytecodeShuffler`` is now ``AsyncShuffler``.
 
+**Redis key-level conflict detection**
+
+DPOR now understands Redis.  Instead of treating all Redis traffic to the same
+``host:port`` as a single conflict point, frontrun intercepts ``execute_command()``
+on redis-py clients, classifies each command (GET, SET, HSET, EXISTS, etc.) as a
+read or write on specific keys, and reports those per-key resource IDs to the DPOR
+engine.  Two tasks operating on different keys are independent; only operations that
+touch the same key with at least one write trigger interleaving exploration.
+
+- **Sync DPOR** (``explore_dpor``): Redis patching is active automatically when
+  ``detect_io=True`` (the default).  No extra parameter is needed.
+- **Async DPOR** (``explore_async_dpor``): pass ``detect_redis=True`` to enable
+  patching for ``redis.asyncio`` and ``coredis`` clients.
+- New modules: ``frontrun._redis_parsing`` (command classification for 160+ Redis
+  commands), ``frontrun._redis_client`` (sync monkey-patching),
+  ``frontrun._redis_client_async`` (async monkey-patching).
+- Endpoint suppression prevents double-reporting when key-level detection is active,
+  including for C-level Redis drivers via the LD_PRELOAD bridge.
+- Fine-grained scheduling points injected around each Redis command so DPOR can
+  explore the gap between an EXISTS check and the subsequent SET (TOCTOU races).
+- asyncio.Lock interactions during Redis connection-pool waits are handled correctly
+  to prevent false deadlocks.
+- Augmented global-variable race detection: ``LOAD_GLOBAL``/``LOAD_DEREF`` now use
+  ``report_first_access`` so that global counter races (``counter += 1``) are
+  detected by DPOR.
+- Integration tests: 17 tests covering lost-update counters, check-then-act
+  (TOCTOU), inventory double-spend, balance transfers, Hash races, List races, Set
+  races, pipeline batches, independent-key non-interference, and async variants.
+
+See :doc:`redis` for the technical walkthrough.
+
 **Async DPOR**
 
 ``explore_async_dpor()`` brings systematic interleaving exploration to async

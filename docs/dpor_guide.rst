@@ -52,44 +52,57 @@ What it can and cannot find
 ---------------------------
 
 DPOR explores alternative interleavings only where it detects a *conflict*
---- two threads accessing the same object with at least one write. It detects
-conflicts by instrumenting Python bytecode, so only operations that are
-visible at the bytecode level register as conflicts.
+--- two threads accessing the same object with at least one write. The
+detection mechanisms are layered from fine-grained to coarse:
 
-**Operations DPOR sees (and will explore reorderings of):**
+**Fine-grained detection (precise, no false conflicts):**
 
 - Attribute reads and writes (``self.x``, ``obj.field = ...``)
 - Subscript reads and writes (``d[key]``, ``lst[i] = ...``)
 - Lock acquire and release (``threading.Lock``, ``threading.RLock``)
 - Thread spawn and join
-- **Socket I/O** (``connect``, ``send``, ``sendall``, ``sendto``, ``recv``,
-  ``recv_into``, ``recvfrom``) --- detected via automatic monkey-patching
-  when ``detect_io=True`` (the default). Two threads accessing the same
-  ``host:port`` endpoint conflict; different endpoints are independent.
-- **File opens** (``builtins.open``) --- read vs write determined by mode,
-  resource identity from the resolved file path.
+- **Redis commands** --- ``execute_command()`` is intercepted on redis-py
+  clients when ``detect_io=True`` (sync) or ``detect_redis=True`` (async).
+  Each command is classified as a read or write on specific keys; two threads
+  operating on *different* keys are independent.  See :doc:`redis`.
+- **SQL statements** --- ``cursor.execute()`` is intercepted at the DBAPI
+  layer.  Statements are parsed to per-table (or per-row) resource IDs; two
+  threads touching *different* tables or rows are independent.  See
+  :doc:`sql-technical-details`.
 
-Beyond invariant violations, DPOR also detects **deadlocks** (via wait-for-graph
-cycle detection) and **crashes** (unhandled exceptions in any thread are
-re-raised after the execution completes).
+**Coarse endpoint-level detection (can cause combinatorial explosion):**
 
-**Operations DPOR does not see (and will therefore not explore):**
+- **Python socket I/O** (``connect``, ``send``, ``sendall``, ``recv``, etc.)
+  --- monkey-patched when ``detect_io=True``.  The resource ID is
+  ``socket:<host>:<port>``, so *every* send and recv on the same server
+  conflicts with every other send and recv on that server.  Two threads each
+  issuing ten Redis commands via the raw socket API would each generate ten
+  write (send) and ten read (recv) events, all conflicting --- DPOR would
+  explore a combinatorial explosion of orderings, most of them spurious.
+  Redis and SQL detection avoid this by suppressing socket-level reporting for
+  those connections and replacing it with fine-grained resource IDs.
+- **C-level socket I/O via LD_PRELOAD** --- when running under the
+  ``frontrun`` CLI, the ``libfrontrun_io.so`` library intercepts libc
+  ``send()``/``recv()`` and reports the same ``socket:<host>:<port>`` resource
+  IDs.  This catches opaque C drivers (libpq, etc.) that bypass Python's
+  ``socket`` module, but with the same coarseness: all traffic to the same
+  endpoint is a potential conflict.  For most database and Redis workloads,
+  the SQL/Redis key-level detection should be used instead so that the
+  endpoint-level reports are suppressed.
+- **File opens** (``builtins.open``) --- resource identity is the resolved
+  file path; read vs write determined by mode.
 
-- **Database operations.** Two threads calling ``cursor.execute("UPDATE ...")``
-  on the same row look like independent C function calls to the tracer ---
-  DPOR sees no conflict between them and only runs one interleaving.
-- **Opaque C-extension I/O.** Database drivers, Redis clients, and other
-  libraries that manage sockets entirely in C code bypass the
-  monkey-patches, so their operations appear independent.
-- **C-extension shared state.** Shared state modified inside C code (NumPy
-  arrays, etc.) is not tracked at the bytecode level.
+**Not tracked (DPOR cannot see these at all):**
 
-The consequence is not that DPOR "can't run" on such code --- it will run
-fine, it just won't explore the interesting schedules. Because the external
-operations look independent, DPOR concludes that reordering them cannot change
-the outcome and skips all the alternative interleavings where the bugs hide.
+- **C-extension shared state.** Shared state modified entirely inside C code
+  (NumPy arrays, custom C extensions, etc.) produces no Python bytecode.
+  DPOR sees no conflict and explores only one interleaving, regardless of
+  whether a race exists.
+- **Locks acquired in C without Python wrappers.**  A C extension that manages
+  its own mutex without calling through ``threading.Lock`` is invisible to the
+  wait-for-graph and the bytecode tracer.
 
-For these cases, there are two alternatives:
+For cases where DPOR cannot see the shared state, two alternatives are available:
 
 - **Bytecode exploration** (``explore_interleavings()``) doesn't need to
   *understand* why a schedule is bad --- it checks an invariant after each run
@@ -102,6 +115,10 @@ For these cases, there are two alternatives:
 - **Trace markers** let you annotate the points where interleaving matters and
   enumerate the orderings by hand.  This is the most reliable approach when you
   already know the race window.
+
+Beyond invariant violations, DPOR also detects **deadlocks** (via wait-for-graph
+cycle detection) and **crashes** (unhandled exceptions in any thread are
+re-raised after the execution completes).
 
 Thread functions should also avoid external side effects (writing to files,
 sending network requests, modifying global state outside the ``setup`` object).
@@ -433,3 +450,95 @@ result:
 
 Inside an async task, use ``get_async_connection()`` to retrieve the
 per-task connection.
+
+
+Redis key-level detection
+--------------------------
+
+DPOR intercepts ``execute_command()`` on redis-py clients and classifies each
+Redis command as a read or write on one or more specific keys.  The DPOR engine
+then treats each Redis key as an independent resource, the same way it treats
+Python-level attribute accesses.
+
+**Sync usage** (``detect_io=True`` is the default; no extra parameter needed):
+
+.. code-block:: python
+
+   import redis
+   from frontrun.dpor import explore_dpor
+
+   def test_redis_lost_update(redis_port):
+       class State:
+           def __init__(self):
+               r = redis.Redis(port=redis_port, decode_responses=True)
+               r.set("counter", "0")
+               r.close()
+
+       def increment(state):
+           r = redis.Redis(port=redis_port, decode_responses=True)
+           val = int(r.get("counter"))
+           r.set("counter", str(val + 1))
+           r.close()
+
+       def invariant(state):
+           r = redis.Redis(port=redis_port, decode_responses=True)
+           result = int(r.get("counter"))
+           r.close()
+           return result == 2
+
+       result = explore_dpor(
+           setup=State,
+           threads=[increment, increment],
+           invariant=invariant,
+           detect_io=True,          # enables Redis key-level patching (default)
+       )
+       assert not result.property_holds   # race detected!
+
+**Async usage** (``detect_redis=True``):
+
+.. code-block:: python
+
+   import redis.asyncio as aioredis
+   from frontrun.async_dpor import explore_async_dpor
+
+   def test_async_redis_check_then_act(redis_port):
+       import asyncio
+
+       async def maybe_init(state):
+           r = aioredis.Redis(port=redis_port, decode_responses=True)
+           if not await r.exists("resource"):
+               await r.set("resource", "initialized")
+           await r.aclose()
+
+       async def invariant(state):
+           r = aioredis.Redis(port=redis_port, decode_responses=True)
+           count = await r.get("resource")
+           await r.aclose()
+           return count is not None
+
+       asyncio.run(explore_async_dpor(
+           setup=lambda: None,
+           tasks=[maybe_init, maybe_init],
+           invariant=lambda s: True,
+           detect_redis=True,
+       ))
+
+DPOR inserts fine-grained scheduling points around each Redis command, so it
+can explore the gap between an ``EXISTS`` check and the subsequent ``SET`` ---
+the classic TOCTOU (check-then-act) race window.
+
+**What counts as a conflict:**
+
+- Any two operations on the *same* key where at least one is a write.
+- Pipeline batches: each command in the pipeline is reported individually.
+- ``MULTI``/``EXEC`` transactions: commands between ``MULTI`` and ``EXEC`` are
+  buffered and reported atomically.
+
+**What is independent (no conflict, no extra interleavings):**
+
+- Two reads on the same key (e.g. two ``GET``s).
+- Any operations on *different* keys, even on the same Redis server.
+- Server-level commands (``PING``, ``INFO``, ``CONFIG``, etc.) that carry no
+  key-level semantics.
+
+For the full command classification and technical details, see :doc:`redis`.
