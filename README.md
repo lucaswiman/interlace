@@ -150,7 +150,7 @@ Race condition found after 2 interleavings.
 
 DPOR explored exactly 2 interleavings out of the 6 possible (the other 4 are equivalent to one of the first two). For a detailed walkthrough of how this works, see the [DPOR algorithm documentation](docs/dpor.rst).
 
-**Scope and limitations:** DPOR tracks conflicts at the Python bytecode level. It sees attribute reads/writes, subscript operations, and lock acquire/release. It does *not* see shared state managed entirely in C extensions (database rows, NumPy arrays, Redis keys). For those, the code runs fine but DPOR concludes — incorrectly — that the threads are independent and explores only one interleaving. Direct socket I/O is detected via monkey-patching when `detect_io=True` (the default), and the `frontrun` CLI adds C-level interception via `LD_PRELOAD` for opaque drivers.
+**Scope and limitations:** DPOR tracks conflicts at the Python bytecode level. It sees attribute reads/writes, subscript operations, and lock acquire/release. It does *not* see shared state managed entirely in C extensions (database rows, NumPy arrays). For those, the code runs fine but DPOR concludes — incorrectly — that the threads are independent and explores only one interleaving. Direct socket I/O is detected via monkey-patching when `detect_io=True` (the default). Redis key-level conflicts are detected automatically by intercepting redis-py's `execute_command()` (sync) or via `detect_redis=True` (async). SQL conflicts are detected by intercepting DBAPI `cursor.execute()`. The `frontrun` CLI adds C-level interception via `LD_PRELOAD` for opaque drivers.
 
 ### 3. Bytecode Exploration
 
@@ -219,6 +219,61 @@ Both the bytecode explorer and DPOR automatically detect socket and file I/O ope
 - **Files:** `open()` (read vs write determined by mode)
 
 Resource identity is derived from the socket's peer address (`host:port`) or the file's resolved path — two threads hitting the same endpoint or file conflict; different endpoints are independent.
+
+### Redis Key-Level Conflict Detection
+
+DPOR goes beyond coarse socket-level detection for Redis: it intercepts `execute_command()` on redis-py clients, classifies each command as a read or write on specific keys, and reports per-key resource IDs to the engine. Two threads operating on different Redis keys are independent; only operations on the same key (with at least one write) trigger interleaving exploration.
+
+**Sync DPOR** — Redis patching is active automatically when `detect_io=True` (the default):
+
+```python
+from frontrun.dpor import explore_dpor
+import redis
+
+def test_redis_counter_race(redis_port):
+    class State:
+        def __init__(self):
+            r = redis.Redis(port=redis_port, decode_responses=True)
+            r.set("counter", "0")
+            r.close()
+
+    def increment(state):
+        r = redis.Redis(port=redis_port, decode_responses=True)
+        val = int(r.get("counter"))
+        r.set("counter", str(val + 1))
+        r.close()
+
+    result = explore_dpor(
+        setup=State,
+        threads=[increment, increment],
+        invariant=lambda s: int(redis.Redis(port=redis_port).get("counter")) == 2,
+        detect_io=True,   # default — activates Redis key-level patching
+    )
+    assert not result.property_holds  # DPOR finds the lost-update race
+```
+
+**Async DPOR** — pass `detect_redis=True`:
+
+```python
+from frontrun.async_dpor import explore_async_dpor
+import redis.asyncio as aioredis
+
+async def test_async_redis_race(redis_port):
+    async def increment(state):
+        r = aioredis.Redis(port=redis_port, decode_responses=True)
+        val = int(await r.get("counter"))
+        await r.set("counter", str(val + 1))
+        await r.aclose()
+
+    result = await explore_async_dpor(
+        setup=lambda: None,
+        tasks=[increment, increment],
+        invariant=lambda s: True,  # check Redis directly in a real test
+        detect_redis=True,
+    )
+```
+
+The same key-level precision applies to hashes (`HGET`/`HSET`), lists, sets, sorted sets, and all other Redis data structures — 160+ commands are classified. See the [Redis technical details](docs/redis.rst) for a full walkthrough.
 
 ### C-Level I/O Interception
 
