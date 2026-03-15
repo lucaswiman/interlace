@@ -179,9 +179,18 @@ Pass ``detect_redis=True`` to activate patching for ``redis.asyncio`` and
        detect_redis=True,
    )
 
-When ``detect_redis=True`` (or ``detect_io=True`` for sync), endpoint-level
-socket I/O for Redis connections is automatically suppressed to avoid
-double-counting.
+When ``detect_redis=True`` (or ``detect_io=True`` for sync), the coarse
+endpoint-level socket I/O reports for Redis connections are automatically
+suppressed.
+
+Without suppression, every ``send()`` (classified as a write on
+``socket:<host>:<port>``) and every ``recv()`` (a read on the same resource)
+would conflict with every other send/recv to the same server.  Ten Redis
+commands in each of two threads would generate roughly 200 spurious conflict
+pairs, causing DPOR to explore a combinatorial explosion of interleavings that
+cannot actually differ in outcome.  Suppressing the socket-level reports and
+replacing them with per-key resource IDs means DPOR only explores orderings
+that can genuinely change the result.
 
 
 Command coverage verification
