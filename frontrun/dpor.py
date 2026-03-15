@@ -921,6 +921,37 @@ def _report_write(
             engine.report_access(execution, thread_id, _make_object_key(id(obj), name), "write")
 
 
+def _report_weak_read(
+    engine: PyDporEngine, execution: PyExecution, thread_id: int, obj: Any, name: Any, lock: threading.Lock
+) -> None:
+    """Like ``_report_read`` but uses ``weak_read`` access kind.
+
+    A weak read conflicts with writes but NOT with weak writes or other
+    weak reads.  Used for LOAD_ATTR on mutable values so that loading a
+    container to subscript it doesn't create a spurious conflict with
+    ``STORE_SUBSCR``'s weak write on disjoint keys, while still
+    conflicting with C-method writes (append, clear, etc.).
+    """
+    if obj is not None:
+        with lock:
+            engine.report_access(execution, thread_id, _make_object_key(id(obj), name), "weak_read")
+
+
+def _report_weak_write(
+    engine: PyDporEngine, execution: PyExecution, thread_id: int, obj: Any, name: Any, lock: threading.Lock
+) -> None:
+    """Like ``_report_write`` but uses ``weak_write`` access kind.
+
+    A weak write conflicts with reads and writes but NOT with other weak
+    writes.  Used for container-level subscript tracking so that two
+    ``STORE_SUBSCR`` on disjoint keys don't create a spurious conflict,
+    while still conflicting with C-method reads (iteration, ``len()``, etc.).
+    """
+    if obj is not None:
+        with lock:
+            engine.report_access(execution, thread_id, _make_object_key(id(obj), name), "weak_write")
+
+
 def _subscript_key_name(key: Any) -> Any:
     """Normalize a subscript key for object key computation.
 
@@ -1125,16 +1156,20 @@ def _process_opcode(
                 val = _safe_getattr(obj, attr)
                 shadow.push(val)
                 # When the loaded value is a mutable object (but NOT a bound
-                # method), report a READ on the object itself.  This detects
-                # cases where a container is read indirectly — e.g. passed
-                # to len() or iterated — creating a conflict with C-level
-                # method WRITEs (append, add, etc.) reported by the CALL
-                # handler below.
+                # method), report a WEAK READ on the object itself.  This
+                # detects cases where a container is read indirectly —
+                # e.g. passed to len() or iterated — creating a conflict
+                # with C-level method WRITEs (append, add, etc.) reported
+                # by the CALL handler below.
+                #
+                # We use weak_read (not read) so that loading a dict just
+                # to subscript it doesn't conflict with STORE_SUBSCR's
+                # weak_write on disjoint keys.
                 #
                 # We skip bound methods (loading .append is not a container
                 # read) and immutable types (no mutation possible).
                 if val is not None and type(val) is not _BUILTIN_METHOD_TYPE and not isinstance(val, _IMMUTABLE_TYPES):
-                    _report_read(engine, execution, thread_id, val, "__cmethods__", elock)
+                    _report_weak_read(engine, execution, thread_id, val, "__cmethods__", elock)
             except Exception:
                 shadow.push(None)
         else:
@@ -1209,11 +1244,11 @@ def _process_opcode(
         _val = shadow.pop()
         _kname = _subscript_key_name(key)
         _report_write(engine, execution, thread_id, container, _kname, elock)
-        # Also report a container-level write so subscript writes conflict
-        # with C-method reads (e.g. len(), iteration) and with subscript
-        # reads using different keys (e.g. slice vs element).
+        # Report a container-level weak-write so subscript writes conflict
+        # with C-method reads (e.g. len(), iteration) but two subscript
+        # writes on disjoint keys do NOT conflict with each other.
         if container is not None and not isinstance(container, _IMMUTABLE_TYPES):
-            _report_write(engine, execution, thread_id, container, "__cmethods__", elock)
+            _report_weak_write(engine, execution, thread_id, container, "__cmethods__", elock)
         if recorder is not None and container is not None:
             recorder.record(thread_id, frame, opcode=op, access_type="write", attr_name=_kname, obj=container)
 
