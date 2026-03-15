@@ -1594,6 +1594,15 @@ def _process_opcode(
         except (ValueError, TypeError):
             shadow.clear()
 
+        # CALL replaces the callable/args with the return value. Plain
+        # stack_effect accounting leaves the bottom-most operand in place,
+        # which can be the callable itself on 3.10+ and pollute subsequent
+        # attribute/subscript tracking.
+        if shadow.stack:
+            shadow.stack[-1] = None
+        else:
+            shadow.push(None)
+
         # Fixup: when a container constructor (enumerate, zip, map, etc.) wraps
         # a mutable iterable, replace the None result on TOS with the source
         # container.  This way GET_ITER picks it up and FOR_ITER can report

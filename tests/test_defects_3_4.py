@@ -6,6 +6,10 @@ Defect #4: DPOR opcode tracer IndexError on shadow stack underflow.
 
 from __future__ import annotations
 
+import builtins
+import dis
+import threading
+from types import SimpleNamespace
 from typing import Generic, TypeVar
 
 from frontrun._cooperative import CooperativeQueue  # noqa: I001
@@ -46,52 +50,86 @@ def test_class_getitem_subscript_subclass() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_shadow_stack_bounds_check_passthrough_builtins() -> None:
-    """Passthrough builtin stack accesses are bounds-checked.
+class _EngineRecorder:
+    def __init__(self) -> None:
+        self.events: list[tuple[int, str, str]] = []
 
-    Exercises the bounds-checking fix for Strategy 1 (passthrough builtins
-    like setattr/getattr) in _process_opcode's CALL handler. The shadow
-    stack may have fewer entries than argc when opcodes cause desync.
-    """
-    from frontrun.dpor import ShadowStack
+    def report_access(self, _execution: object, _thread_id: int, object_key: int, kind: str) -> None:
+        self.events.append((object_key, kind, "access"))
 
-    shadow = ShadowStack()
-
-    # Simulate a shadow stack that's shorter than what a CALL instruction
-    # expects. With setattr(obj, "attr", val), argc=3 but shadow stack
-    # might only have 1 entry due to opcode desync.
-    shadow.push(None)
-    slen = len(shadow.stack)
-
-    # Accessing shadow.stack[-3] with only 1 element would IndexError
-    # without bounds checking.
-    argc = 3
-    obj_idx = 0
-    depth = argc - obj_idx  # = 3
-    assert depth > slen  # confirms this WOULD have crashed before the fix
-
-    # The fix: check bounds before accessing
-    if 0 < depth <= slen:
-        _ = shadow.stack[-depth]
-    # No crash = success
+    def report_first_access(self, _execution: object, _thread_id: int, object_key: int, kind: str) -> None:
+        self.events.append((object_key, kind, "first"))
 
 
-def test_shadow_stack_bounds_check_wrapper_descriptor() -> None:
-    """Wrapper descriptor stack accesses are bounds-checked.
+class _SchedulerStub:
+    def __init__(self, engine: _EngineRecorder) -> None:
+        from frontrun.dpor import ShadowStack
 
-    Exercises the bounds-checking fix for Strategy 3 (wrapper descriptors)
-    in _process_opcode's CALL handler.
-    """
-    from frontrun.dpor import ShadowStack
+        self._shadow = ShadowStack()
+        self.engine = engine
+        self.execution = object()
+        self._engine_lock = threading.Lock()
+        self.trace_recorder = None
 
-    shadow = ShadowStack()
-    # Empty shadow stack; accessing shadow.stack[-1] would IndexError
-    argc = 2
-    assert argc > len(shadow.stack)
+    def get_shadow_stack(self, _frame_id: int):  # type: ignore[no-untyped-def]
+        return self._shadow
 
-    if argc >= 1 and argc <= len(shadow.stack):
-        _ = shadow.stack[-argc]
-    # No crash = success
+
+def test_process_opcode_call_replaces_callable_with_result_placeholder() -> None:
+    """CALL should leave a result placeholder, not the callable, on the shadow stack."""
+    from frontrun.dpor import _process_opcode
+
+    def identity(seq: list[int]) -> list[int]:
+        return seq
+
+    def sample(seq: list[int]) -> int:
+        return identity(seq)[0]
+
+    engine = _EngineRecorder()
+    scheduler = _SchedulerStub(engine)
+    frame = SimpleNamespace(
+        f_code=sample.__code__,
+        f_locals={"seq": [10]},
+        f_globals=globals() | {"identity": identity},
+        f_builtins=builtins.__dict__,
+        f_lasti=0,
+    )
+
+    for instr in dis.get_instructions(sample):
+        frame.f_lasti = instr.offset
+        _process_opcode(frame, scheduler, 1)
+        if instr.opname == "CALL":
+            assert scheduler.get_shadow_stack(id(frame)).peek() is None
+
+
+def test_process_opcode_subscript_after_call_does_not_reuse_callable() -> None:
+    """Subscript access after CALL must not treat the callable itself as the result."""
+    from frontrun.dpor import _make_object_key, _process_opcode
+
+    shared = [10]
+
+    def identity(seq: list[int]) -> list[int]:
+        return seq
+
+    def sample(seq: list[int]) -> int:
+        return identity(seq)[0]
+
+    engine = _EngineRecorder()
+    scheduler = _SchedulerStub(engine)
+    frame = SimpleNamespace(
+        f_code=sample.__code__,
+        f_locals={"seq": shared},
+        f_globals=globals() | {"identity": identity},
+        f_builtins=builtins.__dict__,
+        f_lasti=0,
+    )
+
+    for instr in dis.get_instructions(sample):
+        frame.f_lasti = instr.offset
+        _process_opcode(frame, scheduler, 1)
+
+    assert (_make_object_key(id(identity), repr(0)), "read", "access") not in engine.events
+    assert (_make_object_key(id(identity), "__cmethods__"), "read", "access") not in engine.events
 
 
 class SharedObj:
