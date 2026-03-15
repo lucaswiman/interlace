@@ -32,9 +32,7 @@ _factory_lock = lock()
 _ConstructedT = TypeVar("_ConstructedT")
 
 
-def _construct_with_real_threading(
-    factory: Callable[..., _ConstructedT], *args: Any, **kwargs: Any
-) -> _ConstructedT:
+def _construct_with_real_threading(factory: Callable[..., _ConstructedT], *args: Any, **kwargs: Any) -> _ConstructedT:
     """Instantiate *factory* while threading primitives point to the originals."""
     with _factory_lock:
         saved_lock = threading.Lock
