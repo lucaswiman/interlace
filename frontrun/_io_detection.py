@@ -115,8 +115,8 @@ _real_socket_close = socket.socket.close
 
 def _report_socket_io(sock: socket.socket, kind: str) -> None:
     """Report a socket I/O event to the per-thread reporter, if installed."""
-    # Skip if SQL-level detection already reported for this cursor.execute call
-    if getattr(_io_tls, "_sql_suppress", False):
+    # Skip if SQL-level or Redis-level detection already reported for this call
+    if getattr(_io_tls, "_sql_suppress", False) or getattr(_io_tls, "_redis_suppress", False):
         return
     reporter = get_io_reporter()
     if reporter is not None:

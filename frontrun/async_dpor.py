@@ -85,6 +85,21 @@ except ImportError:
         pass
 
 
+# Lazy import for async Redis patching (avoid hard dependency)
+_redis_async_available = False
+try:
+    from frontrun._redis_client_async import patch_redis_async, unpatch_redis_async
+
+    _redis_async_available = True
+except ImportError:
+
+    def patch_redis_async() -> None:  # type: ignore[misc]
+        pass
+
+    def unpatch_redis_async() -> None:  # type: ignore[misc]
+        pass
+
+
 T = TypeVar("T")
 
 
@@ -427,6 +442,7 @@ class AsyncDporScheduler(InterleavedLoop):
         *,
         deadlock_timeout: float = 5.0,
         detect_sql: bool = False,
+        detect_redis: bool = False,
     ) -> None:
         super().__init__(deadlock_timeout=deadlock_timeout)
         self.engine = engine
@@ -434,6 +450,7 @@ class AsyncDporScheduler(InterleavedLoop):
         self._num_engine_tasks = num_tasks
         self._current_task: int | None = None
         self._detect_sql = detect_sql
+        self._detect_redis = detect_redis
         self._engine_lock = _NoOpLock()
         self.trace_recorder = None
         self._iter_to_container: dict[int, Any] = {}
@@ -505,7 +522,7 @@ class AsyncDporScheduler(InterleavedLoop):
         set_dpor_scheduler(self)
         set_dpor_thread_id(task_id)
 
-        if self._detect_sql:
+        if self._detect_sql or self._detect_redis:
 
             def _io_reporter(resource_id: str, kind: str) -> None:
                 object_key = _make_object_key(hash(resource_id), resource_id)
@@ -608,7 +625,7 @@ class AsyncDporScheduler(InterleavedLoop):
 
         set_dpor_scheduler(None)
         set_dpor_thread_id(None)
-        if self._detect_sql:
+        if self._detect_sql or self._detect_redis:
             set_io_reporter(None)
 
     def get_shadow_stack(self, frame_id: int) -> ShadowStack:
@@ -827,6 +844,7 @@ async def run_with_schedule_dpor(
     timeout: float = 5.0,
     deadlock_timeout: float = 5.0,
     detect_sql: bool = False,
+    detect_redis: bool = False,
 ) -> Any:
     """Run one async DPOR execution and return the state object.
 
@@ -838,6 +856,8 @@ async def run_with_schedule_dpor(
         timeout: Max seconds.
         deadlock_timeout: Seconds to wait before declaring a deadlock.
         detect_sql: If True, patch async DBAPI drivers for SQL tracking.
+        detect_redis: If True, patch async Redis clients for key-level
+            conflict detection.
 
     Returns:
         The state object after execution.
@@ -849,6 +869,7 @@ async def run_with_schedule_dpor(
         num_tasks,
         deadlock_timeout=deadlock_timeout,
         detect_sql=detect_sql,
+        detect_redis=detect_redis,
     )
 
     state = setup()
@@ -990,6 +1011,7 @@ async def explore_async_dpor(
     stop_on_first: bool = True,
     deadlock_timeout: float = 5.0,
     detect_sql: bool = False,
+    detect_redis: bool = False,
     trace_packages: list[str] | None = None,
     reproduce_on_failure: int = 10,
     total_timeout: float | None = None,
@@ -1009,6 +1031,9 @@ async def explore_async_dpor(
     SQL-level conflicts (e.g. two tasks writing the same table) and explore
     their orderings.
 
+    When ``detect_redis=True``, async Redis clients (redis.asyncio, coredis)
+    are monkey-patched to report key-level accesses to the DPOR engine.
+
     Args:
         setup: Creates fresh shared state for each execution.
         tasks: List of async callables, each receiving the shared state.
@@ -1022,6 +1047,8 @@ async def explore_async_dpor(
         stop_on_first: If True (default), stop on first invariant violation.
         deadlock_timeout: Seconds to wait before declaring a deadlock.
         detect_sql: If True, patch async DBAPI drivers for SQL tracking.
+        detect_redis: If True, patch async Redis clients for key-level
+            conflict detection.
         trace_packages: List of package name patterns (fnmatch syntax) to
             trace in addition to user code.  By default, code in
             site-packages is skipped.  Use this to include specific
@@ -1066,6 +1093,9 @@ async def explore_async_dpor(
     if detect_sql and _sql_async_available:
         patch_sql_async()
 
+    if detect_redis and _redis_async_available:
+        patch_redis_async()
+
     clear_sql_metadata()
 
     # Inject SET lock_timeout on new PG connections (defect #6 workaround).
@@ -1094,6 +1124,7 @@ async def explore_async_dpor(
                 num_tasks,
                 deadlock_timeout=deadlock_timeout,
                 detect_sql=detect_sql,
+                detect_redis=detect_redis,
             )
 
             state = setup()
@@ -1216,5 +1247,7 @@ async def explore_async_dpor(
         _unpatch_asyncio_lock()
         if detect_sql and _sql_async_available:
             unpatch_sql_async()
+        if detect_redis and _redis_async_available:
+            unpatch_redis_async()
 
     return result
