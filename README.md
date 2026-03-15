@@ -249,6 +249,23 @@ with IOEventDispatcher() as dispatcher:
 # all events are also available as dispatcher.events
 ```
 
+### Trace Filtering (`trace_packages`)
+
+By default, frontrun only traces user code — files outside the stdlib, `site-packages`, and frontrun's own internals. When the code under test lives inside an installed package (Django apps, plugin architectures, etc.), pass `trace_packages` to widen the filter:
+
+```python
+from frontrun.dpor import explore_dpor
+
+result = explore_dpor(
+    setup=make_state,
+    threads=[thread_a, thread_b],
+    invariant=check_invariant,
+    trace_packages=["mylib.*", "django_filters.*"],
+)
+```
+
+Patterns use [`fnmatch`](https://docs.python.org/3/library/fnmatch.html) syntax and are matched against dotted module names (e.g. `django_filters.views`). All exploration entry points (`explore_dpor`, `explore_interleavings`, and their async variants) accept this parameter. See [trace filtering docs](docs/trace_filtering.rst) for details.
+
 ## Async Support
 
 Trace markers, random interleaving exploration, and DPOR all have async support.

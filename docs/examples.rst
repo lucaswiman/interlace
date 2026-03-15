@@ -234,6 +234,5 @@ Real-World Case Study: SQLAlchemy ORM
 
 For a walkthrough of a real lost-update race in SQLAlchemy ORM code running
 against PostgreSQL, see :doc:`orm_race`. That case study demonstrates detection
-with trace markers and bytecode exploration, and discusses why DPOR cannot
-detect this particular race (the shared state lives in the database, not in
-Python memory).
+with trace markers, bytecode exploration, and DPOR with C-level I/O
+interception via ``LD_PRELOAD``.
