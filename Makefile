@@ -1,7 +1,7 @@
 .PHONY: test clean docs docs-clean docs-html docs-clean-build lint type-check check test-integration build-all
 
 # Python versions to test
-PYTHON_VERSIONS := 3.14t 3.10 3.14
+PYTHON_VERSIONS := 3.14t 3.10 3.11 3.12 3.13 3.14
 
 PYTEST_ARGS?=--tb=short -v
 
