@@ -1047,12 +1047,19 @@ def _process_opcode(
             _fb = getattr(frame, "f_builtins", None)
             if isinstance(_fb, dict):
                 val = _fb.get(instr.argval)
-        shadow.push(val)
         # On 3.11+, LOAD_GLOBAL with NULL flag (bit 0 of arg) pushes an
-        # extra NULL slot after the value, matching the stack layout
-        # expected by CALL: [callable, NULL, args...].
+        # extra NULL slot.  The order differs by version:
+        #   3.11-3.13: [NULL, value]  (NULL below, value on TOS)
+        #   3.14+:     [value, NULL]  (value below, NULL on TOS)
         if _PY_VERSION >= (3, 11) and instr.arg is not None and instr.arg & 1:
-            shadow.push(None)
+            if _PY_VERSION >= (3, 14):
+                shadow.push(val)
+                shadow.push(None)
+            else:
+                shadow.push(None)
+                shadow.push(val)
+        else:
+            shadow.push(val)
         # Report a READ on the module's globals dict for this variable name.
         # Without this, LOAD_GLOBAL/STORE_GLOBAL races are invisible to DPOR.
         # Uses first-access semantics so ``global += 1`` (LOAD_GLOBAL + STORE_GLOBAL)
@@ -1174,10 +1181,11 @@ def _process_opcode(
                 shadow.push(None)
         else:
             shadow.push(None)
-        # On 3.11+, LOAD_ATTR with method flag (bit 0 of arg) pushes an
+        # On 3.12+, LOAD_ATTR with method flag (bit 0 of arg) pushes an
         # extra self/NULL slot after the callable, matching LOAD_METHOD's
-        # stack layout: [value, NULL].
-        if _PY_VERSION >= (3, 11) and instr.arg is not None and instr.arg & 1:
+        # stack layout.  On 3.11, LOAD_ATTR with the method flag has
+        # stack_effect=0 (no extra push), so we skip it there.
+        if _PY_VERSION >= (3, 12) and instr.arg is not None and instr.arg & 1:
             shadow.push(None)
 
     elif op == "STORE_ATTR":
@@ -1251,6 +1259,33 @@ def _process_opcode(
             _report_weak_write(engine, execution, thread_id, container, "__cmethods__", elock)
         if recorder is not None and container is not None:
             recorder.record(thread_id, frame, opcode=op, access_type="write", attr_name=_kname, obj=container)
+
+    elif op == "BINARY_SLICE":
+        # New in 3.12 (replaces BINARY_SUBSCR for slice operations).
+        # Stack: [container, start, stop] → [result]
+        _stop = shadow.pop()
+        _start = shadow.pop()
+        container = shadow.pop()
+        _report_read(engine, execution, thread_id, container, "__slice__", elock)
+        if container is not None and not isinstance(container, _IMMUTABLE_TYPES):
+            _report_read(engine, execution, thread_id, container, "__cmethods__", elock)
+            _expand_slice_reads(engine, execution, thread_id, container, slice(_start, _stop), elock)
+        if recorder is not None and container is not None:
+            recorder.record(thread_id, frame, opcode=op, access_type="read", attr_name="__slice__", obj=container)
+        shadow.push(None)
+
+    elif op == "STORE_SLICE":
+        # New in 3.12 (replaces STORE_SUBSCR for slice operations).
+        # Stack: [value, container, start, stop] → []
+        _stop = shadow.pop()
+        _start = shadow.pop()
+        container = shadow.pop()
+        _val = shadow.pop()
+        _report_write(engine, execution, thread_id, container, "__slice__", elock)
+        if container is not None and not isinstance(container, _IMMUTABLE_TYPES):
+            _report_weak_write(engine, execution, thread_id, container, "__cmethods__", elock)
+        if recorder is not None and container is not None:
+            recorder.record(thread_id, frame, opcode=op, access_type="write", attr_name="__slice__", obj=container)
 
     elif op == "DELETE_SUBSCR":
         key = shadow.pop()
@@ -1426,6 +1461,13 @@ def _process_opcode(
 
     # === Function/method calls ===
 
+    elif op == "PRECALL":
+        # Python 3.11 only.  PRECALL is a no-op for the evaluation stack
+        # (it's a cache/optimization hint for the interpreter).  However,
+        # dis.stack_effect reports a negative effect equal to -argc, which
+        # would corrupt the shadow stack if handled by the fallback.
+        pass
+
     elif op in ("CALL", "CALL_FUNCTION", "CALL_METHOD", "CALL_KW", "CALL_FUNCTION_KW", "CALL_FUNCTION_EX"):
         # Detect C-level method calls and classify as read or write.
         #
@@ -1459,13 +1501,17 @@ def _process_opcode(
                 # Arguments are always in the top `argc` positions on the stack
                 # regardless of Python version (3.10: [func, args], 3.11-3.13:
                 # [NULL, func, args], 3.14: [func, NULL, args]).
-                if argc >= _pt_obj_idx + 1:
-                    _pt_target = shadow.stack[-(argc - _pt_obj_idx)]
+                _slen = len(shadow.stack)
+                _obj_depth = argc - _pt_obj_idx
+                if argc >= _pt_obj_idx + 1 and 0 < _obj_depth <= _slen:
+                    _pt_target = shadow.stack[-_obj_depth]
                     _pt_attr: Any = "__cmethods__"
                     if _pt_name_idx is not None and argc >= _pt_name_idx + 1:
-                        _raw = shadow.stack[-(argc - _pt_name_idx)]
-                        if isinstance(_raw, str):
-                            _pt_attr = _raw
+                        _name_depth = argc - _pt_name_idx
+                        if 0 < _name_depth <= _slen:
+                            _raw = shadow.stack[-_name_depth]
+                            if isinstance(_raw, str):
+                                _pt_attr = _raw
                     if _pt_target is not None and not isinstance(_pt_target, _IMMUTABLE_TYPES):
                         if _pt_kind == "read":
                             _report_read(engine, execution, thread_id, _pt_target, _pt_attr, elock)
@@ -1489,7 +1535,7 @@ def _process_opcode(
                 # iterates its first argument (e.g. str.join reads the iterable).
                 if self_obj is not None:
                     method_name = getattr(item, "__name__", None)
-                    if method_name in _IMMUTABLE_SELF_ARG_READERS and argc >= 1:
+                    if method_name in _IMMUTABLE_SELF_ARG_READERS and argc >= 1 and argc <= len(shadow.stack):
                         _arg_target = shadow.stack[-argc]
                         if _arg_target is not None and not isinstance(_arg_target, _IMMUTABLE_TYPES):
                             _report_read(engine, execution, thread_id, _arg_target, "__cmethods__", elock)
@@ -1506,7 +1552,10 @@ def _process_opcode(
                 # if this constructor result is iterated via FOR_ITER, the reads
                 # are attributed to the underlying container (not the wrapper).
                 for _ci in range(argc):
-                    _c_arg = shadow.stack[-(argc - _ci)]
+                    _c_depth = argc - _ci
+                    if _c_depth < 1 or _c_depth > len(shadow.stack):
+                        continue
+                    _c_arg = shadow.stack[-_c_depth]
                     if _c_arg is not None and not isinstance(_c_arg, _IMMUTABLE_TYPES):
                         _report_read(engine, execution, thread_id, _c_arg, "__cmethods__", elock)
                         if _constructor_source is None:
@@ -1519,7 +1568,7 @@ def _process_opcode(
                 objclass = getattr(item, "__objclass__", None)
                 if objclass is not None and not issubclass(objclass, _IMMUTABLE_TYPES):
                     # First argument (self) is always at the bottom of the argc args
-                    if argc >= 1:
+                    if argc >= 1 and argc <= len(shadow.stack):
                         _wd_target = shadow.stack[-argc]
                         if _wd_target is not None and not isinstance(_wd_target, _IMMUTABLE_TYPES):
                             method_name = getattr(item, "__name__", None)
@@ -1533,12 +1582,26 @@ def _process_opcode(
         # Standard stack effect handling.
         try:
             effect = dis.stack_effect(instr.opcode, instr.arg or 0)
+            # On Python 3.11, PRECALL reported a stack effect of -argc
+            # but we handle it as a no-op (it doesn't touch the real
+            # stack).  Compensate by adding the missing pops to CALL.
+            if _PY_VERSION[:2] == (3, 11) and op == "CALL" and argc > 0:
+                effect -= argc
             for _ in range(max(0, -effect)):
                 shadow.pop()
             for _ in range(max(0, effect)):
                 shadow.push(None)
         except (ValueError, TypeError):
             shadow.clear()
+
+        # CALL replaces the callable/args with the return value. Plain
+        # stack_effect accounting leaves the bottom-most operand in place,
+        # which can be the callable itself on 3.10+ and pollute subsequent
+        # attribute/subscript tracking.
+        if shadow.stack:
+            shadow.stack[-1] = None
+        else:
+            shadow.push(None)
 
         # Fixup: when a container constructor (enumerate, zip, map, etc.) wraps
         # a mutable iterable, replace the None result on TOS with the source
@@ -1549,8 +1612,8 @@ def _process_opcode(
 
     else:
         # Fallback: use dis.stack_effect for unknown opcodes.
-        # This handles PUSH_NULL, RESUME, PRECALL, and any
-        # version-specific opcodes we don't explicitly handle.
+        # This handles PUSH_NULL, RESUME, and any version-specific
+        # opcodes we don't explicitly handle.
         try:
             effect = dis.stack_effect(instr.opcode, instr.arg or 0)
             for _ in range(max(0, -effect)):
