@@ -72,6 +72,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 _RE_INSERT_TABLE = re.compile(r"^\s*INSERT\s+INTO\s+[`\"\[]?(\w+)", re.I)
+_RE_UPDATE_TABLE = re.compile(r"^\s*UPDATE\s+[`\"\[]?(\w+)", re.I)
 
 
 # ---------------------------------------------------------------------------
@@ -631,11 +632,13 @@ def _report_sql_access(
             #   _capture_insert_id so the write is flushed at the INSERT's
             #   scheduling point, not left as orphaned pending_io).
             # - DELETE tables report WRITE on :seq.
-            # - UPDATE is excluded: it doesn't change table membership, and
-            #   adding :seq writes would cause false conflicts between
-            #   UPDATEs to different rows.
+            # - UPDATE tables report READ on :seq (defect #6 fix): UPDATE
+            #   results depend on which rows exist (like SELECT), so
+            #   concurrent INSERTs that add rows matching the UPDATE's WHERE
+            #   clause are phantom reads. We use READ (not WRITE) to avoid
+            #   false write-write conflicts between UPDATEs on different rows.
             #
-            # This creates READ-WRITE conflicts between SELECT and
+            # This creates READ-WRITE conflicts between SELECT/UPDATE and
             # INSERT/DELETE, detecting phantom read races.
             pure_read_tables = access.read_tables - access.write_tables
             for table in pure_read_tables:
@@ -659,6 +662,19 @@ def _report_sql_access(
                     reporter,
                     _sql_sequence_resource_id(table, db_scope=db_scope),
                     "write",
+                )
+            # UPDATE targets: in both write_tables and read_tables (UPDATE
+            # reads the WHERE clause and writes matched rows), excluding
+            # DELETE tables. Report READ on :seq so DPOR creates conflict
+            # arcs with concurrent INSERTs (which WRITE :seq). This lets
+            # DPOR explore interleavings where both UPDATEs run before either
+            # INSERT — the pattern that causes phantom races (defect #6).
+            update_tables = (access.write_tables & access.read_tables) - delete_tables
+            for table in update_tables:
+                _report_or_buffer(
+                    reporter,
+                    _sql_sequence_resource_id(table, db_scope=db_scope),
+                    "read",
                 )
 
     return reported
@@ -728,6 +744,7 @@ def _intercept_execute(
     are supported via buffer truncation.
     """
     insert_match = _RE_INSERT_TABLE.match(operation) if isinstance(operation, str) else None
+    update_match = _RE_UPDATE_TABLE.match(operation) if isinstance(operation, str) else None
 
     # Detect autobegin: most DB-API drivers (psycopg2, pymysql) default to
     # autocommit=False, meaning the first statement implicitly starts a
@@ -778,6 +795,18 @@ def _intercept_execute(
         # exit, blocking other DPOR threads indefinitely.
         _release_dpor_row_locks()
         raise
+
+    # Defect #6 fix: release row locks for 0-row UPDATEs.
+    # In PostgreSQL, an UPDATE that matches 0 rows acquires no row locks
+    # (there are no rows to lock).  But frontrun's row-lock arbitration
+    # acquired a scheduler-level lock based on the WHERE-clause resource ID
+    # regardless of whether any rows matched.  This over-serialization
+    # prevents DPOR from exploring interleavings where both 0-row UPDATEs
+    # execute before either INSERT (the UPDATE-INSERT phantom race pattern).
+    if update_match is not None and reported:
+        rowcount = getattr(self, "rowcount", -1)
+        if rowcount == 0:
+            _release_dpor_row_locks()
 
     # Post-INSERT: capture lastrowid and record indexical alias
     if insert_match is not None and not is_executemany and reported:
