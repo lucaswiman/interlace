@@ -81,8 +81,6 @@ _SINGLE_KEY_READ_CMDS: frozenset[str] = frozenset(
         "PTTL",
         "PERSIST",
         "DUMP",
-        "OBJECT",
-        "DEBUG",
         "XLEN",
         "XRANGE",
         "XREVRANGE",

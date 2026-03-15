@@ -584,7 +584,7 @@ class TestCommandCoverage:
         ("MODULE", ("LIST",)),
         ("ACL", ("LIST",)),
         ("OBJECT", ("ENCODING", "k")),
-        ("DEBUG", ("OBJECT", "k")),
+        ("DEBUG", ("OBJECT", "k")),  # Server command — no keys
         ("UNSUBSCRIBE", ()),
         ("PUNSUBSCRIBE", ()),
     ]
@@ -640,6 +640,7 @@ class TestCommandCoverage:
             "EXEC",
             "DISCARD",
             "UNWATCH",
+            "DEBUG",
         }
 
         for cmd_name, cmd_args in self.CORE_COMMANDS:
@@ -672,3 +673,178 @@ class TestCommandCoverage:
 
         overlap_w_rw = _SINGLE_KEY_WRITE_CMDS & _SINGLE_KEY_READ_WRITE_CMDS
         assert not overlap_w_rw, f"Commands in both write and read+write sets: {overlap_w_rw}"
+
+
+class TestConflictDetection:
+    """Verify that commands on the same key produce overlapping resource sets
+    and commands on different keys produce disjoint resource sets."""
+
+    def test_same_key_read_write_conflicts(self) -> None:
+        """GET and SET on the same key should produce overlapping key sets."""
+        r1 = parse_redis_access("GET", ("shared",))
+        r2 = parse_redis_access("SET", ("shared", "val"))
+        assert set(r1.read_keys) & set(r2.write_keys), "GET and SET on same key must conflict"
+
+    def test_same_key_write_write_conflicts(self) -> None:
+        """Two SETs on the same key should produce overlapping write sets."""
+        r1 = parse_redis_access("SET", ("shared", "v1"))
+        r2 = parse_redis_access("SET", ("shared", "v2"))
+        assert set(r1.write_keys) & set(r2.write_keys), "Two SETs on same key must conflict"
+
+    def test_different_keys_no_conflict(self) -> None:
+        """Operations on different keys should produce disjoint key sets."""
+        r1 = parse_redis_access("SET", ("key_a", "v"))
+        r2 = parse_redis_access("SET", ("key_b", "v"))
+        all_1 = set(r1.read_keys + r1.write_keys)
+        all_2 = set(r2.read_keys + r2.write_keys)
+        assert not (all_1 & all_2), "Operations on different keys must not conflict"
+
+    def test_many_independent_ops_no_overlap(self) -> None:
+        """A batch of operations on distinct keys should have no pairwise overlap."""
+        ops = [parse_redis_access("SET", (f"ind:{i}", "v")) for i in range(20)]
+        for i, r1 in enumerate(ops):
+            for j, r2 in enumerate(ops):
+                if i == j:
+                    continue
+                all_1 = set(r1.read_keys + r1.write_keys)
+                all_2 = set(r2.read_keys + r2.write_keys)
+                assert not (all_1 & all_2), f"Ops {i} and {j} should not conflict"
+
+    def test_mixed_commands_same_key_all_conflict(self) -> None:
+        """Various read/write commands on the same key should all conflict pairwise."""
+        cmds = [
+            ("GET", ("k",)),
+            ("SET", ("k", "v")),
+            ("INCR", ("k",)),
+            ("APPEND", ("k", "x")),
+            ("HSET", ("k", "f", "v")),
+            ("HGET", ("k", "f")),
+            ("LPUSH", ("k", "v")),
+            ("SADD", ("k", "m")),
+        ]
+        for i, (c1, a1) in enumerate(cmds):
+            for j, (c2, a2) in enumerate(cmds):
+                if i == j:
+                    continue
+                r1 = parse_redis_access(c1, a1)
+                r2 = parse_redis_access(c2, a2)
+                all_1 = set(r1.read_keys + r1.write_keys)
+                all_2 = set(r2.read_keys + r2.write_keys)
+                assert all_1 & all_2, f"{c1} and {c2} on same key must conflict"
+
+
+class TestResourceIdConstruction:
+    """Verify resource ID construction for different db scopes."""
+
+    def test_resource_id_without_scope(self) -> None:
+        from frontrun._redis_client import _redis_resource_id
+
+        assert _redis_resource_id("mykey") == "redis:mykey"
+
+    def test_resource_id_with_scope(self) -> None:
+        from frontrun._redis_client import _redis_resource_id
+
+        assert _redis_resource_id("mykey", db_scope="redis:localhost:6379/0") == (
+            "redis:mykey:db=redis:localhost:6379/0"
+        )
+
+    def test_different_db_scopes_produce_different_ids(self) -> None:
+        from frontrun._redis_client import _redis_resource_id
+
+        id1 = _redis_resource_id("mykey", db_scope="redis:localhost:6379/0")
+        id2 = _redis_resource_id("mykey", db_scope="redis:localhost:6379/1")
+        assert id1 != id2, "Same key on different DBs must produce different resource IDs"
+
+    def test_same_db_scope_same_key_produces_same_id(self) -> None:
+        from frontrun._redis_client import _redis_resource_id
+
+        id1 = _redis_resource_id("mykey", db_scope="redis:localhost:6379/0")
+        id2 = _redis_resource_id("mykey", db_scope="redis:localhost:6379/0")
+        assert id1 == id2
+
+
+class TestDporEngineIoIndependence:
+    """Verify the Rust DPOR engine correctly handles I/O independence.
+
+    These tests directly exercise the engine without opcode tracing, proving
+    that independent I/O objects (different Redis keys mapped to different
+    object IDs) result in exactly 1 execution path, while conflicting objects
+    require additional exploration.
+    """
+
+    def test_independent_io_objects_single_path(self) -> None:
+        """Two threads writing different I/O objects → exactly 1 DPOR path."""
+        from frontrun._dpor import PyDporEngine
+
+        engine = PyDporEngine(num_threads=2, preemption_bound=2, max_branches=100)
+        execution = engine.begin_execution()
+
+        # Schedule: thread 0 runs first
+        engine.schedule(execution)
+        engine.report_io_access(execution, 0, 100, "write")
+
+        # Schedule again
+        engine.schedule(execution)
+        engine.report_io_access(execution, 1, 200, "write")  # Different object!
+
+        execution.finish_thread(0)
+        engine.schedule(execution)
+        execution.finish_thread(1)
+
+        assert not engine.next_execution(), "Independent I/O objects should need exactly 1 path"
+
+    def test_conflicting_io_objects_multiple_paths(self) -> None:
+        """Two threads writing the SAME I/O object → more than 1 DPOR path."""
+        from frontrun._dpor import PyDporEngine
+
+        engine = PyDporEngine(num_threads=2, preemption_bound=2, max_branches=100)
+        execution = engine.begin_execution()
+
+        engine.schedule(execution)
+        engine.report_io_access(execution, 0, 100, "write")
+
+        engine.schedule(execution)
+        engine.report_io_access(execution, 1, 100, "write")  # SAME object!
+
+        execution.finish_thread(0)
+        engine.schedule(execution)
+        execution.finish_thread(1)
+
+        assert engine.next_execution(), "Conflicting I/O objects should need more than 1 path"
+
+    def test_many_independent_io_objects_single_path(self) -> None:
+        """Two threads each writing 10 different I/O objects → exactly 1 path."""
+        from frontrun._dpor import PyDporEngine
+
+        engine = PyDporEngine(num_threads=2, preemption_bound=2, max_branches=200)
+        execution = engine.begin_execution()
+
+        # Thread 0 writes objects 0-9, thread 1 writes objects 10-19
+        for i in range(10):
+            engine.schedule(execution)
+            engine.report_io_access(execution, 0, i, "write")
+
+        for i in range(10, 20):
+            engine.schedule(execution)
+            engine.report_io_access(execution, 1, i, "write")
+
+        execution.finish_thread(0)
+        engine.schedule(execution)
+        execution.finish_thread(1)
+
+        assert not engine.next_execution(), "10+10 independent I/O objects should need exactly 1 path"
+
+    def test_redis_resource_ids_independent(self) -> None:
+        """Redis resource IDs for different keys map to different DPOR object keys."""
+        from frontrun.async_dpor import _make_object_key
+
+        keys_a = [f"ind:{i}" for i in range(10)]
+        keys_b = [f"ind:{i}" for i in range(10, 20)]
+
+        resource_ids_a = [f"redis:{k}" for k in keys_a]
+        resource_ids_b = [f"redis:{k}" for k in keys_b]
+
+        object_keys_a = {_make_object_key(hash(rid), rid) for rid in resource_ids_a}
+        object_keys_b = {_make_object_key(hash(rid), rid) for rid in resource_ids_b}
+
+        assert not (object_keys_a & object_keys_b), "Different Redis keys must produce different DPOR object keys"
