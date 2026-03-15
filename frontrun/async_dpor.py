@@ -199,7 +199,7 @@ class _CooperativeAsyncLock:
         # coroutine wrapper won't insert a redundant scheduling point
         # for the pause's own yields.
         scheduler = _scheduler_var.get()
-        if scheduler is not None and task_id is not None:
+        if scheduler is not None and task_id is not None and _in_scheduler_pause.get() == 0:
             await scheduler.pause(task_id, ("lock_acquire", id(self)))
 
         if task_id is not None and graph is not None and self._lock.locked():
@@ -210,10 +210,30 @@ class _CooperativeAsyncLock:
                 graph.remove_waiting(task_id, lock_id)
                 desc = format_cycle(cycle)
                 raise DeadlockError(f"Async lock deadlock detected: {desc}", desc)
+            # Mark this task as blocked in the DPOR execution so the engine
+            # won't schedule it while it's waiting for the lock.  Also track
+            # the lock holder so _schedule_next can redirect to the holder
+            # if needed.
+            if scheduler is not None:
+                scheduler.execution.block_thread(task_id)
+                if self._owner is not None:
+                    scheduler._lock_blocked[task_id] = self._owner
+            # Set _in_scheduler_pause so the AutoPauseCoroutine passes
+            # the lock's internal yields through to the event loop without
+            # inserting scheduling points.  Without this, the DPOR scheduler
+            # would try to schedule at every yield of the lock's acquire,
+            # creating a deadlock (the blocked task can't proceed but the
+            # scheduler keeps picking it).
+            depth = _in_scheduler_pause.get()
+            _in_scheduler_pause.set(depth + 1)
             try:
                 result = await self._lock.acquire()
             finally:
+                _in_scheduler_pause.set(depth)
                 graph.remove_waiting(task_id, lock_id)
+                if scheduler is not None:
+                    scheduler.execution.unblock_thread(task_id)
+                    scheduler._lock_blocked.pop(task_id, None)
         else:
             result = await self._lock.acquire()
 
@@ -459,6 +479,10 @@ class AsyncDporScheduler(InterleavedLoop):
         # Pending I/O accesses per task (from SQL interception)
         self._pending_io: dict[int, list[tuple[int, str]]] = {i: [] for i in range(num_tasks)}
 
+        # Track tasks blocked on asyncio.Lock: task_id → lock-holder task_id.
+        # When DPOR schedules a blocked task, override to run the holder.
+        self._lock_blocked: dict[int, int] = {}
+
         # Row lock tracking: resource_id → holding task_id
         self._active_row_locks: dict[str, int] = {}
         # task_id → set of held resource_ids
@@ -471,11 +495,24 @@ class AsyncDporScheduler(InterleavedLoop):
         self._current_task = self._schedule_next()
 
     def _schedule_next(self) -> int | None:
-        """Ask the DPOR engine which task to run next."""
+        """Ask the DPOR engine which task to run next.
+
+        If the engine picks a task blocked on an asyncio.Lock, override
+        the decision to schedule the lock holder instead.  This prevents
+        the scheduler from cycling between a blocked task and the event
+        loop, causing false deadlock timeouts.
+        """
         runnable = self.execution.runnable_threads()
         if not runnable:
             return None
-        return self.engine.schedule(self.execution)
+        scheduled = self.engine.schedule(self.execution)
+        if scheduled is not None and scheduled in self._lock_blocked:
+            holder = self._lock_blocked[scheduled]
+            if holder not in self._tasks_done:
+                return holder
+            # Holder is done — lock should be released. Clean up stale entry.
+            self._lock_blocked.pop(scheduled, None)
+        return scheduled
 
     # -- InterleavedLoop policy -----------------------------------------
 
@@ -483,7 +520,15 @@ class AsyncDporScheduler(InterleavedLoop):
         if self._current_task is None:
             self._finished = True
             return True
-        return self._current_task == task_id
+        if self._current_task == task_id:
+            return True
+        # If the currently-scheduled task is blocked on a lock held by
+        # task_id, let task_id proceed so it can release the lock.
+        if self._current_task in self._lock_blocked:
+            holder = self._lock_blocked[self._current_task]
+            if holder == task_id:
+                return True
+        return False
 
     def on_proceed(self, task_id: Any, marker: Any = None) -> None:
         # Flush any pending I/O accesses before advancing
@@ -525,8 +570,15 @@ class AsyncDporScheduler(InterleavedLoop):
         if self._detect_sql or self._detect_redis:
 
             def _io_reporter(resource_id: str, kind: str) -> None:
+                # Dynamically read the current task ID so that when multiple
+                # async tasks share the same thread-local reporter, each
+                # I/O event is attributed to the task that actually runs the
+                # Redis/SQL command, not whichever task was set up last.
+                current_task = _task_id_var.get()
+                if current_task is None:
+                    current_task = task_id
                 object_key = _make_object_key(hash(resource_id), resource_id)
-                self._pending_io.setdefault(task_id, []).append((object_key, kind))
+                self._pending_io.setdefault(current_task, []).append((object_key, kind))
 
             set_io_reporter(_io_reporter)
 
@@ -623,10 +675,17 @@ class AsyncDporScheduler(InterleavedLoop):
         _task_id_var.set(None)
         from frontrun._io_detection import set_dpor_scheduler, set_dpor_thread_id, set_io_reporter
 
-        set_dpor_scheduler(None)
-        set_dpor_thread_id(None)
-        if self._detect_sql or self._detect_redis:
-            set_io_reporter(None)
+        # Only clear thread-local DPOR/IO state when ALL tasks are done.
+        # In async mode, all tasks share the same thread-local storage.
+        # Clearing the reporter when one task finishes would break I/O
+        # detection for remaining tasks on the same thread.
+        # Note: _cleanup_task_context runs BEFORE _mark_done, so the
+        # current task_id is not yet in _tasks_done; +1 accounts for it.
+        if len(self._tasks_done) + 1 >= self._num_engine_tasks:
+            set_dpor_scheduler(None)
+            set_dpor_thread_id(None)
+            if self._detect_sql or self._detect_redis:
+                set_io_reporter(None)
 
     def get_shadow_stack(self, frame_id: int) -> ShadowStack:
         stack = self._shadow_stacks.get(frame_id)
@@ -641,6 +700,14 @@ class AsyncDporScheduler(InterleavedLoop):
     def _trace_user_opcode(self, frame: Any) -> None:
         task_id = _task_id_var.get()
         if task_id is None or _scheduler_var.get() is not self or _in_trace_processing.get():
+            return
+        # When I/O detection (Redis/SQL) is active, skip opcode-level access
+        # reporting entirely.  The I/O-level reporters already capture the
+        # real key/table conflicts.  Running _process_opcode on user frames
+        # would still pick up shared Python state (module globals, class
+        # objects, connection pool internals) creating false DPOR backtrack
+        # points and excess path exploration for independent I/O operations.
+        if self._detect_sql or self._detect_redis:
             return
         token = _in_trace_processing.set(True)
         try:

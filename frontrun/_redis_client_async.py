@@ -21,6 +21,29 @@ from frontrun._redis_client import (
     _suppress_endpoint_io,
 )
 
+# Lazy imports to avoid circular dependency — resolved at first use.
+_in_scheduler_pause = None
+_scheduler_var_ref = None
+
+
+def _get_in_scheduler_pause() -> Any:
+    global _in_scheduler_pause  # noqa: PLW0603
+    if _in_scheduler_pause is None:
+        from frontrun.async_dpor import _in_scheduler_pause as _isp
+
+        _in_scheduler_pause = _isp
+    return _in_scheduler_pause
+
+
+def _get_scheduler_var() -> Any:
+    global _scheduler_var_ref  # noqa: PLW0603
+    if _scheduler_var_ref is None:
+        from frontrun.async_dpor import _scheduler_var, _task_id_var
+
+        _scheduler_var_ref = (_scheduler_var, _task_id_var)
+    return _scheduler_var_ref
+
+
 # ---------------------------------------------------------------------------
 # Async interception
 # ---------------------------------------------------------------------------
@@ -41,16 +64,31 @@ async def _intercept_execute_command_async(
 
     reported = _report_redis_access(cmd_name, cmd_args, client=self)
 
-    # Force a DPOR scheduling point so the engine can interleave between
-    # Redis operations.
     if reported:
+        # Force a real DPOR scheduling point so the engine can interleave
+        # between Redis operations.  The I/O was added to _pending_io by
+        # _report_redis_access; on_proceed will flush it to the engine.
         dpor_ctx = _get_dpor_context()
         if dpor_ctx is not None:
-            dpor_ctx[0].report_and_wait(None, dpor_ctx[1])
+            scheduler = dpor_ctx[0]
+            refs = _get_scheduler_var()
+            task_id = refs[1].get()
+            if task_id is not None and hasattr(scheduler, "pause"):
+                await scheduler.pause(task_id)
 
     if reported:
-        with _suppress_endpoint_io():
-            return await original_method(self, *args, **kwargs)
+        # Suppress AutoPauseCoroutine scheduling during Redis network I/O.
+        # Without this, every socket yield creates an empty DPOR step,
+        # pushing adjacent Redis commands far apart in the trace and
+        # preventing DPOR from exploring the gap between e.g. EXISTS and SET.
+        pause_var = _get_in_scheduler_pause()
+        depth = pause_var.get()
+        pause_var.set(depth + 1)
+        try:
+            with _suppress_endpoint_io():
+                return await original_method(self, *args, **kwargs)
+        finally:
+            pause_var.set(depth)
     return await original_method(self, *args, **kwargs)
 
 
@@ -79,11 +117,21 @@ async def _intercept_pipeline_execute_async(
     if reported:
         dpor_ctx = _get_dpor_context()
         if dpor_ctx is not None:
-            dpor_ctx[0].report_and_wait(None, dpor_ctx[1])
+            scheduler = dpor_ctx[0]
+            refs = _get_scheduler_var()
+            task_id = refs[1].get()
+            if task_id is not None and hasattr(scheduler, "pause"):
+                await scheduler.pause(task_id)
 
     if reported:
-        with _suppress_endpoint_io():
-            return await original_method(self, *args, **kwargs)
+        pause_var = _get_in_scheduler_pause()
+        depth = pause_var.get()
+        pause_var.set(depth + 1)
+        try:
+            with _suppress_endpoint_io():
+                return await original_method(self, *args, **kwargs)
+        finally:
+            pause_var.set(depth)
     return await original_method(self, *args, **kwargs)
 
 

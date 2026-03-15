@@ -898,6 +898,21 @@ def _report_read(
             engine.report_access(execution, thread_id, _make_object_key(id(obj), name), "read")
 
 
+def _report_first_read(
+    engine: PyDporEngine, execution: PyExecution, thread_id: int, obj: Any, name: Any, lock: threading.Lock
+) -> None:
+    """Like ``_report_read`` but preserves the **earliest** read position.
+
+    Used for LOAD_GLOBAL reads so that ``global += 1`` (which also does
+    LOAD_GLOBAL) doesn't overwrite the position of an earlier read like
+    ``tmp = global_var``.  Preserving the earliest read is critical for
+    detecting TOCTOU patterns.
+    """
+    if obj is not None:
+        with lock:
+            engine.report_first_access(execution, thread_id, _make_object_key(id(obj), name), "read")
+
+
 def _report_write(
     engine: PyDporEngine, execution: PyExecution, thread_id: int, obj: Any, name: Any, lock: threading.Lock
 ) -> None:
@@ -1009,7 +1024,10 @@ def _process_opcode(
             shadow.push(None)
         # Report a READ on the module's globals dict for this variable name.
         # Without this, LOAD_GLOBAL/STORE_GLOBAL races are invisible to DPOR.
-        _report_read(engine, execution, thread_id, frame.f_globals, instr.argval, elock)
+        # Uses first-access semantics so ``global += 1`` (LOAD_GLOBAL + STORE_GLOBAL)
+        # doesn't overwrite the position of an earlier read, enabling DPOR to
+        # backtrack between the read and a subsequent write.
+        _report_first_read(engine, execution, thread_id, frame.f_globals, instr.argval, elock)
 
     elif op == "LOAD_NAME":
         # Used in exec/eval code (module-level scope).  Like LOAD_GLOBAL
@@ -1031,7 +1049,7 @@ def _process_opcode(
         # threads sharing a closure function share the same code object.
         varname = instr.argval
         if varname in code.co_freevars or varname in code.co_cellvars:
-            _report_read(engine, execution, thread_id, code, varname, elock)
+            _report_first_read(engine, execution, thread_id, code, varname, elock)
 
     elif op in ("LOAD_CONST", "LOAD_CONST_IMMORTAL", "LOAD_CONST_MORTAL"):
         shadow.push(instr.argval)
@@ -1194,9 +1212,6 @@ def _process_opcode(
         # Also report a container-level write so subscript writes conflict
         # with C-method reads (e.g. len(), iteration) and with subscript
         # reads using different keys (e.g. slice vs element).
-        # Uses regular (last-access) semantics: keeping the LAST write
-        # position enables cascading backtracks that progressively interleave
-        # reads between individual writes across multiple DPOR executions.
         if container is not None and not isinstance(container, _IMMUTABLE_TYPES):
             _report_write(engine, execution, thread_id, container, "__cmethods__", elock)
         if recorder is not None and container is not None:
