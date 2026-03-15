@@ -758,6 +758,11 @@ class CooperativeQueue:
     _queue_class = real_queue
     _queue: Any
 
+    @classmethod
+    def __class_getitem__(cls, item: Any) -> type:
+        """Support generic subscript syntax (e.g. Queue[T]) for compatibility with psycopg v3."""
+        return cls
+
     def __init__(self, maxsize: int = 0) -> None:
         self._queue = self._queue_class(maxsize)
 

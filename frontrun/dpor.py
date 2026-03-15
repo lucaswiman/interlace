@@ -1459,13 +1459,17 @@ def _process_opcode(
                 # Arguments are always in the top `argc` positions on the stack
                 # regardless of Python version (3.10: [func, args], 3.11-3.13:
                 # [NULL, func, args], 3.14: [func, NULL, args]).
-                if argc >= _pt_obj_idx + 1:
-                    _pt_target = shadow.stack[-(argc - _pt_obj_idx)]
+                _slen = len(shadow.stack)
+                _obj_depth = argc - _pt_obj_idx
+                if argc >= _pt_obj_idx + 1 and 0 < _obj_depth <= _slen:
+                    _pt_target = shadow.stack[-_obj_depth]
                     _pt_attr: Any = "__cmethods__"
                     if _pt_name_idx is not None and argc >= _pt_name_idx + 1:
-                        _raw = shadow.stack[-(argc - _pt_name_idx)]
-                        if isinstance(_raw, str):
-                            _pt_attr = _raw
+                        _name_depth = argc - _pt_name_idx
+                        if 0 < _name_depth <= _slen:
+                            _raw = shadow.stack[-_name_depth]
+                            if isinstance(_raw, str):
+                                _pt_attr = _raw
                     if _pt_target is not None and not isinstance(_pt_target, _IMMUTABLE_TYPES):
                         if _pt_kind == "read":
                             _report_read(engine, execution, thread_id, _pt_target, _pt_attr, elock)
@@ -1489,7 +1493,7 @@ def _process_opcode(
                 # iterates its first argument (e.g. str.join reads the iterable).
                 if self_obj is not None:
                     method_name = getattr(item, "__name__", None)
-                    if method_name in _IMMUTABLE_SELF_ARG_READERS and argc >= 1:
+                    if method_name in _IMMUTABLE_SELF_ARG_READERS and argc >= 1 and argc <= len(shadow.stack):
                         _arg_target = shadow.stack[-argc]
                         if _arg_target is not None and not isinstance(_arg_target, _IMMUTABLE_TYPES):
                             _report_read(engine, execution, thread_id, _arg_target, "__cmethods__", elock)
@@ -1506,7 +1510,10 @@ def _process_opcode(
                 # if this constructor result is iterated via FOR_ITER, the reads
                 # are attributed to the underlying container (not the wrapper).
                 for _ci in range(argc):
-                    _c_arg = shadow.stack[-(argc - _ci)]
+                    _c_depth = argc - _ci
+                    if _c_depth < 1 or _c_depth > len(shadow.stack):
+                        continue
+                    _c_arg = shadow.stack[-_c_depth]
                     if _c_arg is not None and not isinstance(_c_arg, _IMMUTABLE_TYPES):
                         _report_read(engine, execution, thread_id, _c_arg, "__cmethods__", elock)
                         if _constructor_source is None:
@@ -1519,7 +1526,7 @@ def _process_opcode(
                 objclass = getattr(item, "__objclass__", None)
                 if objclass is not None and not issubclass(objclass, _IMMUTABLE_TYPES):
                     # First argument (self) is always at the bottom of the argc args
-                    if argc >= 1:
+                    if argc >= 1 and argc <= len(shadow.stack):
                         _wd_target = shadow.stack[-argc]
                         if _wd_target is not None and not isinstance(_wd_target, _IMMUTABLE_TYPES):
                             method_name = getattr(item, "__name__", None)
