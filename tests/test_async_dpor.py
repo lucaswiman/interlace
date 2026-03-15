@@ -1037,3 +1037,144 @@ class TestAsyncDporExplanation:
         assert "task" in explanation_lower or "schedule" in explanation_lower or "interleav" in explanation_lower, (
             f"Explanation should describe the interleaving, got: {result.explanation}"
         )
+
+
+class TestAsyncDporReproduceOnFailure:
+    """Tests for reproduce_on_failure parameter in async DPOR."""
+
+    def test_reproduce_on_failure_default(self) -> None:
+        """By default, reproduce_on_failure=10 replays the counterexample."""
+        require_active("test_async_dpor_reproduce_default")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class Counter:
+            def __init__(self) -> None:
+                self.value = 0
+
+        async def increment(counter: Counter) -> None:
+            temp = counter.value
+            await asyncio.sleep(0)
+            counter.value = temp + 1
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=Counter,
+                tasks=[increment, increment],
+                invariant=lambda c: c.value == 2,
+                deadlock_timeout=5.0,
+            )
+        )
+
+        assert not result.property_holds
+        assert result.reproduction_attempts == 10, (
+            f"Expected 10 reproduction attempts, got {result.reproduction_attempts}"
+        )
+        assert result.reproduction_successes == 10, (
+            f"Expected 10/10 reproductions, got {result.reproduction_successes}/{result.reproduction_attempts}"
+        )
+
+    def test_reproduce_on_failure_zero(self) -> None:
+        """reproduce_on_failure=0 skips replay."""
+        require_active("test_async_dpor_reproduce_zero")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class Counter:
+            def __init__(self) -> None:
+                self.value = 0
+
+        async def increment(counter: Counter) -> None:
+            temp = counter.value
+            await asyncio.sleep(0)
+            counter.value = temp + 1
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=Counter,
+                tasks=[increment, increment],
+                invariant=lambda c: c.value == 2,
+                deadlock_timeout=5.0,
+                reproduce_on_failure=0,
+            )
+        )
+
+        assert not result.property_holds
+        assert result.reproduction_attempts == 0
+        assert result.reproduction_successes == 0
+
+    def test_reproduce_on_failure_custom(self) -> None:
+        """reproduce_on_failure=3 replays exactly 3 times."""
+        require_active("test_async_dpor_reproduce_custom")
+        from frontrun.async_dpor import explore_async_dpor
+
+        class Counter:
+            def __init__(self) -> None:
+                self.value = 0
+
+        async def increment(counter: Counter) -> None:
+            temp = counter.value
+            await asyncio.sleep(0)
+            counter.value = temp + 1
+
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=Counter,
+                tasks=[increment, increment],
+                invariant=lambda c: c.value == 2,
+                deadlock_timeout=5.0,
+                reproduce_on_failure=3,
+            )
+        )
+
+        assert not result.property_holds
+        assert result.reproduction_attempts == 3, (
+            f"Expected 3 reproduction attempts, got {result.reproduction_attempts}"
+        )
+        assert result.reproduction_successes == 3, (
+            f"Expected 3/3 reproductions, got {result.reproduction_successes}/{result.reproduction_attempts}"
+        )
+
+
+class TestAsyncDporTotalTimeout:
+    """Tests for total_timeout parameter in async DPOR."""
+
+    def test_total_timeout_bounds_exploration(self) -> None:
+        """total_timeout should stop exploration even if more interleavings remain."""
+        require_active("test_async_dpor_total_timeout")
+        import time
+
+        from frontrun.async_dpor import explore_async_dpor
+
+        class State:
+            def __init__(self) -> None:
+                self.a = 0
+                self.b = 0
+                self.c = 0
+
+        async def task_a(s: State) -> None:
+            s.a += 1
+            await asyncio.sleep(0)
+            s.b += 1
+            await asyncio.sleep(0)
+            s.c += 1
+
+        async def task_b(s: State) -> None:
+            s.c += 1
+            await asyncio.sleep(0)
+            s.b += 1
+            await asyncio.sleep(0)
+            s.a += 1
+
+        start = time.monotonic()
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=State,
+                tasks=[task_a, task_b],
+                invariant=lambda s: True,  # always passes — we want to test timeout
+                deadlock_timeout=5.0,
+                total_timeout=0.5,
+            )
+        )
+        elapsed = time.monotonic() - start
+
+        assert result.property_holds
+        assert elapsed < 3.0, f"total_timeout=0.5 but took {elapsed:.1f}s"
