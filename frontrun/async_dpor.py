@@ -46,10 +46,13 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import sys
+import time
 from collections.abc import Awaitable, Callable, Coroutine, Generator
 from typing import Any, TypeVar
 
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
+from frontrun._sql_cursor import clear_sql_metadata, get_lock_timeout, set_lock_timeout
+from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._tracing import TraceFilter as _TraceFilter
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
@@ -899,6 +902,83 @@ def _format_async_trace(schedule: list[int], num_tasks: int) -> str:
     return "\n".join(lines)
 
 
+class _ReplayAsyncScheduler(InterleavedLoop):
+    """Replay a fixed schedule for async counterexample reproduction."""
+
+    def __init__(self, schedule: list[int], num_tasks: int, *, deadlock_timeout: float = 5.0) -> None:
+        super().__init__(deadlock_timeout=deadlock_timeout)
+        self._replay_schedule = list(schedule)
+        self._replay_index = 0
+        self._replay_max_ops = len(self._replay_schedule) * 10 + 10_000
+        self._current_task: int | None = schedule[0] if schedule else None
+        self._num_replay_tasks = num_tasks
+
+    def _extend_schedule(self) -> bool:
+        if self._replay_index >= self._replay_max_ops:
+            return False
+        active = [t for t in range(self._num_replay_tasks) if t not in self._tasks_done]
+        if not active:
+            return False
+        self._replay_schedule.extend(active)
+        return True
+
+    def should_proceed(self, task_id: Any, marker: Any = None) -> bool:
+        if self._current_task is None:
+            self._finished = True
+            return True
+        return self._current_task == task_id
+
+    def on_proceed(self, task_id: Any, marker: Any = None) -> None:
+        while True:
+            if self._replay_index >= len(self._replay_schedule):
+                if not self._extend_schedule():
+                    self._current_task = None
+                    self._finished = True
+                    return
+            scheduled = self._replay_schedule[self._replay_index]
+            self._replay_index += 1
+            if scheduled not in self._tasks_done:
+                self._current_task = scheduled
+                return
+
+    def finish_task(self, task_id: int) -> None:
+        self._tasks_done.add(task_id)
+
+
+async def _reproduce_async_counterexample(
+    schedule_list: list[int],
+    setup: Callable[[], T],
+    tasks: list[Callable[[T], Coroutine[Any, Any, None]]],
+    invariant: Callable[[T], bool] | None,
+    num_tasks: int,
+    reproduce_on_failure: int,
+    timeout_per_run: float,
+    deadlock_timeout: float,
+) -> tuple[int, int]:
+    """Measure how often an async DPOR counterexample reproduces."""
+    successes = 0
+    for _ in range(reproduce_on_failure):
+        scheduler = _ReplayAsyncScheduler(schedule_list, num_tasks, deadlock_timeout=deadlock_timeout)
+        state = setup()
+        task_funcs: dict[int, Callable[..., Coroutine[Any, Any, None]]] = {
+            i: (lambda s=state, t=t: t(s))  # type: ignore[assignment]
+            for i, t in enumerate(tasks)
+        }
+        deadlocked = False
+        try:
+            await scheduler.run_all(task_funcs, timeout=timeout_per_run)  # type: ignore[arg-type]
+        except DeadlockError:
+            if invariant is None:
+                successes += 1
+            deadlocked = True
+        except (TimeoutError, Exception):
+            continue
+        if not deadlocked:
+            if invariant is not None and not invariant(state):
+                successes += 1
+    return reproduce_on_failure, successes
+
+
 async def explore_async_dpor(
     setup: Callable[[], T],
     tasks: list[Callable[[T], Coroutine[Any, Any, None]]],
@@ -911,6 +991,10 @@ async def explore_async_dpor(
     deadlock_timeout: float = 5.0,
     detect_sql: bool = False,
     trace_packages: list[str] | None = None,
+    reproduce_on_failure: int = 10,
+    total_timeout: float | None = None,
+    warn_nondeterministic_sql: bool = True,
+    lock_timeout: int | None = None,
 ) -> InterleavingResult:
     """Systematically explore async interleavings using DPOR.
 
@@ -942,6 +1026,24 @@ async def explore_async_dpor(
             trace in addition to user code.  By default, code in
             site-packages is skipped.  Use this to include specific
             installed packages, e.g. ``["django_*", "mylib.*"]``.
+        reproduce_on_failure: When a counterexample is found, replay the
+            same schedule this many times to measure reproducibility.
+            Set to 0 to skip.
+        total_timeout: Maximum total time in seconds for the entire
+            exploration.  None means no global deadline.
+        warn_nondeterministic_sql: If True (default), raise
+            :class:`~frontrun.common.NondeterministicSQLError` when SQL
+            INSERT statements are detected but ``lastrowid`` capture
+            failed (e.g. psycopg2 without RETURNING).  Set to False to
+            suppress.  When capture succeeds, INSERTs use stable
+            indexical resource IDs automatically.
+        lock_timeout: If set, automatically execute
+            ``SET lock_timeout = '<N>ms'`` on every new PostgreSQL
+            connection created through the patched ``psycopg2.connect``
+            (or ``psycopg.connect``).  This prevents the cooperative
+            scheduler from deadlocking when two tasks contend on the
+            same PostgreSQL row lock.  Value is in milliseconds;
+            2000 (2 seconds) is a good default.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample.
@@ -959,14 +1061,25 @@ async def explore_async_dpor(
     )
 
     result = InterleavingResult(property_holds=True)
+    total_deadline = time.monotonic() + total_timeout if total_timeout is not None else None
 
     if detect_sql and _sql_async_available:
         patch_sql_async()
+
+    clear_sql_metadata()
+
+    # Inject SET lock_timeout on new PG connections (defect #6 workaround).
+    prev_lock_timeout = get_lock_timeout()
+    if lock_timeout is not None:
+        set_lock_timeout(lock_timeout)
 
     _patch_asyncio_lock()
 
     try:
         while True:
+            if total_deadline is not None and time.monotonic() > total_deadline:
+                break
+            clear_insert_tracker()
             execution = engine.begin_execution()
 
             # Clear wait-for graph and held-locks tracking between executions
@@ -1043,6 +1156,19 @@ async def explore_async_dpor(
                 if result.counterexample is None:
                     result.counterexample = schedule_list
                     result.explanation = deadlock_explanation
+                if reproduce_on_failure > 0 and result.reproduction_attempts == 0:
+                    attempts, successes = await _reproduce_async_counterexample(
+                        schedule_list=schedule_list,
+                        setup=setup,
+                        tasks=tasks,
+                        invariant=None,
+                        num_tasks=num_tasks,
+                        reproduce_on_failure=reproduce_on_failure,
+                        timeout_per_run=timeout_per_run,
+                        deadlock_timeout=deadlock_timeout,
+                    )
+                    result.reproduction_attempts = attempts
+                    result.reproduction_successes = successes
                 if stop_on_first:
                     return result
             elif task_error is not None:
@@ -1055,13 +1181,30 @@ async def explore_async_dpor(
                     result.explanation = f"Task crash in execution {result.num_explored}: {exc_type}: {task_error}"
                 if stop_on_first:
                     return result
-            elif not invariant(state):
+
+            if warn_nondeterministic_sql:
+                check_uncaptured_inserts()
+
+            if not is_deadlock and task_error is None and not invariant(state):
                 result.property_holds = False
                 schedule_list = list(execution.schedule_trace)
                 result.failures.append((result.num_explored, schedule_list))
                 if result.counterexample is None:
                     result.counterexample = schedule_list
                     result.explanation = _format_async_trace(schedule_list, num_tasks)
+                if reproduce_on_failure > 0 and result.reproduction_attempts == 0:
+                    attempts, successes = await _reproduce_async_counterexample(
+                        schedule_list=schedule_list,
+                        setup=setup,
+                        tasks=tasks,
+                        invariant=invariant,
+                        num_tasks=num_tasks,
+                        reproduce_on_failure=reproduce_on_failure,
+                        timeout_per_run=timeout_per_run,
+                        deadlock_timeout=deadlock_timeout,
+                    )
+                    result.reproduction_attempts = attempts
+                    result.reproduction_successes = successes
                 if stop_on_first:
                     return result
 
@@ -1069,6 +1212,7 @@ async def explore_async_dpor(
                 break
     finally:
         _set_active_trace_filter(None)
+        set_lock_timeout(prev_lock_timeout)
         _unpatch_asyncio_lock()
         if detect_sql and _sql_async_available:
             unpatch_sql_async()

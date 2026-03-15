@@ -185,12 +185,14 @@ Interpreting results
    @dataclass
    class InterleavingResult:
        property_holds: bool                              # True if invariant held everywhere
-       num_explored: int = 0                             # total interleavings tried
        counterexample: list[int] | None = None           # first failing schedule
+       num_explored: int = 0                             # total interleavings tried
+       unique_interleavings: int = 0                     # distinct schedules (= num_explored for DPOR)
        failures: list[tuple[int, list[int]]] = ...       # all (execution_num, schedule) pairs
        explanation: str | None = None                    # human-readable trace of the race
        reproduction_attempts: int = 0                    # number of replay attempts
        reproduction_successes: int = 0                   # how many replays reproduced the failure
+       sql_anomaly: SqlAnomaly | None = None             # classified SQL isolation anomaly (if any)
 
 ``counterexample`` is a list of thread IDs representing the order in
 which threads were scheduled. For example, ``[0, 0, 1, 1]`` means thread 0
