@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import sys
+import time
 from collections.abc import Awaitable, Callable, Coroutine, Generator
 from typing import Any, TypeVar
 
@@ -899,6 +900,83 @@ def _format_async_trace(schedule: list[int], num_tasks: int) -> str:
     return "\n".join(lines)
 
 
+class _ReplayAsyncScheduler(InterleavedLoop):
+    """Replay a fixed schedule for async counterexample reproduction."""
+
+    def __init__(self, schedule: list[int], num_tasks: int, *, deadlock_timeout: float = 5.0) -> None:
+        super().__init__(deadlock_timeout=deadlock_timeout)
+        self._replay_schedule = list(schedule)
+        self._replay_index = 0
+        self._replay_max_ops = len(self._replay_schedule) * 10 + 10_000
+        self._current_task: int | None = schedule[0] if schedule else None
+        self._num_replay_tasks = num_tasks
+
+    def _extend_schedule(self) -> bool:
+        if self._replay_index >= self._replay_max_ops:
+            return False
+        active = [t for t in range(self._num_replay_tasks) if t not in self._tasks_done]
+        if not active:
+            return False
+        self._replay_schedule.extend(active)
+        return True
+
+    def should_proceed(self, task_id: Any, marker: Any = None) -> bool:
+        if self._current_task is None:
+            self._finished = True
+            return True
+        return self._current_task == task_id
+
+    def on_proceed(self, task_id: Any, marker: Any = None) -> None:
+        while True:
+            if self._replay_index >= len(self._replay_schedule):
+                if not self._extend_schedule():
+                    self._current_task = None
+                    self._finished = True
+                    return
+            scheduled = self._replay_schedule[self._replay_index]
+            self._replay_index += 1
+            if scheduled not in self._tasks_done:
+                self._current_task = scheduled
+                return
+
+    def finish_task(self, task_id: int) -> None:
+        self._tasks_done.add(task_id)
+
+
+async def _reproduce_async_counterexample(
+    schedule_list: list[int],
+    setup: Callable[[], T],
+    tasks: list[Callable[[T], Coroutine[Any, Any, None]]],
+    invariant: Callable[[T], bool] | None,
+    num_tasks: int,
+    reproduce_on_failure: int,
+    timeout_per_run: float,
+    deadlock_timeout: float,
+) -> tuple[int, int]:
+    """Measure how often an async DPOR counterexample reproduces."""
+    successes = 0
+    for _ in range(reproduce_on_failure):
+        scheduler = _ReplayAsyncScheduler(schedule_list, num_tasks, deadlock_timeout=deadlock_timeout)
+        state = setup()
+        task_funcs: dict[int, Callable[..., Coroutine[Any, Any, None]]] = {
+            i: (lambda s=state, t=t: t(s))  # type: ignore[assignment]
+            for i, t in enumerate(tasks)
+        }
+        deadlocked = False
+        try:
+            await scheduler.run_all(task_funcs, timeout=timeout_per_run)  # type: ignore[arg-type]
+        except DeadlockError:
+            if invariant is None:
+                successes += 1
+            deadlocked = True
+        except (TimeoutError, Exception):
+            continue
+        if not deadlocked:
+            if invariant is not None and not invariant(state):
+                successes += 1
+    return reproduce_on_failure, successes
+
+
 async def explore_async_dpor(
     setup: Callable[[], T],
     tasks: list[Callable[[T], Coroutine[Any, Any, None]]],
@@ -911,6 +989,8 @@ async def explore_async_dpor(
     deadlock_timeout: float = 5.0,
     detect_sql: bool = False,
     trace_packages: list[str] | None = None,
+    reproduce_on_failure: int = 10,
+    total_timeout: float | None = None,
 ) -> InterleavingResult:
     """Systematically explore async interleavings using DPOR.
 
@@ -942,6 +1022,11 @@ async def explore_async_dpor(
             trace in addition to user code.  By default, code in
             site-packages is skipped.  Use this to include specific
             installed packages, e.g. ``["django_*", "mylib.*"]``.
+        reproduce_on_failure: When a counterexample is found, replay the
+            same schedule this many times to measure reproducibility.
+            Set to 0 to skip.
+        total_timeout: Maximum total time in seconds for the entire
+            exploration.  None means no global deadline.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample.
@@ -959,6 +1044,7 @@ async def explore_async_dpor(
     )
 
     result = InterleavingResult(property_holds=True)
+    total_deadline = time.monotonic() + total_timeout if total_timeout is not None else None
 
     if detect_sql and _sql_async_available:
         patch_sql_async()
@@ -967,6 +1053,8 @@ async def explore_async_dpor(
 
     try:
         while True:
+            if total_deadline is not None and time.monotonic() > total_deadline:
+                break
             execution = engine.begin_execution()
 
             # Clear wait-for graph and held-locks tracking between executions
@@ -1043,6 +1131,19 @@ async def explore_async_dpor(
                 if result.counterexample is None:
                     result.counterexample = schedule_list
                     result.explanation = deadlock_explanation
+                if reproduce_on_failure > 0 and result.reproduction_attempts == 0:
+                    attempts, successes = await _reproduce_async_counterexample(
+                        schedule_list=schedule_list,
+                        setup=setup,
+                        tasks=tasks,
+                        invariant=None,
+                        num_tasks=num_tasks,
+                        reproduce_on_failure=reproduce_on_failure,
+                        timeout_per_run=timeout_per_run,
+                        deadlock_timeout=deadlock_timeout,
+                    )
+                    result.reproduction_attempts = attempts
+                    result.reproduction_successes = successes
                 if stop_on_first:
                     return result
             elif task_error is not None:
@@ -1062,6 +1163,19 @@ async def explore_async_dpor(
                 if result.counterexample is None:
                     result.counterexample = schedule_list
                     result.explanation = _format_async_trace(schedule_list, num_tasks)
+                if reproduce_on_failure > 0 and result.reproduction_attempts == 0:
+                    attempts, successes = await _reproduce_async_counterexample(
+                        schedule_list=schedule_list,
+                        setup=setup,
+                        tasks=tasks,
+                        invariant=invariant,
+                        num_tasks=num_tasks,
+                        reproduce_on_failure=reproduce_on_failure,
+                        timeout_per_run=timeout_per_run,
+                        deadlock_timeout=deadlock_timeout,
+                    )
+                    result.reproduction_attempts = attempts
+                    result.reproduction_successes = successes
                 if stop_on_first:
                     return result
 
