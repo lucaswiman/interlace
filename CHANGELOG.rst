@@ -6,90 +6,29 @@ All releases: https://github.com/lucaswiman/frontrun/releases
 0.2.0 (unreleased)
 -------------------
 
-- Cutover rename: ``frontrun.async_bytecode`` is now ``frontrun.async_shuffler``,
-  and ``AsyncBytecodeShuffler`` is now ``AsyncShuffler``.
+**Redis and SQL conflict detection**
 
-**Redis key-level conflict detection**
+DPOR now understands Redis and SQL.  Instead of treating all traffic to the same
+``host:port`` as a single conflict point, frontrun intercepts execute methods
+on the db drivers in common sql and redis clients. This means that DPOR can
+analyze whether two SQL queries can conflict (e.g. read or update the same row)
+and not explore all interleavings of independent SQL queries.
 
-DPOR now understands Redis.  Instead of treating all Redis traffic to the same
-``host:port`` as a single conflict point, frontrun intercepts ``execute_command()``
-on redis-py clients, classifies each command (GET, SET, HSET, EXISTS, etc.) as a
-read or write on specific keys, and reports those per-key resource IDs to the DPOR
-engine.  Two tasks operating on different keys are independent; only operations that
-touch the same key with at least one write trigger interleaving exploration.
-
-- **Sync DPOR** (``explore_dpor``): Redis patching is active automatically when
-  ``detect_io=True`` (the default).  No extra parameter is needed.
-- **Async DPOR** (``explore_async_dpor``): pass ``detect_redis=True`` to enable
-  patching for ``redis.asyncio`` and ``coredis`` clients.
-- New modules: ``frontrun._redis_parsing`` (command classification for 160+ Redis
-  commands), ``frontrun._redis_client`` (sync monkey-patching),
-  ``frontrun._redis_client_async`` (async monkey-patching).
-- Endpoint suppression prevents double-reporting when key-level detection is active,
-  including for C-level Redis drivers via the LD_PRELOAD bridge.
-- Fine-grained scheduling points injected around each Redis command so DPOR can
-  explore the gap between an EXISTS check and the subsequent SET (TOCTOU races).
-- asyncio.Lock interactions during Redis connection-pool waits are handled correctly
-  to prevent false deadlocks.
-- Augmented global-variable race detection: ``LOAD_GLOBAL``/``LOAD_DEREF`` now use
-  ``report_first_access`` so that global counter races (``counter += 1``) are
-  detected by DPOR.
-- Integration tests: 17 tests covering lost-update counters, check-then-act
-  (TOCTOU), inventory double-spend, balance transfers, Hash races, List races, Set
-  races, pipeline batches, independent-key non-interference, and async variants.
-
-See :doc:`redis` for the technical walkthrough.
+This means that Frontrun can detect complex race conditions involving interactions
+between threading primitives, sql databases and redis while keeping the exploration
+space manageably small.
 
 **Async DPOR**
 
-``explore_async_dpor()`` brings systematic interleaving exploration to async
-code.  Tasks are async callables scheduled cooperatively; ``await_point()``
-marks explicit yield points where context switches can occur.  The same Rust
-DPOR engine (vector clocks, conflict analysis, backtrack sets) drives the
-exploration.  SQL tracking (``detect_sql=True``) reuses the existing async
-cursor patching, so asyncpg, aiosqlite, and aiomysql queries are detected as
-conflicts automatically.
+DPOR now automatically treats await points in coroutines as possible conficts,
+using tracing/io interception/sql+redis parsing to identify which interleavings
+of awaits might could lead to resource conflicts and race conditions.
 
-- New module: ``frontrun.async_dpor`` (``explore_async_dpor``, ``await_point``).
-- Contrib helpers merged into packages: ``frontrun.contrib.django``
-  (``django_dpor``, ``async_django_dpor``) and ``frontrun.contrib.sqlalchemy``
-  (``sqlalchemy_dpor``, ``async_sqlalchemy_dpor``, ``get_connection``,
-  ``get_async_connection``).
-- Integration tests against asyncpg, SQLAlchemy async, and Django async ORM.
+**Many bugfixes**
 
-**SQL conflict detection in DPOR**
-
-DPOR now understands SQL.  Instead of treating all database traffic to the
-same host:port as a single conflict point, frontrun parses each SQL statement
-at the DBAPI layer, extracts per-table (or per-row) resource IDs, and reports
-them with correct Read/Write access kinds.  Two threads on different tables
-are independent; two SELECTs on the same table are independent; only
-genuinely conflicting operations (same table/row, at least one write) trigger
-interleaving exploration.
-
-- SQL parsing via regex fast-path (~90% of ORM queries) with sqlglot
-  fallback for complex SQL (CTEs, subqueries, UNION, MERGE).
-- Row-level conflict detection using equality and IN-list predicates on
-  primary key columns.  Parameter resolution for all five PEP 249
-  paramstyles (qmark, numeric, named, format, pyformat).
-- DBAPI cursor monkey-patching for sqlite3, psycopg2, psycopg3, pymysql,
-  asyncpg, aiosqlite, and aiomysql.  Both sync and async drivers supported.
-- Endpoint suppression prevents double-reporting when SQL-level detection is
-  active, including for C-level drivers via the LD_PRELOAD bridge.
-- Transaction grouping: operations within BEGIN/COMMIT are buffered and
-  reported atomically.  SAVEPOINT and ROLLBACK TO handle partial rollback.
-- Lock intent detection: SELECT FOR UPDATE and LOCK TABLE statements are
-  classified as writes.
-- PostgreSQL wire protocol parsing in the Rust LD_PRELOAD library catches
-  C-level SQL from libpq (Simple Query and Extended Query messages).
-- Anomaly classification: when DPOR finds a failing interleaving involving
-  SQL, the anomaly is classified as lost update, write skew, dirty read,
-  non-repeatable read, phantom read, or write-write conflict via DSG cycle
-  analysis.
-- Correctness verified by three TLA+ specifications (38,000+ states, 23
-  invariants, all passing).
-
-See :doc:`sql-technical-details` for the full technical walkthrough.
+A large number of bugfixes from having Claude run frontrun against dozens of open
+source libraries. DPOR should now be more accurate about identifying conflict
+points and succeed in identifying more complex races.
 
 0.1.0 (2026-02-27)
 -------------------
