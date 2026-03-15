@@ -1379,6 +1379,13 @@ def _process_opcode(
             # The counter tracks which element index FOR_ITER is reading,
             # enabling per-element conflict detection with STORE_SUBSCR writes.
             shadow.push(["__iter_source__", iterable, 0])
+            # Report a container-level read now.  On Python 3.10, list
+            # comprehensions are compiled as nested functions, so FOR_ITER
+            # runs in a child frame with a fresh shadow stack that won't
+            # see the __iter_source__ marker.  The read here ensures the
+            # conflict with STORE_SUBSCR weak-writes is recorded in the
+            # current frame before the iterator crosses frame boundaries.
+            _report_read(engine, execution, thread_id, iterable, "__cmethods__", elock)
         else:
             shadow.pop()
             shadow.push(None)
