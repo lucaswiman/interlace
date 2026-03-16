@@ -1,0 +1,118 @@
+"""Defect #9: Redis DPOR counterexamples fail to reproduce (0/10).
+
+DPOR correctly detects races in Redis GET-then-SET patterns, but
+reproduction against real Redis consistently fails. All reference
+Redis DPOR tests use ``reproduce_on_failure=0`` to work around this.
+
+This test demonstrates the defect with the simplest possible Redis
+race: two threads doing GET→increment→SET on the same counter key.
+DPOR finds the lost-update interleaving, but reproduction fails 0/10.
+
+Running::
+
+    REDIS_PORT=16399 frontrun pytest tests/test_defect9_redis_reproduction.py -v --timeout=60
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import time
+
+import pytest
+
+try:
+    import redis as redis_lib
+except ImportError:
+    pytest.skip("redis package not installed", allow_module_level=True)
+
+from frontrun.dpor import explore_dpor
+
+_REDIS_PORT = int(os.environ.get("REDIS_PORT", "16399"))
+
+
+@pytest.fixture(scope="module")
+def redis_port():
+    """Provide a Redis port, starting a server if needed."""
+    r = redis_lib.Redis(port=_REDIS_PORT)
+    try:
+        r.ping()
+        r.close()
+        yield _REDIS_PORT
+        return
+    except redis_lib.ConnectionError:
+        r.close()
+
+    if not shutil.which("redis-server"):
+        pytest.skip("redis-server not available")
+
+    proc = subprocess.Popen(
+        ["redis-server", "--port", str(_REDIS_PORT), "--save", "", "--appendonly", "no", "--loglevel", "warning"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(0.5)
+    r = redis_lib.Redis(port=_REDIS_PORT)
+    try:
+        r.ping()
+    except redis_lib.ConnectionError:
+        proc.kill()
+        pytest.skip("Could not start redis-server")
+    finally:
+        r.close()
+    yield _REDIS_PORT
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+class TestRedisReproductionFailure:
+    """Minimal reproduction of defect #9: Redis DPOR counterexamples
+    fail to reproduce.
+
+    The simplest Redis race: two threads do GET→increment→SET on the
+    same counter. DPOR detects the lost-update interleaving, but when
+    it replays the schedule against real Redis, both threads run too
+    fast for the interleaving to manifest (0/10 reproduction).
+    """
+
+    def test_counter_race_detected_but_not_reproduced(self, redis_port: int) -> None:
+        """DPOR finds the race but reproduction fails 0/10."""
+        port = redis_port
+
+        class State:
+            def __init__(self) -> None:
+                r = redis_lib.Redis(port=port, decode_responses=True)
+                r.set("defect9:counter", "0")
+                r.close()
+
+        def increment(state: State) -> None:
+            r = redis_lib.Redis(port=port, decode_responses=True)
+            val = int(r.get("defect9:counter"))  # type: ignore[arg-type]
+            r.set("defect9:counter", str(val + 1))
+            r.close()
+
+        def invariant(state: State) -> bool:
+            r = redis_lib.Redis(port=port, decode_responses=True)
+            result = int(r.get("defect9:counter"))  # type: ignore[arg-type]
+            r.close()
+            return result == 2
+
+        result = explore_dpor(
+            setup=State,
+            threads=[increment, increment],
+            invariant=invariant,
+            detect_io=True,
+            max_executions=50,
+            deadlock_timeout=15.0,
+            reproduce_on_failure=10,
+        )
+
+        # DPOR should detect the race (property does NOT hold).
+        assert not result.property_holds, "DPOR should detect lost-update on Redis counter"
+
+        # Defect #9 fix: reproduction should now succeed with
+        # patch_redis_for_replay fallback.
+        assert result.reproduction_successes > 0, (
+            f"Reproduction should succeed but got {result.reproduction_successes}/{result.reproduction_attempts} times."
+        )

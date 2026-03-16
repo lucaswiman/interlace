@@ -322,10 +322,13 @@ class TestSpecialCommands:
         assert result.read_keys == ["source"]
         assert result.write_keys == ["dest"]
 
-    def test_eval_with_keys(self) -> None:
+    def test_eval_is_atomic(self) -> None:
+        # EVAL/EVALSHA are atomic (Lua scripts execute without interleaving).
+        # They are treated as transaction control with no key-level accesses.
         result = parse_redis_access("EVAL", ("script", 2, "key1", "key2", "arg1"))
-        assert result.read_keys == ["key1", "key2"]
-        assert result.write_keys == ["key1", "key2"]
+        assert result.read_keys == []
+        assert result.write_keys == []
+        assert result.is_transaction_control
 
     def test_pfadd_is_write(self) -> None:
         result = parse_redis_access("PFADD", ("myhll", "elem1"))
@@ -716,6 +719,12 @@ class TestCommandCoverage:
             "DISCARD",
             "UNWATCH",
             "DEBUG",
+            # EVAL/EVALSHA are treated as atomic (transaction control)
+            # with no key-level accesses.  See defect #8.
+            "EVAL",
+            "EVALSHA",
+            "EVAL_RO",
+            "EVALSHA_RO",
         }
 
         for cmd_name, cmd_args in self.CORE_COMMANDS:

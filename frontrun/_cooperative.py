@@ -97,6 +97,16 @@ def set_sync_reporter(reporter: SyncReporter | None) -> None:
     _scheduler_tls.sync_reporter = reporter
 
 
+def _in_dpor_machinery() -> bool:
+    """Return ``True`` if the current thread is already inside DPOR machinery.
+
+    When this is set, cooperative locks fall back to real blocking to avoid
+    reentrancy deadlocks (e.g., when GC triggers ``__del__`` during
+    ``_process_opcode`` or ``_sync_reporter``).
+    """
+    return getattr(_scheduler_tls, "_in_dpor_machinery", False)
+
+
 # ---------------------------------------------------------------------------
 # Internal helper
 # ---------------------------------------------------------------------------
@@ -141,6 +151,13 @@ class CooperativeLock:
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         from frontrun._deadlock import get_wait_for_graph
+
+        # Reentrancy guard: if we're already inside DPOR machinery (e.g.,
+        # _sync_reporter or _process_opcode), GC-triggered __del__ chains
+        # must not re-enter the scheduler.  Fall back to real blocking.
+        if _in_dpor_machinery():
+            result = self._lock.acquire(blocking=blocking, timeout=timeout if timeout >= 0 else -1)
+            return result
 
         if not blocking:
             result = self._lock.acquire(blocking=False)
@@ -201,6 +218,11 @@ class CooperativeLock:
     def release(self) -> None:
         from frontrun._deadlock import get_wait_for_graph
 
+        # Reentrancy guard: skip scheduler interaction during GC __del__
+        if _in_dpor_machinery():
+            self._lock.release()
+            return
+
         owner = self._owner_thread_id
         self._owner_thread_id = None
         self._report("lock_release")
@@ -238,7 +260,12 @@ class CooperativeLock:
     def _report(self, event: str) -> None:
         reporter = get_sync_reporter()
         if reporter is not None:
-            reporter(event, self._object_id)
+            prev = getattr(_scheduler_tls, "_in_dpor_machinery", False)
+            _scheduler_tls._in_dpor_machinery = True
+            try:
+                reporter(event, self._object_id)
+            finally:
+                _scheduler_tls._in_dpor_machinery = prev
 
     def __repr__(self) -> str:
         return f"<CooperativeLock locked={self.locked()}>"
@@ -382,7 +409,12 @@ class CooperativeRLock:
     def _report(self, event: str) -> None:
         reporter = get_sync_reporter()
         if reporter is not None:
-            reporter(event, self._object_id)
+            prev = getattr(_scheduler_tls, "_in_dpor_machinery", False)
+            _scheduler_tls._in_dpor_machinery = True
+            try:
+                reporter(event, self._object_id)
+            finally:
+                _scheduler_tls._in_dpor_machinery = prev
 
     def __repr__(self) -> str:
         return f"<CooperativeRLock owner={self._owner} count={self._count}>"
@@ -420,7 +452,12 @@ class CooperativeSemaphore:
     def _report(self, event: str) -> None:
         reporter = get_sync_reporter()
         if reporter is not None:
-            reporter(event, self._object_id)
+            prev = getattr(_scheduler_tls, "_in_dpor_machinery", False)
+            _scheduler_tls._in_dpor_machinery = True
+            try:
+                reporter(event, self._object_id)
+            finally:
+                _scheduler_tls._in_dpor_machinery = prev
 
     def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
 

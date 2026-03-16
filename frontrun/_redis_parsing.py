@@ -355,17 +355,11 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
     if upper == "XGROUP" and len(cmd_args) >= 2:
         return RedisAccessResult(read_keys=[], write_keys=[str(cmd_args[1])], is_transaction_control=False)
 
-    # EVAL / EVALSHA — EVAL script numkeys key [key ...]
-    if upper in ("EVAL", "EVALSHA", "EVAL_RO", "EVALSHA_RO") and len(cmd_args) >= 2:
-        try:
-            numkeys = int(str(cmd_args[1]))
-        except (ValueError, TypeError):
-            numkeys = 0
-        keys = [str(cmd_args[2 + i]) for i in range(min(numkeys, len(cmd_args) - 2))]
-        if upper.endswith("_RO"):
-            return RedisAccessResult(read_keys=keys, write_keys=[], is_transaction_control=False)
-        # EVAL scripts can both read and write.
-        return RedisAccessResult(read_keys=keys, write_keys=keys, is_transaction_control=False)
+    # EVAL / EVALSHA — Redis Lua scripts execute atomically (no other
+    # commands can interleave), so we treat them as transaction control
+    # to avoid false key-level conflict arcs.  See defect #8.
+    if upper in ("EVAL", "EVALSHA", "EVAL_RO", "EVALSHA_RO"):
+        return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=True)
 
     # PUBLISH — channel, message.
     if upper == "PUBLISH" and len(cmd_args) >= 1:
