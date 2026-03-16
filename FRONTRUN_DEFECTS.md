@@ -202,7 +202,7 @@ These are common in Django's ORM (e.g., `queryset.update()` followed by
 
 ## Defect #7: DPOR deadlock when redis-py `__del__` fires during `_process_opcode`
 
-**Status:** Open
+**Status:** FIXED (March 2026) — reentrancy guard in cooperative locks
 
 **Symptom:** DPOR threads deadlock during Redis-based tests. One thread hangs
 inside `_process_opcode` → `_get_instructions` while Python's garbage collector
@@ -266,7 +266,7 @@ timeout).
 
 ## Defect #8: DPOR does not model Redis Lua script (EVALSHA) atomicity — false positive races
 
-**Status:** Open
+**Status:** FIXED (March 2026) — EVAL/EVALSHA treated as atomic (transaction control)
 
 **Symptom:** DPOR reports race conditions (invariant violations) on Redis
 keys accessed by Lua scripts, but reproduction always fails (0/10). The
@@ -310,7 +310,7 @@ this defect.
 
 ## Defect #9: Redis DPOR counterexamples fail to reproduce (0/10) for real races
 
-**Status:** Open
+**Status:** FIXED (March 2026) — patch_redis_for_replay fallback in reproduction
 
 **Symptom:** DPOR correctly detects real race conditions in Redis
 GET-then-SET patterns, but reproduction against real Redis consistently

@@ -16,7 +16,6 @@ import threading
 from frontrun._cooperative import (
     CooperativeLock,
     _scheduler_tls,
-    get_context,
     set_context,
     set_sync_reporter,
 )
@@ -113,7 +112,6 @@ class TestGCReentrancyGuard:
 
     def test_cooperative_lock_with_reentrancy_guard(self) -> None:
         """When _in_dpor_machinery flag is set, cooperative locks use real blocking."""
-        from frontrun._cooperative import _scheduler_tls
 
         lock = CooperativeLock()
 

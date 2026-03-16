@@ -114,6 +114,5 @@ class TestRedisReproductionFailure:
         # Defect #9 fix: reproduction should now succeed with
         # patch_redis_for_replay fallback.
         assert result.reproduction_successes > 0, (
-            f"Reproduction should succeed but got "
-            f"{result.reproduction_successes}/{result.reproduction_attempts} times."
+            f"Reproduction should succeed but got {result.reproduction_successes}/{result.reproduction_attempts} times."
         )
