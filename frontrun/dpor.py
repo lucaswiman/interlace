@@ -2133,12 +2133,12 @@ def _reproduce_dpor_counterexample(
     from frontrun._redis_client import patch_redis, set_redis_replay_mode, unpatch_redis
     from frontrun._sql_cursor import get_lock_timeout, patch_sql, set_lock_timeout, unpatch_sql
 
-    def _attempt(
-        *, patch_sql_for_replay: bool, patch_redis_for_replay: bool, attempts: int
-    ) -> int:
+    def _attempt(*, patch_sql_for_replay: bool, patch_redis_for_replay: bool, attempts: int) -> int:
         successes = 0
         _prev_lt = get_lock_timeout()
-        replay_timeout = timeout_per_run if (patch_sql_for_replay or patch_redis_for_replay) else min(timeout_per_run, 5.0)
+        replay_timeout = (
+            timeout_per_run if (patch_sql_for_replay or patch_redis_for_replay) else min(timeout_per_run, 5.0)
+        )
         if patch_sql_for_replay:
             _replay_lock_timeout = lock_timeout if lock_timeout is not None else 5000
             set_lock_timeout(_replay_lock_timeout)
@@ -2184,9 +2184,7 @@ def _reproduce_dpor_counterexample(
         else:
             # Fallback: re-enable SQL row-lock arbitration and/or Redis
             # command-level scheduling points for reproduction.
-            successes = _attempt(
-                patch_sql_for_replay=True, patch_redis_for_replay=True, attempts=reproduce_on_failure
-            )
+            successes = _attempt(patch_sql_for_replay=True, patch_redis_for_replay=True, attempts=reproduce_on_failure)
     return reproduce_on_failure, successes
 
 

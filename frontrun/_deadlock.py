@@ -21,7 +21,8 @@ from __future__ import annotations
 
 from typing import Literal
 
-from frontrun._real_threading import lock as _real_lock, rlock as _real_rlock
+from frontrun._real_threading import lock as _real_lock
+from frontrun._real_threading import rlock as _real_rlock
 
 LockKind = Literal["lock", "row_lock"]
 
