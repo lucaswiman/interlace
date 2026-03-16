@@ -2128,63 +2128,50 @@ def _reproduce_dpor_counterexample(
     lock_timeout: int | None,
     invariant: Callable[[T], bool] | None = None,
 ) -> tuple[int, int]:
-    """Measure how often a DPOR counterexample reproduces under the DPOR runner."""
+    """Measure how often a DPOR counterexample reproduces under the DPOR runner.
+
+    Reproduction runs with the same IO interception (SQL, Redis) as
+    exploration so that the replay scheduler can enforce interleavings at
+    IO boundaries, not just bytecode boundaries.
+    """
     from frontrun._preload_io import _set_preload_pipe_fd
     from frontrun._redis_client import patch_redis, set_redis_replay_mode, unpatch_redis
     from frontrun._sql_cursor import get_lock_timeout, patch_sql, set_lock_timeout, unpatch_sql
 
-    def _attempt(*, patch_sql_for_replay: bool, patch_redis_for_replay: bool, attempts: int) -> int:
-        successes = 0
-        _prev_lt = get_lock_timeout()
-        replay_timeout = (
-            timeout_per_run if (patch_sql_for_replay or patch_redis_for_replay) else min(timeout_per_run, 5.0)
-        )
-        if patch_sql_for_replay:
-            _replay_lock_timeout = lock_timeout if lock_timeout is not None else 5000
-            set_lock_timeout(_replay_lock_timeout)
-            patch_sql()
-        if patch_redis_for_replay:
-            patch_redis()
-            set_redis_replay_mode(True)
-        try:
-            for _ in range(attempts):
-                try:
-                    replay_state = _run_dpor_schedule(
-                        schedule_list,
-                        setup,
-                        threads,
-                        timeout=replay_timeout,
-                        detect_io=False,
-                        deadlock_timeout=deadlock_timeout,
-                    )
-                    if invariant is not None and not invariant(replay_state):
-                        successes += 1
-                except DeadlockError:
-                    if invariant is None:
-                        successes += 1
-                except Exception:
-                    pass  # timeout / crash during replay — not a reproduction
-        finally:
-            if patch_redis_for_replay:
-                set_redis_replay_mode(False)
-                unpatch_redis()
-            if patch_sql_for_replay:
-                unpatch_sql()
-                set_lock_timeout(_prev_lt)
-        return successes
-
     _set_preload_pipe_fd(-1)
+    if reproduce_on_failure <= 0:
+        return reproduce_on_failure, 0
+
+    _prev_lt = get_lock_timeout()
+    _replay_lock_timeout = lock_timeout if lock_timeout is not None else 5000
+    set_lock_timeout(_replay_lock_timeout)
+    patch_sql()
+    patch_redis()
+    set_redis_replay_mode(True)
     successes = 0
-    if reproduce_on_failure > 0:
-        quick_success = _attempt(patch_sql_for_replay=False, patch_redis_for_replay=False, attempts=1)
-        if quick_success > 0:
-            successes = quick_success + _attempt(
-                patch_sql_for_replay=False, patch_redis_for_replay=False, attempts=reproduce_on_failure - 1
-            )
-        else:
-            # Fallback: re-enable SQL row-lock arbitration and/or Redis
-            # command-level scheduling points for reproduction.
-            successes = _attempt(patch_sql_for_replay=True, patch_redis_for_replay=True, attempts=reproduce_on_failure)
+    try:
+        for _ in range(reproduce_on_failure):
+            try:
+                replay_state = _run_dpor_schedule(
+                    schedule_list,
+                    setup,
+                    threads,
+                    timeout=timeout_per_run,
+                    detect_io=False,
+                    deadlock_timeout=deadlock_timeout,
+                )
+                if invariant is not None and not invariant(replay_state):
+                    successes += 1
+            except DeadlockError:
+                if invariant is None:
+                    successes += 1
+            except Exception:
+                pass  # timeout / crash during replay — not a reproduction
+    finally:
+        set_redis_replay_mode(False)
+        unpatch_redis()
+        unpatch_sql()
+        set_lock_timeout(_prev_lt)
     return reproduce_on_failure, successes
 
 
