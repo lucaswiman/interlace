@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from frontrun._real_threading import lock as _real_lock
+from frontrun._real_threading import lock as _real_lock, rlock as _real_rlock
 
 LockKind = Literal["lock", "row_lock"]
 
@@ -64,7 +64,9 @@ class WaitForGraph:
     """
 
     def __init__(self) -> None:
-        self._lock = _real_lock()
+        # Use RLock to allow reentrant access when GC-triggered __del__
+        # chains fire during graph operations.  See defect #7.
+        self._lock = _real_rlock()
         # adjacency: node -> set of successor nodes
         self._edges: dict[tuple[str, int], set[tuple[str, int]]] = {}
 

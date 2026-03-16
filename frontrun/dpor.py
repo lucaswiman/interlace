@@ -395,95 +395,104 @@ class DporScheduler:
         return self._report_and_wait(frame, thread_id)
 
     def _report_and_wait(self, frame: Any | None, thread_id: int) -> bool:
+        from frontrun._cooperative import _scheduler_tls
+
         with self._condition:
+            # Set reentrancy guard so GC-triggered __del__ (e.g.,
+            # redis.Redis.__del__) won't re-enter the scheduler.
+            # See defect #7.
+            _scheduler_tls._in_dpor_machinery = True
+            try:
 
-            def _flush_pending_io() -> None:
-                pending_io: list[tuple[int, str]] | None = getattr(_dpor_tls, "pending_io", None)
-                if pending_io and getattr(_dpor_tls, "lock_depth", 0) == 0:
-                    engine = self.engine
-                    execution = self.execution
-                    for obj_key, io_kind in pending_io:
-                        with self._engine_lock:
-                            engine.report_io_access(execution, thread_id, obj_key, io_kind)
-                    pending_io.clear()
+                def _flush_pending_io() -> None:
+                    pending_io: list[tuple[int, str]] | None = getattr(_dpor_tls, "pending_io", None)
+                    if pending_io and getattr(_dpor_tls, "lock_depth", 0) == 0:
+                        engine = self.engine
+                        execution = self.execution
+                        for obj_key, io_kind in pending_io:
+                            with self._engine_lock:
+                                engine.report_io_access(execution, thread_id, obj_key, io_kind)
+                        pending_io.clear()
 
-            # Merge LD_PRELOAD I/O events (C-level send/recv from e.g.
-            # psycopg2) into the thread's pending_io list.  The preload
-            # bridge buffers events from the pipe reader thread, keyed by
-            # DPOR thread ID.
-            _pending_io: list[tuple[int, str]] | None = getattr(_dpor_tls, "pending_io", None)
-            if self._preload_bridge is not None:
-                _preload_events = self._preload_bridge.drain(thread_id)
-                if _preload_events:
-                    # Record into trace for human-readable output.  These events
-                    # come from C extensions (e.g. libpq) with no Python frame.
-                    _recorder = self.trace_recorder
-                    if _recorder is not None:
-                        for _, _kind, _resource_id, _detail, _call_chain in _preload_events:
-                            _recorder.record_io(
-                                thread_id,
-                                _resource_id,
-                                _kind,
-                                call_chain=_call_chain,
-                                detail=_detail,
-                            )
-                    # Convert 3-tuples to 2-tuples for the pending list
-                    _io_pairs = [(_key, _kind) for _key, _kind, _, _, _ in _preload_events]
-                    if _pending_io is not None:
-                        _pending_io.extend(_io_pairs)
-                    else:
-                        _dpor_tls.pending_io = _io_pairs
-                        _pending_io = _io_pairs
-            # NOTE: We intentionally do NOT skip scheduling inside explicit
-            # SQL transactions.  SQL atomicity is handled separately by
-            # _tx_buffer in _sql_cursor.py (SQL events are buffered during
-            # BEGIN...COMMIT and flushed atomically at COMMIT).  Non-SQL
-            # shared state (Python objects) modified inside a transaction
-            # body must still be interleaved by DPOR to find races.
+                # Merge LD_PRELOAD I/O events (C-level send/recv from e.g.
+                # psycopg2) into the thread's pending_io list.  The preload
+                # bridge buffers events from the pipe reader thread, keyed by
+                # DPOR thread ID.
+                _pending_io: list[tuple[int, str]] | None = getattr(_dpor_tls, "pending_io", None)
+                if self._preload_bridge is not None:
+                    _preload_events = self._preload_bridge.drain(thread_id)
+                    if _preload_events:
+                        # Record into trace for human-readable output.  These events
+                        # come from C extensions (e.g. libpq) with no Python frame.
+                        _recorder = self.trace_recorder
+                        if _recorder is not None:
+                            for _, _kind, _resource_id, _detail, _call_chain in _preload_events:
+                                _recorder.record_io(
+                                    thread_id,
+                                    _resource_id,
+                                    _kind,
+                                    call_chain=_call_chain,
+                                    detail=_detail,
+                                )
+                        # Convert 3-tuples to 2-tuples for the pending list
+                        _io_pairs = [(_key, _kind) for _key, _kind, _, _, _ in _preload_events]
+                        if _pending_io is not None:
+                            _pending_io.extend(_io_pairs)
+                        else:
+                            _dpor_tls.pending_io = _io_pairs
+                            _pending_io = _io_pairs
+                # NOTE: We intentionally do NOT skip scheduling inside explicit
+                # SQL transactions.  SQL atomicity is handled separately by
+                # _tx_buffer in _sql_cursor.py (SQL events are buffered during
+                # BEGIN...COMMIT and flushed atomically at COMMIT).  Non-SQL
+                # shared state (Python objects) modified inside a transaction
+                # body must still be interleaved by DPOR to find races.
 
-            while True:
-                if self._finished or self._error:
-                    return False
-                if self._current_thread == thread_id:
-                    # Flush deferred I/O only once this thread actually owns
-                    # the current DPOR step. On free-threaded Python a thread
-                    # can reach report_and_wait while another thread still owns
-                    # the step; flushing earlier stamps the access onto the
-                    # wrong path_id and can hide the backtrack point.
-                    _flush_pending_io()
-                    # Process opcode accesses only when it's our turn.
-                    # Deferring this until the thread is scheduled ensures
-                    # that accesses are recorded at the correct path_id
-                    # (after any intervening operations by other threads).
-                    # Without this, a preempted thread's accesses land at the
-                    # preemption branch where the other thread is Active,
-                    # making backtracks at that position impossible.
-                    if frame is not None:
-                        _process_opcode(frame, self, thread_id)
-                        frame = None  # only process once
-                    # It's our turn. After executing one opcode, schedule next.
-                    next_thread = self._schedule_next()
-                    self._current_thread = next_thread
-                    if next_thread is None:
-                        self._finished = True
-                    self._condition.notify_all()
-                    return True
-
-                # Wait for our turn (fallback timeout for C-blocked threads)
-                if not self._condition.wait(timeout=self.deadlock_timeout):
-                    if self._current_thread in self._threads_done:
-                        # Current thread is done, try scheduling again
+                while True:
+                    if self._finished or self._error:
+                        return False
+                    if self._current_thread == thread_id:
+                        # Flush deferred I/O only once this thread actually owns
+                        # the current DPOR step. On free-threaded Python a thread
+                        # can reach report_and_wait while another thread still owns
+                        # the step; flushing earlier stamps the access onto the
+                        # wrong path_id and can hide the backtrack point.
+                        _flush_pending_io()
+                        # Process opcode accesses only when it's our turn.
+                        # Deferring this until the thread is scheduled ensures
+                        # that accesses are recorded at the correct path_id
+                        # (after any intervening operations by other threads).
+                        # Without this, a preempted thread's accesses land at the
+                        # preemption branch where the other thread is Active,
+                        # making backtracks at that position impossible.
+                        if frame is not None:
+                            _process_opcode(frame, self, thread_id)
+                            frame = None  # only process once
+                        # It's our turn. After executing one opcode, schedule next.
                         next_thread = self._schedule_next()
                         self._current_thread = next_thread
                         if next_thread is None:
                             self._finished = True
                         self._condition.notify_all()
-                        continue
-                    self._error = TimeoutError(
-                        f"DPOR deadlock: waiting for thread {thread_id}, current is {self._current_thread}"
-                    )
-                    self._condition.notify_all()
-                    return False
+                        return True
+
+                    # Wait for our turn (fallback timeout for C-blocked threads)
+                    if not self._condition.wait(timeout=self.deadlock_timeout):
+                        if self._current_thread in self._threads_done:
+                            # Current thread is done, try scheduling again
+                            next_thread = self._schedule_next()
+                            self._current_thread = next_thread
+                            if next_thread is None:
+                                self._finished = True
+                            self._condition.notify_all()
+                            continue
+                        self._error = TimeoutError(
+                            f"DPOR deadlock: waiting for thread {thread_id}, current is {self._current_thread}"
+                        )
+                        self._condition.notify_all()
+                        return False
+            finally:
+                _scheduler_tls._in_dpor_machinery = False
 
     def mark_done(self, thread_id: int) -> None:
         with self._condition:
@@ -1837,33 +1846,43 @@ class DporBytecodeRunner:
         #   "lock_acquire" → execution.unblock_thread (DPOR can schedule again)
         #   "lock_release" → unblock all waiters for this lock
         def _sync_reporter(event: str, obj_id: int) -> None:
-            if event == "lock_wait":
+            from frontrun._cooperative import _scheduler_tls
+
+            # Set reentrancy guard so that GC-triggered __del__ chains
+            # (e.g., redis.Redis.__del__) that acquire cooperative locks
+            # will fall back to real blocking instead of re-entering the
+            # scheduler.  See defect #7.
+            _scheduler_tls._in_dpor_machinery = True
+            try:
+                if event == "lock_wait":
+                    with engine_lock:
+                        scheduler._lock_waiters.setdefault(obj_id, set()).add(thread_id)
+                        execution.block_thread(thread_id)
+                    return
+                if event == "lock_acquire":
+                    with engine_lock:
+                        waiter_set = scheduler._lock_waiters.get(obj_id)
+                        if waiter_set is not None and thread_id in waiter_set:
+                            waiter_set.discard(thread_id)
+                            execution.unblock_thread(thread_id)
+                        engine.report_sync(execution, thread_id, "lock_acquire", obj_id)
+                    _dpor_tls.lock_depth = getattr(_dpor_tls, "lock_depth", 0) + 1
+                    return
+                if event == "lock_release":
+                    with engine_lock:
+                        waiters = scheduler._lock_waiters.pop(obj_id, set())
+                        for waiter in waiters:
+                            execution.unblock_thread(waiter)
+                        engine.report_sync(execution, thread_id, "lock_release", obj_id)
+                    _dpor_tls.lock_depth = max(0, getattr(_dpor_tls, "lock_depth", 1) - 1)
+                    # Wake threads that may now be schedulable
+                    with scheduler._condition:
+                        scheduler._condition.notify_all()
+                    return
                 with engine_lock:
-                    scheduler._lock_waiters.setdefault(obj_id, set()).add(thread_id)
-                    execution.block_thread(thread_id)
-                return
-            if event == "lock_acquire":
-                with engine_lock:
-                    waiter_set = scheduler._lock_waiters.get(obj_id)
-                    if waiter_set is not None and thread_id in waiter_set:
-                        waiter_set.discard(thread_id)
-                        execution.unblock_thread(thread_id)
-                    engine.report_sync(execution, thread_id, "lock_acquire", obj_id)
-                _dpor_tls.lock_depth = getattr(_dpor_tls, "lock_depth", 0) + 1
-                return
-            if event == "lock_release":
-                with engine_lock:
-                    waiters = scheduler._lock_waiters.pop(obj_id, set())
-                    for waiter in waiters:
-                        execution.unblock_thread(waiter)
-                    engine.report_sync(execution, thread_id, "lock_release", obj_id)
-                _dpor_tls.lock_depth = max(0, getattr(_dpor_tls, "lock_depth", 1) - 1)
-                # Wake threads that may now be schedulable
-                with scheduler._condition:
-                    scheduler._condition.notify_all()
-                return
-            with engine_lock:
-                engine.report_sync(execution, thread_id, event, obj_id)
+                    engine.report_sync(execution, thread_id, event, obj_id)
+            finally:
+                _scheduler_tls._in_dpor_machinery = False
 
         set_sync_reporter(_sync_reporter)
         # DPOR-specific TLS for _process_opcode (shadow stacks, etc.)
