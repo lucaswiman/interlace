@@ -111,11 +111,9 @@ class TestRedisReproductionFailure:
         # DPOR should detect the race (property does NOT hold).
         assert not result.property_holds, "DPOR should detect lost-update on Redis counter"
 
-        # BUG: reproduction should succeed but doesn't.
-        # When defect #9 is fixed, change this to:
-        #   assert result.reproduction_successes > 0
-        assert result.reproduction_successes == 0, (
-            f"Defect #9 may be fixed! Reproduction succeeded "
-            f"{result.reproduction_successes}/{result.reproduction_attempts} times. "
-            f"Update FRONTRUN_DEFECTS.md and remove this assertion."
+        # Defect #9 fix: reproduction should now succeed with
+        # patch_redis_for_replay fallback.
+        assert result.reproduction_successes > 0, (
+            f"Reproduction should succeed but got "
+            f"{result.reproduction_successes}/{result.reproduction_attempts} times."
         )

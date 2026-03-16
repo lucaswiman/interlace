@@ -31,6 +31,11 @@ from frontrun._redis_parsing import parse_redis_access
 _suppress_tids: set[int] = set()
 _suppress_lock = _rt.lock()
 
+# When True, Redis interception forces scheduling points even without
+# the IO reporter.  Used during counterexample reproduction to enforce
+# the DPOR schedule at Redis command boundaries.  See defect #9.
+_redis_replay_mode = False
+
 
 @contextlib.contextmanager
 def _suppress_endpoint_io() -> Generator[None, None, None]:
@@ -154,9 +159,14 @@ def _intercept_execute_command(
 
     reported = _report_redis_access(cmd_name, cmd_args, client=self)
 
+    # In replay mode (defect #9 fix), force a scheduling point even
+    # without IO reporting so the replay scheduler can enforce the
+    # interleaving at Redis command boundaries.
+    needs_scheduling_point = reported or _redis_replay_mode
+
     # Force a DPOR scheduling point so the engine can interleave between
     # Redis operations.
-    if reported:
+    if needs_scheduling_point:
         dpor_ctx = _get_dpor_context()
         if dpor_ctx is not None:
             dpor_ctx[0].report_and_wait(None, dpor_ctx[1])
@@ -304,3 +314,14 @@ def unpatch_redis() -> None:
     _PATCHES.clear()
     _ORIGINAL_METHODS.clear()
     _redis_patched = False
+
+
+def set_redis_replay_mode(enabled: bool) -> None:
+    """Enable/disable Redis replay mode for counterexample reproduction.
+
+    When enabled, Redis command interception creates scheduling points
+    even without the IO reporter, so the replay scheduler can enforce
+    the DPOR schedule at Redis command boundaries.  See defect #9.
+    """
+    global _redis_replay_mode  # noqa: PLW0603
+    _redis_replay_mode = enabled
