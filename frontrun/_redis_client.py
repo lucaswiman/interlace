@@ -201,7 +201,15 @@ def _intercept_pipeline_execute(
             if _report_redis_access(cmd_name, cmd_cmd_args, client=self):
                 reported = True
 
-    if reported:
+    # In replay mode (defect #9 fix), force a scheduling point even
+    # without IO reporting so the replay scheduler can enforce the
+    # interleaving at Redis command boundaries.  Without this, pipeline
+    # commands (used by get_many/set_many in e.g. Flask-Caching @memoize)
+    # silently skip their scheduling points during replay, causing the
+    # schedule to misalign.  See defect #10.
+    needs_scheduling_point = reported or _redis_replay_mode
+
+    if needs_scheduling_point:
         dpor_ctx = _get_dpor_context()
         if dpor_ctx is not None:
             dpor_ctx[0].report_and_wait(None, dpor_ctx[1])
