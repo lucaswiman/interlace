@@ -1,35 +1,22 @@
-"""Defect #10: Stampede reproduction failure — partially resolved by defect #9 fix.
+"""Defect #10: Stampede reproduction failure for pipeline-based caching patterns.
 
-After defect #9 added ``patch_redis_for_replay``, simple GET→increment→SET
-races reproduce 10/10.  Most "stampede" patterns now also reproduce correctly.
+After defect #9 added ``patch_redis_for_replay``, simple GET→SET races
+reproduce 10/10.  However, patterns that use Redis pipelines (e.g.
+``get_many``/``set_many`` in Flask-Caching's ``@memoize``) show 0/10
+reproduction.
 
-However, one residual failure pattern remains: Flask-Caching's ``@memoize``
-decorator still shows 0/10 reproduction.  The ``@memoize`` decorator differs
-from ``@cached`` because it calls ``_memoize_version()`` which issues
-``get_many()`` / ``set_many()`` (via cachelib's Redis backend) to manage
-version keys.  This creates a data-dependent code path: on first call the
-version doesn't exist, so ``set_many`` runs (extra Redis pipeline + bytecodes);
-on subsequent calls, the version exists and ``set_many`` is skipped.
+Root cause: ``_intercept_pipeline_execute`` was missing the
+``_redis_replay_mode`` check that ``_intercept_execute_command`` has.
+During replay, the I/O reporter is ``None`` so ``_report_redis_access``
+returns False for all pipeline commands → ``reported=False`` → no
+scheduling point.  Single-command Redis operations were fine because
+``_intercept_execute_command`` falls back to ``_redis_replay_mode``.
 
-During DPOR exploration (with ``detect_io=True``), the schedule records
-scheduling points at I/O boundaries (Redis commands).  During replay (with
-``detect_io=False``), the bytecode tracer adds scheduling points at every
-opcode.  The short I/O-level schedule is consumed by the first few bytecodes
-of the library overhead (Flask app context, decorator logic, version check),
-and the ``_extend_schedule`` round-robin padding does not enforce the critical
-interleaving at the Redis command level.
-
-The @cached decorator (which does NOT have version checking) reproduces 10/10,
-confirming the issue is specific to memoize's ``_memoize_version`` pattern.
-
-This test verifies:
-1. Simple stampede patterns reproduce correctly (defect #9 fix works)
-2. The defect #10 memoize pattern still fails to reproduce (0/10)
+Fix: add ``_redis_replay_mode`` fallback to ``_intercept_pipeline_execute``.
 
 Running::
 
-    REDIS_PORT=16399 frontrun python -m pytest \\
-      frontrun-bugs/tests/test_defect10_stampede_reproduction.py -v
+    make test-integration-3.14 PYTEST_ARGS="-v -k test_defect10"
 """
 
 from __future__ import annotations
@@ -86,14 +73,10 @@ def redis_port():
 
 
 class TestStampedeReproduction:
-    """Defect #10: stampede reproduction after defect #9 fix.
-
-    Simple stampede (GET miss → compute → SET) now reproduces 10/10.
-    The memoize pattern (with version checking) still fails 0/10.
-    """
+    """Defect #10: pipeline-based stampede reproduction."""
 
     def test_simple_stampede_reproduces(self, redis_port: int) -> None:
-        """Simple GET→compute→SET stampede reproduces (defect #9 fix works)."""
+        """Control: simple GET→compute→SET stampede reproduces (defect #9 fix)."""
         port = redis_port
 
         class State:
@@ -108,7 +91,6 @@ class TestStampedeReproduction:
             cached = r.get("defect10:cache")
             if cached is None:
                 r.incr("defect10:compute_count")
-                # Some computation between GET and SET
                 result = sum(i * 3 for i in range(50))
                 r.set("defect10:cache", str(result))
             r.close()
@@ -129,12 +111,9 @@ class TestStampedeReproduction:
             reproduce_on_failure=10,
         )
 
-        # DPOR detects the stampede.
         assert not result.property_holds, (
-            "DPOR should detect cache stampede race "
-            f"(explored {result.interleavings_explored} interleavings)"
+            f"DPOR should detect cache stampede race (explored {result.interleavings_explored} interleavings)"
         )
-        # Defect #9 fix: reproduction now succeeds.
         assert result.reproduction_successes > 0, (
             f"Simple stampede should reproduce (defect #9 fix) but got "
             f"{result.reproduction_successes}/{result.reproduction_attempts}"
@@ -178,12 +157,82 @@ class TestStampedeReproduction:
             f"{result.reproduction_successes}/{result.reproduction_attempts}"
         )
 
-    def test_memoize_stampede_fails_to_reproduce(self, redis_port: int) -> None:
-        """Defect #10 residual: Flask-Caching @memoize stampede fails 0/10.
+    def test_pipeline_stampede_reproduces(self, redis_port: int) -> None:
+        """Defect #10 (minimal): pipeline-based cache stampede must reproduce.
 
-        The @memoize decorator's _memoize_version() issues get_many/set_many
-        via cachelib, creating a data-dependent code path that causes the
-        replay schedule to misalign with the actual bytecode execution.
+        This is the minimal reproduction of defect #10.  The stampede uses
+        Redis pipelines (``pipeline().get().set().execute()``) for the
+        cache check, mimicking what cachelib's ``get_many``/``set_many``
+        do under Flask-Caching's ``@memoize``.
+
+        Before the fix, ``_intercept_pipeline_execute`` was missing the
+        ``_redis_replay_mode`` check, so pipeline commands didn't create
+        scheduling points during replay → 0/10 reproduction.
+        """
+        port = redis_port
+
+        class State:
+            def __init__(self) -> None:
+                r = redis_lib.Redis(port=port, decode_responses=True)
+                r.delete("defect10:pipe_version", "defect10:pipe_cache", "defect10:pipe_count")
+                r.set("defect10:pipe_count", "0")
+                r.close()
+
+        def pipeline_stampede(state: State) -> None:
+            r = redis_lib.Redis(port=port, decode_responses=True)
+
+            # Version check via pipeline (like Flask-Caching's _memoize_version
+            # which uses get_many/set_many via cachelib's MGET + pipeline SET)
+            pipe = r.pipeline()
+            pipe.get("defect10:pipe_version")
+            pipe.get("defect10:pipe_cache")
+            results = pipe.execute()
+
+            version = results[0]
+            cached = results[1]
+
+            if version is None:
+                # First call: set version via pipeline
+                pipe = r.pipeline()
+                pipe.set("defect10:pipe_version", "1")
+                pipe.execute()
+
+            if cached is None:
+                # Cache miss: compute and store
+                r.incr("defect10:pipe_count")
+                r.set("defect10:pipe_cache", "computed")
+
+            r.close()
+
+        def invariant(state: State) -> bool:
+            r = redis_lib.Redis(port=port, decode_responses=True)
+            count = int(r.get("defect10:pipe_count"))  # type: ignore[arg-type]
+            r.close()
+            return count <= 1
+
+        result = explore_dpor(
+            setup=State,
+            threads=[pipeline_stampede, pipeline_stampede],
+            invariant=invariant,
+            detect_io=True,
+            max_executions=50,
+            deadlock_timeout=15.0,
+            reproduce_on_failure=10,
+        )
+
+        assert not result.property_holds, (
+            f"DPOR should detect pipeline-based stampede (explored {result.interleavings_explored} interleavings)"
+        )
+        assert result.reproduction_successes > 0, (
+            f"Pipeline stampede should reproduce after defect #10 fix but got "
+            f"{result.reproduction_successes}/{result.reproduction_attempts}"
+        )
+
+    def test_memoize_stampede_reproduces(self, redis_port: int) -> None:
+        """Defect #10 (original): Flask-Caching @memoize stampede reproduces.
+
+        This tests the original pattern reported in defect #10.  Requires
+        flask-caching; skipped if not installed.
         """
         port = redis_port
 
@@ -218,6 +267,7 @@ class TestStampedeReproduction:
             def fn(s: _State) -> None:
                 with s.app.app_context():
                     s.expensive_compute(42)
+
             return fn
 
         def _inv(s: _State) -> bool:
@@ -236,15 +286,10 @@ class TestStampedeReproduction:
             reproduce_on_failure=10,
         )
 
-        # DPOR should detect the stampede.
         assert not result.property_holds, (
-            "DPOR should detect memoize stampede "
-            f"(explored {result.interleavings_explored} interleavings)"
+            f"DPOR should detect memoize stampede (explored {result.interleavings_explored} interleavings)"
         )
-
-        # Defect #10: reproduction fails for the memoize pattern.
-        assert result.reproduction_successes == 0, (
-            f"Expected 0/10 reproduction (defect #10) but got "
-            f"{result.reproduction_successes}/{result.reproduction_attempts}. "
-            f"If this passes, defect #10 may be fixed!"
+        assert result.reproduction_successes > 0, (
+            f"Memoize stampede should reproduce after defect #10 fix but got "
+            f"{result.reproduction_successes}/{result.reproduction_attempts}"
         )
