@@ -1109,8 +1109,11 @@ class TestDeadlockAsInvariantViolation:
             setup=State,
             threads=[make_philosopher(i) for i in range(num_philosophers)],
             invariant=lambda s: True,
-            # Note: high executions / preemption bounds required since finding the 4-cycle takes many more interleavings that most simple races.
-            max_executions=2000,
+            # Note: high executions / preemption bounds required since finding
+            # the 4-cycle takes many more interleavings than most simple races.
+            # Lock boundary backtracking (for multi-lock race detection) adds
+            # more exploration paths, so the limit needs to be generous.
+            max_executions=50000,
             preemption_bound=2,
             detect_io=False,
             deadlock_timeout=2.0,

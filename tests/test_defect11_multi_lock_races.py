@@ -1,16 +1,11 @@
-"""Defect #11: DPOR cannot detect races between two separate lock objects.
+"""Defect #11 (FIXED): DPOR detects races between two separate lock objects.
 
 Problem statement
 -----------------
 
-DPOR detects data races by finding **conflicts** — two threads accessing the
-*same* shared object where at least one access is a write.  It then explores
-alternate interleavings around those conflict points.  This works perfectly
-for single-object races (lost updates, TOCTOU on one variable, etc.).
-
-However, a common real-world race pattern involves a **compound operation**
-that updates two separately-locked values in sequence, where a concurrent
-reader observes the values *between* the two updates and sees an inconsistent
+A common real-world race pattern involves a **compound operation** that
+updates two separately-locked values in sequence, where a concurrent reader
+observes the values *between* the two updates and sees an inconsistent
 snapshot:
 
     # Thread A (writer — "observe"):
@@ -26,53 +21,27 @@ snapshot:
     with sum_lock:                   # Lock 2
         s = sum._value               # but sum not yet incremented → c > s
 
-This is the pattern used by ``prometheus_client.Summary.observe()``.  A
-stress test (100k iterations, 2 threads) confirms ``count > sum`` is
-observable within ~1000 iterations.
+This is the pattern used by ``prometheus_client.Summary.observe()``.
 
-Why DPOR misses this
---------------------
+How DPOR detects this
+---------------------
 
-DPOR sees the following per-object conflicts:
+The fix has two parts:
 
-  - ``count._value``: Thread A writes, Thread B reads → conflict ✓
-  - ``sum._value``:   Thread A writes, Thread B reads → conflict ✓
+1. **Lock-based happens-before fixed**: Lock release now stores the
+   releasing thread's ``dpor_vv`` (previously stored ``causality``, which
+   was never incremented and always zero).  This ensures data accesses
+   inside the same critical section are correctly ordered by HB.
 
-Both objects have valid conflicts.  DPOR explores interleavings that
-reorder Thread A's access to ``count._value`` relative to Thread B's
-access to ``count._value``, and similarly for ``sum._value``.
+2. **Lock operations create backtrack points**: Lock acquire is reported
+   as a Write I/O access to a virtual lock object, using ``io_vv`` (which
+   doesn't include lock-based HB) and first-access semantics.  This makes
+   lock acquires on the same lock by different threads appear concurrent,
+   creating backtrack points at lock boundaries.
 
-But the **cross-object invariant** (``count <= sum`` after both threads
-finish) requires DPOR to reason about the *gap between the release of
-Lock 1 and the acquisition of Lock 2* in Thread A.  Thread B must
-interleave in this exact gap — *after* Thread A releases ``count_lock``
-but *before* Thread A acquires ``sum_lock``.
-
-DPOR's partial-order reduction explores interleavings at conflict points
-on *individual objects*.  The gap between two lock releases on *different*
-objects is not a conflict point for either object individually, so DPOR
-never inserts a scheduling decision there.  The race is invisible to
-single-object conflict analysis.
-
-What would be needed to fix this
---------------------------------
-
-Detecting multi-lock atomicity violations requires one of:
-
-1. **Lockset analysis** layered on top of DPOR — track which locks each
-   thread holds at each scheduling point and detect "lock-set gaps" where
-   a compound operation releases one lock before acquiring another.
-
-2. **Atomicity inference** — recognize that ``count`` and ``sum`` are
-   semantically related (e.g., they appear in the same invariant) and
-   treat accesses to both as a single compound conflict.
-
-3. **Exhaustive preemption** at lock boundaries — force a scheduling point
-   at every lock release, not just at conflict points.  This is sound but
-   exponentially expensive (it defeats the purpose of partial-order
-   reduction).
-
-All three are fundamental extensions to the DPOR algorithm, not code fixes.
+Together, these changes let DPOR explore the ordering where Thread B runs
+its entire count_lock + sum_lock sequence *between* Thread A's two
+critical sections — finding the count=1, sum=0 invariant violation.
 
 Running
 -------
@@ -85,29 +54,18 @@ from __future__ import annotations
 
 import threading
 
-import pytest
-
 from frontrun.dpor import explore_dpor
 
 
 class TestMultiLockRaces:
-    """Defect #11: DPOR misses races that span two separately-locked objects.
+    """Defect #11 (FIXED): DPOR detects races that span two separately-locked objects.
 
-    These tests demonstrate real race conditions (confirmed by stress testing)
-    that DPOR's single-object conflict model cannot detect.  They are marked
-    ``xfail`` because this is a known fundamental limitation.
+    Lock acquire is now reported as an I/O access, creating backtrack points
+    at lock boundaries.  Combined with fixed lock-based happens-before, DPOR
+    explores the interleaving where a reader runs between a writer's two
+    critical sections.
     """
 
-    @pytest.mark.xfail(
-        reason=(
-            "Defect #11: DPOR's single-object conflict model cannot detect "
-            "races in compound operations that span two separate locks.  The "
-            "race window exists between the release of lock 1 and the "
-            "acquisition of lock 2, which is not a conflict point for either "
-            "object individually."
-        ),
-        strict=True,
-    )
     def test_prometheus_summary_observe_pattern(self) -> None:
         """Two separately-locked counters updated non-atomically.
 
@@ -175,20 +133,11 @@ class TestMultiLockRaces:
 
         assert not result.property_holds, (
             f"DPOR should detect the multi-lock race but missed it.  "
-            f"Explored {result.interleavings_explored} interleavings.  "
+            f"Explored {result.num_explored} interleavings.  "
             f"The race exists: a reader can see count=1, total=0 when it "
             f"interleaves between the writer's two locked sections."
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "Defect #11: DPOR's single-object conflict model cannot detect "
-            "races in compound operations that update two objects under "
-            "separate locks.  Both objects have valid conflicts individually, "
-            "but the cross-object inconsistency window is invisible to DPOR."
-        ),
-        strict=True,
-    )
     def test_transfer_between_two_locked_accounts(self) -> None:
         """Transfer between two separately-locked accounts is non-atomic.
 
@@ -240,7 +189,7 @@ class TestMultiLockRaces:
 
         assert not result.property_holds, (
             f"DPOR should detect the transfer atomicity violation but missed "
-            f"it.  Explored {result.interleavings_explored} interleavings.  "
+            f"it.  Explored {result.num_explored} interleavings.  "
             f"The auditor can observe balance_a=50, balance_b=100 (total=150) "
             f"when it interleaves between the debit and credit."
         )

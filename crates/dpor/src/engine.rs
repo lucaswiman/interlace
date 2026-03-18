@@ -66,6 +66,11 @@ pub struct DporEngine {
 }
 
 impl DporEngine {
+    /// XOR mask to derive virtual object IDs for lock acquire conflict tracking.
+    const LOCK_OBJECT_XOR: u64 = 0x4C4F_434B_4C4F_434B; // "LOCKLOCK"
+    /// XOR mask for lock release objects (distinct from acquire).
+    const LOCK_RELEASE_XOR: u64 = 0x524C_5345_524C_5345; // "RLSERLSE"
+
     pub fn new(
         num_threads: usize,
         preemption_bound: Option<u32>,
@@ -200,10 +205,46 @@ impl DporEngine {
                     execution.threads[thread_id].causality.join(&release_vv);
                     execution.threads[thread_id].dpor_vv.join(&release_vv);
                 }
+                // Report lock acquire as an I/O access (Write to virtual lock
+                // object).  This uses io_vv (no lock-based HB) so that lock
+                // operations on the same lock by different threads always
+                // appear concurrent — creating backtrack points at lock
+                // boundaries.  First-access semantics ensure the backtrack
+                // targets the earliest lock position, which is critical for
+                // multi-lock race detection: it lets DPOR explore orderings
+                // where thread B runs between thread A's two critical sections
+                // on different locks.
+                let lock_obj_id = lock_id ^ Self::LOCK_OBJECT_XOR;
+                self.process_io_access(
+                    execution,
+                    thread_id,
+                    lock_obj_id,
+                    AccessKind::Write,
+                );
             }
             SyncEvent::LockRelease { lock_id } => {
-                let vv = execution.threads[thread_id].causality.clone();
+                // Store dpor_vv (not causality) so that lock-based
+                // happens-before edges carry meaningful scheduling
+                // information.  The acquiring thread's dpor_vv will be
+                // joined with this, ordering data accesses inside the
+                // same critical section correctly.
+                let vv = execution.threads[thread_id].dpor_vv.clone();
                 execution.lock_release_vv.insert(lock_id, vv);
+                // Report lock release as an I/O access to a SEPARATE
+                // virtual object (distinct from the acquire object).
+                // This creates backtrack points at lock release positions,
+                // which is critical for multi-lock races: the "gap"
+                // between two critical sections starts at the release.
+                // Using a different XOR constant ensures the release
+                // object doesn't alias with the acquire object, so
+                // first-access semantics track them independently.
+                let lock_rel_obj_id = lock_id ^ Self::LOCK_RELEASE_XOR;
+                self.process_io_access(
+                    execution,
+                    thread_id,
+                    lock_rel_obj_id,
+                    AccessKind::Write,
+                );
             }
             SyncEvent::ThreadJoin { joined_thread } => {
                 let joined_causality = execution.threads[joined_thread].causality.clone();
