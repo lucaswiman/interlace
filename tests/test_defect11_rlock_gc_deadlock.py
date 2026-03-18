@@ -36,7 +36,7 @@ class TestRLockGCReentrancyGuard:
         """
         rlock = CooperativeRLock()
         released_ok = False
-        reporter_called = False
+        release_reporter_called = False
 
         class FakeScheduler:
             _finished = False
@@ -55,12 +55,14 @@ class TestRLockGCReentrancyGuard:
             set_context(scheduler, 0)  # type: ignore[arg-type]
 
             def reporter(event: str, obj_id: int) -> None:
-                nonlocal reporter_called
-                reporter_called = True
+                nonlocal release_reporter_called
+                if event == "lock_release":
+                    release_reporter_called = True
 
             set_sync_reporter(reporter)
 
-            # Acquire the RLock normally
+            # Acquire the RLock normally (this calls _report("lock_acquire"),
+            # which is expected and fine).
             rlock.acquire()
 
             # Simulate being inside DPOR machinery (as if _report_and_wait
@@ -79,10 +81,10 @@ class TestRLockGCReentrancyGuard:
             uninstall_wait_for_graph()
 
         assert released_ok, "RLock release deadlocked inside DPOR machinery"
-        # The guard should skip _report() entirely
-        assert not reporter_called, (
+        # The guard should skip _report("lock_release") entirely
+        assert not release_reporter_called, (
             "CooperativeRLock.release() should skip _report() when _in_dpor_machinery() "
-            "is True, but reporter was called"
+            "is True, but lock_release reporter was called"
         )
 
     def test_rlock_release_normal_reports(self) -> None:
