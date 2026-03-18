@@ -375,6 +375,11 @@ class CooperativeRLock:
             owner_tid = self._owner_thread_id
             self._owner = None
             self._owner_thread_id = None
+            # Reentrancy guard: skip scheduler interaction during GC __del__
+            # (same guard as CooperativeLock.release — see defect #7 / #11).
+            if _in_dpor_machinery():
+                self._lock.release()
+                return
             self._report("lock_release")
             self._lock.release()
 

@@ -57,7 +57,7 @@ class TestSelectForUpdateTodo:
         sql = "SELECT * FROM inventory WHERE product_id IN (1, 2, 3) FOR UPDATE SKIP LOCKED"
         r, w, lock_intent, *_ = parse_sql_access(sql)
         assert r == {"inventory"} and w == set()
-        assert lock_intent is LockIntent.UPDATE
+        assert lock_intent is LockIntent.UPDATE_SKIP_LOCKED
 
 
 # =============================================================================
