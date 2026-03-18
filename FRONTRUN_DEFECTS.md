@@ -109,7 +109,7 @@ Redis command boundaries, not just bytecode boundaries.
 
 ## Defect #10: Redis DPOR counterexamples still fail to reproduce (0/10) for memoize-style version-check patterns
 
-**Status:** Partially resolved — most originally affected patterns now reproduce 10/10 after defect #9 fix
+**Status:** FIXED (March 2026) — `_intercept_pipeline_execute` now checks `_redis_replay_mode`
 
 **Symptom:** After defect #9's `patch_redis_for_replay` fix, most Redis race
 patterns now reproduce correctly. The original defect #10 report listed many
@@ -410,7 +410,7 @@ occur in real PostgreSQL.
 
 ## Defect #11: GC destructor deadlock with Redis connection pool (CooperativeRLock missing reentrancy guard)
 
-**Status:** Open
+**Status:** FIXED (March 2026) — `_in_dpor_machinery()` guard added to `CooperativeRLock.release()`
 
 **Symptom:** Tests that create `redis.Redis` objects stored in `_State` (and thus
 GC'd between DPOR runs) time out after 120s with a deadlock in frontrun's
