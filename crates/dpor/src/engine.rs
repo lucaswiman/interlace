@@ -426,6 +426,151 @@ mod tests {
         assert_eq!(exec_count, 6);
     }
 
+    /// Model of the multi-lock race (defect #11):
+    ///
+    /// Thread A: lock(cL), write(count), unlock(cL), lock(sL), write(sum), unlock(sL)
+    /// Thread B: lock(cL), read(count), unlock(cL), lock(sL), read(sum), unlock(sL)
+    ///
+    /// The bug: B can interleave between A's two critical sections, seeing
+    /// count=1 but sum=0.  DPOR must explore the ordering where A goes first
+    /// on count_lock but B goes first on sum_lock.
+    #[test]
+    fn test_multi_lock_race_detected() {
+        let mut engine = DporEngine::new(2, None, 100_000, None);
+
+        // Object IDs
+        const COUNT: u64 = 1;
+        const SUM: u64 = 2;
+        const CL: u64 = 100;  // count_lock
+        const SL: u64 = 200;  // sum_lock
+
+        // Thread operations: (object_id, access_kind, is_lock_acquire, is_lock_release, lock_id)
+        // We model lock acquire/release as sync events + io accesses.
+        #[derive(Clone)]
+        enum Op {
+            LockAcquire(u64),
+            Access(u64, AccessKind),
+            LockRelease(u64),
+        }
+
+        let thread_a = vec![
+            Op::LockAcquire(CL),
+            Op::Access(COUNT, AccessKind::Write),
+            Op::LockRelease(CL),
+            Op::LockAcquire(SL),
+            Op::Access(SUM, AccessKind::Write),
+            Op::LockRelease(SL),
+        ];
+        let thread_b = vec![
+            Op::LockAcquire(CL),
+            Op::Access(COUNT, AccessKind::Read),
+            Op::LockRelease(CL),
+            Op::LockAcquire(SL),
+            Op::Access(SUM, AccessKind::Read),
+            Op::LockRelease(SL),
+        ];
+        let thread_ops = [thread_a, thread_b];
+
+        let mut found_bug = false;
+        let mut exec_count = 0;
+
+        loop {
+            let mut execution = engine.begin_execution();
+            let mut count = 0i64;
+            let mut sum = 0i64;
+            let mut observed_count: Option<i64> = None;
+            let mut observed_sum: Option<i64> = None;
+            let mut pcs = [0usize; 2];
+            let mut locks_held: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+
+            loop {
+                // Mark finished threads
+                for i in 0..2 {
+                    if pcs[i] >= thread_ops[i].len() {
+                        execution.finish_thread(i);
+                    }
+                }
+                if execution.runnable_threads().is_empty() {
+                    break;
+                }
+                let chosen = match engine.schedule(&mut execution) {
+                    Some(t) => t,
+                    None => break,
+                };
+                let pc = pcs[chosen];
+                if pc >= thread_ops[chosen].len() {
+                    break;
+                }
+
+                match &thread_ops[chosen][pc] {
+                    Op::LockAcquire(lock_id) => {
+                        if let Some(&holder) = locks_held.get(lock_id) {
+                            if holder != chosen {
+                                // Lock is held by other thread — block
+                                execution.block_thread(chosen);
+                                continue; // don't advance PC
+                            }
+                        }
+                        locks_held.insert(*lock_id, chosen);
+                        engine.process_sync(
+                            &mut execution, chosen,
+                            SyncEvent::LockAcquire { lock_id: *lock_id },
+                        );
+                    }
+                    Op::Access(obj_id, kind) => {
+                        engine.process_access(&mut execution, chosen, *obj_id, *kind);
+                        // Apply state changes
+                        match (chosen, *obj_id, *kind) {
+                            (0, 1, AccessKind::Write) => count = 1,
+                            (0, 2, AccessKind::Write) => sum = 10,
+                            (1, 1, AccessKind::Read) => observed_count = Some(count),
+                            (1, 2, AccessKind::Read) => observed_sum = Some(sum),
+                            _ => {}
+                        }
+                    }
+                    Op::LockRelease(lock_id) => {
+                        locks_held.remove(lock_id);
+                        engine.process_sync(
+                            &mut execution, chosen,
+                            SyncEvent::LockRelease { lock_id: *lock_id },
+                        );
+                        // Unblock any thread waiting for this lock
+                        for tid in 0..2 {
+                            if tid != chosen && execution.threads[tid].blocked {
+                                if pcs[tid] < thread_ops[tid].len() {
+                                    if let Op::LockAcquire(lid) = &thread_ops[tid][pcs[tid]] {
+                                        if lid == lock_id {
+                                            execution.unblock_thread(tid);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                pcs[chosen] += 1;
+            }
+
+            // Check invariant: if B observed count, it should be consistent
+            if let (Some(c), Some(s)) = (observed_count, observed_sum) {
+                if c > 0 && s != c * 10 {
+                    found_bug = true;
+                }
+            }
+
+            exec_count += 1;
+            if !engine.next_execution() {
+                break;
+            }
+        }
+
+        assert!(
+            found_bug,
+            "DPOR should detect the multi-lock race (count=1, sum=0 interleaving). \
+             Explored {exec_count} executions without finding it."
+        );
+    }
+
     #[test]
     fn test_three_threads_read_write_conflict() {
         // Thread A reads, Thread B reads, Thread C writes — all same object.
