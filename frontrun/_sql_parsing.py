@@ -22,6 +22,7 @@ class LockIntent(enum.Enum):
 
     UPDATE = "UPDATE"
     SHARE = "SHARE"
+    UPDATE_SKIP_LOCKED = "UPDATE_SKIP_LOCKED"
 
 
 class TxOp(enum.Enum):
@@ -83,6 +84,7 @@ _RE_DELETE = re.compile(rf"\bDELETE{_WS}FROM{_WS}({_IDENT})", re.I)
 _RE_FROM = re.compile(rf"\bFROM{_WS}({_IDENT})", re.I)
 _RE_JOIN = re.compile(rf"\bJOIN{_WS}({_IDENT})", re.I)
 _RE_LITERAL = re.compile(r"'[^']*'")
+_RE_FOR_UPDATE_SKIP_LOCKED = re.compile(r"\bFOR" + _WS + r"UPDATE" + _WS + r"SKIP" + _WS + r"LOCKED\b", re.I)
 _RE_FOR_UPDATE = re.compile(r"\bFOR" + _WS + r"UPDATE\b", re.I)
 _RE_FOR_SHARE = re.compile(r"\bFOR" + _WS + r"SHARE\b", re.I)
 _RE_LOCK_TABLE = re.compile(rf"\bLOCK{_WS}TABLE{_WS}({_IDENT})", re.I)
@@ -195,7 +197,9 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
         write.add(tbl)
         return SqlAccessResult(read, write, lock_intent, None, None)
 
-    if _RE_FOR_UPDATE.search(no_literals):
+    if _RE_FOR_UPDATE_SKIP_LOCKED.search(no_literals):
+        lock_intent = LockIntent.UPDATE_SKIP_LOCKED
+    elif _RE_FOR_UPDATE.search(no_literals):
         lock_intent = LockIntent.UPDATE
     elif _RE_FOR_SHARE.search(no_literals):
         lock_intent = LockIntent.SHARE
@@ -275,9 +279,11 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
 
 
 def _merge_lock_intent(a: LockIntent | None, b: LockIntent | None) -> LockIntent | None:
-    """Merge two lock intents, preferring UPDATE over SHARE."""
+    """Merge two lock intents, preferring UPDATE > UPDATE_SKIP_LOCKED > SHARE."""
     if a is LockIntent.UPDATE or b is LockIntent.UPDATE:
         return LockIntent.UPDATE
+    if a is LockIntent.UPDATE_SKIP_LOCKED or b is LockIntent.UPDATE_SKIP_LOCKED:
+        return LockIntent.UPDATE_SKIP_LOCKED
     if a is LockIntent.SHARE or b is LockIntent.SHARE:
         return LockIntent.SHARE
     return None
@@ -346,24 +352,36 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
         elif isinstance(ast, exp.Rollback):
             tx_op = TxOp.ROLLBACK
         else:
-            # Extract lock intent from SELECT
+            # Extract lock intent from SELECT (including inside CTEs)
+            def _extract_lock_intent_from_select(select_node: exp.Expression) -> LockIntent | None:
+                """Extract lock intent from a SELECT, checking FOR UPDATE SKIP LOCKED."""
+                lock_node = select_node.find(exp.Lock)
+                if not lock_node:
+                    return None
+                if lock_node.args.get("update"):
+                    # wait=False means SKIP LOCKED in sqlglot
+                    if lock_node.args.get("wait") is False:
+                        return LockIntent.UPDATE_SKIP_LOCKED
+                    return LockIntent.UPDATE
+                # Not update → share lock
+                intent = LockIntent.SHARE
+                kind_val = lock_node.args.get("kind")
+                if kind_val:
+                    kind_upper = str(kind_val).upper()
+                    if "UPDATE" in kind_upper:
+                        intent = LockIntent.UPDATE
+                    elif "SHARE" in kind_upper:
+                        intent = LockIntent.SHARE
+                return intent
+
             if isinstance(ast, exp.Select):
-                lock = ast.find(exp.Lock)
-                if lock:
-                    if lock.args.get("update"):
-                        lock_intent = LockIntent.UPDATE
-                    else:
-                        # sqlglot might not have "share" key, but if it's a Lock and not update,
-                        # it's usually a share lock in dialects that support it.
-                        lock_intent = LockIntent.SHARE
-                        # Extra check for some versions/dialects
-                        kind = lock.args.get("kind")
-                        if kind:
-                            kind_upper = str(kind).upper()
-                            if "UPDATE" in kind_upper:
-                                lock_intent = LockIntent.UPDATE
-                            elif "SHARE" in kind_upper:
-                                lock_intent = LockIntent.SHARE
+                lock_intent = _extract_lock_intent_from_select(ast)
+
+            # Also extract lock intent from CTEs (e.g. WITH cte AS (SELECT ... FOR UPDATE SKIP LOCKED))
+            for cte_node in ast.find_all(exp.CTE):
+                cte_intent = _extract_lock_intent_from_select(cte_node.this)
+                if cte_intent is not None:
+                    lock_intent = _merge_lock_intent(lock_intent, cte_intent)
 
             # Advisory locks (PostgreSQL, MySQL)
             for call in ast.find_all(exp.Anonymous):

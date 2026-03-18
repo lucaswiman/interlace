@@ -97,44 +97,19 @@ class TestSkipLockedParsingGap:
     (skip-locked) from unsafe (blocking) row-level locking patterns.
     """
 
-    @pytest.mark.xfail(
-        reason=(
-            "Defect #13: parse_sql_access does not distinguish FOR UPDATE "
-            "SKIP LOCKED from FOR UPDATE — both return LockIntent.UPDATE.  "
-            "A future fix would need a new LockIntent variant (e.g., "
-            "LockIntent.UPDATE_SKIP_LOCKED) so the conflict model can "
-            "recognize that SKIP LOCKED accesses on the same table do not "
-            "actually conflict at the row level."
-        ),
-        strict=True,
-    )
     def test_skip_locked_produces_distinct_lock_intent(self) -> None:
         """parse_sql_access should distinguish SKIP LOCKED from plain FOR UPDATE."""
         regular = parse_sql_access("SELECT id FROM queue FOR UPDATE")
         skip_locked = parse_sql_access("SELECT id FROM queue FOR UPDATE SKIP LOCKED")
 
-        # Both produce LockIntent.UPDATE today — the SKIP LOCKED is lost.
         assert regular.lock_intent == LockIntent.UPDATE
-        assert skip_locked.lock_intent == LockIntent.UPDATE
+        assert skip_locked.lock_intent == LockIntent.UPDATE_SKIP_LOCKED
 
-        # The fix would make skip_locked produce a different intent so the
-        # conflict model can suppress false backtrack points.
         assert skip_locked.lock_intent != regular.lock_intent, (
             "SKIP LOCKED should produce a distinct LockIntent so DPOR's "
             "conflict model knows these accesses cannot conflict at the row level"
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "Defect #13: CTE with FOR UPDATE SKIP LOCKED is parsed via the "
-            "sqlglot fallback which loses lock_intent entirely (returns None). "
-            "The conflict model sees a read+write on 'queue' with no lock "
-            "intent, so it cannot distinguish this safe pattern from an "
-            "unprotected read-then-write.  A fix would need to propagate "
-            "lock_intent through CTE parsing."
-        ),
-        strict=True,
-    )
     def test_cte_skip_locked_preserves_lock_intent(self) -> None:
         """CTE + FOR UPDATE SKIP LOCKED should preserve lock_intent."""
         result = parse_sql_access("""
@@ -150,17 +125,11 @@ class TestSkipLockedParsingGap:
             RETURNING queue.msg_id
         """)
 
-        # Today: the sqlglot parser path loses lock_intent entirely for
-        # CTEs — it returns None instead of LockIntent.UPDATE.
-        # The CTE alias 'cte' also appears in read_tables (harmless noise).
         assert "queue" in result.read_tables
         assert "queue" in result.write_tables
 
-        # The fix should at minimum preserve that a FOR UPDATE lock is
-        # present in the CTE.  Ideally it would distinguish SKIP LOCKED.
-        assert result.lock_intent is not None, (
-            "CTE with FOR UPDATE SKIP LOCKED should preserve lock_intent "
-            "(at minimum LockIntent.UPDATE), but sqlglot path returns None"
+        assert result.lock_intent == LockIntent.UPDATE_SKIP_LOCKED, (
+            "CTE with FOR UPDATE SKIP LOCKED should preserve lock_intent as UPDATE_SKIP_LOCKED"
         )
 
     def test_nowait_also_not_distinguished(self) -> None:
