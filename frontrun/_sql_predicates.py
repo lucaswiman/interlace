@@ -22,6 +22,7 @@ rather than an SMT solver like z3 because:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -99,7 +100,7 @@ def _extract_from_ast(ast: object) -> list[Predicate]:
     predicate_expr = where.this
 
     # Flatten ANDs into individual conjuncts
-    conjuncts: list[exp.Expression]
+    conjuncts: Sequence[exp.Expr]
     if isinstance(predicate_expr, exp.And):
         conjuncts = list(predicate_expr.flatten())
     else:
