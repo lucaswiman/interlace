@@ -54,11 +54,11 @@ if __name__ == "__main__":
     import sys
 
     label = sys.argv[1] if len(sys.argv) > 1 else "benchmark"
+    num_runs = int(sys.argv[2]) if len(sys.argv) > 2 else 1
     print(f"=== {label} ===")
 
-    # Run 3 times and take the median
     results = []
-    for i in range(3):
+    for i in range(num_runs):
         r = bench_dining_philosophers_four()
         results.append(r)
         print(f"  Run {i + 1}: {r['elapsed_seconds']}s, {r['num_explored']} executions, deadlock={r['found_deadlock']}")
