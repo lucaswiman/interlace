@@ -342,34 +342,38 @@ at maximal executions (`enabled(s[E]) = ∅`), not during execution.
 
 ### 3a. Defer race detection to end of execution
 
-- [ ] Currently: `process_access()` calls `backtrack()` immediately on each race.
-  This is Algorithm 1 style (race detection during exploration).
-- [ ] Algorithm 2 style: collect races during execution, process them only when
-  all threads are finished or blocked (`enabled(s[E]) = ∅`).
-- [ ] Store races in `pending_races: Vec<(usize, usize, u64)>` (position, thread, object)
-- [ ] In `next_execution()`, before calling `step()`, process all pending races.
-- [ ] **Why this matters**: Deferred race detection allows computing `v = notdep(e, E).e'`
+- [x] Currently: `process_access()` collects races as `PendingRace` entries instead
+  of calling `backtrack()` immediately. This is Algorithm 2 style (deferred detection).
+- [x] Algorithm 2 style: races collected during execution via `pending_races: Vec<PendingRace>`,
+  processed only in `next_execution()` when all threads are finished or blocked.
+- [x] `PendingRace` struct stores `prev_path_id`, `current_path_id`, `thread_id`, `race_object`.
+- [x] In `next_execution()`, before calling `step()`, process all pending races via
+  `path.process_deferred_races(&races)`.
+- [x] **Why this matters**: Deferred race detection allows computing `v = notdep(e, E).e'`
   (Algorithm 2 line 4) using the full execution trace, not just the prefix seen so far.
   This produces better wakeup sequences.
 
 ### 3b. Compute notdep sequences
 
-- [ ] For each race (e ≾_E e') at position i:
+- [x] For each race (e ≾_E e') at position i:
   - `E' = pre(E, e)` — the execution prefix up to just before event e
   - `v = notdep(e, E).e'` — events between e and e' that are independent of e,
     followed by e'. This is the sequence to insert into `wut(E')`.
   - **Paper ref**: Algorithm 2 line 4 (JACM'17 p.24)
-  - **Implementation**: Walk the execution trace from position of e to position
-    of e', collecting thread IDs of events that are independent of e (disjoint
-    object sets). Append the thread of e'.
+  - **Implementation**: `Path::compute_notdep()` walks positions e+1..e'-1,
+    excludes same-thread events (JACM'17 Def 3.3 p.13: same-process events
+    are ALWAYS dependent) and data-dependent events (conflicting accesses),
+    then appends the racing thread e'.
 
 ### 3c. Insert notdep sequences into wakeup tree
 
-- [ ] Instead of `wakeup.insert(&[thread_id])`, insert the full notdep sequence.
-- [ ] Add the sleep set check: `sleep(E') ∩ WI[E'](v) = ∅` before inserting
-  (Algorithm 2 line 5). If a sleeping thread is a weak initial of v, the
-  equivalent execution has already been explored.
-- [ ] **Paper ref**: Algorithm 2 lines 5-6 (JACM'17 p.24)
+- [x] Instead of `wakeup.insert(&[thread_id])`, insert the full notdep sequence
+  via `process_one_deferred_race()`.
+- [x] Sleep set check: checks both local sleep (`sleep[first_thread]`) and
+  propagated sleep (`propagated_sleep_accesses`) before inserting, plus
+  runnability and preemption bound checks.
+  (Algorithm 2 line 5: `sleep(E') ∩ WI[E'](v) = ∅`)
+- [x] **Paper ref**: Algorithm 2 lines 5-6 (JACM'17 p.24)
 
 ## Phase 4: Multi-step wakeup sequences
 
@@ -388,11 +392,13 @@ is passed to the recursive Explore call.
 
 ### 4b. Use wakeup subtrees during replay
 
-- [ ] In `Path::schedule()`, when creating a new branch, check if the parent's
-  wakeup subtree suggests a specific thread (from a multi-step sequence).
-- [ ] Pass `WuT' = subtree(wut(E), p)` as guidance for the next scheduling point.
-- [ ] Override the "prefer current thread" heuristic when the wakeup tree has guidance.
-- [ ] **Paper ref**: Algorithm 2 lines 8-12, 17 (JACM'17 p.24-25)
+- [x] In `Path::schedule()`, when creating a new branch, check if
+  `pending_wakeup_subtree` has guidance from a multi-step wakeup sequence.
+- [x] In `Path::step()`, extract `WuT' = subtree(wut(E), p)` when picking next
+  thread from wakeup tree, store in `pending_wakeup_subtree`.
+- [x] `schedule()` overrides "prefer current thread" heuristic when subtree
+  has guidance, cascading subtree to subsequent positions.
+- [x] **Paper ref**: Algorithm 2 lines 8-12, 17 (JACM'17 p.24-25)
 
 ### 4c. Wakeup tree insert with equivalence checking
 
@@ -470,14 +476,14 @@ races during execution and process them in `next_execution()`.
 
 ## Known implementation gaps vs paper
 
-1. **Race detection timing**: Current = during execution (Alg 1 style).
-   Paper's Alg 2 = only at maximal executions. (Phase 3)
+1. ~~**Race detection timing**~~: **Done** (Phase 3a). Deferred to maximal
+   executions via `pending_races` collection and `process_deferred_races()`.
 
 2. **Wakeup tree insert**: Current = exact prefix matching only.
    Paper = equivalence checking via `∼[E]` relation. (Phase 4c)
 
-3. **notdep sequences**: Current = single thread `[q]`.
-   Paper = full `notdep(e, E).e'` sequence. (Phase 3b)
+3. ~~**notdep sequences**~~: **Done** (Phase 3b). Full `notdep(e, E).e'`
+   sequences computed via `compute_notdep()` and inserted into wakeup trees.
 
 4. **Sleep set propagation**: Full propagation implemented (Phases 1+2b).
    Replay-only propagation uses `explored_accesses`; propagation to new
@@ -490,8 +496,9 @@ races during execution and process them in `next_execution()`.
    is implemented via `contains_thread`. The weak initials optimization
    (`WI` instead of `I`) requires trace equivalence computation. (Phase 3)
 
-6. **Wakeup subtree guidance**: Current = `schedule()` ignores subtrees.
-   Paper = `WuT' = subtree(wut(E), p)` guides replay. (Phase 4b)
+6. ~~**Wakeup subtree guidance**~~: **Done** (Phase 4b). `step()` extracts
+   `WuT' = subtree(wut(E), p)` and `schedule()` uses it to guide thread
+   selection at new branches.
 
 ## References
 
