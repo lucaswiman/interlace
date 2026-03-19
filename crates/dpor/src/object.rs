@@ -1,4 +1,10 @@
 //! Shared object tracking for DPOR.
+//!
+//! Tracks per-thread access history to each shared object. This is the
+//! concrete implementation of the dependency relation used for race detection.
+//! Paper: two events are **dependent** when they access the same object and
+//! at least one is a write (JACM'17 Section 3.3 p.13-14). Independent events
+//! can be reordered without changing the resulting state (Def 3.3).
 
 use std::collections::HashMap;
 
@@ -39,6 +45,9 @@ impl ObjectState {
     }
 
     /// Returns all accesses that the given `kind` by `current_thread` depends on.
+    ///
+    /// Paper: dependency is defined in JACM'17 Section 3.3 (p.13-14). Two events
+    /// on the same object are dependent unless both are reads (reads commute).
     ///
     /// - A **Read** depends on writes from *other* threads (reads are independent).
     /// - A **Write** depends on both reads and writes from *other* threads.

@@ -1,15 +1,25 @@
 //! Exploration tree for Source Sets DPOR.
 //!
-//! Implements the Source Sets algorithm from Abdulla et al. (2017) using
-//! wakeup trees for backtracking and sleep sets for pruning equivalent
-//! interleavings. Each scheduling point (Branch) maintains:
+//! Implements a hybrid of Algorithms 1 and 2 from Abdulla et al., "Source Sets:
+//! A Foundation for Optimal Dynamic Partial Order Reduction", JACM 2017.
 //!
-//! - A **wakeup tree** of thread sequences to explore (replaces classic
-//!   Backtrack status with ordered, structured exploration).
+//! **Current algorithm**: Uses wakeup trees (Algorithm 2, JACM'17 p.24-25) as
+//! the backtrack data structure, but performs race detection during execution
+//! (Algorithm 1 style, JACM'17 p.16) rather than only at maximal executions.
+//! Sleep sets are local per-branch (not yet propagated across scheduling points).
+//! Source set filtering is disabled (all racing threads are added to backtrack).
+//!
+//! Each scheduling point (Branch) maintains:
+//!
+//! - A **wakeup tree** of thread sequences to explore — replaces classic
+//!   Backtrack status with ordered, structured exploration.
+//!   (Algorithm 2 lines 14-20, JACM'17 p.24-25)
 //! - A **sleep set** of threads that should not be re-explored because an
 //!   equivalent execution has already been covered.
+//!   (Algorithm 2 lines 13, 20, JACM'17 p.24-25)
 //! - **Object tracking** per thread to enable independence-based sleep set
-//!   propagation across scheduling points.
+//!   propagation across scheduling points (needed for Algorithm 2 line 16:
+//!   `Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -23,22 +33,32 @@ pub struct Branch {
     pub preemptions: u32,
     /// Wakeup tree: threads/sequences to explore at this scheduling point.
     /// Replaces the classic Backtrack thread status.
+    /// Paper: wut(E) in Algorithm 2 (JACM'17 p.24).
     pub wakeup: WakeupTree,
     /// Sleep set: threads that should not be added as backtracks because
     /// an equivalent execution starting with them has already been explored.
     /// Indexed by thread ID; `true` = sleeping.
+    /// Paper: sleep(E) in Algorithm 2 (JACM'17 p.24). Currently only tracks
+    /// Visited threads locally; cross-branch propagation (line 16:
+    /// `Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}`) is not yet implemented.
     pub sleep: Vec<bool>,
     /// Objects accessed by the current active thread at this scheduling step.
     /// Used for sleep set independence checks during propagation.
+    /// Paper: needed to compute E ⊢ p♦q (independence, JACM'17 Def 3.3 p.13)
+    /// — two events are independent if their object sets are disjoint.
     pub active_objects: HashSet<u64>,
     /// For each previously-explored (Visited) thread at this position,
     /// the set of objects it accessed. Used for sleep set propagation:
     /// a sleeping thread stays asleep if its recorded objects are
     /// disjoint from the active thread's objects (independent actions).
+    /// Paper: approximates the independence check E ⊢ p♦q (JACM'17 p.13)
+    /// using object-set disjointness as a sufficient condition.
     pub explored_objects: HashMap<usize, HashSet<u64>>,
     // Note: pending_race_objects was removed — source set filtering at the
-    // race-object level requires sleep sets for soundness (Abdulla et al. 2017).
-    // The wakeup tree still provides structural benefits for exploration control.
+    // race-object level requires sleep sets for soundness.
+    // Paper: source set filtering (Def 4.3, JACM'17 p.15) allows adding only
+    // one thread per race, but this requires sleep sets to prevent re-exploration
+    // of equivalent traces. See ideas/optimal_dpor.md Phase 2.
 }
 
 impl Branch {
@@ -79,6 +99,8 @@ impl Path {
 
     /// Record that an object was accessed at the given scheduling step.
     /// Called by the engine after each process_access/process_io_access.
+    /// Populates `active_objects` for future independence checks
+    /// (E ⊢ p♦q, JACM'17 Def 3.3 p.13).
     pub fn record_access(&mut self, path_id: usize, object_id: u64) {
         if let Some(branch) = self.branches.get_mut(path_id) {
             branch.active_objects.insert(object_id);
@@ -87,6 +109,10 @@ impl Path {
 
     /// Pick which thread to run at the current scheduling point.
     /// During replay, follows the recorded path; otherwise creates a new branch.
+    ///
+    /// In Algorithm 2 (JACM'17 p.24), this corresponds to lines 8-12 (choosing
+    /// which process to explore) and line 18 (recursive Explore call). Currently
+    /// does NOT pass wakeup subtrees (WuT') to guide replay — see Phase 4b.
     pub fn schedule(
         &mut self,
         runnable: &[usize],
@@ -131,8 +157,13 @@ impl Path {
     /// Mark thread_id for backtracking at branch path_id.
     /// Uses wakeup tree insertion and sleep set filtering.
     ///
+    /// This is called during execution (Algorithm 1 style, JACM'17 p.16 lines
+    /// 5-9). In full Optimal-DPOR (Algorithm 2, p.24 lines 2-6), race detection
+    /// is deferred to maximal executions and inserts notdep sequences rather
+    /// than single threads. See ideas/optimal_dpor.md Phase 3.
+    ///
     /// `_race_object`: the object involved in the race. Reserved for future
-    /// source set filtering (requires sleep sets for soundness).
+    /// source set filtering (Def 4.3, JACM'17 p.15; requires sleep sets).
     pub fn backtrack(&mut self, path_id: usize, thread_id: usize, _race_object: Option<u64>) {
         if path_id >= self.branches.len() {
             return;
@@ -147,6 +178,10 @@ impl Path {
         }
 
         // Sleep set check: if thread is sleeping (Visited), skip.
+        // Paper: Algorithm 2 line 5 (JACM'17 p.24) checks
+        //   sleep(E') ∩ WI[E'](v) = ∅
+        // before inserting. Our simplified version just checks if the
+        // thread itself is in the sleep set.
         if branch.sleep.get(thread_id).copied().unwrap_or(false) {
             return;
         }
@@ -165,33 +200,49 @@ impl Path {
             }
         }
 
-        // Insert into wakeup tree
+        // Insert into wakeup tree.
+        // Paper: Algorithm 2 line 6 (JACM'17 p.24):
+        //   wut(E') := insert[E'](v, wut(E'))
+        // We insert single-thread sequences [q] rather than full notdep
+        // sequences v = notdep(e, E).e'. See Phase 3b for multi-step.
         self.branches[path_id].wakeup.insert(&[thread_id]);
     }
 
     /// Advance to the next unexplored execution path.
     /// Uses wakeup trees instead of scanning for Backtrack status.
+    ///
+    /// Implements the while loop of Algorithm 2 lines 14-20 (JACM'17 p.24-25):
+    ///   while ∃p ∈ wut(E):
+    ///     pick min≺{p}           → min_thread()
+    ///     explore E.p            → set active_thread, reset pos
+    ///     remove p.w from wut(E) → remove_branch()
+    ///     add p to sleep(E)      → sleep[active] = true
     pub fn step(&mut self) -> bool {
         while let Some(branch) = self.branches.last_mut() {
             let active = branch.active_thread;
             if active < branch.threads.len() && branch.threads[active] == ThreadStatus::Active {
                 branch.threads[active] = ThreadStatus::Visited;
-                // Save explored objects for sleep set propagation
+                // Save explored objects for future sleep set propagation
+                // (needed for Algorithm 2 line 16: independence check E ⊢ p♦q)
                 let objects = branch.active_objects.clone();
                 branch.explored_objects.entry(active).or_default().extend(objects);
-                // Add to sleep set: this thread has been explored at this position
+                // Add to sleep set: this thread has been explored at this position.
+                // Paper: Algorithm 2 line 20 (JACM'17 p.25): "add p to sleep(E)"
                 if active < branch.sleep.len() {
                     branch.sleep[active] = true;
                 }
                 branch.active_objects.clear();
             }
 
-            // Remove current thread from wakeup tree (already explored)
+            // Remove current thread from wakeup tree (already explored).
+            // Paper: Algorithm 2 line 19 (JACM'17 p.25):
+            //   "remove all sequences of form p.w from wut(E)"
             branch.wakeup.remove_branch(active);
 
             // Find next thread to explore from wakeup tree.
-            // Use minimum thread ID to match the classic DPOR exploration order
-            // (lowest-index first), which tends to find bugs faster in practice.
+            // Paper: Algorithm 2 line 15 (JACM'17 p.24):
+            //   "let p = min≺{p ∈ wut(E)}"
+            // We use minimum thread ID as a deterministic proxy for ≺.
             if let Some(next) = branch.wakeup.min_thread() {
                 branch.threads[next] = ThreadStatus::Active;
                 branch.active_thread = next;
