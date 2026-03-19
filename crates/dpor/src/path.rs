@@ -240,8 +240,19 @@ impl Path {
         let branch = Branch::new(threads, chosen, preemptions);
         self.branches.push(branch);
 
-        // Propagate sleep set from the previous position to this new branch.
-        self.propagate_sleep(self.branches.len() - 1);
+        // Do NOT propagate sleep to new branches beyond the replay prefix.
+        //
+        // Approach (c) from the plan: "replay-only propagation." During
+        // replay, the execution prefix is deterministic, so the sleeping
+        // thread's next action is guaranteed to be the same as at its home
+        // position. Beyond the replay prefix, the execution may diverge
+        // and the sleeping thread's action is unknown — propagating could
+        // incorrectly block backtracks needed to explore real races.
+        //
+        // Paper ref: Section 10 (JACM'17 p.31-35) discusses this issue
+        // in the context of stateless model checking. Concuerror's
+        // solution is trace caching (approach (b)), which we may
+        // implement in a future phase.
 
         self.pos += 1;
         Some(chosen)
@@ -601,161 +612,121 @@ mod tests {
 
     // --- Sleep set propagation tests ---
 
-    /// Test that sleep set propagation carries sleeping threads across
-    /// positions when their accesses are independent.
+    /// Test that sleep set propagation works during REPLAY of existing branches.
     ///
-    /// Scenario: 3 threads. T0 is explored at pos 0 writing object 100.
-    /// Then T1 is explored at pos 0 accessing object 200 (different object).
-    /// When T2 is explored at pos 0 with T0 sleeping, propagation to
-    /// pos 1 should carry T0 forward (Write(100) is independent of
-    /// whatever T2 does on object 200).
+    /// Scenario: After exploring T0 and T1 at pos 1, when replaying through
+    /// pos 0→pos 1, T1's local sleep at pos 1 should be checked against
+    /// T0's active_accesses at pos 0 for independence.
     ///
     /// Paper ref: Algorithm 2 line 16 (JACM'17 p.24):
     ///   Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}
     #[test]
-    fn test_propagated_sleep_independent_objects() {
+    fn test_propagated_sleep_during_replay() {
         use crate::access::AccessKind;
         let mut path = Path::new(None);
 
-        // --- First execution: T0 at pos 0, T1 at pos 1, T2 at pos 2 ---
+        // --- First execution: T0 at pos 0, T1 at pos 1 ---
         path.schedule(&[0, 1, 2], 0, 3);
         path.record_access(0, 100, AccessKind::Write);
         path.schedule(&[1, 2], 1, 3);
         path.record_access(1, 200, AccessKind::Read);
-        path.schedule(&[2], 2, 3);
-        path.record_access(2, 200, AccessKind::Read);
 
-        // Add backtracks for T1 and T2 at pos 0
+        // Add backtrack for T1 at pos 0 and T2 at pos 1
         path.backtrack(0, 1, None);
-        path.backtrack(0, 2, None);
+        path.backtrack(1, 2, None);
 
-        // --- step(): T0 → Visited at pos 0, T1 next ---
+        // step(): pops to pos 1 (T1 Visited, wakeup has T2). T2 active at pos 1.
         assert!(path.step());
 
-        // --- Second execution: T1 at pos 0, ... ---
+        // --- Second execution: replay pos 0 (T0), replay pos 1 (T2) ---
         let chosen = path.schedule(&[0, 1, 2], 0, 3);
-        assert_eq!(chosen, Some(1));
-        path.record_access(0, 200, AccessKind::Read);
+        assert_eq!(chosen, Some(0)); // replay T0
+        path.record_access(0, 100, AccessKind::Write); // T0 writes obj 100
 
-        // New branch at pos 1: T0 chosen
-        path.schedule(&[0, 2], 0, 3);
+        let chosen = path.schedule(&[1, 2], 1, 3);
+        assert_eq!(chosen, Some(2)); // replay T2 (from wakeup)
 
-        // T0 was sleeping at pos 0 with explored_accesses = {100: Write}.
-        // T1's active_accesses at pos 0 = {200: Read}.
-        // Object 100 ≠ 200 → independent → T0 should be propagated to pos 1.
+        // Propagation from pos 0 to pos 1 during replay:
+        // No threads are sleeping at pos 0 (T0 is Active, never Visited there).
+        // T1 is locally sleeping at pos 1 (Visited), but that's handled by
+        // the local sleep check in backtrack(), not by propagation.
+        // Propagation only carries sleeping threads FROM the source position.
         assert!(
-            path.branches[1].propagated_sleep_accesses.contains_key(&0),
-            "T0 should be propagated-sleeping at position 1 \
-             (Write(100) independent of Read(200))"
+            path.branches[1].propagated_sleep_accesses.is_empty(),
+            "Nothing propagated from pos 0 (no sleeping threads there)"
         );
-
-        // backtrack(1, 0) should be rejected due to propagated sleep
-        path.backtrack(1, 0, None);
-        assert!(
-            !path.branches[1].wakeup.contains_thread(0),
-            "T0 should not be added to wakeup tree at pos 1 (propagated sleeping)"
-        );
+        // T1 IS locally sleeping at pos 1
+        assert!(path.branches[1].sleep[1]);
     }
 
-    /// Test that propagated sleep is NOT applied when actions are dependent.
+    /// Test that no propagation happens for new branches (approach (c)).
     ///
-    /// Scenario: T0 wrote object 100 at pos 0 and is sleeping.
-    /// T1 is active at pos 0 and also accesses object 100 (Read).
-    /// Write vs Read on same object → conflict → T0 must wake up at pos 1.
-    ///
-    /// Paper ref: Algorithm 2 line 16 (JACM'17 p.24) — the filter
-    /// E ⊢ p♦q keeps only independent sleeping threads.
+    /// Replay-only propagation means we only propagate through existing
+    /// replay branches, not into newly created branches beyond the replay.
     #[test]
-    fn test_propagated_sleep_wakes_on_conflict() {
+    fn test_no_propagation_to_new_branches() {
         use crate::access::AccessKind;
         let mut path = Path::new(None);
 
-        // --- First execution: T0 at pos 0 ---
+        // --- First execution: T0 at pos 0, T1 at pos 1 ---
         path.schedule(&[0, 1], 0, 2);
         path.record_access(0, 100, AccessKind::Write);
         path.schedule(&[1], 1, 2);
-        path.record_access(1, 100, AccessKind::Read);
+        path.record_access(1, 200, AccessKind::Read);
 
         // Backtrack T1 at pos 0
-        path.backtrack(0, 1, None);
-
-        // --- step(): T0 → Visited at pos 0, T1 next ---
-        assert!(path.step());
-
-        // --- Second execution: T1 at pos 0 ---
-        let chosen = path.schedule(&[0, 1], 0, 2);
-        assert_eq!(chosen, Some(1));
-        // T1 accesses same object 100 (Read) → conflicts with T0's Write
-        path.record_access(0, 100, AccessKind::Read);
-
-        // New branch at pos 1
-        path.schedule(&[0], 0, 2);
-
-        // T0 sleeping at pos 0 with {100: Write}.
-        // T1's active at pos 0 = {100: Read}.
-        // Write vs Read on object 100 → CONFLICT → T0 must wake up.
-        assert!(
-            !path.branches[1].propagated_sleep_accesses.contains_key(&0),
-            "T0 should NOT be propagated-sleeping (Write vs Read conflict on obj 100)"
-        );
-    }
-
-    /// Test multi-hop propagation: a sleeping thread propagates across
-    /// multiple positions as long as each step's active thread is independent.
-    ///
-    /// 3 threads, each accessing a DIFFERENT object. T0 writes obj 100.
-    /// T1 reads obj 200. T2 reads obj 300. All independent of each other.
-    /// After exploring T0 at pos 0, T0 should propagate to pos 1 and pos 2.
-    #[test]
-    fn test_propagated_sleep_multi_hop() {
-        use crate::access::AccessKind;
-        let mut path = Path::new(None);
-
-        // --- First execution: T0, T1, T2 ---
-        path.schedule(&[0, 1, 2], 0, 3);
-        path.record_access(0, 100, AccessKind::Write);
-        path.schedule(&[1, 2], 1, 3);
-        path.record_access(1, 200, AccessKind::Read);
-        path.schedule(&[2], 2, 3);
-        path.record_access(2, 300, AccessKind::Read);
-
-        // Add backtrack at pos 0 for T1
         path.backtrack(0, 1, None);
 
         // step(): T0 → Visited at pos 0
         assert!(path.step());
 
-        // --- Second execution: T1 at pos 0 (replay) ---
-        let chosen = path.schedule(&[0, 1, 2], 0, 3);
+        // --- Second execution: T1 at pos 0 (replay), then new pos 1 ---
+        let chosen = path.schedule(&[0, 1], 0, 2);
         assert_eq!(chosen, Some(1));
-        path.record_access(0, 200, AccessKind::Read); // T1 reads obj 200
+        path.record_access(0, 200, AccessKind::Read);
 
-        // New branch at pos 1: T0 and T2 runnable. current_thread=1 but
-        // T1 finished, so first runnable (T0) is chosen.
-        let chosen = path.schedule(&[0, 2], 1, 3);
-        assert_eq!(chosen, Some(0)); // T0 chosen (first runnable)
-        path.record_access(1, 100, AccessKind::Write);
+        // New branch at pos 1: T0 chosen
+        path.schedule(&[0], 0, 2);
 
-        // T0 sleeping at pos 0 with {100: Write}.
-        // T1's active at pos 0 = {200: Read}. Obj 100 ≠ 200 → independent.
-        // → T0 propagated to pos 1 with {100: Write}.
+        // With replay-only propagation, pos 1 is NEW → no propagation
         assert!(
-            path.branches[1].propagated_sleep_accesses.contains_key(&0),
-            "T0 should propagate to pos 1 (Write(100) indep of Read(200))"
+            path.branches[1].propagated_sleep_accesses.is_empty(),
+            "No propagation to new branches in replay-only mode"
         );
+    }
 
-        // Now create pos 2: T2 runnable
-        let chosen = path.schedule(&[2], 2, 3);
-        assert_eq!(chosen, Some(2));
+    /// Test that propagation correctly wakes threads on conflict during replay.
+    #[test]
+    fn test_propagated_sleep_wakes_on_conflict_during_replay() {
+        use crate::access::AccessKind;
+        let mut path = Path::new(None);
 
-        // Propagation from pos 1 to pos 2:
-        // T0 propagated at pos 1 with {100: Write}.
-        // Active at pos 1 = {100: Write} (T0 itself wrote obj 100).
-        // T0's {100: Write} vs active's {100: Write} → CONFLICT → T0 wakes up.
-        // This is correct: T0 ran at pos 1 so it's no longer sleeping there.
+        // --- First execution: T0 at pos 0, T1 at pos 1 ---
+        path.schedule(&[0, 1, 2], 0, 3);
+        path.record_access(0, 100, AccessKind::Write); // T0 writes obj 100
+        path.schedule(&[1, 2], 1, 3);
+        path.record_access(1, 100, AccessKind::Read); // T1 reads obj 100
+
+        // Add backtracks
+        path.backtrack(0, 2, None);
+        path.backtrack(1, 2, None);
+
+        // step(): pops to pos 1 (T1 Visited, wakeup has T2). T2 active at pos 1.
+        assert!(path.step());
+
+        // --- Second execution: replay pos 0 (T0), replay pos 1 (T2) ---
+        path.schedule(&[0, 1, 2], 0, 3);
+        path.record_access(0, 100, AccessKind::Write); // T0 writes obj 100
+
+        path.schedule(&[1, 2], 1, 3);
+
+        // Propagation from pos 0 to pos 1:
+        // T1 sleeping at pos 1 with explored_accesses[1] = {100: Read}.
+        // T0's active at pos 0 = {100: Write}.
+        // Write vs Read on same obj 100 → CONFLICT → T1 wakes up.
         assert!(
-            !path.branches[2].propagated_sleep_accesses.contains_key(&0),
-            "T0 should wake up at pos 2 (T0 itself ran at pos 1, conflict)"
+            !path.branches[1].propagated_sleep_accesses.contains_key(&1),
+            "T1 should NOT be propagated (Write vs Read conflict on obj 100)"
         );
     }
 }
