@@ -6,7 +6,6 @@ use crate::vv::VersionVec;
 pub enum ThreadStatus {
     Disabled,
     Pending,
-    Backtrack,
     Yield,
     Active,
     Visited,
@@ -17,7 +16,7 @@ impl ThreadStatus {
     pub fn is_runnable(self) -> bool {
         matches!(
             self,
-            ThreadStatus::Pending | ThreadStatus::Backtrack | ThreadStatus::Yield | ThreadStatus::Active
+            ThreadStatus::Pending | ThreadStatus::Yield | ThreadStatus::Active
         )
     }
 }

@@ -9,30 +9,45 @@ one execution per Mazurkiewicz trace, eliminating redundant interleavings.
 The dining philosophers benchmark (4 threads, preemption_bound=2) explores
 **14,221 executions in ~95s**. Many of these are equivalent traces.
 
+**Where we are in the algorithm**: The current implementation is a **hybrid** —
+it has wakeup trees (from Optimal-DPOR, Algorithm 2) but does race detection
+*during* execution (from Source-DPOR, Algorithm 1). This is a valid stepping
+stone: the wakeup tree currently functions as a structured backtrack set,
+producing identical results to classic DPOR. The key optimizations (sleep set
+propagation, source set filtering, deferred race detection) are the next steps.
+
 ## Completed
 
 - [x] Wakeup tree data structure (`crates/dpor/src/wakeup_tree.rs`)
   - Ordered tree of thread-id sequences with insert/remove/subtree/min_thread
   - Merges shared prefixes, deduplicates sequences
   - Unit tests for all operations including complex multi-branch trees
+  - **Paper ref**: Definition 6.1 (JACM'17 p.21-22, POPL'14 p.6-7)
 
 - [x] Replace `ThreadStatus::Backtrack` with wakeup tree in `Branch`
   - `step()` picks next thread from wakeup tree (min-index for deterministic order)
   - `backtrack()` inserts single-thread sequences into wakeup tree
   - Maintains identical exploration behavior to classic DPOR (same execution count)
+  - **Paper ref**: Algorithm 2 lines 14-20 (JACM'17 p.24-25)
 
 - [x] Per-branch object access tracking
   - `active_objects: HashSet<u64>` records objects accessed at each scheduling step
   - `explored_objects: HashMap<usize, HashSet<u64>>` records per-Visited-thread objects
   - `record_access()` called from engine after each `process_access`
+  - **Paper ref**: needed for independence checks in sleep set propagation
+    (Algorithm 2 line 16: `Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}`)
 
 - [x] Sleep set skeleton at branch level
   - `sleep: Vec<bool>` tracks Visited threads (equivalent to existing Visited check)
   - `backtrack()` checks sleep set before inserting into wakeup tree
+  - **Paper ref**: Algorithm 2 line 13 (`sleep(E) := Sleep`) and line 20
+    (`add p to sleep(E)`)
 
 - [x] `race_object: Option<u64>` parameter plumbed through `backtrack()`
   - Engine passes the racing object ID from `process_access` / `process_io_access`
   - Currently unused (filtering disabled) but available for source set optimization
+  - **Paper ref**: needed for source set filtering (Algorithm 1 line 8:
+    `I[E'](v)` check; Definition 4.1 JACM'17 p.14)
 
 - [x] Benchmark infrastructure
   - `benchmarks/bench_dining_philosophers.py` with configurable run count
@@ -43,72 +58,211 @@ The dining philosophers benchmark (4 threads, preemption_bound=2) explores
   - 3 Python engine-level tests (4-thread exhaustive, independent pairs, read-read)
   - Full test suite passes (1158 tests)
 
-## TODO: Sleep set propagation (the hard part)
+## Phase 1: Sleep set propagation
 
-The core challenge: sleep sets in **stateless** model checking require knowing
-each sleeping thread's next action, but we don't run sleeping threads. In
-**stateful** MC, the state is explicit and actions are computable.
+The core optimization. Without this, all other improvements are unsound.
 
-- [ ] Record per-thread next-action during execution
-  - At each scheduling point, for EVERY enabled thread (not just the chosen one),
-    record what object it would access next. This requires either:
-    - (a) Speculatively running each thread for one step (expensive), or
-    - (b) Caching the action from a previous execution at the same prefix (fragile), or
-    - (c) Using the execution trace to infer actions during replay (only works for
-      the replayed prefix, not beyond the backtrack point)
-  - Option (c) is most practical: during replay, we know all threads' actions
-    because the prefix is deterministic
+**Paper ref**: Algorithm 2 lines 13-20 (JACM'17 p.24-25). The key line is 16:
+`Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}` — when exploring E.p, only keep sleeping
+threads whose next action is independent of p's action.
 
-- [ ] Implement sleep set propagation through replayed prefix
-  - At the backtrack point (position K): sleep = {Visited threads at K}
-  - During replay of positions 0..K-1: propagate sleep forward
-  - At position i+1: `sleep' = {q in sleep(i) : action(q, state_i) indep action(chosen_i, state_i)}`
-  - Independence = `explored_objects[q] disjoint from active_objects` at position i
-  - This is SOUND for the replayed prefix because the prefix is deterministic
-  - Do NOT propagate beyond the backtrack point (actions are unknown there)
+### 1a. Record per-thread next-action during execution
 
-- [ ] Track sleeping thread actions across the replay boundary
-  - At position K (backtrack point), sleeping threads have known actions from the
-    previous execution. Record these in a `replay_actions: HashMap<usize, HashSet<u64>>`
-  - Propagate ONE step past K using these recorded actions
-  - Beyond K+1, sleeping threads must be woken (their actions are unknown)
+- [ ] During each execution, at each scheduling point, record what object each
+  enabled thread *would* access next (not just the chosen thread).
+  - **Implementation**: Store `next_actions: HashMap<usize, HashSet<u64>>` in Branch,
+    populated during execution (not just replay).
+  - **Challenge**: In stateless model checking, we don't run non-chosen threads,
+    so we don't know their next action at the current state.
+  - **Paper assumption**: The paper assumes a stateful model where `enabled(s[E])`
+    is computable (Section 3.1, JACM'17 p.11-12, Assumption 3.1).
 
-## TODO: Source set filtering
+  Three approaches to resolve this in stateless MC:
 
-With sleep sets working, source set filtering becomes sound:
+  **(a) Speculative execution** (expensive): Run each enabled thread for one step
+  to discover its next access, then roll back. Too expensive for Python threads.
 
-- [ ] Enable race-object filtering in `backtrack()`
-  - For each (position, object) pair, add at most ONE racing thread
-  - This is safe because sleep sets prevent re-exploration of equivalent traces
-  - Use `pending_race_objects: HashSet<u64>` (already removed, re-add)
-  - Clear `pending_race_objects` when step() picks a new thread
+  **(b) Trace caching** (fragile): Cache each thread's next action from a
+  previous execution at the same prefix. Works because prefixes are deterministic.
+  **This is the approach used by Concuerror** (Section 10, JACM'17 p.31-35).
 
-- [ ] Verify with dining philosophers benchmark
-  - Expected: significant reduction in execution count (from 14k to ~hundreds)
-  - The filtering is the main source of exploration reduction
+  **(c) Replay-only propagation** (practical): During replay of positions 0..K-1,
+  we know all threads' actions from the previous execution trace. Propagate sleep
+  sets only through the replayed prefix; beyond the backtrack point, wake all
+  sleeping threads (their actions are unknown).
 
-## TODO: Multi-step wakeup sequences
+  **Recommendation**: Start with (c), which is simplest and correct. The sleep set
+  will be conservative (too small beyond the backtrack point) but still provides
+  reduction. Upgrade to (b) later if needed.
 
-Single-thread sequences `[q]` are the simple case. For full Optimal DPOR:
+### 1b. Implement sleep set propagation through replayed prefix
 
-- [ ] Compute wakeup sequences for races where the target thread is blocked
-  - When thread q is not enabled at position i (e.g., blocked on a lock),
-    compute the sequence of threads that must run to enable q
-  - Example: q blocked on lock L held by p → sequence is [p, q]
-    (p must release L before q can acquire it)
-  - Use the execution trace to find the enabling sequence
+- [ ] In `Path::schedule()`, during replay (pos < branches.len()):
+  - Compute `Sleep'` from the previous branch's sleep set
+  - For each sleeping thread q: keep q sleeping if its recorded objects
+    (from `explored_objects[q]`) are disjoint from the chosen thread's objects
+    (from `active_objects`). This approximates `E ⊢ p♦q`.
+  - Store `Sleep'` in the new branch's `sleep` field
+  - **Paper ref**: Algorithm 2 line 16 (JACM'17 p.24)
 
-- [ ] Insert multi-step sequences into wakeup tree
-  - `wakeup.insert(&[p, q])` instead of just `&[q]`
-  - The wakeup tree's subtree mechanism guides replay:
-    at position i choose p, at position i+1 choose q
+- [ ] In `Path::step()`, when computing the initial sleep set at backtrack point:
+  - `sleep(E) = {threads marked Visited at position K}`
+  - This is the starting point for propagation in the next execution
+  - **Paper ref**: Algorithm 2 line 20 (JACM'17 p.25)
 
-- [ ] Use wakeup subtrees during replay in `schedule()`
-  - When creating a new branch, check if the parent's wakeup subtree
-    suggests a specific thread (from a multi-step sequence)
-  - Override the default "prefer current thread" heuristic
+### 1c. Track sleeping thread actions across replay boundary
 
-## TODO: Exploration order heuristics
+- [ ] At position K (backtrack point), sleeping threads have known actions from
+  the previous execution. Store in `replay_actions: HashMap<usize, HashSet<u64>>`.
+- [ ] Propagate ONE step past K using these recorded actions.
+- [ ] Beyond K+1, sleeping threads must be woken (actions unknown).
+- [ ] **Paper ref**: This is a practical concern not directly addressed in the
+  paper (which assumes stateful MC). Concuerror handles this via trace caching
+  (Section 10, JACM'17 p.32-34).
+
+### 1d. Verification
+
+- [ ] Add test: two independent writers to different objects → still 1 execution
+  with sleep sets (same as without, but verifies propagation doesn't break things)
+- [ ] Add test: writer-readers example (JACM'17 Fig.1 p.6-7) → verify source-DPOR
+  explores exactly 4 interleavings vs 5+ for classic DPOR
+- [ ] Add test: lastzero-style program (POPL'14 Fig.4 p.11) → verify reduction
+- [ ] Re-run dining philosophers benchmark: expect reduction from 14,221
+
+## Phase 2: Source set filtering
+
+With sleep sets working, source set filtering becomes sound.
+
+**Paper ref**: Definition 4.3 (JACM'17 p.15), Algorithm 1 lines 5-9 (p.16).
+A source set P for W after E requires only that `WI[E](w) ∩ P ≠ ∅` for each
+continuation w ∈ W. This is *weaker* than persistent sets, which require
+`I[E](w) ∩ P ≠ ∅` — the difference is that weak initials allow adding a thread
+that doesn't directly participate in the first step of w but whose execution
+leads to an equivalent trace.
+
+### 2a. Enable source set filtering in backtrack()
+
+- [ ] For each racing pair (e, e') at position i on object obj:
+  - Check if `backtrack(i, *, Some(obj))` has already been called for this
+    position+object pair in this execution
+  - If yes, skip (one thread per race object is sufficient for source sets)
+  - Re-add `pending_race_objects: HashSet<(usize, u64)>` to Branch (was removed)
+  - **Paper ref**: Algorithm 1 line 8-9 (JACM'17 p.16): the test
+    `I[E'](v) ∩ backtrack(E') = ∅` prevents adding redundant threads
+
+### 2b. Verify source set filtering
+
+- [ ] Writer-readers (3 threads, 1 writer, 2 readers):
+  - Classic DPOR: explores 5+ interleavings
+  - Source-DPOR: explores exactly 4 (POPL'14 Table 1 p.11, JACM'17 p.36)
+- [ ] Dining philosophers benchmark: expect major reduction
+  - POPL'14 Table 1: lesystem(19) goes from 4096 (classic) to 64 (source/optimal)
+- [ ] Independent pairs (T0/T1 write X, T2/T3 write Y): should remain at 4
+
+## Phase 3: Deferred race detection (Optimal-DPOR)
+
+Move from Source-DPOR (Algorithm 1) to Optimal-DPOR (Algorithm 2) race detection.
+
+**Paper ref**: Algorithm 2 lines 1-6 (JACM'17 p.24). Race detection happens only
+at maximal executions (`enabled(s[E]) = ∅`), not during execution.
+
+### 3a. Defer race detection to end of execution
+
+- [ ] Currently: `process_access()` calls `backtrack()` immediately on each race.
+  This is Algorithm 1 style (race detection during exploration).
+- [ ] Algorithm 2 style: collect races during execution, process them only when
+  all threads are finished or blocked (`enabled(s[E]) = ∅`).
+- [ ] Store races in `pending_races: Vec<(usize, usize, u64)>` (position, thread, object)
+- [ ] In `next_execution()`, before calling `step()`, process all pending races.
+- [ ] **Why this matters**: Deferred race detection allows computing `v = notdep(e, E).e'`
+  (Algorithm 2 line 4) using the full execution trace, not just the prefix seen so far.
+  This produces better wakeup sequences.
+
+### 3b. Compute notdep sequences
+
+- [ ] For each race (e ≾_E e') at position i:
+  - `E' = pre(E, e)` — the execution prefix up to just before event e
+  - `v = notdep(e, E).e'` — events between e and e' that are independent of e,
+    followed by e'. This is the sequence to insert into `wut(E')`.
+  - **Paper ref**: Algorithm 2 line 4 (JACM'17 p.24)
+  - **Implementation**: Walk the execution trace from position of e to position
+    of e', collecting thread IDs of events that are independent of e (disjoint
+    object sets). Append the thread of e'.
+
+### 3c. Insert notdep sequences into wakeup tree
+
+- [ ] Instead of `wakeup.insert(&[thread_id])`, insert the full notdep sequence.
+- [ ] Add the sleep set check: `sleep(E') ∩ WI[E'](v) = ∅` before inserting
+  (Algorithm 2 line 5). If a sleeping thread is a weak initial of v, the
+  equivalent execution has already been explored.
+- [ ] **Paper ref**: Algorithm 2 lines 5-6 (JACM'17 p.24)
+
+## Phase 4: Multi-step wakeup sequences
+
+Full wakeup tree integration for Optimal DPOR.
+
+**Paper ref**: Algorithm 2 lines 17-18 (JACM'17 p.24-25): `WuT' = subtree(wut(E), p)`
+is passed to the recursive Explore call.
+
+### 4a. Compute wakeup sequences for blocked threads
+
+- [ ] When thread q is not enabled at position i (blocked on a lock):
+  - Find the sequence of threads that must run to enable q
+  - Example: q blocked on lock L held by p → sequence is `[p, q]`
+  - **Paper ref**: Section 8 (JACM'17 p.26-29), Algorithms 3-6 handle
+    disabling/blocking. Algorithm 4 (p.28) is Optimal-DPOR with locks.
+
+### 4b. Use wakeup subtrees during replay
+
+- [ ] In `Path::schedule()`, when creating a new branch, check if the parent's
+  wakeup subtree suggests a specific thread (from a multi-step sequence).
+- [ ] Pass `WuT' = subtree(wut(E), p)` as guidance for the next scheduling point.
+- [ ] Override the "prefer current thread" heuristic when the wakeup tree has guidance.
+- [ ] **Paper ref**: Algorithm 2 lines 8-12, 17 (JACM'17 p.24-25)
+
+### 4c. Wakeup tree insert with equivalence checking
+
+- [ ] The paper's insert operation (Definition 6.2, JACM'17 p.22) checks for
+  `w' ∼[E] w` — whether an existing branch already covers the sequence.
+- [ ] Current implementation only checks exact prefix match. This is sound
+  (may insert redundant branches) but not optimal.
+- [ ] Add equivalence checking: before inserting, check if any existing leaf
+  explores an equivalent interleaving using independence information.
+- [ ] **Paper ref**: Lemma 6.2 (JACM'17 p.22): any leaf w is the smallest node
+  in the tree consistent with w after E.
+
+## Phase 5: Locks and disabling (Algorithms 3-6)
+
+**Paper ref**: Section 8 (JACM'17 p.26-29). The basic algorithms (1-2) assume
+Assumption 3.1: processes don't disable each other. With locks, this fails.
+
+### Current approach vs paper
+
+The current engine uses `io_vv` (a separate vector clock without lock-based HB)
+for lock operations, making them always appear concurrent. This is a pragmatic
+approach that creates backtrack points at lock boundaries.
+
+The paper's approach (Algorithms 3-4, JACM'17 p.27-28) is more precise:
+- Track which threads are *enabled* vs *blocked* at each state
+- Only consider races between enabled threads
+- Compute wakeup sequences that unblock threads before they can participate
+
+### 5a. Evaluate paper's lock algorithms
+
+- [ ] Compare current `io_vv` approach with Algorithm 3/4 precision
+  - Does the `io_vv` approach over-explore? Under-explore?
+  - The current approach may find more interleavings than necessary (conservative)
+  - **Paper ref**: Algorithm 3 (JACM'17 p.27) adds enabled-check to backtrack;
+    Algorithm 4 (p.28) adds wakeup sequences for blocked threads
+
+### 5b. Implement Algorithm 3/4 if beneficial
+
+- [ ] Add enabled-thread tracking at each scheduling point
+- [ ] Modify `backtrack()` to check if the target thread was enabled
+- [ ] For blocked threads, compute enabling sequences
+- [ ] **Paper ref**: Algorithm 4 line modifications (JACM'17 p.28)
+
+## Exploration order heuristics
 
 Independent of Optimal DPOR correctness, exploration order affects how
 quickly bugs are found with `stop_on_first=True`:
@@ -136,10 +290,53 @@ replay) and `Path::step()` (when computing the initial sleep set at the
 backtrack point). The engine doesn't need changes — it already passes
 `race_object` through to `backtrack()`.
 
+For Phase 3 (deferred race detection), the engine will need changes: collect
+races during execution and process them in `next_execution()`.
+
+## Known implementation gaps vs paper
+
+1. **Race detection timing**: Current = during execution (Alg 1 style).
+   Paper's Alg 2 = only at maximal executions. (Phase 3)
+
+2. **Wakeup tree insert**: Current = exact prefix matching only.
+   Paper = equivalence checking via `∼[E]` relation. (Phase 4c)
+
+3. **notdep sequences**: Current = single thread `[q]`.
+   Paper = full `notdep(e, E).e'` sequence. (Phase 3b)
+
+4. **Sleep set propagation**: Current = local per-branch only (no cross-branch).
+   Paper = propagated through Explore calls. (Phase 1)
+
+5. **Source set filtering**: Current = disabled (all racing threads added).
+   Paper = one thread per race suffices with sleep sets. (Phase 2)
+
+6. **Wakeup subtree guidance**: Current = `schedule()` ignores subtrees.
+   Paper = `WuT' = subtree(wut(E), p)` guides replay. (Phase 4b)
+
 ## References
 
+### Primary sources (checked into `ideas/`)
+
 - Abdulla et al., "Optimal Dynamic Partial Order Reduction", POPL 2014
+  (`ideas/abdulla_popl2014/`)
+  - Algorithm 1 (Source-DPOR): p.6
+  - Algorithm 2 (Optimal-DPOR): p.7-8
+  - Correctness proofs: p.8-9 (Theorems 7.4, 7.5, 7.7)
+  - Benchmarks: p.11-12 (Tables 1-3)
+
 - Abdulla et al., "Source Sets: A Foundation for Optimal Dynamic Partial Order
-  Reduction", JACM 2017, Sections 6-7
+  Reduction", JACM 2017 (`ideas/abdulla_jacm2017/`)
+  - Framework and computation model: p.11-14 (Section 3)
+  - Source sets definition: p.14-16 (Section 4, Definition 4.3)
+  - Algorithm 1 (Source-DPOR): p.16 (Section 5)
+  - Wakeup trees: p.21-24 (Section 6, Definitions 6.1-6.2)
+  - Algorithm 2 (Optimal-DPOR): p.24-26 (Section 7)
+  - Locks/disabling: p.26-29 (Section 8, Algorithms 3-6)
+  - Trade-offs analysis: p.29-31 (Section 9)
+  - Implementation details: p.31-35 (Section 10)
+  - Benchmarks: p.35-44 (Section 11)
+
+### Secondary references
+
 - Kokologiannakis et al., "Stateless Model Checking for TSO and PSO", TACAS 2018
   (extends to weak memory models)

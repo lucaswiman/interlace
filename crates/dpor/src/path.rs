@@ -195,6 +195,7 @@ impl Path {
             if let Some(next) = branch.wakeup.min_thread() {
                 branch.threads[next] = ThreadStatus::Active;
                 branch.active_thread = next;
+                // Reset to start: stateless MC replays the full prefix from scratch.
                 self.pos = 0;
                 return true;
             }

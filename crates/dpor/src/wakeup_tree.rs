@@ -102,11 +102,11 @@ impl WakeupTree {
         if sequence.is_empty() {
             return false;
         }
-        self.insert_at(&mut Vec::new(), sequence)
+        self.insert_at(sequence)
     }
 
     /// Internal recursive insertion.
-    fn insert_at(&mut self, _prefix: &mut Vec<usize>, sequence: &[usize]) -> bool {
+    fn insert_at(&mut self, sequence: &[usize]) -> bool {
         if sequence.is_empty() {
             return false;
         }
@@ -125,7 +125,7 @@ impl WakeupTree {
                 let mut subtree = WakeupTree {
                     children: std::mem::take(&mut child.children),
                 };
-                let added = subtree.insert_at(_prefix, rest);
+                let added = subtree.insert_at(rest);
                 child.children = subtree.children;
                 return added;
             }
