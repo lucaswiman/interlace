@@ -1793,6 +1793,18 @@ class DporBytecodeRunner:
 
             if event == "opcode":
                 scheduler.report_and_wait(frame, thread_id)
+                # CPython 3.10-3.11 bug workaround: after our trace callback
+                # returns, CPython calls PyFrame_LocalsToFast(frame, 1) which
+                # copies f_locals dict values back to cell/free variable cells
+                # (see CPython ceval.c call_trace).  If this thread waited in
+                # report_and_wait while another thread modified a shared cell,
+                # the stale f_locals snapshot would overwrite the new value.
+                # Re-accessing frame.f_locals triggers PyFrame_FastToLocals
+                # (see CPython frameobject.c frame_getlocals), refreshing the
+                # snapshot so LocalsToFast writes back the current value.
+                # This is not needed on 3.12+ where PEP 667 replaced f_locals
+                # with a proxy and removed LocalsToFast from the trace path.
+                frame.f_locals  # noqa: B018  — refresh f_locals before LocalsToFast
                 return trace
 
             if event == "return":
