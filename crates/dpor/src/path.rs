@@ -242,17 +242,24 @@ impl Path {
 
         // Do NOT propagate sleep to new branches beyond the replay prefix.
         //
-        // Approach (c) from the plan: "replay-only propagation." During
-        // replay, the execution prefix is deterministic, so the sleeping
-        // thread's next action is guaranteed to be the same as at its home
-        // position. Beyond the replay prefix, the execution may diverge
-        // and the sleeping thread's action is unknown — propagating could
-        // incorrectly block backtracks needed to explore real races.
+        // Root cause: `explored_accesses` saved by step() use Python object
+        // keys based on `hash((id(obj), name))`, where `id(obj)` is a memory
+        // address. Each execution creates fresh Python objects (new state,
+        // new dicts, etc.), so `id(obj)` changes between executions. The
+        // `explored_accesses` carry stale object keys from a previous
+        // execution, making the independence check unsound — stale keys
+        // never match fresh keys, so all sleeping threads appear independent
+        // of everything, and backtracks get incorrectly blocked.
         //
-        // Paper ref: Section 10 (JACM'17 p.31-35) discusses this issue
-        // in the context of stateless model checking. Concuerror's
-        // solution is trace caching (approach (b)), which we may
-        // implement in a future phase.
+        // During replay-only propagation, sleeping threads don't propagate
+        // past the backtrack point (they become sleeping AT the last replay
+        // position, not before it), so the stale keys never reach new
+        // positions where they'd block fresh backtracks.
+        //
+        // Fix: Use stable object keys that persist across executions (e.g.,
+        // based on logical object identity rather than memory addresses).
+        // Once object keys are stable, propagation to new branches can be
+        // safely enabled.
 
         self.pos += 1;
         Some(chosen)
