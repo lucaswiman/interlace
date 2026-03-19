@@ -10,12 +10,14 @@ The dining philosophers benchmark (4 threads, preemption_bound=2) explores
 **14,221 executions in ~95s**. Many of these are equivalent traces.
 
 **Where we are in the algorithm**: The current implementation is a **hybrid** —
-it has wakeup trees (from Optimal-DPOR, Algorithm 2), sleep set propagation
-(Algorithm 2 line 16), but does race detection *during* execution (from
+it has wakeup trees (from Optimal-DPOR, Algorithm 2), full sleep set
+propagation (Algorithm 2 line 16, including to new branches past replay),
+and the basic source set check (`I[E'](v) ∩ backtrack(E')` via
+`contains_thread`). Race detection is done *during* execution (from
 Source-DPOR, Algorithm 1). Sleep set propagation reduces redundant
 interleavings where independent actions commute (e.g., read-read on the
-same object). Source set filtering and deferred race detection are the next
-steps for further reduction.
+same object). Deferred race detection with notdep sequences and weak
+initials are the next steps for further reduction.
 
 ## Completed
 
@@ -99,7 +101,14 @@ threads whose next action is independent of p's action.
   **(c) Replay-only propagation** (practical): During replay of positions 0..K-1,
   we know all threads' actions from the previous execution trace. Propagate sleep
   sets only through the replayed prefix; beyond the backtrack point, wake all
-  sleeping threads (their actions are unknown). **← IMPLEMENTED**
+  sleeping threads (their actions are unknown).
+
+  **(c') Full propagation** (final): Extend propagation to ALL positions, including
+  new branches beyond the replay prefix. This is sound because sleeping threads
+  have not been scheduled since their home position — their program counter and
+  local state are frozen, so their next action (what objects they access) is the
+  same as recorded. The paper's Algorithm 2 line 18 naturally passes Sleep' to
+  all recursive Explore calls, not just replayed ones. **← IMPLEMENTED**
 
 ### 1b. Implement sleep set propagation through replayed prefix
 
@@ -134,9 +143,12 @@ threads whose next action is independent of p's action.
   past the backtrack point using the sleeping thread's recorded accesses.
 - [x] If no access info is available for a sleeping thread (e.g., a locally
   Visited thread without explored_accesses), it is woken up (conservative).
-- [ ] **Future**: Upgrade to approach (b) — trace caching — for better
-  propagation beyond the backtrack point. This would cache each thread's
-  next action from a previous execution at the same prefix.
+- [x] ~~**Future**: Upgrade to approach (b) — trace caching.~~
+  **Resolved**: approach (c') — full propagation to new branches — achieves
+  the same result as trace caching for the common case. Sleeping threads'
+  access info is valid at new positions because their state is frozen.
+  This reduces readers(2) from 5→4 and readers(4) from ~65→16 traces,
+  matching POPL'14 Table 2 (source-DPOR = 2^N for readers(N)).
 
 ### 1d. Verification
 
@@ -149,38 +161,69 @@ threads whose next action is independent of p's action.
   coefficients). Full reduction to 5 traces requires source set filtering (Phase 2).
 - [x] 2-philosopher benchmark: reduced from 6 to 3 Mazurkiewicz traces
   (`test_two_philosophers_all_orderings` updated to assert ≥3)
-- [ ] Add test: lastzero-style program (POPL'14 Fig.4 p.11) → verify reduction
+- [x] Add test: lastzero-style program (POPL'14 Fig.4 p.11) →
+  `test_lastzero_three` models lastzero(3) with 4 threads. Source-DPOR
+  explores ≤30 traces (down from 48 without full propagation).
 - [ ] Re-run dining philosophers benchmark: expect reduction from 14,221
 
-## Phase 2: Source set filtering
+## Phase 2: Source set filtering via sleep propagation
 
-With sleep sets working, source set filtering becomes sound.
+**Correction**: The originally-planned object-based source set filtering
+("one thread per race object per position") is **incorrect** — it
+under-explores. Different threads racing on the same object at the same
+position have different initials: `I[E'](v) = {q}` for each racing thread
+q. Skipping q because another thread was already added for the same object
+misses the Mazurkiewicz trace where q goes first.
 
-**Paper ref**: Definition 4.3 (JACM'17 p.15), Algorithm 1 lines 5-9 (p.16).
-A source set P for W after E requires only that `WI[E](w) ∩ P ≠ ∅` for each
-continuation w ∈ W. This is *weaker* than persistent sets, which require
-`I[E](w) ∩ P ≠ ∅` — the difference is that weak initials allow adding a thread
-that doesn't directly participate in the first step of w but whose execution
-leads to an equivalent trace.
+The paper's source set check `I[E'](v) ∩ backtrack(E') = ∅` (Algorithm 1
+line 8, JACM'17 p.16) is **already implemented** by the existing
+`contains_thread` check in `backtrack()`: for single-step races, `I = {q}`,
+so the check is "is q already in the wakeup tree?"
 
-### 2a. Enable source set filtering in backtrack()
+The actual source-DPOR improvement for benchmarks like readers(N) comes from
+**sleep set propagation** (Algorithm 2 line 16, JACM'17 p.24), specifically
+propagation to new branches beyond the replay prefix. This was implemented
+in Phase 1c' (approach (c'): full propagation).
 
-- [ ] For each racing pair (e, e') at position i on object obj:
-  - Check if `backtrack(i, *, Some(obj))` has already been called for this
-    position+object pair in this execution
-  - If yes, skip (one thread per race object is sufficient for source sets)
-  - Re-add `pending_race_objects: HashSet<(usize, u64)>` to Branch (was removed)
-  - **Paper ref**: Algorithm 1 line 8-9 (JACM'17 p.16): the test
-    `I[E'](v) ∩ backtrack(E') = ∅` prevents adding redundant threads
+Further improvements from source sets require:
+1. **Weak initials** (WI vs I): adding a different thread that provides
+   equivalent coverage via independence. This enables the optimization
+   originally envisioned but requires computing trace equivalence. (Phase 3)
+2. **Multi-step notdep sequences**: computing `v = notdep(e, E).e'` allows
+   inserting multi-step wakeup sequences that encode independence info
+   directly in the wakeup tree. (Phase 3b)
 
-### 2b. Verify source set filtering
+### 2a. Source set check via contains_thread (already implemented)
 
-- [ ] Writer-readers (3 threads, 1 writer, 2 readers):
-  - Classic DPOR: explores 5+ interleavings
-  - Source-DPOR: explores exactly 4 (POPL'14 Table 1 p.11, JACM'17 p.36)
-- [ ] Dining philosophers benchmark: expect major reduction
-  - POPL'14 Table 1: lesystem(19) goes from 4096 (classic) to 64 (source/optimal)
-- [ ] Independent pairs (T0/T1 write X, T2/T3 write Y): should remain at 4
+- [x] The `contains_thread` check in `backtrack()` implements `I[E'](v) ∩
+  backtrack(E') = ∅` for single-step races. No additional tracking needed.
+  - **Paper ref**: Algorithm 1 line 8 (JACM'17 p.16)
+
+### 2b. Full sleep set propagation to new branches
+
+- [x] Extended `schedule()` to call `propagate_sleep()` for new branches,
+  not just replay branches. This implements the paper's Algorithm 2 line 18
+  where `Sleep'` is passed to ALL recursive Explore calls.
+  - Sleeping threads at position K are propagated to position K+1 (new) if
+    their recorded accesses are independent of the active thread's accesses.
+  - Sound because sleeping threads' state is frozen (not scheduled since
+    their home position). Their next action is the same as recorded.
+  - **Results**: readers(2): 5→4, readers(4): ~65→16, lastzero(3): 48→≤30
+
+### 2c. Verification
+
+- [x] Writer-readers (3 threads, 1 writer, 2 readers):
+  - Without propagation to new branches: 5 interleavings
+  - With full propagation: exactly 4 (matching POPL'14 Table 2: source=4)
+- [x] Writer-readers (5 threads, 1 writer, 4 readers):
+  - Without propagation: ~65 interleavings
+  - With full propagation: exactly 16 (= 2^4, matching POPL'14 Table 2)
+- [x] Lastzero(3) (4 threads, POPL'14 Fig.4 p.11):
+  - Without propagation: 48 traces
+  - With full propagation: ≤30 traces
+- [ ] Dining philosophers benchmark: expect reduction from 14,221
+- [x] Independent pairs (T0/T1 write X, T2/T3 write Y): remains at 4
+- [x] All existing tests pass unchanged (48/48 Rust tests)
 
 ## Phase 3: Deferred race detection (Optimal-DPOR)
 
@@ -308,10 +351,10 @@ The current implementation cleanly separates concerns:
 - `DporEngine` — race detection, vector clocks, sync events
 - `PyDporEngine` — PyO3 bridge to Python
 
-The sleep set propagation should be implemented in `Path::schedule()` (during
-replay) and `Path::step()` (when computing the initial sleep set at the
-backtrack point). The engine doesn't need changes — it already passes
-`race_object` through to `backtrack()`.
+Sleep set propagation is implemented in `Path::schedule()` (during both
+replay AND new branches) and `Path::step()` (when computing the initial
+sleep set at the backtrack point). The engine doesn't need changes — it
+already passes `race_object` through to `backtrack()`.
 
 For Phase 3 (deferred race detection), the engine will need changes: collect
 races during execution and process them in `next_execution()`.
@@ -332,8 +375,9 @@ races during execution and process them in `next_execution()`.
    access-kind-aware independence checks. Multi-hop propagation via
    `propagated_sleep_accesses` carrying access info forward.
 
-5. **Source set filtering**: Current = disabled (all racing threads added).
-   Paper = one thread per race suffices with sleep sets. (Phase 2)
+5. **Source set filtering**: The basic check (`I[E'](v) ∩ backtrack(E')`)
+   is implemented via `contains_thread`. The weak initials optimization
+   (`WI` instead of `I`) requires trace equivalence computation. (Phase 3)
 
 6. **Wakeup subtree guidance**: Current = `schedule()` ignores subtrees.
    Paper = `WuT' = subtree(wut(E), p)` guides replay. (Phase 4b)
