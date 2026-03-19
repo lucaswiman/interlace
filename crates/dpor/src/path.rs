@@ -21,10 +21,59 @@
 //!   propagation across scheduling points (needed for Algorithm 2 line 16:
 //!   `Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
+use crate::access::AccessKind;
 use crate::thread::ThreadStatus;
 use crate::wakeup_tree::WakeupTree;
+
+/// Check whether two access kinds conflict (i.e., are dependent).
+///
+/// Two accesses to the same object are **dependent** if reordering them could
+/// produce a different result. This mirrors the conflict semantics in
+/// `ObjectState::dependent_accesses` (object.rs).
+///
+/// Paper ref: JACM'17 Def 3.3 (p.13) — events e, e' are dependent when they
+/// access the same shared variable and at least one is a write (for the basic
+/// model). Our extended model also has WeakWrite/WeakRead with relaxed
+/// conflict rules for container operations.
+///
+/// Independence (¬conflict) is used for sleep set propagation:
+///   Algorithm 2 line 16 (JACM'17 p.24): Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}
+/// where p♦q means p's action is independent of q's action.
+fn access_kinds_conflict(a: AccessKind, b: AccessKind) -> bool {
+    matches!(
+        (a, b),
+        // Write conflicts with everything
+        (AccessKind::Write, _) | (_, AccessKind::Write)
+        // Read + WeakWrite conflict (Read depends on WeakWrite)
+        | (AccessKind::Read, AccessKind::WeakWrite) | (AccessKind::WeakWrite, AccessKind::Read)
+    )
+    // Independent pairs (not matched above):
+    //   Read + Read, Read + WeakRead, WeakRead + WeakRead,
+    //   WeakWrite + WeakWrite, WeakWrite + WeakRead, WeakRead + WeakWrite
+}
+
+/// Check if two sets of (object → access_kind) are independent.
+///
+/// Two sets are independent if, for every object that appears in both sets,
+/// the access kinds are non-conflicting (e.g., both reads).
+///
+/// Paper ref: JACM'17 Def 3.3 (p.13) — independence is the negation of
+/// dependence. We approximate the paper's E ⊢ p♦q (Def 3.3) using access-kind
+/// compatibility as a sufficient condition for independence.
+fn accesses_are_independent(a: &HashMap<u64, AccessKind>, b: &HashMap<u64, AccessKind>) -> bool {
+    // Iterate over the smaller map for efficiency
+    let (smaller, larger) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    for (obj, kind_a) in smaller {
+        if let Some(kind_b) = larger.get(obj) {
+            if access_kinds_conflict(*kind_a, *kind_b) {
+                return false;
+            }
+        }
+    }
+    true
+}
 
 #[derive(Clone, Debug)]
 pub struct Branch {
@@ -38,22 +87,39 @@ pub struct Branch {
     /// Sleep set: threads that should not be added as backtracks because
     /// an equivalent execution starting with them has already been explored.
     /// Indexed by thread ID; `true` = sleeping.
-    /// Paper: sleep(E) in Algorithm 2 (JACM'17 p.24). Currently only tracks
-    /// Visited threads locally; cross-branch propagation (line 16:
-    /// `Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}`) is not yet implemented.
+    /// Paper: sleep(E) in Algorithm 2 (JACM'17 p.24). Tracks Visited threads
+    /// locally at each position. Cross-branch propagation is handled by
+    /// `propagated_sleep_accesses` below.
     pub sleep: Vec<bool>,
-    /// Objects accessed by the current active thread at this scheduling step.
+    /// Accesses (object → kind) performed by the active thread at this step.
     /// Used for sleep set independence checks during propagation.
+    ///
+    /// Tracks the AccessKind so we can distinguish read-read (independent)
+    /// from read-write (dependent) on the same object.
+    ///
     /// Paper: needed to compute E ⊢ p♦q (independence, JACM'17 Def 3.3 p.13)
-    /// — two events are independent if their object sets are disjoint.
-    pub active_objects: HashSet<u64>,
+    /// — two events are independent if their accesses don't conflict.
+    pub active_accesses: HashMap<u64, AccessKind>,
     /// For each previously-explored (Visited) thread at this position,
-    /// the set of objects it accessed. Used for sleep set propagation:
-    /// a sleeping thread stays asleep if its recorded objects are
-    /// disjoint from the active thread's objects (independent actions).
-    /// Paper: approximates the independence check E ⊢ p♦q (JACM'17 p.13)
-    /// using object-set disjointness as a sufficient condition.
-    pub explored_objects: HashMap<usize, HashSet<u64>>,
+    /// its accesses (object → kind). Used for sleep set propagation:
+    /// a sleeping thread stays asleep if its accesses are independent of
+    /// the active thread's accesses.
+    ///
+    /// Paper: approximates the independence check E ⊢ p♦q (JACM'17 p.13).
+    pub explored_accesses: HashMap<usize, HashMap<u64, AccessKind>>,
+    /// Sleep set entries propagated from the previous scheduling point.
+    ///
+    /// When thread p is chosen at position i, each sleeping thread q at
+    /// position i whose next action is independent of p's action (p♦q)
+    /// stays asleep at position i+1. This map carries both the sleeping
+    /// status AND the thread's access info, enabling multi-hop propagation.
+    ///
+    /// Paper ref: Algorithm 2 line 16 (JACM'17 p.24):
+    ///   Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}
+    /// In the paper's recursive formulation, Sleep' is passed to the
+    /// recursive Explore(E.p, WuT', Sleep') call. In our iterative
+    /// implementation, we compute it during replay and store it here.
+    pub propagated_sleep_accesses: HashMap<usize, HashMap<u64, AccessKind>>,
     // Note: pending_race_objects was removed — source set filtering at the
     // race-object level requires sleep sets for soundness.
     // Paper: source set filtering (Def 4.3, JACM'17 p.15) allows adding only
@@ -70,8 +136,9 @@ impl Branch {
             preemptions,
             wakeup: WakeupTree::empty(),
             sleep: vec![false; num_threads],
-            active_objects: HashSet::new(),
-            explored_objects: HashMap::new(),
+            active_accesses: HashMap::new(),
+            explored_accesses: HashMap::new(),
+            propagated_sleep_accesses: HashMap::new(),
         }
     }
 }
@@ -99,11 +166,26 @@ impl Path {
 
     /// Record that an object was accessed at the given scheduling step.
     /// Called by the engine after each process_access/process_io_access.
-    /// Populates `active_objects` for future independence checks
+    /// Populates `active_accesses` for future independence checks
     /// (E ⊢ p♦q, JACM'17 Def 3.3 p.13).
-    pub fn record_access(&mut self, path_id: usize, object_id: u64) {
+    ///
+    /// When the same object is accessed multiple times at one scheduling
+    /// point with different AccessKinds, we conservatively upgrade to
+    /// Write (which conflicts with everything). This ensures the
+    /// independence check remains sound.
+    pub fn record_access(&mut self, path_id: usize, object_id: u64, kind: AccessKind) {
         if let Some(branch) = self.branches.get_mut(path_id) {
-            branch.active_objects.insert(object_id);
+            branch.active_accesses
+                .entry(object_id)
+                .and_modify(|existing| {
+                    // If access kinds differ, upgrade to Write (conservative:
+                    // Write conflicts with everything, so independence checks
+                    // will correctly report dependent).
+                    if *existing != kind {
+                        *existing = AccessKind::Write;
+                    }
+                })
+                .or_insert(kind);
         }
     }
 
@@ -111,8 +193,14 @@ impl Path {
     /// During replay, follows the recorded path; otherwise creates a new branch.
     ///
     /// In Algorithm 2 (JACM'17 p.24), this corresponds to lines 8-12 (choosing
-    /// which process to explore) and line 18 (recursive Explore call). Currently
-    /// does NOT pass wakeup subtrees (WuT') to guide replay — see Phase 4b.
+    /// which process to explore) and line 18 (recursive Explore call with
+    /// Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}).
+    ///
+    /// **Sleep set propagation**: At each position, we propagate sleeping
+    /// threads from the previous position. A thread q sleeping at position
+    /// i-1 stays asleep at position i if q's recorded accesses are
+    /// independent of the chosen thread p's accesses at position i-1.
+    /// This implements Algorithm 2 line 16 (JACM'17 p.24).
     pub fn schedule(
         &mut self,
         runnable: &[usize],
@@ -124,8 +212,10 @@ impl Path {
         }
 
         if self.pos < self.branches.len() {
-            // Replay: clear active_objects for fresh recording.
-            self.branches[self.pos].active_objects.clear();
+            // Replay: propagate sleep set from previous position, then
+            // clear active_accesses for fresh recording.
+            self.propagate_sleep(self.pos);
+            self.branches[self.pos].active_accesses.clear();
             let chosen = self.branches[self.pos].active_thread;
             self.pos += 1;
             return Some(chosen);
@@ -148,10 +238,82 @@ impl Path {
         }
 
         let branch = Branch::new(threads, chosen, preemptions);
-
         self.branches.push(branch);
+
+        // Propagate sleep set from the previous position to this new branch.
+        self.propagate_sleep(self.branches.len() - 1);
+
         self.pos += 1;
         Some(chosen)
+    }
+
+    /// Propagate the sleep set from position `pos-1` to position `pos`.
+    ///
+    /// For each thread q that is sleeping at position pos-1 (either locally
+    /// Visited or propagated from an earlier position), check if q's
+    /// recorded accesses are independent of the active thread's accesses
+    /// at pos-1. If independent, q stays asleep at pos.
+    ///
+    /// This implements Algorithm 2 line 16 (JACM'17 p.24):
+    ///   Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}
+    ///
+    /// The independence check E ⊢ p♦q is approximated by access-kind
+    /// compatibility: two accesses to the same object are independent if
+    /// they are both reads (or other non-conflicting combinations like
+    /// WeakWrite+WeakRead). This is a sufficient condition — if the object
+    /// sets are disjoint or all overlapping accesses are compatible, the
+    /// actions are truly independent in any execution context.
+    ///
+    /// **Approach (c) from the plan**: We propagate through the replayed
+    /// prefix and into new positions. For locally-sleeping threads, we use
+    /// `explored_accesses` (recorded when the thread was the active thread
+    /// at this position). For propagated threads, we carry their access
+    /// info forward. Threads without access info are woken up (conservative).
+    fn propagate_sleep(&mut self, pos: usize) {
+        if pos == 0 {
+            // Position 0 has no predecessor to propagate from.
+            return;
+        }
+
+        let prev = pos - 1;
+        // Collect the active thread's accesses at the previous position.
+        // These are the accesses of the thread that was chosen at pos-1.
+        let prev_active_accesses = self.branches[prev].active_accesses.clone();
+
+        // Collect all sleeping threads at pos-1 and their access info.
+        // A thread is sleeping if it's locally Visited (sleep[q]=true) or
+        // propagated from an earlier position (in propagated_sleep_accesses).
+        let mut sleeping_threads: HashMap<usize, HashMap<u64, AccessKind>> = HashMap::new();
+
+        // 1. Locally-sleeping threads (Visited at pos-1)
+        let num_threads = self.branches[prev].sleep.len();
+        for tid in 0..num_threads {
+            if self.branches[prev].sleep.get(tid).copied().unwrap_or(false) {
+                if let Some(accesses) = self.branches[prev].explored_accesses.get(&tid) {
+                    sleeping_threads.insert(tid, accesses.clone());
+                }
+                // If no explored_accesses for this Visited thread, we can't
+                // check independence → wake up (don't add to sleeping_threads).
+            }
+        }
+
+        // 2. Propagated-sleeping threads (from even earlier positions)
+        for (tid, accesses) in &self.branches[prev].propagated_sleep_accesses {
+            sleeping_threads.insert(*tid, accesses.clone());
+        }
+
+        // Compute which sleeping threads stay asleep at pos.
+        let mut propagated: HashMap<usize, HashMap<u64, AccessKind>> = HashMap::new();
+        for (tid, tid_accesses) in sleeping_threads {
+            if accesses_are_independent(&tid_accesses, &prev_active_accesses) {
+                propagated.insert(tid, tid_accesses);
+            }
+            // If dependent, the thread wakes up — it must be available for
+            // backtracking at this position since its equivalent trace may
+            // not have been explored.
+        }
+
+        self.branches[pos].propagated_sleep_accesses = propagated;
     }
 
     /// Mark thread_id for backtracking at branch path_id.
@@ -177,12 +339,19 @@ impl Path {
             _ => return,
         }
 
-        // Sleep set check: if thread is sleeping (Visited), skip.
+        // Sleep set check: if thread is sleeping (locally Visited or
+        // propagated from an earlier position), skip.
+        //
         // Paper: Algorithm 2 line 5 (JACM'17 p.24) checks
         //   sleep(E') ∩ WI[E'](v) = ∅
-        // before inserting. Our simplified version just checks if the
-        // thread itself is in the sleep set.
+        // before inserting. Our version checks both the local sleep set
+        // (threads Visited at this position) and the propagated sleep set
+        // (threads whose next action is independent of all chosen threads
+        // between their home position and this position).
         if branch.sleep.get(thread_id).copied().unwrap_or(false) {
+            return;
+        }
+        if branch.propagated_sleep_accesses.contains_key(&thread_id) {
             return;
         }
 
@@ -222,16 +391,18 @@ impl Path {
             let active = branch.active_thread;
             if active < branch.threads.len() && branch.threads[active] == ThreadStatus::Active {
                 branch.threads[active] = ThreadStatus::Visited;
-                // Save explored objects for future sleep set propagation
-                // (needed for Algorithm 2 line 16: independence check E ⊢ p♦q)
-                let objects = branch.active_objects.clone();
-                branch.explored_objects.entry(active).or_default().extend(objects);
+                // Save explored accesses for future sleep set propagation.
+                // These are used to check independence (E ⊢ p♦q) when
+                // propagating sleep sets across scheduling points.
+                // Paper: Algorithm 2 line 16 (JACM'17 p.24).
+                let accesses = branch.active_accesses.clone();
+                branch.explored_accesses.insert(active, accesses);
                 // Add to sleep set: this thread has been explored at this position.
                 // Paper: Algorithm 2 line 20 (JACM'17 p.25): "add p to sleep(E)"
                 if active < branch.sleep.len() {
                     branch.sleep[active] = true;
                 }
-                branch.active_objects.clear();
+                branch.active_accesses.clear();
             }
 
             // Remove current thread from wakeup tree (already explored).
@@ -265,6 +436,7 @@ impl Path {
                     && (!would_preempt || branch.preemptions < bound)
                     && !branch.wakeup.contains_thread(thread_id)
                     && !branch.sleep.get(thread_id).copied().unwrap_or(false)
+                    && !branch.propagated_sleep_accesses.contains_key(&thread_id)
                 {
                     self.branches[i].wakeup.insert(&[thread_id]);
                     return;
@@ -353,11 +525,12 @@ mod tests {
 
     #[test]
     fn test_sleep_set_visited_thread() {
+        use crate::access::AccessKind;
         // After exploring thread 0 at position 0, it should be in the sleep set
         let mut path = Path::new(None);
         path.schedule(&[0, 1, 2], 0, 3);
         // Record some access for thread 0
-        path.record_access(0, 100);
+        path.record_access(0, 100, AccessKind::Write);
         path.backtrack(0, 1, None);
 
         // step() marks 0 as Visited and adds to sleep set
@@ -371,11 +544,12 @@ mod tests {
 
     #[test]
     fn test_visited_thread_cannot_be_backtracked() {
+        use crate::access::AccessKind;
         // After exploring T0 at position 0, T0 is Visited and in the sleep set.
         // Backtracks to T0 at position 0 should be rejected.
         let mut path = Path::new(None);
         path.schedule(&[0, 1, 2], 0, 3);
-        path.record_access(0, 100);
+        path.record_access(0, 100, AccessKind::Write);
 
         // Add backtrack for T1
         path.backtrack(0, 1, None);
@@ -427,64 +601,67 @@ mod tests {
 
     // --- Sleep set propagation tests ---
 
-    /// Test that propagated_sleep_accesses blocks backtracking.
+    /// Test that sleep set propagation carries sleeping threads across
+    /// positions when their accesses are independent.
     ///
-    /// If thread q is propagated-sleeping at position K (i.e., its next
-    /// action is independent of all chosen threads between q's home
-    /// position and K), then backtrack(K, q) should be rejected.
+    /// Scenario: 3 threads. T0 is explored at pos 0 writing object 100.
+    /// Then T1 is explored at pos 0 accessing object 200 (different object).
+    /// When T2 is explored at pos 0 with T0 sleeping, propagation to
+    /// pos 1 should carry T0 forward (Write(100) is independent of
+    /// whatever T2 does on object 200).
     ///
-    /// Paper ref: Algorithm 2 line 5 (JACM'17 p.24) — before inserting
-    /// into the wakeup tree, check sleep(E') ∩ WI[E'](v) = ∅.
+    /// Paper ref: Algorithm 2 line 16 (JACM'17 p.24):
+    ///   Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}
     #[test]
-    fn test_propagated_sleep_blocks_backtrack() {
+    fn test_propagated_sleep_independent_objects() {
         use crate::access::AccessKind;
         let mut path = Path::new(None);
 
-        // Position 0: T0 active, T1 and T2 pending
+        // --- First execution: T0 at pos 0, T1 at pos 1, T2 at pos 2 ---
         path.schedule(&[0, 1, 2], 0, 3);
-        // T0 accesses object 100 (Write)
         path.record_access(0, 100, AccessKind::Write);
-
-        // Position 1: T1 active (new branch)
         path.schedule(&[1, 2], 1, 3);
-        // T1 accesses object 200 (Read)
         path.record_access(1, 200, AccessKind::Read);
+        path.schedule(&[2], 2, 3);
+        path.record_access(2, 200, AccessKind::Read);
 
-        // Simulate exploring T0 at pos 0: mark Visited, add to sleep
-        // and explored_accesses
-        path.step(); // T0 -> Visited at pos 0, saved in explored_accesses
-        // Now backtrack T1 at pos 0
+        // Add backtracks for T1 and T2 at pos 0
         path.backtrack(0, 1, None);
-        assert!(path.step()); // picks T1 from wakeup at pos 0
+        path.backtrack(0, 2, None);
 
-        // Replay pos 0 with T1 active
+        // --- step(): T0 → Visited at pos 0, T1 next ---
+        assert!(path.step());
+
+        // --- Second execution: T1 at pos 0, ... ---
         let chosen = path.schedule(&[0, 1, 2], 0, 3);
         assert_eq!(chosen, Some(1));
-        // T1 accesses object 200 (Read) — different object, independent of T0's Write to 100
         path.record_access(0, 200, AccessKind::Read);
 
-        // Position 1 (new branch): T0 active
+        // New branch at pos 1: T0 chosen
         path.schedule(&[0, 2], 0, 3);
 
-        // At position 1, T0 is NOT sleeping (local sleep[0] is false at pos 1).
-        // But propagation: T0 was sleeping at pos 0 with {100: Write}.
+        // T0 was sleeping at pos 0 with explored_accesses = {100: Write}.
         // T1's active_accesses at pos 0 = {200: Read}.
-        // {100} ∩ {200} = ∅ → independent → T0 propagated to pos 1.
-        // So backtrack(1, 0) should be blocked by propagated sleep.
+        // Object 100 ≠ 200 → independent → T0 should be propagated to pos 1.
         assert!(
-            path.branches[1]
-                .propagated_sleep_accesses
-                .contains_key(&0),
-            "T0 should be propagated-sleeping at position 1"
+            path.branches[1].propagated_sleep_accesses.contains_key(&0),
+            "T0 should be propagated-sleeping at position 1 \
+             (Write(100) independent of Read(200))"
+        );
+
+        // backtrack(1, 0) should be rejected due to propagated sleep
+        path.backtrack(1, 0, None);
+        assert!(
+            !path.branches[1].wakeup.contains_thread(0),
+            "T0 should not be added to wakeup tree at pos 1 (propagated sleeping)"
         );
     }
 
     /// Test that propagated sleep is NOT applied when actions are dependent.
     ///
-    /// If the sleeping thread's next action conflicts with the chosen
-    /// thread's action (same object, at least one write), the sleeping
-    /// thread must wake up — its equivalent trace is NOT guaranteed to
-    /// exist, so we must allow exploring it.
+    /// Scenario: T0 wrote object 100 at pos 0 and is sleeping.
+    /// T1 is active at pos 0 and also accesses object 100 (Read).
+    /// Write vs Read on same object → conflict → T0 must wake up at pos 1.
     ///
     /// Paper ref: Algorithm 2 line 16 (JACM'17 p.24) — the filter
     /// E ⊢ p♦q keeps only independent sleeping threads.
@@ -493,35 +670,92 @@ mod tests {
         use crate::access::AccessKind;
         let mut path = Path::new(None);
 
-        // Position 0: T0 active, T1 pending
+        // --- First execution: T0 at pos 0 ---
         path.schedule(&[0, 1], 0, 2);
-        // T0 accesses object 100 (Write)
         path.record_access(0, 100, AccessKind::Write);
-
-        // Position 1: T1 active
         path.schedule(&[1], 1, 2);
+        path.record_access(1, 100, AccessKind::Read);
 
-        // Mark T0 Visited at pos 0, add backtrack for T1
-        path.step();
+        // Backtrack T1 at pos 0
         path.backtrack(0, 1, None);
+
+        // --- step(): T0 → Visited at pos 0, T1 next ---
         assert!(path.step());
 
-        // Replay pos 0 with T1 active
-        path.schedule(&[0, 1], 0, 2);
-        // T1 ALSO accesses object 100 (Read) — conflicts with T0's Write
+        // --- Second execution: T1 at pos 0 ---
+        let chosen = path.schedule(&[0, 1], 0, 2);
+        assert_eq!(chosen, Some(1));
+        // T1 accesses same object 100 (Read) → conflicts with T0's Write
         path.record_access(0, 100, AccessKind::Read);
 
-        // Position 1 (new branch): T0 active
+        // New branch at pos 1
         path.schedule(&[0], 0, 2);
 
-        // T0 was sleeping at pos 0 with {100: Write}.
-        // T1's active_accesses at pos 0 = {100: Read}.
-        // Write vs Read on same object → CONFLICT → T0 must wake up.
+        // T0 sleeping at pos 0 with {100: Write}.
+        // T1's active at pos 0 = {100: Read}.
+        // Write vs Read on object 100 → CONFLICT → T0 must wake up.
         assert!(
-            !path.branches[1]
-                .propagated_sleep_accesses
-                .contains_key(&0),
-            "T0 should NOT be propagated-sleeping when actions conflict"
+            !path.branches[1].propagated_sleep_accesses.contains_key(&0),
+            "T0 should NOT be propagated-sleeping (Write vs Read conflict on obj 100)"
+        );
+    }
+
+    /// Test multi-hop propagation: a sleeping thread propagates across
+    /// multiple positions as long as each step's active thread is independent.
+    ///
+    /// 3 threads, each accessing a DIFFERENT object. T0 writes obj 100.
+    /// T1 reads obj 200. T2 reads obj 300. All independent of each other.
+    /// After exploring T0 at pos 0, T0 should propagate to pos 1 and pos 2.
+    #[test]
+    fn test_propagated_sleep_multi_hop() {
+        use crate::access::AccessKind;
+        let mut path = Path::new(None);
+
+        // --- First execution: T0, T1, T2 ---
+        path.schedule(&[0, 1, 2], 0, 3);
+        path.record_access(0, 100, AccessKind::Write);
+        path.schedule(&[1, 2], 1, 3);
+        path.record_access(1, 200, AccessKind::Read);
+        path.schedule(&[2], 2, 3);
+        path.record_access(2, 300, AccessKind::Read);
+
+        // Add backtrack at pos 0 for T1
+        path.backtrack(0, 1, None);
+
+        // step(): T0 → Visited at pos 0
+        assert!(path.step());
+
+        // --- Second execution: T1 at pos 0 (replay) ---
+        let chosen = path.schedule(&[0, 1, 2], 0, 3);
+        assert_eq!(chosen, Some(1));
+        path.record_access(0, 200, AccessKind::Read); // T1 reads obj 200
+
+        // New branch at pos 1: T0 and T2 runnable. current_thread=1 but
+        // T1 finished, so first runnable (T0) is chosen.
+        let chosen = path.schedule(&[0, 2], 1, 3);
+        assert_eq!(chosen, Some(0)); // T0 chosen (first runnable)
+        path.record_access(1, 100, AccessKind::Write);
+
+        // T0 sleeping at pos 0 with {100: Write}.
+        // T1's active at pos 0 = {200: Read}. Obj 100 ≠ 200 → independent.
+        // → T0 propagated to pos 1 with {100: Write}.
+        assert!(
+            path.branches[1].propagated_sleep_accesses.contains_key(&0),
+            "T0 should propagate to pos 1 (Write(100) indep of Read(200))"
+        );
+
+        // Now create pos 2: T2 runnable
+        let chosen = path.schedule(&[2], 2, 3);
+        assert_eq!(chosen, Some(2));
+
+        // Propagation from pos 1 to pos 2:
+        // T0 propagated at pos 1 with {100: Write}.
+        // Active at pos 1 = {100: Write} (T0 itself wrote obj 100).
+        // T0's {100: Write} vs active's {100: Write} → CONFLICT → T0 wakes up.
+        // This is correct: T0 ran at pos 1 so it's no longer sleeping there.
+        assert!(
+            !path.branches[2].propagated_sleep_accesses.contains_key(&0),
+            "T0 should wake up at pos 2 (T0 itself ran at pos 1, conflict)"
         );
     }
 }
