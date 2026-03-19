@@ -889,12 +889,12 @@ mod tests {
         }
 
         // With replay-only sleep set propagation (approach (c)):
-        // - Full propagation (replay + new branches) gives 4 traces (optimal)
+        // - Full propagation (replay + new branches) would give 4 traces
+        //   but requires trace caching to know the sleeping thread's complete
+        //   future accesses (not just the last-explored position's accesses).
         // - Replay-only propagation gives 5 traces (one redundant trace
-        //   because reader-reader propagation to new branches is disabled)
+        //   because reader-reader propagation to new branches is disabled).
         // - Without propagation: 5+ traces
-        // Full optimality (4 traces) requires propagation to new branches,
-        // which needs trace caching (approach (b)) for soundness.
         assert!(
             exec_count <= 5,
             "writer-readers (1W + 2R) should explore at most 5 traces, got {exec_count}"
@@ -951,9 +951,9 @@ mod tests {
         }
 
         // With replay-only propagation (approach (c)), the count is ~65.
-        // Full propagation (to new branches) reduces to 16 but risks
-        // unsound blocking (see tricky_races test failures).
-        // Optimal = 5 (requires source set filtering, Phase 2).
+        // Full propagation to new branches requires trace caching (Phase 2)
+        // to know each sleeping thread's complete future accesses.
+        // Optimal = 5 (requires source set filtering, JACM'17 Def 4.3 p.15).
         // 5! = 120 would be the worst case without any DPOR.
         assert!(
             exec_count < 120,

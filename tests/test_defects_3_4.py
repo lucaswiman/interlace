@@ -63,13 +63,14 @@ class _EngineRecorder:
 
 class _SchedulerStub:
     def __init__(self, engine: _EngineRecorder) -> None:
-        from frontrun.dpor import ShadowStack
+        from frontrun.dpor import ShadowStack, StableObjectIds
 
         self._shadow = ShadowStack()
         self.engine = engine
         self.execution = object()
         self._engine_lock = threading.Lock()
         self.trace_recorder = None
+        self._stable_ids = StableObjectIds()
 
     def get_shadow_stack(self, _frame_id: int):  # type: ignore[no-untyped-def]
         return self._shadow
