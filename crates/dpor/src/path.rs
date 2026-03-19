@@ -597,17 +597,70 @@ mod tests {
     }
 
     #[test]
-    fn test_race_object_passed_through() {
-        // All racing threads should be added regardless of object
-        // (source set filtering is disabled for soundness without sleep sets)
+    fn test_race_object_source_set_filtering() {
+        // With source set filtering (Def 4.3, JACM'17 p.15):
+        // Only ONE thread per race object per position is added.
+        // T1 and T2 race on object 100 → only T1 added.
+        // T3 races on object 200 → T3 also added (different object).
         let mut path = Path::new(None);
         path.schedule(&[0, 1, 2, 3], 0, 4);
 
-        path.backtrack(0, 1, Some(100));
-        path.backtrack(0, 2, Some(100));
-        path.backtrack(0, 3, Some(200));
+        path.backtrack(0, 1, Some(100)); // First for obj 100 → added
+        path.backtrack(0, 2, Some(100)); // Second for obj 100 → SKIPPED
+        path.backtrack(0, 3, Some(200)); // First for obj 200 → added
 
-        assert_eq!(path.branches[0].wakeup.root_threads(), vec![1, 2, 3]);
+        assert_eq!(path.branches[0].wakeup.root_threads(), vec![1, 3]);
+    }
+
+    // --- Source set filtering tests ---
+
+    /// Source set filtering: when two threads race on the same object at the
+    /// same position, only ONE should be added to the backtrack set.
+    ///
+    /// Paper ref: Algorithm 1 lines 8-9 (JACM'17 p.16): the test
+    ///   `I[E'](v) ∩ backtrack(E') = ∅`
+    /// prevents adding redundant threads. With source sets (Def 4.3, JACM'17
+    /// p.15), we only need `WI[E](w) ∩ P ≠ ∅` for each continuation w ∈ W —
+    /// one thread per race object suffices.
+    #[test]
+    fn test_source_set_filters_redundant_backtrack() {
+        let mut path = Path::new(None);
+        path.schedule(&[0, 1, 2, 3], 0, 4);
+
+        // First backtrack for object 100 at position 0: should succeed
+        path.backtrack(0, 1, Some(100));
+        assert!(path.branches[0].wakeup.contains_thread(1));
+
+        // Second backtrack for SAME object 100 at position 0: should be SKIPPED
+        // (source set already satisfied for this race object at this position)
+        path.backtrack(0, 2, Some(100));
+        assert!(
+            !path.branches[0].wakeup.contains_thread(2),
+            "Source set filtering should skip redundant thread for same (position, object) pair"
+        );
+
+        // Backtrack for DIFFERENT object 200 at position 0: should succeed
+        // (different object = different race class, needs its own source set entry)
+        path.backtrack(0, 3, Some(200));
+        assert!(
+            path.branches[0].wakeup.contains_thread(3),
+            "Different race objects need separate source set entries"
+        );
+    }
+
+    /// Source set filtering should NOT apply when race_object is None
+    /// (e.g., in tests or manual backtrack calls without object info).
+    #[test]
+    fn test_source_set_no_filtering_without_object() {
+        let mut path = Path::new(None);
+        path.schedule(&[0, 1, 2], 0, 3);
+
+        path.backtrack(0, 1, None);
+        path.backtrack(0, 2, None);
+
+        // Both should be added (no source set filtering without object info)
+        assert!(path.branches[0].wakeup.contains_thread(1));
+        assert!(path.branches[0].wakeup.contains_thread(2));
     }
 
     // --- Sleep set propagation tests ---
