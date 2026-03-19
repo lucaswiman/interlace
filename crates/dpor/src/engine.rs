@@ -130,6 +130,9 @@ impl DporEngine {
 
         let access = Access::new(current_path_id, current_dpor_vv, thread_id);
         object_state.record_access(access, kind);
+
+        // Record access for sleep set independence checks
+        self.path.record_access(current_path_id, object_id);
     }
 
     /// Like [`process_access`] but uses first-access recording semantics
@@ -162,6 +165,8 @@ impl DporEngine {
 
         let access = Access::new(current_path_id, current_dpor_vv, thread_id);
         object_state.record_io_access(access, kind);
+
+        self.path.record_access(current_path_id, object_id);
     }
 
     /// Like [`process_access`] but uses the thread's `io_vv` instead of
@@ -190,6 +195,8 @@ impl DporEngine {
 
         let access = Access::new(current_path_id, current_io_vv, thread_id);
         object_state.record_io_access(access, kind);
+
+        self.path.record_access(current_path_id, object_id);
     }
 
     pub fn process_sync(

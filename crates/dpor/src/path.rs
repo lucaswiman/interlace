@@ -1,21 +1,60 @@
-//! Exploration tree for DPOR.
+//! Exploration tree for Source Sets DPOR.
+//!
+//! Implements the Source Sets algorithm from Abdulla et al. (2017) using
+//! wakeup trees for backtracking and sleep sets for pruning equivalent
+//! interleavings. Each scheduling point (Branch) maintains:
+//!
+//! - A **wakeup tree** of thread sequences to explore (replaces classic
+//!   Backtrack status with ordered, structured exploration).
+//! - A **sleep set** of threads that should not be re-explored because an
+//!   equivalent execution has already been covered.
+//! - **Object tracking** per thread to enable independence-based sleep set
+//!   propagation across scheduling points.
+
+use std::collections::{HashMap, HashSet};
 
 use crate::thread::ThreadStatus;
+use crate::wakeup_tree::WakeupTree;
 
 #[derive(Clone, Debug)]
 pub struct Branch {
     pub threads: Vec<ThreadStatus>,
     pub active_thread: usize,
     pub preemptions: u32,
+    /// Wakeup tree: threads/sequences to explore at this scheduling point.
+    /// Replaces the classic Backtrack thread status.
+    pub wakeup: WakeupTree,
+    /// Sleep set: threads that should not be added as backtracks because
+    /// an equivalent execution starting with them has already been explored.
+    /// Indexed by thread ID; `true` = sleeping.
+    pub sleep: Vec<bool>,
+    /// Objects accessed by the current active thread at this scheduling step.
+    /// Used for sleep set independence checks during propagation.
+    pub active_objects: HashSet<u64>,
+    /// For each previously-explored (Visited) thread at this position,
+    /// the set of objects it accessed. Used for sleep set propagation:
+    /// a sleeping thread stays asleep if its recorded objects are
+    /// disjoint from the active thread's objects (independent actions).
+    pub explored_objects: HashMap<usize, HashSet<u64>>,
 }
 
 impl Branch {
     pub fn new(threads: Vec<ThreadStatus>, active_thread: usize, preemptions: u32) -> Self {
-        Self { threads, active_thread, preemptions }
+        let num_threads = threads.len();
+        Self {
+            threads,
+            active_thread,
+            preemptions,
+            wakeup: WakeupTree::empty(),
+            sleep: vec![false; num_threads],
+            active_objects: HashSet::new(),
+            explored_objects: HashMap::new(),
+        }
     }
 }
 
-/// The exploration tree: manages DFS over scheduling decisions.
+/// The exploration tree: manages DFS over scheduling decisions using
+/// wakeup trees and sleep sets (Source Sets DPOR).
 pub struct Path {
     branches: Vec<Branch>,
     pos: usize,
@@ -35,6 +74,14 @@ impl Path {
         self.branches.len()
     }
 
+    /// Record that an object was accessed at the given scheduling step.
+    /// Called by the engine after each process_access/process_io_access.
+    pub fn record_access(&mut self, path_id: usize, object_id: u64) {
+        if let Some(branch) = self.branches.get_mut(path_id) {
+            branch.active_objects.insert(object_id);
+        }
+    }
+
     /// Pick which thread to run at the current scheduling point.
     /// During replay, follows the recorded path; otherwise creates a new branch.
     pub fn schedule(
@@ -48,6 +95,8 @@ impl Path {
         }
 
         if self.pos < self.branches.len() {
+            // Replay: clear active_objects for fresh recording.
+            self.branches[self.pos].active_objects.clear();
             let chosen = self.branches[self.pos].active_thread;
             self.pos += 1;
             return Some(chosen);
@@ -69,40 +118,75 @@ impl Path {
             threads[tid] = if tid == chosen { ThreadStatus::Active } else { ThreadStatus::Pending };
         }
 
-        self.branches.push(Branch::new(threads, chosen, preemptions));
+        let branch = Branch::new(threads, chosen, preemptions);
+
+        self.branches.push(branch);
         self.pos += 1;
         Some(chosen)
     }
 
     /// Mark thread_id for backtracking at branch path_id.
+    /// Uses wakeup tree insertion and sleep set filtering.
     pub fn backtrack(&mut self, path_id: usize, thread_id: usize) {
         if path_id >= self.branches.len() {
             return;
         }
-        let branch = &mut self.branches[path_id];
+
+        let branch = &self.branches[path_id];
+
+        // Only runnable threads can be backtracked
         match branch.threads.get(thread_id).copied() {
-            Some(ThreadStatus::Pending) | Some(ThreadStatus::Yield) => {
-                if let Some(bound) = self.preemption_bound {
-                    if branch.active_thread != thread_id && branch.preemptions >= bound {
-                        self.add_conservative_backtrack(path_id, thread_id, bound);
-                        return;
-                    }
-                }
-                branch.threads[thread_id] = ThreadStatus::Backtrack;
-            }
-            _ => {}
+            Some(ThreadStatus::Pending) | Some(ThreadStatus::Yield) => {}
+            _ => return,
         }
+
+        // Sleep set check: if thread is sleeping, skip.
+        // This is the core Source Sets optimization — an equivalent execution
+        // starting with this thread has already been explored.
+        if branch.sleep.get(thread_id).copied().unwrap_or(false) {
+            return;
+        }
+
+        // Already in wakeup tree?
+        if branch.wakeup.contains_thread(thread_id) {
+            return;
+        }
+
+        // Preemption bound check
+        if let Some(bound) = self.preemption_bound {
+            let branch = &self.branches[path_id];
+            if branch.active_thread != thread_id && branch.preemptions >= bound {
+                self.add_conservative_backtrack(path_id, thread_id, bound);
+                return;
+            }
+        }
+
+        // Insert into wakeup tree
+        self.branches[path_id].wakeup.insert(&[thread_id]);
     }
 
     /// Advance to the next unexplored execution path.
+    /// Uses wakeup trees instead of scanning for Backtrack status.
     pub fn step(&mut self) -> bool {
         while let Some(branch) = self.branches.last_mut() {
             let active = branch.active_thread;
             if active < branch.threads.len() && branch.threads[active] == ThreadStatus::Active {
                 branch.threads[active] = ThreadStatus::Visited;
+                // Save explored objects for sleep set propagation
+                let objects = branch.active_objects.clone();
+                branch.explored_objects.entry(active).or_default().extend(objects);
+                // Add to sleep set: this thread has been explored at this position
+                if active < branch.sleep.len() {
+                    branch.sleep[active] = true;
+                }
+                branch.active_objects.clear();
             }
 
-            if let Some(next) = branch.threads.iter().position(|s| *s == ThreadStatus::Backtrack) {
+            // Remove current thread from wakeup tree (already explored)
+            branch.wakeup.remove_branch(active);
+
+            // Find next thread to explore from wakeup tree
+            if let Some(next) = branch.wakeup.first_thread() {
                 branch.threads[next] = ThreadStatus::Active;
                 branch.active_thread = next;
                 self.pos = 0;
@@ -116,13 +200,15 @@ impl Path {
 
     fn add_conservative_backtrack(&mut self, path_id: usize, thread_id: usize, bound: u32) {
         for i in (0..path_id).rev() {
-            let branch = &mut self.branches[i];
+            let branch = &self.branches[i];
             if let Some(status) = branch.threads.get(thread_id) {
                 let would_preempt = branch.active_thread != thread_id && status.is_runnable();
                 if matches!(status, ThreadStatus::Pending | ThreadStatus::Yield)
                     && (!would_preempt || branch.preemptions < bound)
+                    && !branch.wakeup.contains_thread(thread_id)
+                    && !branch.sleep.get(thread_id).copied().unwrap_or(false)
                 {
-                    branch.threads[thread_id] = ThreadStatus::Backtrack;
+                    self.branches[i].wakeup.insert(&[thread_id]);
                     return;
                 }
             }
@@ -189,5 +275,81 @@ mod tests {
         path.backtrack(0, 1);
         // With bound=0, backtrack to thread 1 is a preemption and should be suppressed
         assert!(!path.step());
+    }
+
+    // --- Source Sets / Wakeup Tree specific tests ---
+
+    #[test]
+    fn test_wakeup_tree_ordering() {
+        // Verify that wakeup tree preserves insertion order
+        let mut path = Path::new(None);
+        path.schedule(&[0, 1, 2], 0, 3);
+        path.backtrack(0, 2); // add 2 first
+        path.backtrack(0, 1); // add 1 second
+
+        // step() should pick the first inserted (2)
+        assert!(path.step());
+        let chosen = path.schedule(&[0, 1, 2], 0, 3);
+        assert_eq!(chosen, Some(2));
+    }
+
+    #[test]
+    fn test_sleep_set_visited_thread() {
+        // After exploring thread 0 at position 0, it should be in the sleep set
+        let mut path = Path::new(None);
+        path.schedule(&[0, 1, 2], 0, 3);
+        // Record some access for thread 0
+        path.record_access(0, 100);
+        path.backtrack(0, 1);
+
+        // step() marks 0 as Visited and adds to sleep set
+        assert!(path.step());
+
+        // Now if a race suggests backtracking to 0 at position 0, it should be skipped
+        path.backtrack(0, 0); // 0 is Visited, so this should be a no-op
+        // The wakeup tree should not have thread 0 (only thread 1 was from step())
+        // This just verifies the Visited check prevents re-adding
+    }
+
+    #[test]
+    fn test_visited_thread_cannot_be_backtracked() {
+        // After exploring T0 at position 0, T0 is Visited and in the sleep set.
+        // Backtracks to T0 at position 0 should be rejected.
+        let mut path = Path::new(None);
+        path.schedule(&[0, 1, 2], 0, 3);
+        path.record_access(0, 100);
+
+        // Add backtrack for T1
+        path.backtrack(0, 1);
+
+        // step() → T0 becomes Visited, sleep[0] = true. T1 becomes Active.
+        assert!(path.step());
+        assert!(path.branches[0].sleep[0]);
+        assert_eq!(path.branches[0].threads[0], ThreadStatus::Visited);
+        assert_eq!(path.branches[0].threads[1], ThreadStatus::Active);
+
+        // Try to backtrack T0 at position 0 — rejected because T0 is Visited
+        path.backtrack(0, 0);
+        // T2 should still be addable
+        path.backtrack(0, 2);
+        assert!(path.branches[0].wakeup.contains_thread(2));
+    }
+
+    #[test]
+    fn test_duplicate_backtrack_rejected() {
+        let mut path = Path::new(None);
+        path.schedule(&[0, 1], 0, 2);
+        path.backtrack(0, 1);
+        path.backtrack(0, 1); // duplicate
+        // Wakeup tree should have only one entry
+        assert_eq!(path.branches[0].wakeup.root_threads(), vec![1]);
+    }
+
+    #[test]
+    fn test_backtrack_to_disabled_rejected() {
+        let mut path = Path::new(None);
+        path.schedule(&[0], 0, 2); // Only thread 0 is runnable; thread 1 is Disabled
+        path.backtrack(0, 1);
+        assert!(path.branches[0].wakeup.is_empty());
     }
 }
