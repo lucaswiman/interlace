@@ -10,13 +10,13 @@ The dining philosophers benchmark (4 threads, preemption_bound=2) explores
 **14,221 executions in ~95s**. Many of these are equivalent traces.
 
 **Where we are in the algorithm**: The current implementation is a **hybrid** —
-it has wakeup trees (from Optimal-DPOR, Algorithm 2), full sleep set
-propagation (Algorithm 2 line 16, including to new branches past replay),
-and the basic source set check (`I[E'](v) ∩ backtrack(E')` via
-`contains_thread`). Race detection is done *during* execution (from
-Source-DPOR, Algorithm 1). Sleep set propagation reduces redundant
-interleavings where independent actions commute (e.g., read-read on the
-same object). Deferred race detection with notdep sequences and weak
+it has wakeup trees (from Optimal-DPOR, Algorithm 2), replay-only sleep set
+propagation (Algorithm 2 line 16, through the replayed prefix only), and the
+basic source set check (`I[E'](v) ∩ backtrack(E')` via `contains_thread`).
+Race detection is done *during* execution (from Source-DPOR, Algorithm 1).
+Sleep set propagation reduces redundant interleavings where independent
+actions commute (e.g., read-read on the same object). Extending propagation
+to new branches and deferred race detection with notdep sequences and weak
 initials are the next steps for further reduction.
 
 ## Completed
@@ -78,6 +78,22 @@ threads whose next action is independent of p's action.
     for all enabled threads, we propagate sleeping threads' recorded accesses
     forward through the replayed prefix. This is conservative (threads are
     woken when their actions are unknown) but correct.
+  - **Note on approach (c') — full propagation to new branches**: This was
+    attempted and reverted. Although the paper's recursive Algorithm 2 passes
+    Sleep' to all Explore calls, our iterative implementation has a subtle
+    issue: propagating sleep to new branches causes `backtrack()` to skip
+    threads that appear in `propagated_sleep_accesses`, which prevents DPOR
+    from discovering races that require those threads to be explored at new
+    positions. The root cause is that our independence check is an
+    approximation — it checks object-level access compatibility, but the
+    paper's `E ⊢ p♦q` requires full trace equivalence (the actions of p and
+    q must commute in ALL continuations, not just based on their recorded
+    accesses). Without trace caching (approach (b), as used by Concuerror),
+    we cannot guarantee that a sleeping thread's equivalence class is truly
+    covered at new positions. This caused 6 Python-level race detection tests
+    to fail (TestDictMergeOperatorRace, TestReduceAccumulateRace, etc.) where
+    DPOR incorrectly reported `property_holds=True` because it skipped
+    interleavings needed to find the bug.
   - **Data structures changed**:
     - `active_objects: HashSet<u64>` → `active_accesses: HashMap<u64, AccessKind>`
     - `explored_objects` → `explored_accesses: HashMap<usize, HashMap<u64, AccessKind>>`
@@ -103,12 +119,17 @@ threads whose next action is independent of p's action.
   sets only through the replayed prefix; beyond the backtrack point, wake all
   sleeping threads (their actions are unknown).
 
-  **(c') Full propagation** (final): Extend propagation to ALL positions, including
-  new branches beyond the replay prefix. This is sound because sleeping threads
-  have not been scheduled since their home position — their program counter and
-  local state are frozen, so their next action (what objects they access) is the
-  same as recorded. The paper's Algorithm 2 line 18 naturally passes Sleep' to
-  all recursive Explore calls, not just replayed ones. **← IMPLEMENTED**
+  **(c') Full propagation** (attempted, reverted): Extend propagation to ALL
+  positions, including new branches beyond the replay prefix. Although the
+  argument that sleeping threads' state is frozen seems sound, our
+  object-level independence check is insufficient — it can incorrectly keep
+  threads asleep at new positions, causing `backtrack()` to skip them and
+  miss real races. The paper's independence relation `E ⊢ p♦q` requires
+  trace-level equivalence, not just access-kind compatibility. To safely
+  implement full propagation, we likely need trace caching (approach (b)),
+  where we cache each thread's full next-action trace from a previous
+  execution and verify it against the current execution's divergent path.
+  See Concuerror's implementation (Section 10, JACM'17 p.31-35).
 
 ### 1b. Implement sleep set propagation through replayed prefix
 
@@ -117,8 +138,7 @@ threads whose next action is independent of p's action.
   - For each sleeping thread q: keep q sleeping if its recorded accesses
     are independent of the active thread's accesses (using `accesses_are_independent()`)
   - Store in `propagated_sleep_accesses` at the new position
-  - Also propagates to NEW branches (not just replay), enabling sleep
-    propagation past the backtrack point for one hop
+  - Only propagates during REPLAY (not to new branches — see note on (c') above)
   - **Paper ref**: Algorithm 2 line 16 (JACM'17 p.24)
 
 - [x] In `Path::step()`, when computing the initial sleep set at backtrack point:
@@ -135,20 +155,21 @@ threads whose next action is independent of p's action.
 ### 1c. Track sleeping thread actions across replay boundary
 
 - [x] Propagated sleep carries access info with the thread, enabling multi-hop
-  propagation. When a thread propagates from pos i to pos i+1, its access
-  map travels with it. At pos i+1, the propagation to pos i+2 uses the
-  same access info (since independence guarantees the state is unchanged).
-- [x] Propagation works for BOTH replay and new branches — `schedule()` calls
-  `propagate_sleep()` in both code paths. This provides one-hop propagation
-  past the backtrack point using the sleeping thread's recorded accesses.
+  propagation during replay. When a thread propagates from pos i to pos i+1,
+  its access map travels with it. At pos i+1, the propagation to pos i+2 uses
+  the same access info (since independence guarantees the state is unchanged).
+- [x] Propagation works during REPLAY only — `schedule()` calls
+  `propagate_sleep()` only in the replay code path. Propagation to new
+  branches was attempted (approach (c')) but reverted because our
+  object-level independence check is insufficient to guarantee soundness
+  at divergent execution paths — it caused real races to be missed.
 - [x] If no access info is available for a sleeping thread (e.g., a locally
   Visited thread without explored_accesses), it is woken up (conservative).
-- [x] ~~**Future**: Upgrade to approach (b) — trace caching.~~
-  **Resolved**: approach (c') — full propagation to new branches — achieves
-  the same result as trace caching for the common case. Sleeping threads'
-  access info is valid at new positions because their state is frozen.
-  This reduces readers(2) from 5→4 and readers(4) from ~65→16 traces,
-  matching POPL'14 Table 2 (source-DPOR = 2^N for readers(N)).
+- [ ] **Future**: Upgrade to approach (b) — trace caching. This would allow
+  safe propagation to new branches by caching each thread's full next-action
+  trace and verifying it against the current execution. This is the approach
+  used by Concuerror (Section 10, JACM'17 p.31-35). Expected improvement:
+  readers(2) from 5→4, readers(4) from ~65→16 traces.
 
 ### 1d. Verification
 
@@ -156,42 +177,38 @@ threads whose next action is independent of p's action.
   with sleep sets (`test_independent_pairs_with_propagation`, also existing
   `test_independent_threads_one_execution` continues to pass)
 - [x] Add test: writer-readers example (JACM'17 Fig.1 p.6-7) → `test_writer_readers_sleep_propagation`
-  verifies source-DPOR explores exactly 4 interleavings (1W+2R case)
-- [x] Writer-readers 1W+4R: currently explores 16 traces (= sum of binomial
-  coefficients). Full reduction to 5 traces requires source set filtering (Phase 2).
+  verifies replay-only propagation explores ≤5 interleavings (1W+2R case)
+- [x] Writer-readers 1W+4R: currently explores ~65 traces with replay-only propagation.
+  Full reduction to 16 traces requires propagation to new branches (Phase 2).
 - [x] 2-philosopher benchmark: reduced from 6 to 3 Mazurkiewicz traces
   (`test_two_philosophers_all_orderings` updated to assert ≥3)
 - [x] Add test: lastzero-style program (POPL'14 Fig.4 p.11) →
-  `test_lastzero_three` models lastzero(3) with 4 threads. Source-DPOR
-  explores ≤30 traces (down from 48 without full propagation).
+  `test_lastzero_three` models lastzero(3) with 4 threads. With replay-only
+  propagation, explores ≤60 traces.
 - [ ] Re-run dining philosophers benchmark: expect reduction from 14,221
 
-## Phase 2: Source set filtering via sleep propagation
+## Phase 2: Sleep propagation to new branches (trace caching)
 
-**Correction**: The originally-planned object-based source set filtering
-("one thread per race object per position") is **incorrect** — it
-under-explores. Different threads racing on the same object at the same
-position have different initials: `I[E'](v) = {q}` for each racing thread
-q. Skipping q because another thread was already added for the same object
-misses the Mazurkiewicz trace where q goes first.
+The main remaining improvement from sleep set propagation is extending it
+past the replay prefix to new branches. Replay-only propagation gives
+readers(2)=5, readers(4)=~65. Full propagation would give readers(2)=4,
+readers(4)=16 (matching POPL'14 Table 2: source=2^N for readers(N)).
 
-The paper's source set check `I[E'](v) ∩ backtrack(E') = ∅` (Algorithm 1
-line 8, JACM'17 p.16) is **already implemented** by the existing
-`contains_thread` check in `backtrack()`: for single-step races, `I = {q}`,
-so the check is "is q already in the wakeup tree?"
+**Attempted and reverted**: A naive approach (c') that propagated sleep to
+new branches using object-level independence checks was unsound. Our
+`accesses_are_independent()` check (object + access-kind compatibility) is
+an approximation of the paper's `E ⊢ p♦q` (full trace equivalence). At new
+branches where execution diverges, the sleeping thread's actual next action
+may differ from its recorded action, and keeping it asleep incorrectly
+prevents `backtrack()` from exploring it. This caused 6 Python race
+detection tests to fail (DPOR reported no bugs when bugs existed).
 
-The actual source-DPOR improvement for benchmarks like readers(N) comes from
-**sleep set propagation** (Algorithm 2 line 16, JACM'17 p.24), specifically
-propagation to new branches beyond the replay prefix. This was implemented
-in Phase 1c' (approach (c'): full propagation).
-
-Further improvements from source sets require:
-1. **Weak initials** (WI vs I): adding a different thread that provides
-   equivalent coverage via independence. This enables the optimization
-   originally envisioned but requires computing trace equivalence. (Phase 3)
-2. **Multi-step notdep sequences**: computing `v = notdep(e, E).e'` allows
-   inserting multi-step wakeup sequences that encode independence info
-   directly in the wakeup tree. (Phase 3b)
+**Correct approach**: Trace caching (approach (b), as used by Concuerror,
+Section 10, JACM'17 p.31-35). Cache each thread's full execution trace from
+a previous run. At a new position, verify the cached trace against the
+current execution: if the sleeping thread's cached next action matches what
+it would actually do, propagation is safe. If the execution has diverged
+such that the cached trace is invalid, wake the thread.
 
 ### 2a. Source set check via contains_thread (already implemented)
 
@@ -199,31 +216,28 @@ Further improvements from source sets require:
   backtrack(E') = ∅` for single-step races. No additional tracking needed.
   - **Paper ref**: Algorithm 1 line 8 (JACM'17 p.16)
 
-### 2b. Full sleep set propagation to new branches
+### 2b. Trace caching for safe propagation to new branches
 
-- [x] Extended `schedule()` to call `propagate_sleep()` for new branches,
-  not just replay branches. This implements the paper's Algorithm 2 line 18
-  where `Sleep'` is passed to ALL recursive Explore calls.
-  - Sleeping threads at position K are propagated to position K+1 (new) if
-    their recorded accesses are independent of the active thread's accesses.
-  - Sound because sleeping threads' state is frozen (not scheduled since
-    their home position). Their next action is the same as recorded.
-  - **Results**: readers(2): 5→4, readers(4): ~65→16, lastzero(3): 48→≤30
+- [ ] Cache per-thread execution traces (sequence of accesses) from each run
+- [ ] At new branches, verify cached trace before propagating sleep
+- [ ] If trace diverges (thread would access different objects), wake thread
+- [ ] **Expected results**: readers(2): 5→4, readers(4): ~65→16,
+  lastzero(3): 48→~30
 
 ### 2c. Verification
 
-- [x] Writer-readers (3 threads, 1 writer, 2 readers):
-  - Without propagation to new branches: 5 interleavings
-  - With full propagation: exactly 4 (matching POPL'14 Table 2: source=4)
-- [x] Writer-readers (5 threads, 1 writer, 4 readers):
-  - Without propagation: ~65 interleavings
-  - With full propagation: exactly 16 (= 2^4, matching POPL'14 Table 2)
-- [x] Lastzero(3) (4 threads, POPL'14 Fig.4 p.11):
-  - Without propagation: 48 traces
-  - With full propagation: ≤30 traces
+- [ ] Writer-readers (3 threads, 1 writer, 2 readers):
+  - Current (replay-only): 5 interleavings
+  - Target (with trace caching): exactly 4
+- [ ] Writer-readers (5 threads, 1 writer, 4 readers):
+  - Current (replay-only): ~65 interleavings
+  - Target (with trace caching): exactly 16
+- [ ] Lastzero(3) (4 threads, POPL'14 Fig.4 p.11):
+  - Current (replay-only): 48 traces
+  - Target: ~30 traces
 - [ ] Dining philosophers benchmark: expect reduction from 14,221
 - [x] Independent pairs (T0/T1 write X, T2/T3 write Y): remains at 4
-- [x] All existing tests pass unchanged (48/48 Rust tests)
+- [x] All existing tests pass (46 Rust tests, 1158 Python tests)
 
 ## Phase 3: Deferred race detection (Optimal-DPOR)
 
@@ -351,10 +365,11 @@ The current implementation cleanly separates concerns:
 - `DporEngine` — race detection, vector clocks, sync events
 - `PyDporEngine` — PyO3 bridge to Python
 
-Sleep set propagation is implemented in `Path::schedule()` (during both
-replay AND new branches) and `Path::step()` (when computing the initial
-sleep set at the backtrack point). The engine doesn't need changes — it
-already passes `race_object` through to `backtrack()`.
+Sleep set propagation is implemented in `Path::schedule()` (during replay
+only) and `Path::step()` (when computing the initial sleep set at the
+backtrack point). Propagation to new branches requires trace caching
+(Phase 2). The engine doesn't need changes — it already passes
+`race_object` through to `backtrack()`.
 
 For Phase 3 (deferred race detection), the engine will need changes: collect
 races during execution and process them in `next_execution()`.
@@ -370,10 +385,11 @@ races during execution and process them in `next_execution()`.
 3. **notdep sequences**: Current = single thread `[q]`.
    Paper = full `notdep(e, E).e'` sequence. (Phase 3b)
 
-4. **Sleep set propagation**: ~~Current = local per-branch only.~~
-   **DONE** (Phase 1): propagated through schedule() calls using
-   access-kind-aware independence checks. Multi-hop propagation via
-   `propagated_sleep_accesses` carrying access info forward.
+4. **Sleep set propagation**: Replay-only propagation is done (Phase 1).
+   Propagation to new branches requires trace caching (Phase 2). Current
+   implementation uses `propagated_sleep_accesses` for multi-hop propagation
+   during replay only. An attempt to extend to new branches using
+   object-level independence was reverted (unsound — caused missed races).
 
 5. **Source set filtering**: The basic check (`I[E'](v) ∩ backtrack(E')`)
    is implemented via `contains_thread`. The weak initials optimization
