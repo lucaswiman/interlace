@@ -1793,6 +1793,18 @@ class DporBytecodeRunner:
 
             if event == "opcode":
                 scheduler.report_and_wait(frame, thread_id)
+                # CPython 3.10-3.11 bug workaround: after our trace callback
+                # returns, CPython calls PyFrame_LocalsToFast(frame, 1) which
+                # copies f_locals dict values back to cell/free variable cells
+                # (see CPython ceval.c call_trace).  If this thread waited in
+                # report_and_wait while another thread modified a shared cell,
+                # the stale f_locals snapshot would overwrite the new value.
+                # Re-accessing frame.f_locals triggers PyFrame_FastToLocals
+                # (see CPython frameobject.c frame_getlocals), refreshing the
+                # snapshot so LocalsToFast writes back the current value.
+                # This is not needed on 3.12+ where PEP 667 replaced f_locals
+                # with a proxy and removed LocalsToFast from the trace path.
+                frame.f_locals  # noqa: B018  — refresh f_locals before LocalsToFast
                 return trace
 
             if event == "return":
@@ -1814,7 +1826,22 @@ class DporBytecodeRunner:
         tool_id = mon.PROFILER_ID  # type: ignore[attr-defined]
         DporBytecodeRunner._TOOL_ID = tool_id
 
-        mon.use_tool_id(tool_id, "frontrun._dpor")  # type: ignore[attr-defined]
+        # Defensively free the tool ID if it's still claimed from a previous
+        # run that was interrupted (e.g. by pytest-timeout) before
+        # _teardown_monitoring could call free_tool_id.  Without this,
+        # use_tool_id raises "tool N is already in use" and every subsequent
+        # test in the suite fails.
+        try:
+            mon.use_tool_id(tool_id, "frontrun._dpor")  # type: ignore[attr-defined]
+        except ValueError:
+            # Tool ID still held from a previous interrupted run — force cleanup.
+            mon.set_events(tool_id, 0)  # type: ignore[attr-defined]
+            mon.register_callback(tool_id, mon.events.PY_START, None)  # type: ignore[attr-defined]
+            mon.register_callback(tool_id, mon.events.PY_RETURN, None)  # type: ignore[attr-defined]
+            mon.register_callback(tool_id, mon.events.INSTRUCTION, None)  # type: ignore[attr-defined]
+            mon.free_tool_id(tool_id)  # type: ignore[attr-defined]
+            mon.use_tool_id(tool_id, "frontrun._dpor")  # type: ignore[attr-defined]
+
         mon.set_events(tool_id, mon.events.PY_START | mon.events.PY_RETURN | mon.events.INSTRUCTION)  # type: ignore[attr-defined]
 
         scheduler = self.scheduler

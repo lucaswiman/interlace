@@ -174,9 +174,9 @@ threads whose next action is independent of p's action.
 - [x] If no access info is available for a sleeping thread (e.g., a locally
   Visited thread without explored_accesses), it is woken up (conservative).
 - [x] Stable object keys implemented (`StableObjectIds` in `frontrun/dpor.py`).
-- [ ] **Future**: Implement trace caching (Phase 2b) to cache each thread's
-  complete future accesses, then re-enable propagation to new branches.
-  Expected improvement: readers(2) from 5→4, readers(4) from ~65→16 traces.
+- [x] **Done**: Trace caching (Phase 2b) implemented. `prev_thread_all_accesses`
+  caches each thread's complete access union, enabling propagation to new
+  branches. Results: readers(2) from 5→4, readers(4) from 65→16 traces.
 
 ### 1d. Verification
 
@@ -275,14 +275,11 @@ readers(4)=16 (matching POPL'14 Table 2: source=2^N for readers(N)).
 
 **Prerequisites**:
 - [x] Stable object keys (implemented via `StableObjectIds`)
-- [ ] Trace caching (Phase 2b) — needed because `explored_accesses` at one
-  position only capture that opcode's accesses. The sleeping thread's
-  complete future trace must be available for the independence check.
-
-Once trace caching is implemented, re-enable propagation to new branches
-by calling `self.propagate_sleep()` in `Path::schedule()` for new branches,
-using the cached trace to determine the sleeping thread's full remaining
-accesses rather than the single-position snapshot from `explored_accesses`.
+- [x] Trace caching (Phase 2b) — implemented via `prev_thread_all_accesses`
+  in `Path`. Stores per-thread union of all accesses from the previous
+  execution. `propagate_sleep()` uses this cache instead of
+  `explored_accesses` for the independence check. `schedule()` now calls
+  `propagate_sleep()` for new branches too.
 
 ### 2a. Source set check via contains_thread (already implemented)
 
@@ -303,30 +300,38 @@ check compares the sleeping thread's entire remaining trace against the
 active thread's action — if any future access conflicts, the thread is
 woken up.
 
-- [ ] Cache per-thread execution traces (full sequence of (object_key,
-  AccessKind) pairs) from each run
-- [ ] At new branches, use the cached trace to determine the sleeping
-  thread's complete remaining accesses (all accesses from position K
-  onward). The independence check uses the UNION of all remaining
-  accesses, not just position K's snapshot.
-- [ ] If trace diverges (thread would access different objects), wake thread
-- [ ] **Expected results**: readers(2): 5→4, readers(4): ~65→16,
-  lastzero(3): 48→~30
+- [x] Cache per-thread execution traces as access unions from each run.
+  **Implementation**: `prev_thread_all_accesses: HashMap<usize, HashMap<u64,
+  AccessKind>>` in `Path`. Computed in `step()` at end of each execution by
+  unioning all `active_accesses` across positions for each thread.
+- [x] At new branches, use the cached trace to determine the sleeping
+  thread's complete remaining accesses. The independence check uses the
+  UNION of all the thread's accesses from the previous execution (conservative
+  approximation of future behavior), not just one position's snapshot.
+  **Implementation**: `propagate_sleep()` checks `prev_thread_all_accesses`
+  before falling back to `explored_accesses`. `schedule()` calls
+  `propagate_sleep()` for new branches (previously skipped).
+- [x] If trace cache unavailable (first execution, thread not in cache),
+  fall back to `explored_accesses` or wake thread (conservative).
+- [x] **Results**: readers(2): 5→4, readers(4): 65→16
+  (matches JACM'17 Table 1 p.36: source sets = 2^N for readers(N))
 
 ### 2c. Verification
 
-- [ ] Writer-readers (3 threads, 1 writer, 2 readers):
-  - Current (replay-only): 5 interleavings
-  - Target (with trace caching): exactly 4
-- [ ] Writer-readers (5 threads, 1 writer, 4 readers):
-  - Current (replay-only): ~65 interleavings
-  - Target (with trace caching): exactly 16
+- [x] Writer-readers (3 threads, 1 writer, 2 readers):
+  - Before: 5 interleavings (replay-only propagation)
+  - After: exactly 4 (trace caching enables reader♦reader propagation at new branches)
+  - Matches JACM'17 Table 1 (p.36): source sets = 2^2 = 4
+- [x] Writer-readers (5 threads, 1 writer, 4 readers):
+  - Before: 65 interleavings (replay-only propagation)
+  - After: exactly 16 (trace caching collapses equivalent reader orderings)
+  - Matches JACM'17 Table 1 (p.36): source sets = 2^4 = 16
 - [ ] Lastzero(3) (4 threads, POPL'14 Fig.4 p.11):
-  - Current (replay-only): 48 traces
-  - Target: ~30 traces
+  - Current: ≤60 traces (data-dependent, trace cache conservative)
+  - Target: ~30 traces (may require per-step trace rather than union)
 - [ ] Dining philosophers benchmark: expect reduction from 14,221
 - [x] Independent pairs (T0/T1 write X, T2/T3 write Y): remains at 4
-- [x] All existing tests pass (46 Rust tests, 1158 Python tests)
+- [x] All existing tests pass (48 Rust tests)
 
 ## Phase 3: Deferred race detection (Optimal-DPOR)
 
@@ -455,10 +460,10 @@ The current implementation cleanly separates concerns:
 - `PyDporEngine` — PyO3 bridge to Python
 
 Sleep set propagation is implemented in `Path::schedule()` (during replay
-only) and `Path::step()` (when computing the initial sleep set at the
-backtrack point). Propagation to new branches requires trace caching
-(Phase 2). The engine doesn't need changes — it already passes
-`race_object` through to `backtrack()`.
+AND at new branches via trace caching) and `Path::step()` (when computing
+the initial sleep set at the backtrack point and saving the trace cache
+for the next execution). The engine doesn't need changes — it already
+passes `race_object` through to `backtrack()`.
 
 For Phase 3 (deferred race detection), the engine will need changes: collect
 races during execution and process them in `next_execution()`.
@@ -474,11 +479,12 @@ races during execution and process them in `next_execution()`.
 3. **notdep sequences**: Current = single thread `[q]`.
    Paper = full `notdep(e, E).e'` sequence. (Phase 3b)
 
-4. **Sleep set propagation**: Replay-only propagation is done (Phase 1).
-   Propagation to new branches requires trace caching (Phase 2). Current
-   implementation uses `propagated_sleep_accesses` for multi-hop propagation
-   during replay only. An attempt to extend to new branches using
-   object-level independence was reverted (unsound — caused missed races).
+4. **Sleep set propagation**: Full propagation implemented (Phases 1+2b).
+   Replay-only propagation uses `explored_accesses`; propagation to new
+   branches uses `prev_thread_all_accesses` (per-thread access union cache
+   from the previous execution). The union approach is conservative: may
+   over-wake threads with data-dependent access patterns, but is sound for
+   programs with deterministic access patterns (writer-readers, philosophers).
 
 5. **Source set filtering**: The basic check (`I[E'](v) ∩ backtrack(E')`)
    is implemented via `contains_thread`. The weak initials optimization

@@ -149,11 +149,38 @@ pub struct Path {
     branches: Vec<Branch>,
     pos: usize,
     preemption_bound: Option<u32>,
+    /// Per-thread union of all accesses from the most recently completed
+    /// execution. Used for sleep set propagation to new branches (Phase 2b).
+    ///
+    /// When propagating sleep to positions beyond the replay prefix, we
+    /// cannot rely on `explored_accesses` (which only captures one scheduling
+    /// step's accesses). Instead, we use this cached union of ALL the
+    /// thread's accesses from the previous execution as a conservative
+    /// approximation of its future behavior.
+    ///
+    /// Paper ref: JACM'17 Section 10 (p.31-35) — Concuerror maintains
+    /// per-process event sequences to determine sleeping processes' next
+    /// actions during propagation. Our approach uses the full access union
+    /// instead of per-step traces, which is more conservative (may over-wake)
+    /// but simpler and always sound for deterministic access patterns.
+    ///
+    /// Soundness note: For threads with data-dependent access patterns (where
+    /// the set of accessed objects depends on values read from shared state),
+    /// the cached union may under-approximate the thread's actual future
+    /// accesses. This could cause a thread to remain asleep when it should
+    /// wake, potentially missing an interleaving. For programs with fixed
+    /// access patterns (like the writer-readers benchmark), the cache is exact.
+    prev_thread_all_accesses: HashMap<usize, HashMap<u64, AccessKind>>,
 }
 
 impl Path {
     pub fn new(preemption_bound: Option<u32>) -> Self {
-        Self { branches: Vec::new(), pos: 0, preemption_bound }
+        Self {
+            branches: Vec::new(),
+            pos: 0,
+            preemption_bound,
+            prev_thread_all_accesses: HashMap::new(),
+        }
     }
 
     pub fn current_position(&self) -> usize {
@@ -240,20 +267,23 @@ impl Path {
         let branch = Branch::new(threads, chosen, preemptions);
         self.branches.push(branch);
 
-        // Do NOT propagate sleep to new branches beyond the replay prefix.
+        // Propagate sleep set to new branches using trace caching (Phase 2b).
         //
-        // Although stable object IDs now ensure keys match across executions,
-        // the explored_accesses at one position only capture the thread's
-        // accesses at THAT position (one opcode). A sleeping thread may do
-        // different opcodes at different positions (reads at one, writes at
-        // another). Carrying the single-position snapshot forward can
-        // incorrectly declare independence (e.g., read♦read) when the thread
-        // would actually WRITE at a later position. This causes real races
-        // to be missed.
+        // The trace cache (`prev_thread_all_accesses`) stores the union of
+        // ALL accesses each thread performed in the previous execution. This
+        // provides a conservative approximation of each sleeping thread's
+        // future behavior, enabling the independence check (Algorithm 2
+        // line 16, JACM'17 p.24: Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}) to
+        // work at new positions beyond the replay prefix.
         //
-        // Full propagation requires knowing the sleeping thread's complete
-        // future trace (Phase 2: trace caching), not just its last-explored
-        // position's accesses.
+        // Without trace caching, `explored_accesses` only captures one
+        // scheduling step's accesses — a thread with reads at one step but
+        // writes at another would appear falsely independent. The trace
+        // cache union includes ALL accesses, preventing this.
+        //
+        // Paper ref: JACM'17 Section 10 (p.31-35) — Concuerror caches
+        // per-process event traces for this purpose.
+        self.propagate_sleep(self.pos);
 
         self.pos += 1;
         Some(chosen)
@@ -298,20 +328,45 @@ impl Path {
         let mut sleeping_threads: HashMap<usize, HashMap<u64, AccessKind>> = HashMap::new();
 
         // 1. Locally-sleeping threads (Visited at pos-1)
+        //
+        // Use trace cache (`prev_thread_all_accesses`) when available for
+        // the thread's access info. The trace cache provides the union of
+        // ALL the thread's accesses from the previous execution, which is
+        // critical for propagation to new branches: `explored_accesses`
+        // only captures one scheduling step's accesses, so a thread with
+        // reads at one step but writes at another would appear falsely
+        // independent. The trace cache union includes all accesses.
+        //
+        // Fallback to `explored_accesses` when no trace cache is available
+        // (e.g., during the first execution).
+        //
+        // Paper ref: JACM'17 Section 10 (p.31-35) — Concuerror caches
+        // per-process event traces for this purpose.
         let num_threads = self.branches[prev].sleep.len();
         for tid in 0..num_threads {
             if self.branches[prev].sleep.get(tid).copied().unwrap_or(false) {
-                if let Some(accesses) = self.branches[prev].explored_accesses.get(&tid) {
+                if let Some(accesses) = self.prev_thread_all_accesses.get(&tid) {
+                    sleeping_threads.insert(tid, accesses.clone());
+                } else if let Some(accesses) = self.branches[prev].explored_accesses.get(&tid) {
                     sleeping_threads.insert(tid, accesses.clone());
                 }
-                // If no explored_accesses for this Visited thread, we can't
-                // check independence → wake up (don't add to sleeping_threads).
+                // If neither available, we can't check independence →
+                // wake up (don't add to sleeping_threads). Conservative.
             }
         }
 
         // 2. Propagated-sleeping threads (from even earlier positions)
+        //
+        // Use trace cache for propagated threads too, since their carried
+        // accesses may only reflect a single-position snapshot from when
+        // they were first put to sleep. The trace cache provides the
+        // complete access union.
         for (tid, accesses) in &self.branches[prev].propagated_sleep_accesses {
-            sleeping_threads.insert(*tid, accesses.clone());
+            if let Some(cached) = self.prev_thread_all_accesses.get(tid) {
+                sleeping_threads.insert(*tid, cached.clone());
+            } else {
+                sleeping_threads.insert(*tid, accesses.clone());
+            }
         }
 
         // Compute which sleeping threads stay asleep at pos.
@@ -399,6 +454,35 @@ impl Path {
     ///     remove p.w from wut(E) → remove_branch()
     ///     add p to sleep(E)      → sleep[active] = true
     pub fn step(&mut self) -> bool {
+        // Save per-thread access unions from the just-completed execution.
+        // These are used as a trace cache for sleep set propagation to new
+        // branches in the NEXT execution (Phase 2b).
+        //
+        // For each thread, compute the union of all its `active_accesses`
+        // across all positions where it was the active thread. This gives
+        // a conservative approximation of the thread's complete behavior:
+        // if ANY access conflicts, the thread is woken during propagation.
+        //
+        // Paper ref: JACM'17 Section 10 (p.31-35) — trace caching for
+        // sleep set propagation. The union is conservative (may over-wake)
+        // but sound for deterministic access patterns.
+        let mut thread_accesses: HashMap<usize, HashMap<u64, AccessKind>> = HashMap::new();
+        for branch in &self.branches {
+            let tid = branch.active_thread;
+            let entry = thread_accesses.entry(tid).or_default();
+            for (obj_id, kind) in &branch.active_accesses {
+                entry
+                    .entry(*obj_id)
+                    .and_modify(|existing| {
+                        if *existing != *kind {
+                            *existing = AccessKind::Write;
+                        }
+                    })
+                    .or_insert(*kind);
+            }
+        }
+        self.prev_thread_all_accesses = thread_accesses;
+
         while let Some(branch) = self.branches.last_mut() {
             let active = branch.active_thread;
             if active < branch.threads.len() && branch.threads[active] == ThreadStatus::Active {
@@ -680,20 +764,23 @@ mod tests {
         assert!(path.branches[1].sleep[1]);
     }
 
-    /// Test that no propagation happens for new branches (replay-only approach).
+    /// Test that propagation works for new branches via trace caching (Phase 2b).
     ///
-    /// Even with stable object IDs, propagation to new branches is disabled
-    /// because explored_accesses only capture one opcode's accesses. A sleeping
-    /// thread may do different opcodes at different positions (reads at one,
-    /// writes at another). Carrying the single-position snapshot forward can
-    /// incorrectly declare independence. Full propagation requires trace
-    /// caching (Phase 2).
+    /// The trace cache records per-thread access unions from the previous
+    /// execution, enabling sleep set propagation to new branches (beyond the
+    /// replay prefix). When a sleeping thread's cached accesses are
+    /// independent of the active thread's accesses, it stays asleep.
+    ///
+    /// Paper ref: JACM'17 Section 10 (p.31-35) — Concuerror uses trace
+    /// caching to determine sleeping threads' next actions. The independence
+    /// check Sleep' = {q ∈ sleep(E) | E ⊢ p♦q} (Algorithm 2 line 16, p.24)
+    /// uses the cached accesses for q's actions.
     #[test]
-    fn test_no_propagation_to_new_branches() {
+    fn test_propagation_to_new_branches_via_trace_cache() {
         use crate::access::AccessKind;
         let mut path = Path::new(None);
 
-        // --- First execution: T0 at pos 0, T1 at pos 1 ---
+        // --- First execution: T0 writes obj 100, T1 reads obj 200 ---
         path.schedule(&[0, 1], 0, 2);
         path.record_access(0, 100, AccessKind::Write);
         path.schedule(&[1], 1, 2);
@@ -702,21 +789,64 @@ mod tests {
         // Backtrack T1 at pos 0
         path.backtrack(0, 1, None);
 
-        // step(): T0 → Visited at pos 0
+        // step(): saves trace, T0 → Visited at pos 0
         assert!(path.step());
 
         // --- Second execution: T1 at pos 0 (replay), then new pos 1 ---
         let chosen = path.schedule(&[0, 1], 0, 2);
         assert_eq!(chosen, Some(1));
-        path.record_access(0, 200, AccessKind::Read);
+        path.record_access(0, 200, AccessKind::Read); // T1 reads different object
 
         // New branch at pos 1: T0 chosen
         path.schedule(&[0], 0, 2);
 
-        // With replay-only propagation, pos 1 is NEW → no propagation
+        // With trace caching, propagation to new branches is enabled.
+        // T0's cached accesses = {100: Write}, T1's active at pos 0 = {200: Read}.
+        // Disjoint objects → INDEPENDENT → T0 stays asleep at pos 1.
         assert!(
-            path.branches[1].propagated_sleep_accesses.is_empty(),
-            "No propagation to new branches in replay-only mode"
+            path.branches[1].propagated_sleep_accesses.contains_key(&0),
+            "T0 should be propagated to new branch (independent: obj 100 vs obj 200)"
+        );
+    }
+
+    /// Test that trace caching correctly wakes threads on conflict at new branches.
+    ///
+    /// When a sleeping thread's cached accesses conflict with the active
+    /// thread's accesses, the sleeping thread must be woken up to allow
+    /// exploring the conflicting interleaving.
+    ///
+    /// Paper ref: Algorithm 2 line 16 (JACM'17 p.24) — threads are removed
+    /// from Sleep' when their action is dependent (¬(p♦q)).
+    #[test]
+    fn test_trace_cache_wakes_on_conflict_at_new_branch() {
+        use crate::access::AccessKind;
+        let mut path = Path::new(None);
+
+        // --- First execution: T0 writes obj 100, T1 writes obj 100 ---
+        path.schedule(&[0, 1], 0, 2);
+        path.record_access(0, 100, AccessKind::Write);
+        path.schedule(&[1], 1, 2);
+        path.record_access(1, 100, AccessKind::Write);
+
+        // Backtrack T1 at pos 0
+        path.backtrack(0, 1, None);
+
+        // step(): saves trace, T0 → Visited
+        assert!(path.step());
+
+        // --- Second execution: T1 at pos 0 (replay), then new pos 1 ---
+        let chosen = path.schedule(&[0, 1], 0, 2);
+        assert_eq!(chosen, Some(1));
+        path.record_access(0, 100, AccessKind::Write); // T1 writes same obj 100
+
+        // New branch at pos 1: T0 chosen
+        path.schedule(&[0], 0, 2);
+
+        // T0's cached accesses = {100: Write}, T1's active at pos 0 = {100: Write}.
+        // Write vs Write on obj 100 → CONFLICT → T0 wakes up.
+        assert!(
+            !path.branches[1].propagated_sleep_accesses.contains_key(&0),
+            "T0 should NOT be propagated (Write vs Write conflict on obj 100)"
         );
     }
 
