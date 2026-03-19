@@ -57,6 +57,12 @@ impl WakeupTree {
         self.children.first().map(|n| n.thread_id)
     }
 
+    /// Get the minimum thread ID among root-level branches.
+    /// This is used for exploration ordering (lowest-index first).
+    pub fn min_thread(&self) -> Option<usize> {
+        self.children.iter().map(|n| n.thread_id).min()
+    }
+
     /// Extract the subtree rooted at the first child with the given thread_id.
     /// This is used when descending into a chosen thread's exploration.
     pub fn subtree(&self, thread_id: usize) -> WakeupTree {

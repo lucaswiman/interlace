@@ -36,13 +36,9 @@ pub struct Branch {
     /// a sleeping thread stays asleep if its recorded objects are
     /// disjoint from the active thread's objects (independent actions).
     pub explored_objects: HashMap<usize, HashSet<u64>>,
-    /// Source set filtering: objects that already have a pending backtrack
-    /// (in the wakeup tree) at this position. For each such object, only
-    /// ONE racing thread is added to the wakeup tree; subsequent threads
-    /// racing on the same object are skipped because the first thread's
-    /// exploration will discover them through further race detection.
-    /// This is the core Source Sets optimization from Abdulla et al. (2017).
-    pub pending_race_objects: HashSet<u64>,
+    // Note: pending_race_objects was removed — source set filtering at the
+    // race-object level requires sleep sets for soundness (Abdulla et al. 2017).
+    // The wakeup tree still provides structural benefits for exploration control.
 }
 
 impl Branch {
@@ -56,7 +52,6 @@ impl Branch {
             sleep: vec![false; num_threads],
             active_objects: HashSet::new(),
             explored_objects: HashMap::new(),
-            pending_race_objects: HashSet::new(),
         }
     }
 }
@@ -134,15 +129,11 @@ impl Path {
     }
 
     /// Mark thread_id for backtracking at branch path_id.
-    /// Uses wakeup tree insertion, sleep set filtering, and source set
-    /// optimization (at most one backtrack per race object per position).
+    /// Uses wakeup tree insertion and sleep set filtering.
     ///
-    /// `race_object`: the object involved in the race. When provided,
-    /// source set filtering ensures that only ONE thread per race object
-    /// per position is added to the wakeup tree. This is sound because
-    /// exploring any single thread that reverses the race on this object
-    /// will discover the other racing threads through subsequent executions.
-    pub fn backtrack(&mut self, path_id: usize, thread_id: usize, race_object: Option<u64>) {
+    /// `_race_object`: the object involved in the race. Reserved for future
+    /// source set filtering (requires sleep sets for soundness).
+    pub fn backtrack(&mut self, path_id: usize, thread_id: usize, _race_object: Option<u64>) {
         if path_id >= self.branches.len() {
             return;
         }
@@ -201,12 +192,9 @@ impl Path {
             // Find next thread to explore from wakeup tree.
             // Use minimum thread ID to match the classic DPOR exploration order
             // (lowest-index first), which tends to find bugs faster in practice.
-            if let Some(next) = branch.wakeup.root_threads().into_iter().min() {
+            if let Some(next) = branch.wakeup.min_thread() {
                 branch.threads[next] = ThreadStatus::Active;
                 branch.active_thread = next;
-                // Reset source set filter: new exploration may discover new races
-                // on the same objects that need new backtracks.
-                branch.pending_race_objects.clear();
                 self.pos = 0;
                 return true;
             }

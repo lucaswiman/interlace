@@ -220,6 +220,82 @@ class TestPyDporEngine:
 # ---------------------------------------------------------------------------
 
 
+class TestWakeupTreeEngine:
+    """Tests verifying the wakeup tree-based backtracking in the DPOR engine."""
+
+    def test_four_threads_write_conflict_exhaustive(self) -> None:
+        """Four threads all writing to the same object should explore 4! = 24 orderings."""
+        engine = PyDporEngine(4)
+        exec_count = 0
+
+        while True:
+            execution = engine.begin_execution()
+
+            while True:
+                runnable = execution.runnable_threads()
+                if not runnable:
+                    break
+                chosen = engine.schedule(execution)
+                if chosen is None:
+                    break
+                engine.report_access(execution, chosen, 1, "write")
+                execution.finish_thread(chosen)
+
+            exec_count += 1
+            if not engine.next_execution():
+                break
+
+        assert exec_count == 24, f"Expected 24 orderings (4!), got {exec_count}"
+
+    def test_independent_pairs_optimal(self) -> None:
+        """Two independent pairs (T0/T1 on X, T2/T3 on Y) should explore 2*2=4."""
+        engine = PyDporEngine(4)
+        thread_objects = [1, 1, 2, 2]
+        exec_count = 0
+
+        while True:
+            execution = engine.begin_execution()
+
+            while True:
+                runnable = execution.runnable_threads()
+                if not runnable:
+                    break
+                chosen = engine.schedule(execution)
+                if chosen is None:
+                    break
+                engine.report_access(execution, chosen, thread_objects[chosen], "write")
+                execution.finish_thread(chosen)
+
+            exec_count += 1
+            if not engine.next_execution():
+                break
+
+        assert exec_count == 4, f"Expected 4 orderings (2!*2!), got {exec_count}"
+
+    def test_read_read_no_backtrack(self) -> None:
+        """Two threads reading the same object should produce exactly 1 execution."""
+        engine = PyDporEngine(2)
+        exec_count = 0
+
+        while True:
+            execution = engine.begin_execution()
+            for _ in range(2):
+                chosen = engine.schedule(execution)
+                if chosen is None:
+                    break
+                engine.report_access(execution, chosen, 1, "read")
+                execution.finish_thread(chosen)
+
+            exec_count += 1
+            if not engine.next_execution():
+                break
+
+        assert exec_count == 1, f"Read-read should be independent, got {exec_count}"
+
+
+# ---------------------------------------------------------------------------
+
+
 class TestExploreDpor:
     def test_lost_update_bug(self) -> None:
         """Two threads doing read-modify-write on a shared counter.
