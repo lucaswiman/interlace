@@ -1814,7 +1814,22 @@ class DporBytecodeRunner:
         tool_id = mon.PROFILER_ID  # type: ignore[attr-defined]
         DporBytecodeRunner._TOOL_ID = tool_id
 
-        mon.use_tool_id(tool_id, "frontrun._dpor")  # type: ignore[attr-defined]
+        # Defensively free the tool ID if it's still claimed from a previous
+        # run that was interrupted (e.g. by pytest-timeout) before
+        # _teardown_monitoring could call free_tool_id.  Without this,
+        # use_tool_id raises "tool N is already in use" and every subsequent
+        # test in the suite fails.
+        try:
+            mon.use_tool_id(tool_id, "frontrun._dpor")  # type: ignore[attr-defined]
+        except ValueError:
+            # Tool ID still held from a previous interrupted run — force cleanup.
+            mon.set_events(tool_id, 0)  # type: ignore[attr-defined]
+            mon.register_callback(tool_id, mon.events.PY_START, None)  # type: ignore[attr-defined]
+            mon.register_callback(tool_id, mon.events.PY_RETURN, None)  # type: ignore[attr-defined]
+            mon.register_callback(tool_id, mon.events.INSTRUCTION, None)  # type: ignore[attr-defined]
+            mon.free_tool_id(tool_id)  # type: ignore[attr-defined]
+            mon.use_tool_id(tool_id, "frontrun._dpor")  # type: ignore[attr-defined]
+
         mon.set_events(tool_id, mon.events.PY_START | mon.events.PY_RETURN | mon.events.INSTRUCTION)  # type: ignore[attr-defined]
 
         scheduler = self.scheduler
