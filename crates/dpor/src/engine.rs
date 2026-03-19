@@ -124,7 +124,7 @@ impl DporEngine {
         // This ensures 3+ thread scenarios are handled correctly.
         for prev_access in object_state.dependent_accesses(kind, thread_id) {
             if !prev_access.happens_before(&current_dpor_vv) {
-                self.path.backtrack(prev_access.path_id, thread_id);
+                self.path.backtrack(prev_access.path_id, thread_id, Some(object_id));
             }
         }
 
@@ -159,7 +159,7 @@ impl DporEngine {
 
         for prev_access in object_state.dependent_accesses(kind, thread_id) {
             if !prev_access.happens_before(&current_dpor_vv) {
-                self.path.backtrack(prev_access.path_id, thread_id);
+                self.path.backtrack(prev_access.path_id, thread_id, Some(object_id));
             }
         }
 
@@ -189,7 +189,7 @@ impl DporEngine {
 
         for prev_access in object_state.dependent_accesses(kind, thread_id) {
             if !prev_access.happens_before(&current_io_vv) {
-                self.path.backtrack(prev_access.path_id, thread_id);
+                self.path.backtrack(prev_access.path_id, thread_id, Some(object_id));
             }
         }
 
@@ -654,5 +654,134 @@ mod tests {
         // explored in all positions relative to both A and B.
         // Expected: 3 orderings (C before both, C between, C after both)
         assert!(exec_count >= 3, "expected at least 3 executions, got {exec_count}");
+    }
+
+    /// Four threads each doing one write to the same object.
+    /// Verifies that the wakeup tree correctly handles 4-way write conflicts.
+    /// All 4! = 24 orderings are distinct traces and must be explored.
+    #[test]
+    fn test_four_threads_write_conflict() {
+        let mut engine = DporEngine::new(4, None, 10000, None);
+        let mut exec_count = 0;
+
+        loop {
+            let mut execution = engine.begin_execution();
+
+            loop {
+                let runnable = execution.runnable_threads();
+                if runnable.is_empty() {
+                    break;
+                }
+                let chosen = match engine.schedule(&mut execution) {
+                    Some(t) => t,
+                    None => break,
+                };
+                engine.process_access(&mut execution, chosen, 1, AccessKind::Write);
+                execution.finish_thread(chosen);
+            }
+
+            exec_count += 1;
+            if !engine.next_execution() {
+                break;
+            }
+        }
+
+        // 4 threads all writing to the same object: 4! = 24 orderings
+        assert_eq!(exec_count, 24);
+    }
+
+    /// Two independent pairs: T0/T1 write X, T2/T3 write Y.
+    /// Should explore 2 * 2 = 4 orderings (independent pairs don't cross).
+    #[test]
+    fn test_two_independent_pairs() {
+        let mut engine = DporEngine::new(4, None, 10000, None);
+        let mut exec_count = 0;
+        // T0 and T1 write object 1; T2 and T3 write object 2
+        let thread_objects = [1u64, 1, 2, 2];
+
+        loop {
+            let mut execution = engine.begin_execution();
+
+            loop {
+                let runnable = execution.runnable_threads();
+                if runnable.is_empty() {
+                    break;
+                }
+                let chosen = match engine.schedule(&mut execution) {
+                    Some(t) => t,
+                    None => break,
+                };
+                engine.process_access(
+                    &mut execution,
+                    chosen,
+                    thread_objects[chosen],
+                    AccessKind::Write,
+                );
+                execution.finish_thread(chosen);
+            }
+
+            exec_count += 1;
+            if !engine.next_execution() {
+                break;
+            }
+        }
+
+        // Two independent pairs: 2! * 2! = 4 orderings
+        assert_eq!(exec_count, 4);
+    }
+
+    /// Model of dining philosophers (simplified):
+    /// 2 threads, each locks two resources in opposite order.
+    /// Thread 0: write(A), write(B)
+    /// Thread 1: write(B), write(A)
+    /// Should find all interleavings including the deadlock-prone one.
+    #[test]
+    fn test_two_philosophers_all_orderings() {
+        let mut engine = DporEngine::new(2, None, 10000, None);
+        let thread_ops: Vec<Vec<(u64, AccessKind)>> = vec![
+            vec![(1, AccessKind::Write), (2, AccessKind::Write)],
+            vec![(2, AccessKind::Write), (1, AccessKind::Write)],
+        ];
+        let mut exec_count = 0;
+        let mut traces = Vec::new();
+
+        loop {
+            let mut execution = engine.begin_execution();
+            let mut pcs = vec![0usize; 2];
+
+            loop {
+                for i in 0..2 {
+                    if pcs[i] >= thread_ops[i].len() {
+                        execution.finish_thread(i);
+                    }
+                }
+                if execution.runnable_threads().is_empty() {
+                    break;
+                }
+                let chosen = match engine.schedule(&mut execution) {
+                    Some(t) => t,
+                    None => break,
+                };
+                let pc = pcs[chosen];
+                if pc >= thread_ops[chosen].len() {
+                    break;
+                }
+                let (obj_id, kind) = thread_ops[chosen][pc];
+                engine.process_access(&mut execution, chosen, obj_id, kind);
+                pcs[chosen] += 1;
+            }
+
+            traces.push(execution.schedule_trace.clone());
+            exec_count += 1;
+            if !engine.next_execution() {
+                break;
+            }
+        }
+
+        // Should explore multiple interleavings including dangerous ones
+        assert!(
+            exec_count >= 4,
+            "expected at least 4 executions for 2-philosopher, got {exec_count}"
+        );
     }
 }

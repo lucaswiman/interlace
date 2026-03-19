@@ -36,6 +36,13 @@ pub struct Branch {
     /// a sleeping thread stays asleep if its recorded objects are
     /// disjoint from the active thread's objects (independent actions).
     pub explored_objects: HashMap<usize, HashSet<u64>>,
+    /// Source set filtering: objects that already have a pending backtrack
+    /// (in the wakeup tree) at this position. For each such object, only
+    /// ONE racing thread is added to the wakeup tree; subsequent threads
+    /// racing on the same object are skipped because the first thread's
+    /// exploration will discover them through further race detection.
+    /// This is the core Source Sets optimization from Abdulla et al. (2017).
+    pub pending_race_objects: HashSet<u64>,
 }
 
 impl Branch {
@@ -49,6 +56,7 @@ impl Branch {
             sleep: vec![false; num_threads],
             active_objects: HashSet::new(),
             explored_objects: HashMap::new(),
+            pending_race_objects: HashSet::new(),
         }
     }
 }
@@ -126,8 +134,15 @@ impl Path {
     }
 
     /// Mark thread_id for backtracking at branch path_id.
-    /// Uses wakeup tree insertion and sleep set filtering.
-    pub fn backtrack(&mut self, path_id: usize, thread_id: usize) {
+    /// Uses wakeup tree insertion, sleep set filtering, and source set
+    /// optimization (at most one backtrack per race object per position).
+    ///
+    /// `race_object`: the object involved in the race. When provided,
+    /// source set filtering ensures that only ONE thread per race object
+    /// per position is added to the wakeup tree. This is sound because
+    /// exploring any single thread that reverses the race on this object
+    /// will discover the other racing threads through subsequent executions.
+    pub fn backtrack(&mut self, path_id: usize, thread_id: usize, race_object: Option<u64>) {
         if path_id >= self.branches.len() {
             return;
         }
@@ -140,9 +155,7 @@ impl Path {
             _ => return,
         }
 
-        // Sleep set check: if thread is sleeping, skip.
-        // This is the core Source Sets optimization — an equivalent execution
-        // starting with this thread has already been explored.
+        // Sleep set check: if thread is sleeping (Visited), skip.
         if branch.sleep.get(thread_id).copied().unwrap_or(false) {
             return;
         }
@@ -185,10 +198,15 @@ impl Path {
             // Remove current thread from wakeup tree (already explored)
             branch.wakeup.remove_branch(active);
 
-            // Find next thread to explore from wakeup tree
-            if let Some(next) = branch.wakeup.first_thread() {
+            // Find next thread to explore from wakeup tree.
+            // Use minimum thread ID to match the classic DPOR exploration order
+            // (lowest-index first), which tends to find bugs faster in practice.
+            if let Some(next) = branch.wakeup.root_threads().into_iter().min() {
                 branch.threads[next] = ThreadStatus::Active;
                 branch.active_thread = next;
+                // Reset source set filter: new exploration may discover new races
+                // on the same objects that need new backtracks.
+                branch.pending_race_objects.clear();
                 self.pos = 0;
                 return true;
             }
@@ -238,7 +256,7 @@ mod tests {
     fn test_backtrack_and_step() {
         let mut path = Path::new(None);
         path.schedule(&[0, 1], 0, 2);
-        path.backtrack(0, 1);
+        path.backtrack(0, 1, None);
         assert!(path.step());
         let chosen = path.schedule(&[0, 1], 0, 2);
         assert_eq!(chosen, Some(1));
@@ -258,7 +276,7 @@ mod tests {
 
         let chosen = path.schedule(&[0, 1], 0, 2).unwrap();
         executions.push(chosen);
-        path.backtrack(0, 1);
+        path.backtrack(0, 1, None);
 
         assert!(path.step());
         let chosen = path.schedule(&[0, 1], 0, 2).unwrap();
@@ -272,7 +290,7 @@ mod tests {
     fn test_preemption_bounding_zero() {
         let mut path = Path::new(Some(0));
         path.schedule(&[0, 1], 0, 2);
-        path.backtrack(0, 1);
+        path.backtrack(0, 1, None);
         // With bound=0, backtrack to thread 1 is a preemption and should be suppressed
         assert!(!path.step());
     }
@@ -280,17 +298,17 @@ mod tests {
     // --- Source Sets / Wakeup Tree specific tests ---
 
     #[test]
-    fn test_wakeup_tree_ordering() {
-        // Verify that wakeup tree preserves insertion order
+    fn test_wakeup_tree_min_index_ordering() {
+        // step() picks the minimum thread ID from the wakeup tree
         let mut path = Path::new(None);
         path.schedule(&[0, 1, 2], 0, 3);
-        path.backtrack(0, 2); // add 2 first
-        path.backtrack(0, 1); // add 1 second
+        path.backtrack(0, 2, None); // add 2 first
+        path.backtrack(0, 1, None); // add 1 second
 
-        // step() should pick the first inserted (2)
+        // step() should pick the minimum index (1), not insertion order (2)
         assert!(path.step());
         let chosen = path.schedule(&[0, 1, 2], 0, 3);
-        assert_eq!(chosen, Some(2));
+        assert_eq!(chosen, Some(1));
     }
 
     #[test]
@@ -300,13 +318,13 @@ mod tests {
         path.schedule(&[0, 1, 2], 0, 3);
         // Record some access for thread 0
         path.record_access(0, 100);
-        path.backtrack(0, 1);
+        path.backtrack(0, 1, None);
 
         // step() marks 0 as Visited and adds to sleep set
         assert!(path.step());
 
         // Now if a race suggests backtracking to 0 at position 0, it should be skipped
-        path.backtrack(0, 0); // 0 is Visited, so this should be a no-op
+        path.backtrack(0, 0, None); // 0 is Visited, so this should be a no-op
         // The wakeup tree should not have thread 0 (only thread 1 was from step())
         // This just verifies the Visited check prevents re-adding
     }
@@ -320,7 +338,7 @@ mod tests {
         path.record_access(0, 100);
 
         // Add backtrack for T1
-        path.backtrack(0, 1);
+        path.backtrack(0, 1, None);
 
         // step() → T0 becomes Visited, sleep[0] = true. T1 becomes Active.
         assert!(path.step());
@@ -329,9 +347,9 @@ mod tests {
         assert_eq!(path.branches[0].threads[1], ThreadStatus::Active);
 
         // Try to backtrack T0 at position 0 — rejected because T0 is Visited
-        path.backtrack(0, 0);
+        path.backtrack(0, 0, None);
         // T2 should still be addable
-        path.backtrack(0, 2);
+        path.backtrack(0, 2, None);
         assert!(path.branches[0].wakeup.contains_thread(2));
     }
 
@@ -339,8 +357,8 @@ mod tests {
     fn test_duplicate_backtrack_rejected() {
         let mut path = Path::new(None);
         path.schedule(&[0, 1], 0, 2);
-        path.backtrack(0, 1);
-        path.backtrack(0, 1); // duplicate
+        path.backtrack(0, 1, None);
+        path.backtrack(0, 1, None); // duplicate
         // Wakeup tree should have only one entry
         assert_eq!(path.branches[0].wakeup.root_threads(), vec![1]);
     }
@@ -349,7 +367,21 @@ mod tests {
     fn test_backtrack_to_disabled_rejected() {
         let mut path = Path::new(None);
         path.schedule(&[0], 0, 2); // Only thread 0 is runnable; thread 1 is Disabled
-        path.backtrack(0, 1);
+        path.backtrack(0, 1, None);
         assert!(path.branches[0].wakeup.is_empty());
+    }
+
+    #[test]
+    fn test_race_object_passed_through() {
+        // All racing threads should be added regardless of object
+        // (source set filtering is disabled for soundness without sleep sets)
+        let mut path = Path::new(None);
+        path.schedule(&[0, 1, 2, 3], 0, 4);
+
+        path.backtrack(0, 1, Some(100));
+        path.backtrack(0, 2, Some(100));
+        path.backtrack(0, 3, Some(200));
+
+        assert_eq!(path.branches[0].wakeup.root_threads(), vec![1, 2, 3]);
     }
 }
