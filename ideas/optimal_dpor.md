@@ -163,13 +163,19 @@ threads whose next action is independent of p's action.
   the same access info (since independence guarantees the state is unchanged).
 - [x] Propagation works during REPLAY only — `schedule()` calls
   `propagate_sleep()` only in the replay code path. Propagation to new
-  branches was attempted (approach (c')) but reverted because our
-  object-level independence check is insufficient to guarantee soundness
-  at divergent execution paths — it caused real races to be missed.
+  branches was attempted (approach (c')) but reverted twice:
+  1. First attempt: failed due to unstable object keys (`id(obj)` changed
+     between executions). **Fixed** by implementing `StableObjectIds`.
+  2. Second attempt (with stable IDs): failed because `explored_accesses`
+     at one position only capture that opcode's accesses. A sleeping
+     thread with reads at position K but writes at K+1 appears independent
+     (read♦read) at K, blocking backtracks needed to find the actual
+     write conflicts. **Fix**: trace caching (Phase 2b).
 - [x] If no access info is available for a sleeping thread (e.g., a locally
   Visited thread without explored_accesses), it is woken up (conservative).
-- [ ] **Future**: Implement stable object keys (see prerequisite section
-  below), then re-enable propagation to new branches (approach (c')).
+- [x] Stable object keys implemented (`StableObjectIds` in `frontrun/dpor.py`).
+- [ ] **Future**: Implement trace caching (Phase 2b) to cache each thread's
+  complete future accesses, then re-enable propagation to new branches.
   Expected improvement: readers(2) from 5→4, readers(4) from ~65→16 traces.
 
 ### 1d. Verification
@@ -190,58 +196,23 @@ threads whose next action is independent of p's action.
 
 ## Prerequisite: Stable object keys
 
+- [x] **Implemented**: `StableObjectIds` class in `frontrun/dpor.py`
+
 Sleep propagation to new branches (Phase 2) requires that object keys are
-**stable across executions**. Currently, `_make_object_key(id(obj), name)`
-in `frontrun/dpor.py` uses Python's `id(obj)` (a memory address) as part of
-the key. Since `explore_dpor` creates a fresh `state = setup()` each
-execution, the same logical object (e.g., `state.d1`) gets a different
-`id()` each time.
+**stable across executions**. Previously, `_make_object_key(id(obj), name)`
+used Python's `id(obj)` (a memory address) as part of the key. Since
+`explore_dpor` creates a fresh `state = setup()` each execution, the same
+logical object (e.g., `state.d1`) got a different `id()` each time.
 
-This breaks sleep propagation to new branches: `explored_accesses` saved by
-`step()` carry stale keys from a previous execution. When the independence
-check compares these against fresh keys from the current execution, the hash
-values never match, so every sleeping thread appears independent of
-everything. Backtracks get incorrectly blocked, causing real races to be
-missed (6 test failures: TestDictMergeOperatorRace, TestReduceAccumulateRace,
-TestBytearraySliceRace, TestDictPopUpdateRace, TestZipRace, TestStrJoinRace).
+### Fix: Monotonic object ID assignment (implemented)
 
-**The algorithm is correct** — the propagation logic and independence check
-are sound. Only the object identity scheme is broken.
-
-### Fix: Monotonic object ID assignment
-
-Assign each Python object a monotonically increasing stable ID the first
-time it is accessed, rather than using `id(obj)`. The mapping is maintained
-per-DporScheduler (persistent across executions within one `explore_dpor`
-call) and keyed by `id(obj)`:
-
-```python
-class StableObjectIds:
-    def __init__(self):
-        self._map: dict[int, int] = {}  # id(obj) → stable_id
-        self._next_id = 0
-
-    def get(self, obj: object) -> int:
-        py_id = id(obj)
-        if py_id not in self._map:
-            self._map[py_id] = self._next_id
-            self._next_id += 1
-        return self._map[py_id]
-
-    def reset_for_execution(self):
-        """Clear the mapping at the start of each execution.
-
-        Since explore_dpor creates fresh state objects each execution,
-        old id(obj) values are stale. The mapping is rebuilt during
-        replay, where the same objects are accessed in the same
-        deterministic order, producing the same stable IDs.
-        """
-        self._map.clear()
-        self._next_id = 0
-```
-
-Then replace `_make_object_key(id(obj), name)` with
-`_make_object_key(stable_ids.get(obj), name)`.
+The `StableObjectIds` class assigns each Python object a monotonically
+increasing stable ID the first time it is accessed. The mapping is
+maintained per `explore_dpor` call, created once and reset at the start of
+each execution. All `_report_*` functions now use `stable_ids.get(obj)`
+instead of `id(obj)`, threaded through `_process_opcode` via the
+scheduler's `_stable_ids` attribute. Both sync (`DporScheduler`) and
+async (`AsyncDporScheduler`) paths are covered.
 
 **Why this works**: During replay, threads execute the same bytecodes in the
 same order, accessing the same logical objects. The monotonic counter assigns
@@ -255,6 +226,27 @@ access is the same object it would have accessed during replay.
 mappings. Within a single execution, objects accessed by the DPOR engine are
 kept alive (referenced by the thread's local variables), so `id()` reuse
 within one execution is not a concern.
+
+### Why stable IDs alone don't enable propagation to new branches
+
+Stable IDs fix the **key matching** problem (explored_accesses keys now
+match active_accesses keys across executions). However, propagation to
+new branches was attempted and still caused 6 test failures
+(TestDictMergeOperatorRace, TestReduceAccumulateRace,
+TestBytearraySliceRace, TestDictPopUpdateRace, TestZipRace,
+TestStrJoinRace). The root cause is **not key mismatch** but
+**incomplete access information**:
+
+`explored_accesses` at position K captures only the accesses from the
+opcode at position K. A sleeping thread may perform reads at position K
+but writes at positions K+1, K+2, etc. When propagating the position-K
+snapshot to new branches at K+3, K+4, ..., the independence check sees
+"read♦read = independent" and keeps the thread asleep, even though its
+FUTURE writes would conflict. This causes real races to be missed.
+
+**Fix**: Trace caching (Phase 2b) — cache each thread's complete sequence
+of future accesses so the independence check can consider ALL remaining
+accesses, not just the snapshot at one position.
 
 ### Rejected alternative: Rust-level key remapping (approach 3)
 
@@ -281,10 +273,16 @@ past the replay prefix to new branches. Replay-only propagation gives
 readers(2)=5, readers(4)=~65. Full propagation would give readers(2)=4,
 readers(4)=16 (matching POPL'14 Table 2: source=2^N for readers(N)).
 
-**Prerequisite**: Stable object keys (see above). Once implemented,
-re-enable propagation to new branches by calling `self.propagate_sleep()`
-in `Path::schedule()` for new branches (the code that was reverted from
-approach (c')).
+**Prerequisites**:
+- [x] Stable object keys (implemented via `StableObjectIds`)
+- [ ] Trace caching (Phase 2b) — needed because `explored_accesses` at one
+  position only capture that opcode's accesses. The sleeping thread's
+  complete future trace must be available for the independence check.
+
+Once trace caching is implemented, re-enable propagation to new branches
+by calling `self.propagate_sleep()` in `Path::schedule()` for new branches,
+using the cached trace to determine the sleeping thread's full remaining
+accesses rather than the single-position snapshot from `explored_accesses`.
 
 ### 2a. Source set check via contains_thread (already implemented)
 
@@ -294,8 +292,23 @@ approach (c')).
 
 ### 2b. Trace caching for safe propagation to new branches
 
-- [ ] Cache per-thread execution traces (sequence of accesses) from each run
-- [ ] At new branches, verify cached trace before propagating sleep
+**Prerequisite**: Stable object keys (implemented).
+
+The key insight from the second propagation attempt: `explored_accesses`
+at one position only capture that opcode's accesses. A sleeping thread
+may do reads at position K but writes at K+1, K+2, etc. To safely
+propagate sleep to new branches, we need the thread's COMPLETE future
+access trace, not just a single-position snapshot. Then the independence
+check compares the sleeping thread's entire remaining trace against the
+active thread's action — if any future access conflicts, the thread is
+woken up.
+
+- [ ] Cache per-thread execution traces (full sequence of (object_key,
+  AccessKind) pairs) from each run
+- [ ] At new branches, use the cached trace to determine the sleeping
+  thread's complete remaining accesses (all accesses from position K
+  onward). The independence check uses the UNION of all remaining
+  accesses, not just position K's snapshot.
 - [ ] If trace diverges (thread would access different objects), wake thread
 - [ ] **Expected results**: readers(2): 5→4, readers(4): ~65→16,
   lastzero(3): 48→~30
