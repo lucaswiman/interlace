@@ -8,6 +8,7 @@ pub mod object;
 pub mod path;
 pub mod thread;
 pub mod vv;
+pub mod wakeup_tree;
 
 use pyo3::prelude::*;
 
