@@ -241,11 +241,19 @@ impl Path {
         self.branches.push(branch);
 
         // Do NOT propagate sleep to new branches beyond the replay prefix.
-        // The `explored_accesses` saved by step() carry stale Python object
-        // keys (based on `id(obj)`) from a previous execution. Since each
-        // execution creates fresh state objects, the keys don't match current
-        // ones, making the independence check unsound. See Phase 2 prereq in
-        // ideas/optimal_dpor.md for the full analysis and fix plan.
+        //
+        // Although stable object IDs now ensure keys match across executions,
+        // the explored_accesses at one position only capture the thread's
+        // accesses at THAT position (one opcode). A sleeping thread may do
+        // different opcodes at different positions (reads at one, writes at
+        // another). Carrying the single-position snapshot forward can
+        // incorrectly declare independence (e.g., read♦read) when the thread
+        // would actually WRITE at a later position. This causes real races
+        // to be missed.
+        //
+        // Full propagation requires knowing the sleeping thread's complete
+        // future trace (Phase 2: trace caching), not just its last-explored
+        // position's accesses.
 
         self.pos += 1;
         Some(chosen)
@@ -672,10 +680,14 @@ mod tests {
         assert!(path.branches[1].sleep[1]);
     }
 
-    /// Test that no propagation happens for new branches (approach (c)).
+    /// Test that no propagation happens for new branches (replay-only approach).
     ///
-    /// Replay-only propagation means we only propagate through existing
-    /// replay branches, not into newly created branches beyond the replay.
+    /// Even with stable object IDs, propagation to new branches is disabled
+    /// because explored_accesses only capture one opcode's accesses. A sleeping
+    /// thread may do different opcodes at different positions (reads at one,
+    /// writes at another). Carrying the single-position snapshot forward can
+    /// incorrectly declare independence. Full propagation requires trace
+    /// caching (Phase 2).
     #[test]
     fn test_no_propagation_to_new_branches() {
         use crate::access::AccessKind;
