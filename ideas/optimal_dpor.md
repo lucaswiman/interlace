@@ -10,11 +10,12 @@ The dining philosophers benchmark (4 threads, preemption_bound=2) explores
 **14,221 executions in ~95s**. Many of these are equivalent traces.
 
 **Where we are in the algorithm**: The current implementation is a **hybrid** —
-it has wakeup trees (from Optimal-DPOR, Algorithm 2) but does race detection
-*during* execution (from Source-DPOR, Algorithm 1). This is a valid stepping
-stone: the wakeup tree currently functions as a structured backtrack set,
-producing identical results to classic DPOR. The key optimizations (sleep set
-propagation, source set filtering, deferred race detection) are the next steps.
+it has wakeup trees (from Optimal-DPOR, Algorithm 2), sleep set propagation
+(Algorithm 2 line 16), but does race detection *during* execution (from
+Source-DPOR, Algorithm 1). Sleep set propagation reduces redundant
+interleavings where independent actions commute (e.g., read-read on the
+same object). Source set filtering and deferred race detection are the next
+steps for further reduction.
 
 ## Completed
 
@@ -68,14 +69,23 @@ threads whose next action is independent of p's action.
 
 ### 1a. Record per-thread next-action during execution
 
-- [ ] During each execution, at each scheduling point, record what object each
+- [x] During each execution, at each scheduling point, record what object each
   enabled thread *would* access next (not just the chosen thread).
-  - **Implementation**: Store `next_actions: HashMap<usize, HashSet<u64>>` in Branch,
-    populated during execution (not just replay).
-  - **Challenge**: In stateless model checking, we don't run non-chosen threads,
-    so we don't know their next action at the current state.
-  - **Paper assumption**: The paper assumes a stateful model where `enabled(s[E])`
-    is computable (Section 3.1, JACM'17 p.11-12, Assumption 3.1).
+  - **Implementation chosen**: Approach (c) — replay-only propagation with
+    access-kind-aware independence checks. Rather than recording next-actions
+    for all enabled threads, we propagate sleeping threads' recorded accesses
+    forward through the replayed prefix. This is conservative (threads are
+    woken when their actions are unknown) but correct.
+  - **Data structures changed**:
+    - `active_objects: HashSet<u64>` → `active_accesses: HashMap<u64, AccessKind>`
+    - `explored_objects` → `explored_accesses: HashMap<usize, HashMap<u64, AccessKind>>`
+    - New: `propagated_sleep_accesses: HashMap<usize, HashMap<u64, AccessKind>>`
+    - `record_access()` now takes `AccessKind` parameter
+  - **Independence check**: `access_kinds_conflict()` function mirrors the
+    conflict semantics in `ObjectState::dependent_accesses`. Read+Read is
+    independent, WeakWrite+WeakWrite is independent, etc. This is crucial
+    for the writer-readers scenario where read-read independence allows
+    collapsing equivalent reader orderings.
 
   Three approaches to resolve this in stateless MC:
 
@@ -89,43 +99,56 @@ threads whose next action is independent of p's action.
   **(c) Replay-only propagation** (practical): During replay of positions 0..K-1,
   we know all threads' actions from the previous execution trace. Propagate sleep
   sets only through the replayed prefix; beyond the backtrack point, wake all
-  sleeping threads (their actions are unknown).
-
-  **Recommendation**: Start with (c), which is simplest and correct. The sleep set
-  will be conservative (too small beyond the backtrack point) but still provides
-  reduction. Upgrade to (b) later if needed.
+  sleeping threads (their actions are unknown). **← IMPLEMENTED**
 
 ### 1b. Implement sleep set propagation through replayed prefix
 
-- [ ] In `Path::schedule()`, during replay (pos < branches.len()):
-  - Compute `Sleep'` from the previous branch's sleep set
-  - For each sleeping thread q: keep q sleeping if its recorded objects
-    (from `explored_objects[q]`) are disjoint from the chosen thread's objects
-    (from `active_objects`). This approximates `E ⊢ p♦q`.
-  - Store `Sleep'` in the new branch's `sleep` field
+- [x] In `Path::schedule()`, during replay (pos < branches.len()):
+  - Call `propagate_sleep(pos)` which computes `Sleep'` from pos-1's sleep set
+  - For each sleeping thread q: keep q sleeping if its recorded accesses
+    are independent of the active thread's accesses (using `accesses_are_independent()`)
+  - Store in `propagated_sleep_accesses` at the new position
+  - Also propagates to NEW branches (not just replay), enabling sleep
+    propagation past the backtrack point for one hop
   - **Paper ref**: Algorithm 2 line 16 (JACM'17 p.24)
 
-- [ ] In `Path::step()`, when computing the initial sleep set at backtrack point:
+- [x] In `Path::step()`, when computing the initial sleep set at backtrack point:
   - `sleep(E) = {threads marked Visited at position K}`
+  - Uses `explored_accesses` (not just objects) to store per-thread access info
   - This is the starting point for propagation in the next execution
   - **Paper ref**: Algorithm 2 line 20 (JACM'17 p.25)
 
+- [x] In `Path::backtrack()`, check both local and propagated sleep:
+  - Checks `sleep[thread_id]` (locally Visited threads)
+  - Checks `propagated_sleep_accesses.contains_key(thread_id)` (propagated)
+  - Also updated `add_conservative_backtrack()` for preemption-bounded case
+
 ### 1c. Track sleeping thread actions across replay boundary
 
-- [ ] At position K (backtrack point), sleeping threads have known actions from
-  the previous execution. Store in `replay_actions: HashMap<usize, HashSet<u64>>`.
-- [ ] Propagate ONE step past K using these recorded actions.
-- [ ] Beyond K+1, sleeping threads must be woken (actions unknown).
-- [ ] **Paper ref**: This is a practical concern not directly addressed in the
-  paper (which assumes stateful MC). Concuerror handles this via trace caching
-  (Section 10, JACM'17 p.32-34).
+- [x] Propagated sleep carries access info with the thread, enabling multi-hop
+  propagation. When a thread propagates from pos i to pos i+1, its access
+  map travels with it. At pos i+1, the propagation to pos i+2 uses the
+  same access info (since independence guarantees the state is unchanged).
+- [x] Propagation works for BOTH replay and new branches — `schedule()` calls
+  `propagate_sleep()` in both code paths. This provides one-hop propagation
+  past the backtrack point using the sleeping thread's recorded accesses.
+- [x] If no access info is available for a sleeping thread (e.g., a locally
+  Visited thread without explored_accesses), it is woken up (conservative).
+- [ ] **Future**: Upgrade to approach (b) — trace caching — for better
+  propagation beyond the backtrack point. This would cache each thread's
+  next action from a previous execution at the same prefix.
 
 ### 1d. Verification
 
-- [ ] Add test: two independent writers to different objects → still 1 execution
-  with sleep sets (same as without, but verifies propagation doesn't break things)
-- [ ] Add test: writer-readers example (JACM'17 Fig.1 p.6-7) → verify source-DPOR
-  explores exactly 4 interleavings vs 5+ for classic DPOR
+- [x] Add test: two independent writers to different objects → still 1 execution
+  with sleep sets (`test_independent_pairs_with_propagation`, also existing
+  `test_independent_threads_one_execution` continues to pass)
+- [x] Add test: writer-readers example (JACM'17 Fig.1 p.6-7) → `test_writer_readers_sleep_propagation`
+  verifies source-DPOR explores exactly 4 interleavings (1W+2R case)
+- [x] Writer-readers 1W+4R: currently explores 16 traces (= sum of binomial
+  coefficients). Full reduction to 5 traces requires source set filtering (Phase 2).
+- [x] 2-philosopher benchmark: reduced from 6 to 3 Mazurkiewicz traces
+  (`test_two_philosophers_all_orderings` updated to assert ≥3)
 - [ ] Add test: lastzero-style program (POPL'14 Fig.4 p.11) → verify reduction
 - [ ] Re-run dining philosophers benchmark: expect reduction from 14,221
 
@@ -304,8 +327,10 @@ races during execution and process them in `next_execution()`.
 3. **notdep sequences**: Current = single thread `[q]`.
    Paper = full `notdep(e, E).e'` sequence. (Phase 3b)
 
-4. **Sleep set propagation**: Current = local per-branch only (no cross-branch).
-   Paper = propagated through Explore calls. (Phase 1)
+4. **Sleep set propagation**: ~~Current = local per-branch only.~~
+   **DONE** (Phase 1): propagated through schedule() calls using
+   access-kind-aware independence checks. Multi-hop propagation via
+   `propagated_sleep_accesses` carrying access info forward.
 
 5. **Source set filtering**: Current = disabled (all racing threads added).
    Paper = one thread per race suffices with sleep sets. (Phase 2)
