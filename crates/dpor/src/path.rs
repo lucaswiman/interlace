@@ -241,25 +241,11 @@ impl Path {
         self.branches.push(branch);
 
         // Do NOT propagate sleep to new branches beyond the replay prefix.
-        //
-        // Root cause: `explored_accesses` saved by step() use Python object
-        // keys based on `hash((id(obj), name))`, where `id(obj)` is a memory
-        // address. Each execution creates fresh Python objects (new state,
-        // new dicts, etc.), so `id(obj)` changes between executions. The
-        // `explored_accesses` carry stale object keys from a previous
-        // execution, making the independence check unsound — stale keys
-        // never match fresh keys, so all sleeping threads appear independent
-        // of everything, and backtracks get incorrectly blocked.
-        //
-        // During replay-only propagation, sleeping threads don't propagate
-        // past the backtrack point (they become sleeping AT the last replay
-        // position, not before it), so the stale keys never reach new
-        // positions where they'd block fresh backtracks.
-        //
-        // Fix: Use stable object keys that persist across executions (e.g.,
-        // based on logical object identity rather than memory addresses).
-        // Once object keys are stable, propagation to new branches can be
-        // safely enabled.
+        // The `explored_accesses` saved by step() carry stale Python object
+        // keys (based on `id(obj)`) from a previous execution. Since each
+        // execution creates fresh state objects, the keys don't match current
+        // ones, making the independence check unsound. See Phase 2 prereq in
+        // ideas/optimal_dpor.md for the full analysis and fix plan.
 
         self.pos += 1;
         Some(chosen)
