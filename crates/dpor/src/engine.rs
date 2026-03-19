@@ -888,16 +888,17 @@ mod tests {
             }
         }
 
-        // With replay-only sleep set propagation (approach (c)):
-        // - Full propagation (replay + new branches) would give 4 traces
-        //   but requires trace caching to know the sleeping thread's complete
-        //   future accesses (not just the last-explored position's accesses).
-        // - Replay-only propagation gives 5 traces (one redundant trace
-        //   because reader-reader propagation to new branches is disabled).
-        // - Without propagation: 5+ traces
-        assert!(
-            exec_count <= 5,
-            "writer-readers (1W + 2R) should explore at most 5 traces, got {exec_count}"
+        // With trace caching (Phase 2b), sleep set propagation extends to new
+        // branches. The cached per-thread access unions allow the independence
+        // check to work at new positions: read♦read → readers stay asleep.
+        // This collapses equivalent reader orderings, giving exactly 4 traces
+        // (one per write position: before both, between R1-R2, between R2-R1, after both).
+        //
+        // Paper ref: JACM'17 Table 1 (p.36) — readers(2) with source sets = 4.
+        // Previously 5 with replay-only propagation (one redundant reader ordering).
+        assert_eq!(
+            exec_count, 4,
+            "writer-readers (1W + 2R) should explore exactly 4 traces with trace caching, got {exec_count}"
         );
     }
 
@@ -950,14 +951,17 @@ mod tests {
             }
         }
 
-        // With replay-only propagation (approach (c)), the count is ~65.
-        // Full propagation to new branches requires trace caching (Phase 2)
-        // to know each sleeping thread's complete future accesses.
-        // Optimal = 5 (requires source set filtering, JACM'17 Def 4.3 p.15).
-        // 5! = 120 would be the worst case without any DPOR.
-        assert!(
-            exec_count < 120,
-            "writer-readers (1W + 4R) should be less than 5!=120, got {exec_count}"
+        // With trace caching (Phase 2b), sleep set propagation extends to new
+        // branches. For readers(N), the optimal count with source sets is 2^N
+        // (JACM'17 Table 1 p.36): each subset of {R1,...,RN} that appears
+        // before the writer gives a distinct Mazurkiewicz trace. For N=4: 2^4 = 16.
+        //
+        // Previously ~65 with replay-only propagation. Trace caching enables
+        // reader-reader independence at new branches, collapsing equivalent
+        // reader orderings within each "before/after" partition.
+        assert_eq!(
+            exec_count, 16,
+            "writer-readers (1W + 4R) should explore exactly 16 traces with trace caching, got {exec_count}"
         );
     }
 

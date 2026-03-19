@@ -680,20 +680,23 @@ mod tests {
         assert!(path.branches[1].sleep[1]);
     }
 
-    /// Test that no propagation happens for new branches (replay-only approach).
+    /// Test that propagation works for new branches via trace caching (Phase 2b).
     ///
-    /// Even with stable object IDs, propagation to new branches is disabled
-    /// because explored_accesses only capture one opcode's accesses. A sleeping
-    /// thread may do different opcodes at different positions (reads at one,
-    /// writes at another). Carrying the single-position snapshot forward can
-    /// incorrectly declare independence. Full propagation requires trace
-    /// caching (Phase 2).
+    /// The trace cache records per-thread access unions from the previous
+    /// execution, enabling sleep set propagation to new branches (beyond the
+    /// replay prefix). When a sleeping thread's cached accesses are
+    /// independent of the active thread's accesses, it stays asleep.
+    ///
+    /// Paper ref: JACM'17 Section 10 (p.31-35) — Concuerror uses trace
+    /// caching to determine sleeping threads' next actions. The independence
+    /// check Sleep' = {q ∈ sleep(E) | E ⊢ p♦q} (Algorithm 2 line 16, p.24)
+    /// uses the cached accesses for q's actions.
     #[test]
-    fn test_no_propagation_to_new_branches() {
+    fn test_propagation_to_new_branches_via_trace_cache() {
         use crate::access::AccessKind;
         let mut path = Path::new(None);
 
-        // --- First execution: T0 at pos 0, T1 at pos 1 ---
+        // --- First execution: T0 writes obj 100, T1 reads obj 200 ---
         path.schedule(&[0, 1], 0, 2);
         path.record_access(0, 100, AccessKind::Write);
         path.schedule(&[1], 1, 2);
@@ -702,21 +705,64 @@ mod tests {
         // Backtrack T1 at pos 0
         path.backtrack(0, 1, None);
 
-        // step(): T0 → Visited at pos 0
+        // step(): saves trace, T0 → Visited at pos 0
         assert!(path.step());
 
         // --- Second execution: T1 at pos 0 (replay), then new pos 1 ---
         let chosen = path.schedule(&[0, 1], 0, 2);
         assert_eq!(chosen, Some(1));
-        path.record_access(0, 200, AccessKind::Read);
+        path.record_access(0, 200, AccessKind::Read); // T1 reads different object
 
         // New branch at pos 1: T0 chosen
         path.schedule(&[0], 0, 2);
 
-        // With replay-only propagation, pos 1 is NEW → no propagation
+        // With trace caching, propagation to new branches is enabled.
+        // T0's cached accesses = {100: Write}, T1's active at pos 0 = {200: Read}.
+        // Disjoint objects → INDEPENDENT → T0 stays asleep at pos 1.
         assert!(
-            path.branches[1].propagated_sleep_accesses.is_empty(),
-            "No propagation to new branches in replay-only mode"
+            path.branches[1].propagated_sleep_accesses.contains_key(&0),
+            "T0 should be propagated to new branch (independent: obj 100 vs obj 200)"
+        );
+    }
+
+    /// Test that trace caching correctly wakes threads on conflict at new branches.
+    ///
+    /// When a sleeping thread's cached accesses conflict with the active
+    /// thread's accesses, the sleeping thread must be woken up to allow
+    /// exploring the conflicting interleaving.
+    ///
+    /// Paper ref: Algorithm 2 line 16 (JACM'17 p.24) — threads are removed
+    /// from Sleep' when their action is dependent (¬(p♦q)).
+    #[test]
+    fn test_trace_cache_wakes_on_conflict_at_new_branch() {
+        use crate::access::AccessKind;
+        let mut path = Path::new(None);
+
+        // --- First execution: T0 writes obj 100, T1 writes obj 100 ---
+        path.schedule(&[0, 1], 0, 2);
+        path.record_access(0, 100, AccessKind::Write);
+        path.schedule(&[1], 1, 2);
+        path.record_access(1, 100, AccessKind::Write);
+
+        // Backtrack T1 at pos 0
+        path.backtrack(0, 1, None);
+
+        // step(): saves trace, T0 → Visited
+        assert!(path.step());
+
+        // --- Second execution: T1 at pos 0 (replay), then new pos 1 ---
+        let chosen = path.schedule(&[0, 1], 0, 2);
+        assert_eq!(chosen, Some(1));
+        path.record_access(0, 100, AccessKind::Write); // T1 writes same obj 100
+
+        // New branch at pos 1: T0 chosen
+        path.schedule(&[0], 0, 2);
+
+        // T0's cached accesses = {100: Write}, T1's active at pos 0 = {100: Write}.
+        // Write vs Write on obj 100 → CONFLICT → T0 wakes up.
+        assert!(
+            !path.branches[1].propagated_sleep_accesses.contains_key(&0),
+            "T0 should NOT be propagated (Write vs Write conflict on obj 100)"
         );
     }
 
