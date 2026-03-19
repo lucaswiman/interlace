@@ -424,4 +424,104 @@ mod tests {
 
         assert_eq!(path.branches[0].wakeup.root_threads(), vec![1, 2, 3]);
     }
+
+    // --- Sleep set propagation tests ---
+
+    /// Test that propagated_sleep_accesses blocks backtracking.
+    ///
+    /// If thread q is propagated-sleeping at position K (i.e., its next
+    /// action is independent of all chosen threads between q's home
+    /// position and K), then backtrack(K, q) should be rejected.
+    ///
+    /// Paper ref: Algorithm 2 line 5 (JACM'17 p.24) — before inserting
+    /// into the wakeup tree, check sleep(E') ∩ WI[E'](v) = ∅.
+    #[test]
+    fn test_propagated_sleep_blocks_backtrack() {
+        use crate::access::AccessKind;
+        let mut path = Path::new(None);
+
+        // Position 0: T0 active, T1 and T2 pending
+        path.schedule(&[0, 1, 2], 0, 3);
+        // T0 accesses object 100 (Write)
+        path.record_access(0, 100, AccessKind::Write);
+
+        // Position 1: T1 active (new branch)
+        path.schedule(&[1, 2], 1, 3);
+        // T1 accesses object 200 (Read)
+        path.record_access(1, 200, AccessKind::Read);
+
+        // Simulate exploring T0 at pos 0: mark Visited, add to sleep
+        // and explored_accesses
+        path.step(); // T0 -> Visited at pos 0, saved in explored_accesses
+        // Now backtrack T1 at pos 0
+        path.backtrack(0, 1, None);
+        assert!(path.step()); // picks T1 from wakeup at pos 0
+
+        // Replay pos 0 with T1 active
+        let chosen = path.schedule(&[0, 1, 2], 0, 3);
+        assert_eq!(chosen, Some(1));
+        // T1 accesses object 200 (Read) — different object, independent of T0's Write to 100
+        path.record_access(0, 200, AccessKind::Read);
+
+        // Position 1 (new branch): T0 active
+        path.schedule(&[0, 2], 0, 3);
+
+        // At position 1, T0 is NOT sleeping (local sleep[0] is false at pos 1).
+        // But propagation: T0 was sleeping at pos 0 with {100: Write}.
+        // T1's active_accesses at pos 0 = {200: Read}.
+        // {100} ∩ {200} = ∅ → independent → T0 propagated to pos 1.
+        // So backtrack(1, 0) should be blocked by propagated sleep.
+        assert!(
+            path.branches[1]
+                .propagated_sleep_accesses
+                .contains_key(&0),
+            "T0 should be propagated-sleeping at position 1"
+        );
+    }
+
+    /// Test that propagated sleep is NOT applied when actions are dependent.
+    ///
+    /// If the sleeping thread's next action conflicts with the chosen
+    /// thread's action (same object, at least one write), the sleeping
+    /// thread must wake up — its equivalent trace is NOT guaranteed to
+    /// exist, so we must allow exploring it.
+    ///
+    /// Paper ref: Algorithm 2 line 16 (JACM'17 p.24) — the filter
+    /// E ⊢ p♦q keeps only independent sleeping threads.
+    #[test]
+    fn test_propagated_sleep_wakes_on_conflict() {
+        use crate::access::AccessKind;
+        let mut path = Path::new(None);
+
+        // Position 0: T0 active, T1 pending
+        path.schedule(&[0, 1], 0, 2);
+        // T0 accesses object 100 (Write)
+        path.record_access(0, 100, AccessKind::Write);
+
+        // Position 1: T1 active
+        path.schedule(&[1], 1, 2);
+
+        // Mark T0 Visited at pos 0, add backtrack for T1
+        path.step();
+        path.backtrack(0, 1, None);
+        assert!(path.step());
+
+        // Replay pos 0 with T1 active
+        path.schedule(&[0, 1], 0, 2);
+        // T1 ALSO accesses object 100 (Read) — conflicts with T0's Write
+        path.record_access(0, 100, AccessKind::Read);
+
+        // Position 1 (new branch): T0 active
+        path.schedule(&[0], 0, 2);
+
+        // T0 was sleeping at pos 0 with {100: Write}.
+        // T1's active_accesses at pos 0 = {100: Read}.
+        // Write vs Read on same object → CONFLICT → T0 must wake up.
+        assert!(
+            !path.branches[1]
+                .propagated_sleep_accesses
+                .contains_key(&0),
+            "T0 should NOT be propagated-sleeping when actions conflict"
+        );
+    }
 }
