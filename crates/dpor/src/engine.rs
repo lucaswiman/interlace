@@ -1,4 +1,14 @@
 //! The DPOR engine: orchestrates systematic exploration of interleavings.
+//!
+//! Implements race detection and happens-before tracking for DPOR.
+//!
+//! **Paper ref**: Abdulla et al., "Source Sets: A Foundation for Optimal
+//! Dynamic Partial Order Reduction", JACM 2017.
+//!
+//! **Current algorithm**: Race detection is performed during execution
+//! (Algorithm 1 style, JACM'17 p.16 lines 5-9), not deferred to maximal
+//! executions (Algorithm 2 style, p.24 lines 1-6). Happens-before is tracked
+//! via vector clocks (Section 10, JACM'17 p.34-35).
 
 use std::collections::HashMap;
 
@@ -9,6 +19,9 @@ use crate::thread::Thread;
 use crate::vv::VersionVec;
 
 /// Synchronization events that affect the happens-before relation.
+/// Paper: happens-before is defined in Definition 3.2 (JACM'17 p.12-13).
+/// Lock acquire/release create happens-before edges; thread spawn/join
+/// establish causal ordering between parent and child.
 #[derive(Clone, Debug)]
 pub enum SyncEvent {
     LockAcquire { lock_id: u64 },
@@ -108,6 +121,17 @@ impl DporEngine {
         Some(chosen)
     }
 
+    /// Report a shared memory access and detect races.
+    ///
+    /// For each prior dependent access from another thread that is NOT
+    /// ordered by happens-before, we have a **race** (JACM'17 Def 3.3 p.13:
+    /// e ⋖_E e' when events are from different threads and concurrent).
+    /// We add the current thread to the backtrack set at the prior access's
+    /// scheduling point to explore the reversed ordering.
+    ///
+    /// **Note**: This performs race detection during execution (Algorithm 1
+    /// style, JACM'17 p.16 lines 5-9). Algorithm 2 (p.24 lines 1-6) defers
+    /// race detection to maximal executions and computes notdep sequences.
     pub fn process_access(
         &mut self,
         execution: &mut Execution,
@@ -122,6 +146,8 @@ impl DporEngine {
 
         // Check ALL dependent accesses from other threads (not just the last one).
         // This ensures 3+ thread scenarios are handled correctly.
+        // Paper: a race exists when e and e' are dependent and concurrent
+        // (¬(e →_E e'), JACM'17 Def 3.3 p.13-14).
         for prev_access in object_state.dependent_accesses(kind, thread_id) {
             if !prev_access.happens_before(&current_dpor_vv) {
                 self.path.backtrack(prev_access.path_id, thread_id, Some(object_id));
@@ -199,6 +225,19 @@ impl DporEngine {
         self.path.record_access(current_path_id, object_id);
     }
 
+    /// Process a synchronization event (lock acquire/release, thread spawn/join).
+    ///
+    /// Updates vector clocks to establish happens-before edges.
+    /// Paper: Definition 3.2 properties 1-7 (JACM'17 p.12-13) define valid
+    /// happens-before assignments. Lock acquire/release create edges via
+    /// vector clock joins; thread spawn/join do the same.
+    ///
+    /// **Lock handling**: The paper's Algorithms 3-4 (JACM'17 p.27-28) handle
+    /// locks by relaxing Assumption 3.1 (processes can disable each other).
+    /// Our approach is different: we use a separate `io_vv` vector clock that
+    /// omits lock HB edges, making lock operations always appear concurrent
+    /// for backtracking purposes. This is conservative (may over-explore)
+    /// but catches multi-lock races that pure HB-based tracking would miss.
     pub fn process_sync(
         &mut self,
         execution: &mut Execution,
@@ -207,6 +246,10 @@ impl DporEngine {
     ) {
         match event {
             SyncEvent::LockAcquire { lock_id } => {
+                // Join with the releasing thread's vector clock to establish
+                // happens-before: release(L) →_E acquire(L).
+                // Paper: Def 3.2 property 4 (JACM'17 p.12) — linearizations
+                // must preserve happens-before and reach the same state.
                 if let Some(release_vv) = execution.lock_release_vv.get(&lock_id) {
                     let release_vv = release_vv.clone();
                     execution.threads[thread_id].causality.join(&release_vv);

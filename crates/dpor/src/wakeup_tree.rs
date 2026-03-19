@@ -5,10 +5,21 @@
 //! choices that reverses a detected race. The tree ensures that no sleep-set-blocked
 //! explorations occur, achieving optimality (one execution per Mazurkiewicz trace).
 //!
-//! Reference: Abdulla et al., "Source Sets: A Foundation for Optimal Dynamic
-//! Partial Order Reduction", JACM 2017, Section 6-7.
+//! **Paper ref**: Definition 6.1 (JACM'17 p.21-22, POPL'14 p.6-7).
+//! A wakeup tree after ⟨E, P⟩ is an ordered tree ⟨B, ≺⟩ satisfying:
+//!   Property 1: WI[E](w) ∩ P = ∅ for each leaf w  (no sleeping weak initial)
+//!   Property 2: for siblings u.p ≺ u.w where u.w is a leaf, p ∉ WI[E.u](w)
+//!               (p will be removed from sleep set by exploring u.w)
+//!
+//! **Current status**: The tree structure is fully implemented, but the insert
+//! operation uses exact prefix matching rather than the paper's equivalence
+//! checking (v ∼[E] w, Lemma 6.2 p.22). This is sound but may insert
+//! redundant branches. See `ideas/optimal_dpor.md` Phase 4c.
 
 /// A node in the wakeup tree. Children are ordered (exploration order matters).
+/// The ordering ≺ between siblings determines sleep set removal:
+/// when u.p is explored before u.q (p ≺ q), p is added to the sleep set,
+/// and u.q must remove p from the sleep set (JACM'17 Def 6.1 Property 2).
 #[derive(Clone, Debug)]
 struct WakeupNode {
     thread_id: usize,
@@ -59,12 +70,20 @@ impl WakeupTree {
 
     /// Get the minimum thread ID among root-level branches.
     /// This is used for exploration ordering (lowest-index first).
+    ///
+    /// In Algorithm 2 line 15 (JACM'17 p.24), the paper picks min≺{p ∈ wut(E)}.
+    /// We use min thread ID as a deterministic proxy for the ≺ ordering.
     pub fn min_thread(&self) -> Option<usize> {
         self.children.iter().map(|n| n.thread_id).min()
     }
 
     /// Extract the subtree rooted at the first child with the given thread_id.
     /// This is used when descending into a chosen thread's exploration.
+    ///
+    /// Corresponds to Algorithm 2 line 17 (JACM'17 p.24):
+    ///   WuT' = subtree(wut(E), p)
+    /// The subtree guides the next level of exploration, ensuring multi-step
+    /// wakeup sequences are followed correctly.
     pub fn subtree(&self, thread_id: usize) -> WakeupTree {
         for child in &self.children {
             if child.thread_id == thread_id {
@@ -79,6 +98,9 @@ impl WakeupTree {
     /// Remove the branch starting with the given thread_id from this tree
     /// (called after exploring that thread). Also returns whether the thread
     /// was found.
+    ///
+    /// Corresponds to Algorithm 2 line 19 (JACM'17 p.25):
+    ///   "remove all sequences of form p.w from wut(E)"
     pub fn remove_branch(&mut self, thread_id: usize) -> bool {
         let len_before = self.children.len();
         self.children.retain(|n| n.thread_id != thread_id);
@@ -92,21 +114,25 @@ impl WakeupTree {
     /// the tree structure: shared prefixes are merged, and new branches are
     /// added at the end (rightmost position) to maintain exploration order.
     ///
-    /// `is_weak_initial` is a callback that checks whether a given thread_id
-    /// is a weak initial of the remaining sequence after the current prefix.
-    /// This is used to determine whether an existing branch already covers
-    /// the needed exploration (Property 2 of Definition 6.1).
+    /// Corresponds to Algorithm 2 line 6 (JACM'17 p.24):
+    ///   wut(E') := insert[E'](v, wut(E'))
+    /// where v = notdep(e, E).e' is the race-reversing sequence.
+    ///
+    /// **Simplification**: The paper's insert (Def 6.2, JACM'17 p.22) checks
+    /// whether an existing branch already covers the sequence via the ∼[E]
+    /// equivalence relation (Lemma 6.2). Our implementation only checks exact
+    /// prefix matching — sound but may keep redundant branches.
     ///
     /// Returns true if a new leaf was added.
     pub fn insert(&mut self, sequence: &[usize]) -> bool {
         if sequence.is_empty() {
             return false;
         }
-        self.insert_at(&mut Vec::new(), sequence)
+        self.insert_at(sequence)
     }
 
     /// Internal recursive insertion.
-    fn insert_at(&mut self, _prefix: &mut Vec<usize>, sequence: &[usize]) -> bool {
+    fn insert_at(&mut self, sequence: &[usize]) -> bool {
         if sequence.is_empty() {
             return false;
         }
@@ -125,17 +151,17 @@ impl WakeupTree {
                 let mut subtree = WakeupTree {
                     children: std::mem::take(&mut child.children),
                 };
-                let added = subtree.insert_at(_prefix, rest);
+                let added = subtree.insert_at(rest);
                 child.children = subtree.children;
                 return added;
             }
         }
 
         // Thread not found among children: add new branch.
-        // But first check if any existing branch "covers" this sequence
-        // (i.e., explores an equivalent interleaving). For simplicity and
-        // correctness, we always add the new branch — the sleep set check
-        // at the call site (process_races) already filters redundant inserts.
+        // The paper (Def 6.2, JACM'17 p.22) would check if any existing branch
+        // "covers" this sequence via v ∼[E] w (Lemma 6.2). We skip that check
+        // and always add — sound but not optimal. The sleep set check at the
+        // call site (backtrack()) already filters some redundant inserts.
         let mut node = WakeupNode {
             thread_id,
             children: Vec::new(),

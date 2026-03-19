@@ -1,4 +1,10 @@
 //! Vector clock implementation for happens-before tracking.
+//!
+//! Vector clocks efficiently implement the happens-before partial order
+//! (→_E, Def 3.2 JACM'17 p.12-13): e →_E e' iff VV(e) ≤ VV(e').
+//! Two events are concurrent (and potentially racing) when their vector
+//! clocks are incomparable. See Section 10 (JACM'17 p.34-35) for the
+//! Concuerror implementation's use of vector clocks.
 
 /// A vector clock indexed by thread ID.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +56,7 @@ impl VersionVec {
     }
 
     /// Returns true if self <= other (component-wise).
+    /// This implements the happens-before check: e →_E e' iff VV(e) ≤ VV(e').
     pub fn partial_le(&self, other: &VersionVec) -> bool {
         let max_len = self.clocks.len().max(other.clocks.len());
         for i in 0..max_len {
@@ -63,6 +70,7 @@ impl VersionVec {
     }
 
     /// Returns true if neither self <= other nor other <= self.
+    /// Concurrent events are potential races (JACM'17 Def 3.3 p.13-14).
     pub fn concurrent_with(&self, other: &VersionVec) -> bool {
         !self.partial_le(other) && !other.partial_le(self)
     }
