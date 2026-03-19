@@ -1206,3 +1206,87 @@ class TestDeadlockAsInvariantViolation:
         assert result.reproduction_successes == 10, (
             f"Expected 10/10 reproductions, got {result.reproduction_successes}/{result.reproduction_attempts}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Stable object ID tests
+# ---------------------------------------------------------------------------
+
+
+class TestStableObjectIds:
+    """Object keys must be stable across executions within one explore_dpor call.
+
+    When explore_dpor creates fresh state via setup() each execution, id(obj)
+    changes because Python allocates new objects at different addresses.  The
+    StableObjectIds class assigns monotonically increasing IDs so that the same
+    logical object (accessed in the same deterministic order during replay)
+    gets the same key across executions.
+    """
+
+    def test_stable_ids_deterministic_across_resets(self) -> None:
+        """After reset_for_execution, re-accessing objects in the same order
+        produces the same stable IDs."""
+        from frontrun.dpor import StableObjectIds
+
+        ids = StableObjectIds()
+
+        # First execution: create objects and get stable IDs
+        obj_a = [1, 2, 3]
+        obj_b = {"key": "value"}
+        id_a1 = ids.get(obj_a)
+        id_b1 = ids.get(obj_b)
+
+        ids.reset_for_execution()
+
+        # Second execution: NEW objects (different id()), same access order
+        obj_a2 = [4, 5, 6]
+        obj_b2 = {"other": "dict"}
+        id_a2 = ids.get(obj_a2)
+        id_b2 = ids.get(obj_b2)
+
+        assert id_a1 == id_a2, f"First-accessed object should get same stable ID: {id_a1} != {id_a2}"
+        assert id_b1 == id_b2, f"Second-accessed object should get same stable ID: {id_b1} != {id_b2}"
+
+    def test_stable_ids_monotonically_increasing(self) -> None:
+        """Stable IDs are assigned in first-access order, starting from 0."""
+        from frontrun.dpor import StableObjectIds
+
+        ids = StableObjectIds()
+        obj1 = object()
+        obj2 = object()
+        obj3 = object()
+
+        assert ids.get(obj1) == 0
+        assert ids.get(obj2) == 1
+        assert ids.get(obj3) == 2
+        # Same object returns same ID
+        assert ids.get(obj1) == 0
+
+    def test_stable_ids_same_object_same_id(self) -> None:
+        """Within one execution, the same object always returns the same ID."""
+        from frontrun.dpor import StableObjectIds
+
+        ids = StableObjectIds()
+        obj = object()
+        first = ids.get(obj)
+        assert ids.get(obj) == first
+        assert ids.get(obj) == first
+
+    def test_make_object_key_uses_stable_ids(self) -> None:
+        """_make_object_key should produce identical keys for the same logical
+        object across executions when StableObjectIds is used."""
+        from frontrun.dpor import StableObjectIds, _make_object_key
+
+        ids = StableObjectIds()
+
+        # Execution 1
+        obj1 = {"shared": True}
+        key1 = _make_object_key(ids.get(obj1), "value")
+
+        ids.reset_for_execution()
+
+        # Execution 2 — different physical object, same access order
+        obj2 = {"shared": False}
+        key2 = _make_object_key(ids.get(obj2), "value")
+
+        assert key1 == key2, f"Object keys should be stable across executions: {key1} != {key2}"
