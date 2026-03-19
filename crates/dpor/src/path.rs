@@ -639,8 +639,31 @@ impl Path {
     /// Paper ref: Algorithm 2 lines 1-6 (JACM'17 p.24). At a maximal execution
     /// (all threads finished or blocked), we process each detected race and
     /// insert notdep sequences into wakeup trees at the appropriate positions.
+    ///
+    /// **Hybrid approach**: The engine also calls `backtrack()` inline during
+    /// execution for each race (Algorithm 1 style). The deferred notdep
+    /// processing here only adds ADDITIONAL coverage: notdep sequences whose
+    /// first thread differs from the racing thread AND the racing thread is
+    /// already covered by the inline backtrack. When notdep starts with a
+    /// different thread, it provides multi-step guidance through independent
+    /// intermediates.
+    ///
+    /// Races are deduplicated by (prev_path_id, thread_id).
     pub fn process_deferred_races(&mut self, races: &[PendingRace]) {
+        // Deduplicate: for each (prev_path_id, thread_id), keep the race with
+        // the latest current_path_id (longest notdep sequence).
+        let mut best: HashMap<(usize, usize), &PendingRace> = HashMap::new();
         for race in races {
+            let key = (race.prev_path_id, race.thread_id);
+            best.entry(key)
+                .and_modify(|existing| {
+                    if race.current_path_id > existing.current_path_id {
+                        *existing = race;
+                    }
+                })
+                .or_insert(race);
+        }
+        for race in best.values() {
             self.process_one_deferred_race(race);
         }
     }
@@ -653,6 +676,15 @@ impl Path {
     ///   let v = notdep(e, E).e'                — independent prefix + racing thread
     ///   if sleep(E') ∩ WI[E'](v) = ∅ then      — not sleep-set blocked
     ///     wut(E') := insert[E'](v, wut(E'))    — add to wakeup tree
+    ///
+    /// **Hybrid semantics**: Since the engine also performs inline `backtrack()`
+    /// for the racing thread (Algorithm 1 style), the deferred processing here
+    /// only adds value when the notdep sequence has independent intermediates
+    /// (i.e., starts with a different thread than the racing thread). When
+    /// `notdep = [thread_id]` (no intermediates), the inline `backtrack()` has
+    /// already handled it. When `notdep = [T_indep, ..., thread_id]`, we insert
+    /// the full sequence for multi-step guidance — but only if this doesn't
+    /// disrupt exploration order (the first thread must be feasible).
     fn process_one_deferred_race(&mut self, race: &PendingRace) {
         let path_id = race.prev_path_id;
         if path_id >= self.branches.len() {
@@ -660,35 +692,24 @@ impl Path {
         }
 
         let notdep = self.compute_notdep(path_id, race.current_path_id, race.thread_id);
-        if notdep.is_empty() {
+
+        // Skip if notdep has no independent intermediates — the inline
+        // backtrack() already inserted [thread_id] for this race.
+        if notdep.len() <= 1 {
             return;
         }
 
         let first_thread = notdep[0];
 
-        // Check runnability: the first thread in the notdep sequence must be
-        // runnable at the race position for the reversal to be feasible.
-        let branch = &self.branches[path_id];
-        match branch.threads.get(first_thread).copied() {
-            Some(ThreadStatus::Pending) | Some(ThreadStatus::Yield) => {}
-            _ => return,
-        }
-
-        // Sleep set check: if the first thread is sleeping (locally Visited or
-        // propagated), the reversed execution would be sleep-set blocked.
-        // Paper: Algorithm 2 line 5 (JACM'17 p.24):
-        //   sleep(E') ∩ WI[E'](v) = ∅
-        if branch.sleep.get(first_thread).copied().unwrap_or(false) {
-            return;
-        }
-        if branch.propagated_sleep_accesses.contains_key(&first_thread) {
+        // Only insert if the first independent thread is feasible at this position.
+        if !self.can_insert_thread(path_id, first_thread) {
             return;
         }
 
         // Preemption bound check for the first thread
         if let Some(bound) = self.preemption_bound {
+            let branch = &self.branches[path_id];
             if branch.active_thread != first_thread && branch.preemptions >= bound {
-                self.add_conservative_backtrack(path_id, race.thread_id, bound);
                 return;
             }
         }
@@ -699,6 +720,26 @@ impl Path {
         // Multi-step sequences guide exploration via subtree extraction
         // (Phase 4b: Algorithm 2 line 17, WuT' = subtree(wut(E), p)).
         self.branches[path_id].wakeup.insert(&notdep);
+    }
+
+    /// Check if `thread_id` can be inserted at `path_id` (runnable, not sleeping).
+    fn can_insert_thread(&self, path_id: usize, thread_id: usize) -> bool {
+        let branch = &self.branches[path_id];
+        // Runnability check
+        match branch.threads.get(thread_id).copied() {
+            Some(ThreadStatus::Pending) | Some(ThreadStatus::Yield) => {}
+            _ => return false,
+        }
+        // Sleep set check (local + propagated)
+        // Paper: Algorithm 2 line 5 (JACM'17 p.24):
+        //   sleep(E') ∩ WI[E'](v) = ∅
+        if branch.sleep.get(thread_id).copied().unwrap_or(false) {
+            return false;
+        }
+        if branch.propagated_sleep_accesses.contains_key(&thread_id) {
+            return false;
+        }
+        true
     }
 
     fn add_conservative_backtrack(&mut self, path_id: usize, thread_id: usize, bound: u32) {
