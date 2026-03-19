@@ -120,6 +120,11 @@ pub struct Branch {
     /// recursive Explore(E.p, WuT', Sleep') call. In our iterative
     /// implementation, we compute it during replay and store it here.
     pub propagated_sleep_accesses: HashMap<usize, HashMap<u64, AccessKind>>,
+    // Note: pending_race_objects was removed — source set filtering at the
+    // race-object level requires sleep sets for soundness.
+    // Paper: source set filtering (Def 4.3, JACM'17 p.15) allows adding only
+    // one thread per race, but this requires sleep sets to prevent re-exploration
+    // of equivalent traces. See ideas/optimal_dpor.md Phase 2.
 }
 
 impl Branch {
@@ -235,34 +240,12 @@ impl Path {
         let branch = Branch::new(threads, chosen, preemptions);
         self.branches.push(branch);
 
-        // Propagate sleep set to new branches beyond the replay prefix.
-        //
-        // This is sound because sleeping threads have NOT been scheduled
-        // since their home position — their program counter and local
-        // state are frozen. Therefore their next action (what objects they
-        // access) is the same as recorded at their home position, and
-        // the independence check against the previous active thread's
-        // accesses is valid.
-        //
-        // Paper ref: Algorithm 2 line 16 (JACM'17 p.24):
-        //   Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}
-        // This propagation is the same check applied both during replay
-        // and at new positions. The paper's recursive formulation
-        // (Algorithm 2 line 18: Explore(E.p, WuT', Sleep')) naturally
-        // passes the sleep set through ALL positions, not just replayed
-        // ones. Our earlier "approach (c)" was overly conservative.
-        //
-        // The key invariant: for a sleeping thread q propagated from
-        // position K to position K+N, at each hop the independence
-        // check verifies that q's next action commutes with the chosen
-        // thread's action. Since independence is checked at every step,
-        // the sleeping thread's trace class is guaranteed to be covered
-        // by the already-explored execution that put q to sleep.
-        // propagate_sleep(pos) propagates from pos-1 to pos.
-        // The new branch was just pushed, so its index is self.branches.len() - 1.
-        // At this point self.pos still points to the old position (before push).
-        let new_pos = self.branches.len() - 1;
-        self.propagate_sleep(new_pos);
+        // Do NOT propagate sleep to new branches beyond the replay prefix.
+        // The `explored_accesses` saved by step() carry stale Python object
+        // keys (based on `id(obj)`) from a previous execution. Since each
+        // execution creates fresh state objects, the keys don't match current
+        // ones, making the independence check unsound. See Phase 2 prereq in
+        // ideas/optimal_dpor.md for the full analysis and fix plan.
 
         self.pos += 1;
         Some(chosen)
@@ -345,18 +328,8 @@ impl Path {
     /// is deferred to maximal executions and inserts notdep sequences rather
     /// than single threads. See ideas/optimal_dpor.md Phase 3.
     ///
-    /// `_race_object`: the object involved in the race. Currently unused —
-    /// the paper's source set check `I[E'](v) ∩ backtrack(E') = ∅`
-    /// (Algorithm 1 line 8-9, JACM'17 p.16) is already implemented by the
-    /// `contains_thread` check below: for single-step races, I[E'](v) = {q}
-    /// where q is the racing thread, so the check is equivalent to
-    /// "is q already in the wakeup tree?"
-    ///
-    /// The real source set optimization comes from using *weak initials*
-    /// WI[E'](v) instead of initials I[E'](v), and from multi-step notdep
-    /// sequences (see Phase 3). The main interleaving reduction for
-    /// benchmarks like readers(N) comes from sleep set propagation
-    /// (Algorithm 2 line 16, JACM'17 p.24), implemented in propagate_sleep().
+    /// `_race_object`: the object involved in the race. Reserved for future
+    /// source set filtering (Def 4.3, JACM'17 p.15; requires sleep sets).
     pub fn backtrack(&mut self, path_id: usize, thread_id: usize, _race_object: Option<u64>) {
         if path_id >= self.branches.len() {
             return;
@@ -386,12 +359,7 @@ impl Path {
             return;
         }
 
-        // Source set check: is this thread already in the backtrack set?
-        //
-        // Paper: Algorithm 1 line 8 (JACM'17 p.16):
-        //   if I[E'](v) ∩ backtrack(E') = ∅
-        // For single-step races, I[E'](v) = {thread_id}, so this check
-        // reduces to "is thread_id already in backtrack(E')?"
+        // Already in wakeup tree?
         if branch.wakeup.contains_thread(thread_id) {
             return;
         }
@@ -622,11 +590,9 @@ mod tests {
     }
 
     #[test]
-    fn test_race_object_all_threads_added() {
-        // All racing threads are added regardless of object — the paper's
-        // source set check I[E'](v) ∩ backtrack(E') = ∅ only filters
-        // DUPLICATE threads (same thread already in wakeup tree), not
-        // different threads racing on the same object.
+    fn test_race_object_passed_through() {
+        // All racing threads should be added regardless of object
+        // (source set filtering is disabled for soundness without sleep sets)
         let mut path = Path::new(None);
         path.schedule(&[0, 1, 2, 3], 0, 4);
 
@@ -637,18 +603,8 @@ mod tests {
         assert_eq!(path.branches[0].wakeup.root_threads(), vec![1, 2, 3]);
     }
 
-    // --- Source set / sleep propagation tests ---
-
-    /// The paper's source set check `I[E'](v) ∩ backtrack(E') = ∅`
-    /// (Algorithm 1 line 8, JACM'17 p.16) is implemented by the
-    /// `contains_thread` check in backtrack(). For single-step races
-    /// where I[E'](v) = {q}, this is equivalent to checking whether
-    /// thread q is already in the wakeup tree.
-    ///
-    /// Different threads racing on the same object at the same position
-    /// have DIFFERENT initials, so they are NOT filtered by this check.
-    /// The actual reduction for benchmarks like readers(N) comes from
-    /// sleep set propagation (Algorithm 2 line 16, JACM'17 p.24).
+    /// Verify that `contains_thread` in `backtrack()` correctly deduplicates:
+    /// same thread is rejected, different threads (even on same object) are added.
     #[test]
     fn test_source_set_check_via_contains_thread() {
         let mut path = Path::new(None);
@@ -658,60 +614,13 @@ mod tests {
         path.backtrack(0, 1, Some(100));
         assert!(path.branches[0].wakeup.contains_thread(1));
 
-        // Second backtrack for same object 100 but DIFFERENT thread: T2 also added.
-        // Different threads = different initials (I[E'](v) = {T2}).
-        // The contains_thread check only filters T2 if T2 is already present.
+        // Different thread, same object: T2 also added (different initials)
         path.backtrack(0, 2, Some(100));
-        assert!(
-            path.branches[0].wakeup.contains_thread(2),
-            "Different threads racing on same object have different initials — both added"
-        );
+        assert!(path.branches[0].wakeup.contains_thread(2));
 
-        // Same thread, same object: duplicate rejected by contains_thread
+        // Same thread again: duplicate rejected by contains_thread
         path.backtrack(0, 1, Some(100));
-        // T1 already in wakeup tree → no duplicate
         assert_eq!(path.branches[0].wakeup.root_threads(), vec![1, 2]);
-    }
-
-    /// Sleep set propagation to new branches prevents redundant
-    /// interleavings by keeping sleeping threads asleep when their
-    /// next action is independent of the chosen thread's action.
-    ///
-    /// Paper ref: Algorithm 2 line 16 (JACM'17 p.24):
-    ///   Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}
-    /// In the paper's recursive formulation, Sleep' is passed to ALL
-    /// recursive Explore calls, including those at new positions
-    /// beyond the replay prefix.
-    #[test]
-    fn test_sleep_propagation_to_new_branch() {
-        use crate::access::AccessKind;
-        let mut path = Path::new(None);
-
-        // First execution: T0 at pos 0, T1 at pos 1
-        path.schedule(&[0, 1, 2], 0, 3);
-        path.record_access(0, 100, AccessKind::Read);
-        path.schedule(&[1, 2], 1, 3);
-
-        // Backtrack T2 at pos 0
-        path.backtrack(0, 2, None);
-
-        // step(): T0 Visited at pos 0, T2 in wakeup. Set T2 Active.
-        assert!(path.step());
-
-        // Second execution: T2 at pos 0 (replay)
-        let chosen = path.schedule(&[0, 1, 2], 0, 3);
-        assert_eq!(chosen, Some(2));
-        path.record_access(0, 100, AccessKind::Read); // T2 reads obj 100
-
-        // New branch at pos 1. T0 is sleeping at pos 0 (Visited, Read on 100).
-        // T2's active accesses = {100: Read}. T0's explored = {100: Read}.
-        // Read vs Read → INDEPENDENT → T0 stays asleep at pos 1.
-        path.schedule(&[0, 1], 0, 3);
-
-        assert!(
-            path.branches[1].propagated_sleep_accesses.contains_key(&0),
-            "T0 should be propagated sleeping to new branch (Read♦Read independent)"
-        );
     }
 
     // --- Sleep set propagation tests ---
@@ -763,44 +672,39 @@ mod tests {
         assert!(path.branches[1].sleep[1]);
     }
 
-    /// Test that propagation DOES happen to new branches.
+    /// Test that no propagation happens for new branches (approach (c)).
     ///
-    /// Sleep set propagation extends past the replay prefix into new
-    /// branches. A sleeping thread stays asleep at a new branch if its
-    /// recorded accesses are independent of the active thread's accesses
-    /// at the previous position.
-    ///
-    /// Paper ref: Algorithm 2 line 18 (JACM'17 p.24-25) passes Sleep'
-    /// to all recursive Explore calls, including those at new positions.
+    /// Replay-only propagation means we only propagate through existing
+    /// replay branches, not into newly created branches beyond the replay.
     #[test]
-    fn test_propagation_to_new_branches() {
+    fn test_no_propagation_to_new_branches() {
         use crate::access::AccessKind;
         let mut path = Path::new(None);
 
         // --- First execution: T0 at pos 0, T1 at pos 1 ---
         path.schedule(&[0, 1], 0, 2);
-        path.record_access(0, 100, AccessKind::Read); // T0 reads obj 100
+        path.record_access(0, 100, AccessKind::Write);
         path.schedule(&[1], 1, 2);
         path.record_access(1, 200, AccessKind::Read);
 
         // Backtrack T1 at pos 0
         path.backtrack(0, 1, None);
 
-        // step(): T0 → Visited at pos 0, explored_accesses[0] = {100: Read}
+        // step(): T0 → Visited at pos 0
         assert!(path.step());
 
         // --- Second execution: T1 at pos 0 (replay), then new pos 1 ---
         let chosen = path.schedule(&[0, 1], 0, 2);
         assert_eq!(chosen, Some(1));
-        path.record_access(0, 200, AccessKind::Read); // T1 reads obj 200
+        path.record_access(0, 200, AccessKind::Read);
 
-        // New branch at pos 1: T0 is sleeping at pos 0 (Visited, {100: Read}).
-        // T1's active at pos 0 = {200: Read}. Disjoint objects → independent → T0 propagates.
+        // New branch at pos 1: T0 chosen
         path.schedule(&[0], 0, 2);
 
+        // With replay-only propagation, pos 1 is NEW → no propagation
         assert!(
-            path.branches[1].propagated_sleep_accesses.contains_key(&0),
-            "T0 should be propagated sleeping to new branch (disjoint objects, independent)"
+            path.branches[1].propagated_sleep_accesses.is_empty(),
+            "No propagation to new branches in replay-only mode"
         );
     }
 
