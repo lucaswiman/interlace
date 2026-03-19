@@ -888,16 +888,13 @@ mod tests {
             }
         }
 
-        // With replay-only sleep set propagation (approach (c)):
-        // - Full propagation (replay + new branches) gives 4 traces (optimal)
-        // - Replay-only propagation gives 5 traces (one redundant trace
-        //   because reader-reader propagation to new branches is disabled)
-        // - Without propagation: 5+ traces
-        // Full optimality (4 traces) requires propagation to new branches,
-        // which needs trace caching (approach (b)) for soundness.
+        // With full sleep set propagation (replay + new branches), the optimal
+        // trace count is 4 for 1 writer + 2 readers (one per position of W
+        // among R1,R2: W-R-R, R-W-R, R-R-W, plus the initial ordering).
+        // With stable object IDs, propagation to new branches is sound.
         assert!(
-            exec_count <= 5,
-            "writer-readers (1W + 2R) should explore at most 5 traces, got {exec_count}"
+            exec_count <= 4,
+            "writer-readers (1W + 2R) should explore at most 4 traces with full propagation, got {exec_count}"
         );
     }
 
@@ -950,14 +947,13 @@ mod tests {
             }
         }
 
-        // With replay-only propagation (approach (c)), the count is ~65.
-        // Full propagation (to new branches) reduces to 16 but risks
-        // unsound blocking (see tricky_races test failures).
-        // Optimal = 5 (requires source set filtering, Phase 2).
-        // 5! = 120 would be the worst case without any DPOR.
+        // With full sleep set propagation (replay + new branches), the count
+        // is 16 = sum of C(4,k) for k=0..4. This is the source-set optimal
+        // count for readers(4). Full optimality (5 traces) requires source
+        // set filtering (Phase 2, JACM'17 Def 4.3 p.15).
         assert!(
-            exec_count < 120,
-            "writer-readers (1W + 4R) should be less than 5!=120, got {exec_count}"
+            exec_count <= 16,
+            "writer-readers (1W + 4R) should explore at most 16 traces with full propagation, got {exec_count}"
         );
     }
 
