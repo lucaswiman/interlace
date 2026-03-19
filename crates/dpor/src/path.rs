@@ -610,6 +610,26 @@ mod tests {
         assert_eq!(path.branches[0].wakeup.root_threads(), vec![1, 2, 3]);
     }
 
+    /// Verify that `contains_thread` in `backtrack()` correctly deduplicates:
+    /// same thread is rejected, different threads (even on same object) are added.
+    #[test]
+    fn test_source_set_check_via_contains_thread() {
+        let mut path = Path::new(None);
+        path.schedule(&[0, 1, 2, 3], 0, 4);
+
+        // First backtrack for object 100: T1 added
+        path.backtrack(0, 1, Some(100));
+        assert!(path.branches[0].wakeup.contains_thread(1));
+
+        // Different thread, same object: T2 also added (different initials)
+        path.backtrack(0, 2, Some(100));
+        assert!(path.branches[0].wakeup.contains_thread(2));
+
+        // Same thread again: duplicate rejected by contains_thread
+        path.backtrack(0, 1, Some(100));
+        assert_eq!(path.branches[0].wakeup.root_threads(), vec![1, 2]);
+    }
+
     // --- Sleep set propagation tests ---
 
     /// Test that sleep set propagation works during REPLAY of existing branches.
