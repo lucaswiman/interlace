@@ -89,7 +89,9 @@ threads whose next action is independent of p's action.
     `explored_accesses` never match fresh keys in `active_accesses`, making
     ALL sleeping threads appear independent of everything, which incorrectly
     blocks backtracks. This caused 6 Python-level race detection tests to
-    fail (TestDictMergeOperatorRace, TestReduceAccumulateRace, etc.) where
+    fail (TestDictMergeOperatorRace, TestReduceAccumulateRace,
+    TestBytearraySliceRace, TestDictPopUpdateRace, TestZipRace,
+    TestStrJoinRace) where
     DPOR reported `property_holds=True` because it skipped interleavings
     needed to find the bug. **Fix**: Implement stable object keys (see
     "Prerequisite: Stable object keys" section below Phase 1), then
@@ -201,7 +203,7 @@ check compares these against fresh keys from the current execution, the hash
 values never match, so every sleeping thread appears independent of
 everything. Backtracks get incorrectly blocked, causing real races to be
 missed (6 test failures: TestDictMergeOperatorRace, TestReduceAccumulateRace,
-etc.).
+TestBytearraySliceRace, TestDictPopUpdateRace, TestZipRace, TestStrJoinRace).
 
 **The algorithm is correct** — the propagation logic and independence check
 are sound. Only the object identity scheme is broken.
