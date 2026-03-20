@@ -1919,10 +1919,17 @@ class DporBytecodeRunner:
                 # Non-shared opcodes only manipulate thread-local state.
                 # Process the shadow stack directly without a scheduler yield.
                 # CALL opcodes need shadow stack inspection to decide.
+                # When detect_io is enabled, skip coarsening for CALL opcodes
+                # because I/O events arrive from C-level LD_PRELOAD interception
+                # and need scheduling points around open/read/write calls.
                 if not _is_shared_opcode(frame.f_code, frame.f_lasti):
                     instrs = _get_instructions(frame.f_code)
                     instr = instrs.get(frame.f_lasti)
                     if instr is not None and instr.opname in _CALL_OPCODES:
+                        if _detect_io:
+                            scheduler.report_and_wait(frame, thread_id)
+                            frame.f_locals  # noqa: B018  — refresh f_locals before LocalsToFast
+                            return trace
                         shadow = scheduler.get_shadow_stack(id(frame))
                         argc = instr.arg or 0
                         if _call_might_report_access(shadow, argc):
@@ -2054,10 +2061,16 @@ class DporBytecodeRunner:
             # False for them so we check the shadow stack to see if the
             # callable is a C-method that would report shared access.
             if not _is_shared_opcode(code, instruction_offset):
-                # Check if this is a CALL opcode that needs shadow stack inspection
+                # Check if this is a CALL opcode that needs shadow stack inspection.
+                # When detect_io is enabled, all CALL opcodes must yield because
+                # I/O events arrive from C-level LD_PRELOAD interception.
                 instrs = _get_instructions(code)
                 instr = instrs.get(instruction_offset)
                 if instr is not None and instr.opname in _CALL_OPCODES:
+                    if _detect_io:
+                        frame = sys._getframe(1)
+                        scheduler.report_and_wait(frame, thread_id)
+                        return None
                     frame = sys._getframe(1)
                     shadow = scheduler.get_shadow_stack(id(frame))
                     argc = instr.arg or 0
