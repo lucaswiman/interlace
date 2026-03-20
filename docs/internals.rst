@@ -328,8 +328,13 @@ High overhead, but complete control over interleaving.
 
 **DPOR** uses the same opcode-level ``sys.settrace`` and cooperative
 primitives as bytecode exploration.  The difference is the scheduling
-policy: DPOR uses a Rust engine that tracks shared-memory accesses via
-vector clocks and only explores alternative orderings at conflict points.
+policy: DPOR uses a Rust engine (``crates/dpor/``) that tracks
+shared-memory accesses via vector clocks and only explores alternative
+orderings at conflict points.  The engine implements a hybrid of classic
+and Optimal DPOR (Abdulla et al., JACM 2017): wakeup trees guide
+exploration order, sleep set propagation with trace caching eliminates
+equivalent interleavings of independent operations, and deferred race
+detection computes ``notdep`` wakeup sequences for better coverage.
 Optionally adds ``sys.setprofile`` for C-call detection and
 monkey-patched I/O.
 

@@ -192,7 +192,11 @@ threads whose next action is independent of p's action.
 - [x] Add test: lastzero-style program (POPL'14 Fig.4 p.11) →
   `test_lastzero_three` models lastzero(3) with 4 threads. With replay-only
   propagation, explores ≤60 traces.
-- [ ] Re-run dining philosophers benchmark: expect reduction from 14,221
+- [x] Re-run dining philosophers benchmark: 4,076 executions with the lock-only
+  model (benchmark was changed in #120 to remove `s.x += 1`; the 14,221
+  baseline was from the old lock+read+write model). The Optimal DPOR changes
+  (sleep sets, trace caching, notdep) did not reduce the lock-only model
+  further — lock conflicts have no read-read independence to exploit.
 
 ## Prerequisite: Stable object keys
 
@@ -326,10 +330,14 @@ woken up.
   - Before: 65 interleavings (replay-only propagation)
   - After: exactly 16 (trace caching collapses equivalent reader orderings)
   - Matches JACM'17 Table 1 (p.36): source sets = 2^4 = 16
-- [ ] Lastzero(3) (4 threads, POPL'14 Fig.4 p.11):
-  - Current: ≤60 traces (data-dependent, trace cache conservative)
-  - Target: ~30 traces (may require per-step trace rather than union)
-- [ ] Dining philosophers benchmark: expect reduction from 14,221
+- [x] Lastzero(3) (4 threads, POPL'14 Fig.4 p.11):
+  - Result: 43 traces (with trace caching + full propagation)
+  - Data-dependent control flow limits further reduction; union-based trace
+    cache is conservative for this pattern. Per-step traces would help but
+    add significant complexity.
+- [x] Dining philosophers benchmark: 4,076 executions with lock-only model
+  (same as pre-Optimal-DPOR baseline; lock conflicts have no read-read
+  independence for sleep sets to exploit)
 - [x] Independent pairs (T0/T1 write X, T2/T3 write Y): remains at 4
 - [x] All existing tests pass (48 Rust tests)
 

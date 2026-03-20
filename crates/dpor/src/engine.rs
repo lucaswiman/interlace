@@ -1152,16 +1152,12 @@ mod tests {
             }
         }
 
-        // With replay-only sleep set propagation (approach (c)), the count
-        // is higher than with full propagation to new branches.
-        // Full propagation gives ~30, but is unsound without trace caching.
-        // Replay-only gives ~48 for this benchmark.
-        // Optimal (with source set filtering, Phase 2) would be lower.
-        // 4! = 24 interleavings for 4 threads, but data-dependent control
-        // flow in thread 0 creates additional distinct traces.
+        // With trace caching + full sleep propagation, lastzero(3) explores ~43 traces.
+        // Data-dependent control flow in thread 0 prevents full optimal reduction.
+        // The union-based trace cache is conservative for data-dependent programs.
         assert!(
             exec_count <= 60,
-            "lastzero(3) should explore at most 60 traces with replay-only propagation, got {exec_count}"
+            "lastzero(3) should explore at most 60 traces, got {exec_count}"
         );
     }
 
