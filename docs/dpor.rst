@@ -639,11 +639,7 @@ interleavings under independent-operation reordering.
 Sleep set propagation further reduces exploration by recognizing fine-grained
 independence. For example, a writer with *N* readers on the same object
 requires :math:`2^N` interleavings (each reader can go before or after the
-writer), not :math:`(N+1)!` --- the reader orderings are equivalent. On a
-4-thread dining philosophers benchmark, the combination of wakeup trees,
-deferred race detection with ``notdep`` sequences, sleep set propagation, and
-trace caching reduces exploration from 14,221 to 4,076 executions (71%
-reduction).
+writer), not :math:`(N+1)!` --- the reader orderings are equivalent.
 
 
 Data structures
