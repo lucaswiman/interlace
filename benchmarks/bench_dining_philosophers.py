@@ -9,20 +9,18 @@ from frontrun.dpor import explore_dpor
 
 
 def bench_dining_philosophers_four() -> dict[str, object]:
-    """Run 4-fold dining philosophers and return timing + execution count."""
+    """Run 4-fold dining philosophers (pure lock deadlock) and return timing + execution count."""
     num_philosophers = 4
 
     class State:
         def __init__(self) -> None:
             self.forks = [threading.Lock() for _ in range(num_philosophers)]
-            self.x = 0
 
     def make_philosopher(i: int):  # noqa: ANN202
         def philosopher(s: State) -> None:
             left = i
             right = (i + 1) % num_philosophers
             with s.forks[left]:
-                s.x += 1
                 with s.forks[right]:
                     pass
 

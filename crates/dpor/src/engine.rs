@@ -1299,45 +1299,26 @@ mod tests {
         );
     }
 
-    /// 4 dining philosophers model: each philosopher locks two forks in order.
-    /// Philosopher i: lock(fork[i]), write(shared), lock(fork[(i+1)%4]).
-    /// Tests that deferred race detection doesn't cause execution explosion.
-    #[test]
-    fn test_four_philosophers_model() {
-        let mut engine = DporEngine::new(4, Some(2), 100_000, Some(50000));
-
-        // Model: philosopher i acquires fork i, writes shared, acquires fork (i+1)%4
-        let num_philosophers = 4;
-
-        #[derive(Clone)]
-        enum Op {
-            LockAcquire(u64),
-            Write(u64),
-            LockRelease(u64),
-        }
-
-        let mut thread_ops: Vec<Vec<Op>> = Vec::new();
-        for i in 0..num_philosophers {
-            let left = i as u64;
-            let right = ((i + 1) % num_philosophers) as u64;
-            thread_ops.push(vec![
-                Op::LockAcquire(left),
-                Op::Write(100), // shared write
-                Op::LockAcquire(right),
-                Op::LockRelease(right),
-                Op::LockRelease(left),
-            ]);
-        }
-
+    /// Run a dining philosopher model with the given operations per thread.
+    /// Each op is ("lock_acquire"|"lock_release"|"write"|"read", object_id).
+    /// Returns (executions_explored, deadlock_found).
+    fn run_philosopher_model(
+        engine: &mut DporEngine,
+        thread_ops: &[Vec<(&str, u64)>],
+        num_threads: usize,
+        stop_on_first: bool,
+    ) -> (u64, bool) {
         let mut exec_count: u64 = 0;
+        let mut deadlock_found = false;
 
         loop {
             let mut execution = engine.begin_execution();
-            let mut pcs = vec![0usize; num_philosophers];
-            let mut locks_held: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+            let mut pcs = vec![0usize; num_threads];
+            let mut locks_held: std::collections::HashMap<u64, usize> =
+                std::collections::HashMap::new();
 
             loop {
-                for i in 0..num_philosophers {
+                for i in 0..num_threads {
                     if pcs[i] >= thread_ops[i].len() {
                         execution.finish_thread(i);
                     }
@@ -1354,43 +1335,71 @@ mod tests {
                     break;
                 }
 
-                match &thread_ops[chosen][pc] {
-                    Op::LockAcquire(lock_id) => {
-                        if let Some(&holder) = locks_held.get(lock_id) {
+                let (op_type, obj_id) = thread_ops[chosen][pc];
+                match op_type {
+                    "lock_acquire" => {
+                        if let Some(&holder) = locks_held.get(&obj_id) {
                             if holder != chosen {
                                 execution.block_thread(chosen);
                                 continue;
                             }
                         }
-                        locks_held.insert(*lock_id, chosen);
+                        locks_held.insert(obj_id, chosen);
                         engine.process_sync(
-                            &mut execution, chosen,
-                            SyncEvent::LockAcquire { lock_id: *lock_id },
+                            &mut execution,
+                            chosen,
+                            SyncEvent::LockAcquire { lock_id: obj_id },
                         );
                     }
-                    Op::Write(obj_id) => {
-                        engine.process_access(&mut execution, chosen, *obj_id, AccessKind::Write);
-                    }
-                    Op::LockRelease(lock_id) => {
-                        locks_held.remove(lock_id);
+                    "lock_release" => {
+                        locks_held.remove(&obj_id);
                         engine.process_sync(
-                            &mut execution, chosen,
-                            SyncEvent::LockRelease { lock_id: *lock_id },
+                            &mut execution,
+                            chosen,
+                            SyncEvent::LockRelease { lock_id: obj_id },
                         );
-                        for tid in 0..num_philosophers {
+                        for tid in 0..num_threads {
                             if tid != chosen && execution.threads[tid].blocked {
                                 if pcs[tid] < thread_ops[tid].len() {
-                                    if let Op::LockAcquire(lid) = &thread_ops[tid][pcs[tid]] {
-                                        if lid == lock_id {
-                                            execution.unblock_thread(tid);
-                                        }
+                                    let (t_op, t_id) = thread_ops[tid][pcs[tid]];
+                                    if t_op == "lock_acquire" && t_id == obj_id {
+                                        execution.unblock_thread(tid);
                                     }
                                 }
                             }
                         }
                     }
+                    "write" => {
+                        engine.process_access(
+                            &mut execution,
+                            chosen,
+                            obj_id,
+                            AccessKind::Write,
+                        );
+                    }
+                    "read" => {
+                        engine.process_access(
+                            &mut execution,
+                            chosen,
+                            obj_id,
+                            AccessKind::Read,
+                        );
+                    }
+                    _ => panic!("Unknown op: {op_type}"),
                 }
                 pcs[chosen] += 1;
+            }
+
+            let all_done = pcs
+                .iter()
+                .enumerate()
+                .all(|(i, pc)| *pc >= thread_ops[i].len());
+            if !all_done {
+                deadlock_found = true;
+                if stop_on_first {
+                    exec_count += 1;
+                    break;
+                }
             }
 
             exec_count += 1;
@@ -1399,10 +1408,68 @@ mod tests {
             }
         }
 
-        eprintln!("4-philosopher model: {exec_count} executions");
+        (exec_count, deadlock_found)
+    }
+
+    /// Dining philosophers model tests.
+    #[test]
+    fn test_four_philosophers_lock_only() {
+        // Pure lock-ordering deadlock: acquire left, acquire right, release right, release left
+        let mut engine = DporEngine::new(4, Some(2), 100_000, Some(50000));
+        let num_philosophers = 4;
+
+        let thread_ops: Vec<Vec<(&str, u64)>> = (0..num_philosophers)
+            .map(|i| {
+                let left = i as u64;
+                let right = ((i + 1) % num_philosophers) as u64;
+                vec![
+                    ("lock_acquire", left),
+                    ("lock_acquire", right),
+                    ("lock_release", right),
+                    ("lock_release", left),
+                ]
+            })
+            .collect();
+
+        let (exec_count, deadlock_found) =
+            run_philosopher_model(&mut engine, &thread_ops, num_philosophers, true);
+
         assert!(
-            exec_count <= 50000,
-            "4-philosopher model should not explode: got {exec_count} executions"
+            deadlock_found,
+            "4-philosopher lock-only model should find a deadlock within {exec_count} executions"
+        );
+        assert!(
+            exec_count <= 5000,
+            "4-philosopher lock-only model should not explode: got {exec_count} executions"
+        );
+    }
+
+    #[test]
+    fn test_three_philosophers_with_write() {
+        // Lock + shared write: acquire left, write shared, acquire right, release right, release left
+        let mut engine = DporEngine::new(3, Some(2), 100_000, Some(50000));
+        let num_philosophers = 3;
+
+        let thread_ops: Vec<Vec<(&str, u64)>> = (0..num_philosophers)
+            .map(|i| {
+                let left = i as u64;
+                let right = ((i + 1) % num_philosophers) as u64;
+                vec![
+                    ("lock_acquire", left),
+                    ("write", 100),
+                    ("lock_acquire", right),
+                    ("lock_release", right),
+                    ("lock_release", left),
+                ]
+            })
+            .collect();
+
+        let (exec_count, deadlock_found) =
+            run_philosopher_model(&mut engine, &thread_ops, num_philosophers, true);
+
+        assert!(
+            deadlock_found,
+            "3-philosopher+write model should find a deadlock within {exec_count} executions"
         );
     }
 }
