@@ -220,6 +220,82 @@ class TestPyDporEngine:
 # ---------------------------------------------------------------------------
 
 
+class TestWakeupTreeEngine:
+    """Tests verifying the wakeup tree-based backtracking in the DPOR engine."""
+
+    def test_four_threads_write_conflict_exhaustive(self) -> None:
+        """Four threads all writing to the same object should explore 4! = 24 orderings."""
+        engine = PyDporEngine(4)
+        exec_count = 0
+
+        while True:
+            execution = engine.begin_execution()
+
+            while True:
+                runnable = execution.runnable_threads()
+                if not runnable:
+                    break
+                chosen = engine.schedule(execution)
+                if chosen is None:
+                    break
+                engine.report_access(execution, chosen, 1, "write")
+                execution.finish_thread(chosen)
+
+            exec_count += 1
+            if not engine.next_execution():
+                break
+
+        assert exec_count == 24, f"Expected 24 orderings (4!), got {exec_count}"
+
+    def test_independent_pairs_optimal(self) -> None:
+        """Two independent pairs (T0/T1 on X, T2/T3 on Y) should explore 2*2=4."""
+        engine = PyDporEngine(4)
+        thread_objects = [1, 1, 2, 2]
+        exec_count = 0
+
+        while True:
+            execution = engine.begin_execution()
+
+            while True:
+                runnable = execution.runnable_threads()
+                if not runnable:
+                    break
+                chosen = engine.schedule(execution)
+                if chosen is None:
+                    break
+                engine.report_access(execution, chosen, thread_objects[chosen], "write")
+                execution.finish_thread(chosen)
+
+            exec_count += 1
+            if not engine.next_execution():
+                break
+
+        assert exec_count == 4, f"Expected 4 orderings (2!*2!), got {exec_count}"
+
+    def test_read_read_no_backtrack(self) -> None:
+        """Two threads reading the same object should produce exactly 1 execution."""
+        engine = PyDporEngine(2)
+        exec_count = 0
+
+        while True:
+            execution = engine.begin_execution()
+            for _ in range(2):
+                chosen = engine.schedule(execution)
+                if chosen is None:
+                    break
+                engine.report_access(execution, chosen, 1, "read")
+                execution.finish_thread(chosen)
+
+            exec_count += 1
+            if not engine.next_execution():
+                break
+
+        assert exec_count == 1, f"Read-read should be independent, got {exec_count}"
+
+
+# ---------------------------------------------------------------------------
+
+
 class TestExploreDpor:
     def test_lost_update_bug(self) -> None:
         """Two threads doing read-modify-write on a shared counter.
@@ -1085,21 +1161,19 @@ class TestDeadlockAsInvariantViolation:
         )
 
     def test_dining_philosophers_four(self) -> None:
-        """Four dining philosophers with lock-order inversion on a circular set."""
+        """Four dining philosophers — pure lock-ordering deadlock on a circular set."""
 
         num_philosophers = 4
 
         class State:
             def __init__(self) -> None:
                 self.forks = [threading.Lock() for _ in range(num_philosophers)]
-                self.x = 0
 
         def make_philosopher(i: int):  # noqa: ANN202
             def philosopher(s: State) -> None:
                 left = i
                 right = (i + 1) % num_philosophers
                 with s.forks[left]:
-                    s.x += 1  # write conflict
                     with s.forks[right]:
                         pass
 
@@ -1109,8 +1183,7 @@ class TestDeadlockAsInvariantViolation:
             setup=State,
             threads=[make_philosopher(i) for i in range(num_philosophers)],
             invariant=lambda s: True,
-            # Note: high executions / preemption bounds required since finding the 4-cycle takes many more interleavings that most simple races.
-            max_executions=2000,
+            max_executions=50000,
             preemption_bound=2,
             detect_io=False,
             deadlock_timeout=2.0,
@@ -1127,3 +1200,129 @@ class TestDeadlockAsInvariantViolation:
         assert result.reproduction_successes == 10, (
             f"Expected 10/10 reproductions, got {result.reproduction_successes}/{result.reproduction_attempts}"
         )
+
+    def test_dining_philosophers_three_with_shared_write(self) -> None:
+        """Three dining philosophers with a shared write inside the critical section.
+
+        The ``s.x += 1`` generates both LOAD_ATTR (read) and STORE_ATTR (write)
+        at the opcode level, creating read-write conflicts between all threads.
+        This significantly expands the DPOR search tree compared to pure lock
+        operations, so we use N=3 to keep the exploration tractable.
+        """
+
+        num_philosophers = 3
+
+        class State:
+            def __init__(self) -> None:
+                self.forks = [threading.Lock() for _ in range(num_philosophers)]
+                self.x = 0
+
+        def make_philosopher(i: int):  # noqa: ANN202
+            def philosopher(s: State) -> None:
+                left = i
+                right = (i + 1) % num_philosophers
+                with s.forks[left]:
+                    s.x += 1
+                    with s.forks[right]:
+                        pass
+
+            return philosopher
+
+        result = explore_dpor(
+            setup=State,
+            threads=[make_philosopher(i) for i in range(num_philosophers)],
+            invariant=lambda s: True,
+            max_executions=50000,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=True,
+        )
+
+        assert not result.property_holds, "Dining philosophers deadlock should be found"
+        assert result.explanation is not None
+        assert "deadlock" in result.explanation.lower()
+
+
+# ---------------------------------------------------------------------------
+# Stable object ID tests
+# ---------------------------------------------------------------------------
+
+
+class TestStableObjectIds:
+    """Object keys must be stable across executions within one explore_dpor call.
+
+    When explore_dpor creates fresh state via setup() each execution, id(obj)
+    changes because Python allocates new objects at different addresses.  The
+    StableObjectIds class assigns monotonically increasing IDs so that the same
+    logical object (accessed in the same deterministic order during replay)
+    gets the same key across executions.
+    """
+
+    def test_stable_ids_deterministic_across_resets(self) -> None:
+        """After reset_for_execution, re-accessing objects in the same order
+        produces the same stable IDs."""
+        from frontrun.dpor import StableObjectIds
+
+        ids = StableObjectIds()
+
+        # First execution: create objects and get stable IDs
+        obj_a = [1, 2, 3]
+        obj_b = {"key": "value"}
+        id_a1 = ids.get(obj_a)
+        id_b1 = ids.get(obj_b)
+
+        ids.reset_for_execution()
+
+        # Second execution: NEW objects (different id()), same access order
+        obj_a2 = [4, 5, 6]
+        obj_b2 = {"other": "dict"}
+        id_a2 = ids.get(obj_a2)
+        id_b2 = ids.get(obj_b2)
+
+        assert id_a1 == id_a2, f"First-accessed object should get same stable ID: {id_a1} != {id_a2}"
+        assert id_b1 == id_b2, f"Second-accessed object should get same stable ID: {id_b1} != {id_b2}"
+
+    def test_stable_ids_monotonically_increasing(self) -> None:
+        """Stable IDs are assigned in first-access order, starting from 0."""
+        from frontrun.dpor import StableObjectIds
+
+        ids = StableObjectIds()
+        obj1 = object()
+        obj2 = object()
+        obj3 = object()
+
+        assert ids.get(obj1) == 0
+        assert ids.get(obj2) == 1
+        assert ids.get(obj3) == 2
+        # Same object returns same ID
+        assert ids.get(obj1) == 0
+
+    def test_stable_ids_same_object_same_id(self) -> None:
+        """Within one execution, the same object always returns the same ID."""
+        from frontrun.dpor import StableObjectIds
+
+        ids = StableObjectIds()
+        obj = object()
+        first = ids.get(obj)
+        assert ids.get(obj) == first
+        assert ids.get(obj) == first
+
+    def test_make_object_key_uses_stable_ids(self) -> None:
+        """_make_object_key should produce identical keys for the same logical
+        object across executions when StableObjectIds is used."""
+        from frontrun.dpor import StableObjectIds, _make_object_key
+
+        ids = StableObjectIds()
+
+        # Execution 1
+        obj1 = {"shared": True}
+        key1 = _make_object_key(ids.get(obj1), "value")
+
+        ids.reset_for_execution()
+
+        # Execution 2 — different physical object, same access order
+        obj2 = {"shared": False}
+        key2 = _make_object_key(ids.get(obj2), "value")
+
+        assert key1 == key2, f"Object keys should be stable across executions: {key1} != {key2}"

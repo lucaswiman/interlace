@@ -59,7 +59,7 @@ from frontrun._tracing import set_active_trace_filter as _set_active_trace_filte
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.async_scheduler import InterleavedLoop
 from frontrun.common import InterleavingResult
-from frontrun.dpor import _USE_SYS_MONITORING, ShadowStack, _process_opcode
+from frontrun.dpor import _USE_SYS_MONITORING, ShadowStack, StableObjectIds, _process_opcode
 
 try:
     from frontrun._dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]
@@ -463,6 +463,7 @@ class AsyncDporScheduler(InterleavedLoop):
         deadlock_timeout: float = 5.0,
         detect_sql: bool = False,
         detect_redis: bool = False,
+        stable_ids: StableObjectIds | None = None,
     ) -> None:
         super().__init__(deadlock_timeout=deadlock_timeout)
         self.engine = engine
@@ -476,6 +477,7 @@ class AsyncDporScheduler(InterleavedLoop):
         self._iter_to_container: dict[int, Any] = {}
         self._shadow_stacks: dict[int, ShadowStack] = {}
         self._monitoring_active = False
+        self._stable_ids = stable_ids if stable_ids is not None else StableObjectIds()
         # Pending I/O accesses per task (from SQL interception)
         self._pending_io: dict[int, list[tuple[int, str]]] = {i: [] for i in range(num_tasks)}
 
@@ -1155,6 +1157,7 @@ async def explore_async_dpor(
     )
 
     result = InterleavingResult(property_holds=True)
+    stable_ids = StableObjectIds()
     total_deadline = time.monotonic() + total_timeout if total_timeout is not None else None
 
     if detect_sql and _sql_async_available:
@@ -1177,6 +1180,7 @@ async def explore_async_dpor(
             if total_deadline is not None and time.monotonic() > total_deadline:
                 break
             clear_insert_tracker()
+            stable_ids.reset_for_execution()
             execution = engine.begin_execution()
 
             # Clear wait-for graph and held-locks tracking between executions
@@ -1192,6 +1196,7 @@ async def explore_async_dpor(
                 deadlock_timeout=deadlock_timeout,
                 detect_sql=detect_sql,
                 detect_redis=detect_redis,
+                stable_ids=stable_ids,
             )
 
             state = setup()

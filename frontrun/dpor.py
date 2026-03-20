@@ -296,6 +296,7 @@ class DporScheduler:
         trace_recorder: TraceRecorder | None = None,
         preload_bridge: _PreloadBridge | None = None,
         detect_io: bool = False,
+        stable_ids: StableObjectIds | None = None,
     ) -> None:
         self.engine = engine
         self.execution = execution
@@ -304,6 +305,7 @@ class DporScheduler:
         self.trace_recorder = trace_recorder
         self._preload_bridge = preload_bridge
         self._detect_io = detect_io
+        self._stable_ids = stable_ids if stable_ids is not None else StableObjectIds()
         # On free-threaded Python, PyO3 &mut self borrows are non-blocking
         # (try-or-panic).  A single engine_lock serialises ALL calls to the
         # engine and execution objects across worker threads, the sync
@@ -899,16 +901,70 @@ def _make_object_key(obj_id: int, name: Any) -> int:
     return hash((obj_id, name)) & 0xFFFFFFFFFFFFFFFF
 
 
+class StableObjectIds:
+    """Assign monotonically increasing stable IDs to Python objects.
+
+    Replaces ``id(obj)`` in object key generation.  Since ``explore_dpor``
+    creates fresh ``state = setup()`` each execution, ``id(obj)`` changes
+    between executions for the same logical object.  This class assigns a
+    counter-based ID on first access, producing the same ID across executions
+    as long as objects are accessed in the same deterministic order during
+    replay.
+
+    The mapping is maintained per ``explore_dpor`` call and reset at the start
+    of each execution via ``reset_for_execution()``.
+    """
+
+    __slots__ = ("_map", "_next_id")
+
+    def __init__(self) -> None:
+        self._map: dict[int, int] = {}
+        self._next_id = 0
+
+    def get(self, obj: object) -> int:
+        """Return the stable ID for *obj*, assigning one on first access."""
+        py_id = id(obj)
+        stable_id = self._map.get(py_id)
+        if stable_id is None:
+            stable_id = self._next_id
+            self._map[py_id] = stable_id
+            self._next_id += 1
+        return stable_id
+
+    def reset_for_execution(self) -> None:
+        """Clear the mapping at the start of each execution.
+
+        Since ``explore_dpor`` creates fresh state objects each execution,
+        old ``id(obj)`` values are stale.  The mapping is rebuilt during
+        replay, where the same objects are accessed in the same
+        deterministic order, producing the same stable IDs.
+        """
+        self._map.clear()
+        self._next_id = 0
+
+
 def _report_read(
-    engine: PyDporEngine, execution: PyExecution, thread_id: int, obj: Any, name: Any, lock: threading.Lock
+    engine: PyDporEngine,
+    execution: PyExecution,
+    thread_id: int,
+    obj: Any,
+    name: Any,
+    lock: threading.Lock,
+    stable_ids: StableObjectIds,
 ) -> None:
     if obj is not None:
         with lock:
-            engine.report_access(execution, thread_id, _make_object_key(id(obj), name), "read")
+            engine.report_access(execution, thread_id, _make_object_key(stable_ids.get(obj), name), "read")
 
 
 def _report_first_read(
-    engine: PyDporEngine, execution: PyExecution, thread_id: int, obj: Any, name: Any, lock: threading.Lock
+    engine: PyDporEngine,
+    execution: PyExecution,
+    thread_id: int,
+    obj: Any,
+    name: Any,
+    lock: threading.Lock,
+    stable_ids: StableObjectIds,
 ) -> None:
     """Like ``_report_read`` but preserves the **earliest** read position.
 
@@ -919,19 +975,31 @@ def _report_first_read(
     """
     if obj is not None:
         with lock:
-            engine.report_first_access(execution, thread_id, _make_object_key(id(obj), name), "read")
+            engine.report_first_access(execution, thread_id, _make_object_key(stable_ids.get(obj), name), "read")
 
 
 def _report_write(
-    engine: PyDporEngine, execution: PyExecution, thread_id: int, obj: Any, name: Any, lock: threading.Lock
+    engine: PyDporEngine,
+    execution: PyExecution,
+    thread_id: int,
+    obj: Any,
+    name: Any,
+    lock: threading.Lock,
+    stable_ids: StableObjectIds,
 ) -> None:
     if obj is not None:
         with lock:
-            engine.report_access(execution, thread_id, _make_object_key(id(obj), name), "write")
+            engine.report_access(execution, thread_id, _make_object_key(stable_ids.get(obj), name), "write")
 
 
 def _report_weak_read(
-    engine: PyDporEngine, execution: PyExecution, thread_id: int, obj: Any, name: Any, lock: threading.Lock
+    engine: PyDporEngine,
+    execution: PyExecution,
+    thread_id: int,
+    obj: Any,
+    name: Any,
+    lock: threading.Lock,
+    stable_ids: StableObjectIds,
 ) -> None:
     """Like ``_report_read`` but uses ``weak_read`` access kind.
 
@@ -943,11 +1011,17 @@ def _report_weak_read(
     """
     if obj is not None:
         with lock:
-            engine.report_access(execution, thread_id, _make_object_key(id(obj), name), "weak_read")
+            engine.report_access(execution, thread_id, _make_object_key(stable_ids.get(obj), name), "weak_read")
 
 
 def _report_weak_write(
-    engine: PyDporEngine, execution: PyExecution, thread_id: int, obj: Any, name: Any, lock: threading.Lock
+    engine: PyDporEngine,
+    execution: PyExecution,
+    thread_id: int,
+    obj: Any,
+    name: Any,
+    lock: threading.Lock,
+    stable_ids: StableObjectIds,
 ) -> None:
     """Like ``_report_write`` but uses ``weak_write`` access kind.
 
@@ -958,7 +1032,7 @@ def _report_weak_write(
     """
     if obj is not None:
         with lock:
-            engine.report_access(execution, thread_id, _make_object_key(id(obj), name), "weak_write")
+            engine.report_access(execution, thread_id, _make_object_key(stable_ids.get(obj), name), "weak_write")
 
 
 def _subscript_key_name(key: Any) -> Any:
@@ -980,6 +1054,7 @@ def _expand_slice_reads(
     container: Any,
     key: Any,
     lock: threading.Lock,
+    stable_ids: StableObjectIds,
 ) -> None:
     """For slice subscript reads, report individual element reads.
 
@@ -999,7 +1074,130 @@ def _expand_slice_reads(
         return
     indices = range(*key.indices(length))
     for idx in indices:
-        _report_read(engine, execution, thread_id, container, repr(idx), lock)
+        _report_read(engine, execution, thread_id, container, repr(idx), lock, stable_ids)
+
+
+# ---------------------------------------------------------------------------
+# Scheduling coarsening: only yield at shared-access opcodes
+# ---------------------------------------------------------------------------
+#
+# Most opcodes (LOAD_FAST, STORE_FAST, BINARY_OP +, COPY, SWAP, etc.) only
+# manipulate thread-local state (the evaluation stack and f_locals).  They
+# never call _report_read/_report_write, so the DPOR engine doesn't need to
+# consider them as scheduling points.  By skipping the scheduler yield for
+# these opcodes, we dramatically reduce the DPOR search tree.
+#
+# Opcodes in _SHARED_ACCESS_OPCODES *may* report shared memory accesses and
+# must go through the full scheduler yield path.  Everything else just updates
+# the shadow stack without yielding.
+
+_SHARED_ACCESS_OPCODES = frozenset(
+    {
+        # Attribute access on (potentially shared) objects
+        "LOAD_ATTR",
+        "STORE_ATTR",
+        "DELETE_ATTR",
+        "LOAD_METHOD",  # 3.10 only
+        # Global / name access
+        "LOAD_GLOBAL",
+        "STORE_GLOBAL",
+        "LOAD_NAME",
+        # Closure / cell variable access
+        "LOAD_DEREF",
+        "STORE_DEREF",
+        # Subscript / slice access
+        "BINARY_SUBSCR",
+        "STORE_SUBSCR",
+        "DELETE_SUBSCR",
+        "BINARY_SLICE",
+        "STORE_SLICE",
+        # BINARY_OP may be subscript on 3.14 (checked at call site)
+        "BINARY_OP",
+        # Function / method calls (may invoke C-level methods)
+        "CALL",
+        "CALL_FUNCTION",
+        "CALL_METHOD",
+        "CALL_KW",
+        "CALL_FUNCTION_KW",
+        "CALL_FUNCTION_EX",
+        # Iterator operations on (potentially mutable) containers
+        "GET_ITER",
+        "FOR_ITER",
+    }
+)
+
+
+_CALL_OPCODES = frozenset({"CALL", "CALL_FUNCTION", "CALL_METHOD", "CALL_KW", "CALL_FUNCTION_KW", "CALL_FUNCTION_EX"})
+
+
+def _call_might_report_access(shadow: ShadowStack, argc: int) -> bool:
+    """Quick pre-check: does this CALL likely involve a C-method that reports access?
+
+    Mirrors the detection strategies in ``_process_opcode``'s CALL handler.
+    Returns True if any detectable C-method pattern is found on the shadow stack.
+    False negatives would miss accesses; false positives are harmless (extra scheduling).
+    """
+    scan_depth = min(argc + 3, len(shadow.stack))
+    for i in range(scan_depth):
+        item = shadow.stack[-(i + 1)]
+        if item is None:
+            continue
+        item_type = type(item)
+
+        # Strategy 1: Passthrough builtins (setattr, getattr, len, etc.)
+        if id(item) in _PASSTHROUGH_BUILTINS:
+            return True
+
+        # Strategy 2: Bound C methods on mutable __self__
+        if item_type is _BUILTIN_METHOD_TYPE or item_type is _METHOD_WRAPPER_TYPE:
+            self_obj = getattr(item, "__self__", None)
+            if self_obj is not None:
+                if not isinstance(self_obj, _IMMUTABLE_TYPES):
+                    return True  # C method on mutable object
+                # Check for immutable-self methods that read arguments (e.g. str.join)
+                method_name = getattr(item, "__name__", None)
+                if method_name in _IMMUTABLE_SELF_ARG_READERS:
+                    return True
+
+        # Strategy 2b: Container constructors (list, dict, etc.)
+        if item_type is type and item in _CONTAINER_CONSTRUCTORS:
+            return True
+
+        # Strategy 3: Wrapper descriptors on mutable types
+        if item_type is _WRAPPER_DESCRIPTOR_TYPE:
+            objclass = getattr(item, "__objclass__", None)
+            if objclass is not None and not issubclass(objclass, _IMMUTABLE_TYPES):
+                return True
+
+    return False
+
+
+def _is_shared_opcode(code: Any, instruction_offset: int) -> bool:
+    """Check whether an opcode at the given offset might access shared state.
+
+    Returns True for opcodes in _SHARED_ACCESS_OPCODES, with a special case
+    for BINARY_OP: only subscript variants (``[]``, ``NB_SUBSCR``) are shared;
+    arithmetic variants (+, -, *, etc.) are not.
+
+    CALL opcodes are NOT checked here — they require shadow stack inspection
+    via ``_call_might_report_access`` and are handled separately in the callbacks.
+    """
+    instrs = _get_instructions(code)
+    instr = instrs.get(instruction_offset)
+    if instr is None:
+        return False
+    op = instr.opname
+    # CALL opcodes are handled separately (need shadow stack inspection)
+    if op in _CALL_OPCODES:
+        return False
+    if op not in _SHARED_ACCESS_OPCODES:
+        return False
+    # BINARY_OP is only shared when it's a subscript operation (3.14+)
+    if op == "BINARY_OP":
+        argrepr = instr.argrepr
+        if not argrepr or ("[" not in argrepr and "NB_SUBSCR" not in argrepr.upper()):
+            return False
+    return True
 
 
 def _process_opcode(
@@ -1027,6 +1225,7 @@ def _process_opcode(
     execution = scheduler.execution
     elock = scheduler._engine_lock
     recorder = scheduler.trace_recorder
+    sids = scheduler._stable_ids
 
     # === LOAD instructions: push values onto the shadow stack ===
 
@@ -1074,7 +1273,7 @@ def _process_opcode(
         # Uses first-access semantics so ``global += 1`` (LOAD_GLOBAL + STORE_GLOBAL)
         # doesn't overwrite the position of an earlier read, enabling DPOR to
         # backtrack between the read and a subsequent write.
-        _report_first_read(engine, execution, thread_id, frame.f_globals, instr.argval, elock)
+        _report_first_read(engine, execution, thread_id, frame.f_globals, instr.argval, elock, sids)
 
     elif op == "LOAD_NAME":
         # Used in exec/eval code (module-level scope).  Like LOAD_GLOBAL
@@ -1096,7 +1295,7 @@ def _process_opcode(
         # threads sharing a closure function share the same code object.
         varname = instr.argval
         if varname in code.co_freevars or varname in code.co_cellvars:
-            _report_first_read(engine, execution, thread_id, code, varname, elock)
+            _report_first_read(engine, execution, thread_id, code, varname, elock, sids)
 
     elif op in ("LOAD_CONST", "LOAD_CONST_IMMORTAL", "LOAD_CONST_MORTAL"):
         shadow.push(instr.argval)
@@ -1156,13 +1355,13 @@ def _process_opcode(
     elif op == "LOAD_ATTR":
         obj = shadow.pop()
         attr = instr.argval
-        _report_read(engine, execution, thread_id, obj, attr, elock)
+        _report_read(engine, execution, thread_id, obj, attr, elock, sids)
         # Also report on obj.__dict__ so LOAD_ATTR conflicts with
         # STORE_SUBSCR on the same __dict__ (cross-path detection).
         if obj is not None:
             try:
                 _obj_dict = object.__getattribute__(obj, "__dict__")
-                _report_read(engine, execution, thread_id, _obj_dict, attr, elock)
+                _report_read(engine, execution, thread_id, _obj_dict, attr, elock, sids)
             except AttributeError:
                 pass
         if recorder is not None and obj is not None:
@@ -1185,7 +1384,7 @@ def _process_opcode(
                 # We skip bound methods (loading .append is not a container
                 # read) and immutable types (no mutation possible).
                 if val is not None and type(val) is not _BUILTIN_METHOD_TYPE and not isinstance(val, _IMMUTABLE_TYPES):
-                    _report_weak_read(engine, execution, thread_id, val, "__cmethods__", elock)
+                    _report_weak_read(engine, execution, thread_id, val, "__cmethods__", elock, sids)
             except Exception:
                 shadow.push(None)
         else:
@@ -1200,13 +1399,13 @@ def _process_opcode(
     elif op == "STORE_ATTR":
         obj = shadow.pop()  # TOS = object
         _val = shadow.pop()  # TOS1 = value
-        _report_write(engine, execution, thread_id, obj, instr.argval, elock)
+        _report_write(engine, execution, thread_id, obj, instr.argval, elock, sids)
         # Also report on obj.__dict__ so STORE_ATTR conflicts with
         # STORE_SUBSCR on the same __dict__ (cross-path detection).
         if obj is not None:
             try:
                 _obj_dict = object.__getattribute__(obj, "__dict__")
-                _report_write(engine, execution, thread_id, _obj_dict, instr.argval, elock)
+                _report_write(engine, execution, thread_id, _obj_dict, instr.argval, elock, sids)
             except AttributeError:
                 pass
         if recorder is not None and obj is not None:
@@ -1217,7 +1416,7 @@ def _process_opcode(
         # Pops owner, pushes (method, self/NULL) — net stack effect +1.
         obj = shadow.pop()
         attr = instr.argval
-        _report_read(engine, execution, thread_id, obj, attr, elock)
+        _report_read(engine, execution, thread_id, obj, attr, elock, sids)
         if recorder is not None and obj is not None:
             recorder.record(thread_id, frame, opcode=op, access_type="read", attr_name=attr, obj=obj)
         if obj is not None:
@@ -1232,7 +1431,7 @@ def _process_opcode(
 
     elif op == "DELETE_ATTR":
         obj = shadow.pop()
-        _report_write(engine, execution, thread_id, obj, instr.argval, elock)
+        _report_write(engine, execution, thread_id, obj, instr.argval, elock, sids)
         if recorder is not None and obj is not None:
             recorder.record(thread_id, frame, opcode=op, access_type="write", attr_name=instr.argval, obj=obj)
 
@@ -1244,13 +1443,13 @@ def _process_opcode(
         key = shadow.pop()
         container = shadow.pop()
         _kname = _subscript_key_name(key)
-        _report_read(engine, execution, thread_id, container, _kname, elock)
+        _report_read(engine, execution, thread_id, container, _kname, elock, sids)
         # Container-level read for conflict with C-methods and different subscript keys.
         if container is not None and not isinstance(container, _IMMUTABLE_TYPES):
-            _report_read(engine, execution, thread_id, container, "__cmethods__", elock)
+            _report_read(engine, execution, thread_id, container, "__cmethods__", elock, sids)
             # For slice accesses, also report reads on individual element keys
             # so DPOR sees per-element conflicts with STORE_SUBSCR writes.
-            _expand_slice_reads(engine, execution, thread_id, container, key, elock)
+            _expand_slice_reads(engine, execution, thread_id, container, key, elock, sids)
         if recorder is not None and container is not None:
             recorder.record(thread_id, frame, opcode=op, access_type="read", attr_name=_kname, obj=container)
         shadow.push(None)
@@ -1260,12 +1459,12 @@ def _process_opcode(
         container = shadow.pop()
         _val = shadow.pop()
         _kname = _subscript_key_name(key)
-        _report_write(engine, execution, thread_id, container, _kname, elock)
+        _report_write(engine, execution, thread_id, container, _kname, elock, sids)
         # Report a container-level weak-write so subscript writes conflict
         # with C-method reads (e.g. len(), iteration) but two subscript
         # writes on disjoint keys do NOT conflict with each other.
         if container is not None and not isinstance(container, _IMMUTABLE_TYPES):
-            _report_weak_write(engine, execution, thread_id, container, "__cmethods__", elock)
+            _report_weak_write(engine, execution, thread_id, container, "__cmethods__", elock, sids)
         if recorder is not None and container is not None:
             recorder.record(thread_id, frame, opcode=op, access_type="write", attr_name=_kname, obj=container)
 
@@ -1275,10 +1474,10 @@ def _process_opcode(
         _stop = shadow.pop()
         _start = shadow.pop()
         container = shadow.pop()
-        _report_read(engine, execution, thread_id, container, "__slice__", elock)
+        _report_read(engine, execution, thread_id, container, "__slice__", elock, sids)
         if container is not None and not isinstance(container, _IMMUTABLE_TYPES):
-            _report_read(engine, execution, thread_id, container, "__cmethods__", elock)
-            _expand_slice_reads(engine, execution, thread_id, container, slice(_start, _stop), elock)
+            _report_read(engine, execution, thread_id, container, "__cmethods__", elock, sids)
+            _expand_slice_reads(engine, execution, thread_id, container, slice(_start, _stop), elock, sids)
         if recorder is not None and container is not None:
             recorder.record(thread_id, frame, opcode=op, access_type="read", attr_name="__slice__", obj=container)
         shadow.push(None)
@@ -1290,9 +1489,9 @@ def _process_opcode(
         _start = shadow.pop()
         container = shadow.pop()
         _val = shadow.pop()
-        _report_write(engine, execution, thread_id, container, "__slice__", elock)
+        _report_write(engine, execution, thread_id, container, "__slice__", elock, sids)
         if container is not None and not isinstance(container, _IMMUTABLE_TYPES):
-            _report_weak_write(engine, execution, thread_id, container, "__cmethods__", elock)
+            _report_weak_write(engine, execution, thread_id, container, "__cmethods__", elock, sids)
         if recorder is not None and container is not None:
             recorder.record(thread_id, frame, opcode=op, access_type="write", attr_name="__slice__", obj=container)
 
@@ -1300,10 +1499,10 @@ def _process_opcode(
         key = shadow.pop()
         container = shadow.pop()
         _kname = _subscript_key_name(key)
-        _report_write(engine, execution, thread_id, container, _kname, elock)
+        _report_write(engine, execution, thread_id, container, _kname, elock, sids)
         # Container-level write for delete too (regular last-access semantics).
         if container is not None and not isinstance(container, _IMMUTABLE_TYPES):
-            _report_write(engine, execution, thread_id, container, "__cmethods__", elock)
+            _report_write(engine, execution, thread_id, container, "__cmethods__", elock, sids)
         if recorder is not None and container is not None:
             recorder.record(thread_id, frame, opcode=op, access_type="write", attr_name=_kname, obj=container)
 
@@ -1317,12 +1516,12 @@ def _process_opcode(
             key = shadow.pop()
             container = shadow.pop()
             _kname = _subscript_key_name(key)
-            _report_read(engine, execution, thread_id, container, _kname, elock)
+            _report_read(engine, execution, thread_id, container, _kname, elock, sids)
             # Container-level read for subscript access (same as BINARY_SUBSCR).
             if container is not None and not isinstance(container, _IMMUTABLE_TYPES):
-                _report_read(engine, execution, thread_id, container, "__cmethods__", elock)
+                _report_read(engine, execution, thread_id, container, "__cmethods__", elock, sids)
                 # For slice accesses, also report reads on individual element keys
-                _expand_slice_reads(engine, execution, thread_id, container, key, elock)
+                _expand_slice_reads(engine, execution, thread_id, container, key, elock, sids)
             if recorder is not None and container is not None:
                 recorder.record(thread_id, frame, opcode=op, access_type="read", attr_name=_kname, obj=container)
             shadow.push(None)
@@ -1344,14 +1543,14 @@ def _process_opcode(
     elif op == "STORE_GLOBAL":
         shadow.pop()
         # Report a WRITE on the module's globals dict for this variable name.
-        _report_write(engine, execution, thread_id, frame.f_globals, instr.argval, elock)
+        _report_write(engine, execution, thread_id, frame.f_globals, instr.argval, elock, sids)
 
     elif op == "STORE_DEREF":
         shadow.pop()
         # Report a WRITE on closure cell/free variables.
         varname = instr.argval
         if varname in code.co_freevars or varname in code.co_cellvars:
-            _report_write(engine, execution, thread_id, code, varname, elock)
+            _report_write(engine, execution, thread_id, code, varname, elock, sids)
 
     elif op == "STORE_FAST":
         shadow.pop()
@@ -1429,7 +1628,7 @@ def _process_opcode(
             # see the __iter_source__ marker.  The read here ensures the
             # conflict with STORE_SUBSCR weak-writes is recorded in the
             # current frame before the iterator crosses frame boundaries.
-            _report_read(engine, execution, thread_id, iterable, "__cmethods__", elock)
+            _report_read(engine, execution, thread_id, iterable, "__cmethods__", elock, sids)
         else:
             shadow.pop()
             shadow.push(None)
@@ -1448,14 +1647,14 @@ def _process_opcode(
                 # Per-element read using the iteration counter as the key.
                 # For lists, counter 0, 1, 2... matches STORE_SUBSCR keys "0", "1", "2"...
                 # This creates per-element conflicts enabling fine-grained interleaving.
-                _report_read(engine, execution, thread_id, _iter_container, repr(_iter_counter), elock)
+                _report_read(engine, execution, thread_id, _iter_container, repr(_iter_counter), elock, sids)
                 # Coarse-grained read for conflict with C-method writes (append,
                 # insert, etc.) and other container-level operations.  Uses regular
                 # (last-access) semantics: each iteration overwrites the previous read
                 # position.  This means backtracks target the LAST iteration, which
                 # allows the other thread to interleave after some elements have
                 # already been read — catching mid-iteration mutation races.
-                _report_read(engine, execution, thread_id, _iter_container, "__cmethods__", elock)
+                _report_read(engine, execution, thread_id, _iter_container, "__cmethods__", elock, sids)
             # Increment counter for next iteration (mutable list, in-place update).
             top[2] = _iter_counter + 1
         shadow.push(None)  # push the yielded value
@@ -1523,9 +1722,9 @@ def _process_opcode(
                                 _pt_attr = _raw
                     if _pt_target is not None and not isinstance(_pt_target, _IMMUTABLE_TYPES):
                         if _pt_kind == "read":
-                            _report_read(engine, execution, thread_id, _pt_target, _pt_attr, elock)
+                            _report_read(engine, execution, thread_id, _pt_target, _pt_attr, elock, sids)
                         else:
-                            _report_write(engine, execution, thread_id, _pt_target, _pt_attr, elock)
+                            _report_write(engine, execution, thread_id, _pt_target, _pt_attr, elock, sids)
                 _call_handled = True
                 break
 
@@ -1535,9 +1734,9 @@ def _process_opcode(
                 if self_obj is not None and not isinstance(self_obj, _IMMUTABLE_TYPES):
                     method_name = getattr(item, "__name__", None)
                     if method_name in _C_METHOD_READ_ONLY:
-                        _report_read(engine, execution, thread_id, self_obj, "__cmethods__", elock)
+                        _report_read(engine, execution, thread_id, self_obj, "__cmethods__", elock, sids)
                     else:
-                        _report_write(engine, execution, thread_id, self_obj, "__cmethods__", elock)
+                        _report_write(engine, execution, thread_id, self_obj, "__cmethods__", elock, sids)
                     _call_handled = True
                     break
                 # __self__ is immutable (e.g. str, module) — check if the method
@@ -1547,7 +1746,7 @@ def _process_opcode(
                     if method_name in _IMMUTABLE_SELF_ARG_READERS and argc >= 1 and argc <= len(shadow.stack):
                         _arg_target = shadow.stack[-argc]
                         if _arg_target is not None and not isinstance(_arg_target, _IMMUTABLE_TYPES):
-                            _report_read(engine, execution, thread_id, _arg_target, "__cmethods__", elock)
+                            _report_read(engine, execution, thread_id, _arg_target, "__cmethods__", elock, sids)
                         _call_handled = True
                         break
                     # Otherwise fall through to continue scan
@@ -1566,7 +1765,7 @@ def _process_opcode(
                         continue
                     _c_arg = shadow.stack[-_c_depth]
                     if _c_arg is not None and not isinstance(_c_arg, _IMMUTABLE_TYPES):
-                        _report_read(engine, execution, thread_id, _c_arg, "__cmethods__", elock)
+                        _report_read(engine, execution, thread_id, _c_arg, "__cmethods__", elock, sids)
                         if _constructor_source is None:
                             _constructor_source = _c_arg
                 _call_handled = True
@@ -1582,9 +1781,9 @@ def _process_opcode(
                         if _wd_target is not None and not isinstance(_wd_target, _IMMUTABLE_TYPES):
                             method_name = getattr(item, "__name__", None)
                             if method_name in _C_METHOD_READ_ONLY:
-                                _report_read(engine, execution, thread_id, _wd_target, "__cmethods__", elock)
+                                _report_read(engine, execution, thread_id, _wd_target, "__cmethods__", elock, sids)
                             else:
-                                _report_write(engine, execution, thread_id, _wd_target, "__cmethods__", elock)
+                                _report_write(engine, execution, thread_id, _wd_target, "__cmethods__", elock, sids)
                 _call_handled = True
                 break
 
@@ -1716,7 +1915,42 @@ class DporBytecodeRunner:
                 return None
 
             if event == "opcode":
+                # --- Scheduling coarsening ---
+                # Non-shared opcodes only manipulate thread-local state.
+                # Process the shadow stack directly without a scheduler yield.
+                # CALL opcodes need shadow stack inspection to decide.
+                # When detect_io is enabled, skip coarsening for CALL opcodes
+                # because I/O events arrive from C-level LD_PRELOAD interception
+                # and need scheduling points around open/read/write calls.
+                if not _is_shared_opcode(frame.f_code, frame.f_lasti):
+                    instrs = _get_instructions(frame.f_code)
+                    instr = instrs.get(frame.f_lasti)
+                    if instr is not None and instr.opname in _CALL_OPCODES:
+                        if _detect_io:
+                            scheduler.report_and_wait(frame, thread_id)
+                            frame.f_locals  # noqa: B018  — refresh f_locals before LocalsToFast
+                            return trace
+                        shadow = scheduler.get_shadow_stack(id(frame))
+                        argc = instr.arg or 0
+                        if _call_might_report_access(shadow, argc):
+                            scheduler.report_and_wait(frame, thread_id)
+                            frame.f_locals  # noqa: B018  — refresh f_locals before LocalsToFast
+                            return trace
+                    _process_opcode(frame, scheduler, thread_id)
+                    return trace
                 scheduler.report_and_wait(frame, thread_id)
+                # CPython 3.10-3.11 bug workaround: after our trace callback
+                # returns, CPython calls PyFrame_LocalsToFast(frame, 1) which
+                # copies f_locals dict values back to cell/free variable cells
+                # (see CPython ceval.c call_trace).  If this thread waited in
+                # report_and_wait while another thread modified a shared cell,
+                # the stale f_locals snapshot would overwrite the new value.
+                # Re-accessing frame.f_locals triggers PyFrame_FastToLocals
+                # (see CPython frameobject.c frame_getlocals), refreshing the
+                # snapshot so LocalsToFast writes back the current value.
+                # This is not needed on 3.12+ where PEP 667 replaced f_locals
+                # with a proxy and removed LocalsToFast from the trace path.
+                frame.f_locals  # noqa: B018  — refresh f_locals before LocalsToFast
                 return trace
 
             if event == "return":
@@ -1738,7 +1972,22 @@ class DporBytecodeRunner:
         tool_id = mon.PROFILER_ID  # type: ignore[attr-defined]
         DporBytecodeRunner._TOOL_ID = tool_id
 
-        mon.use_tool_id(tool_id, "frontrun._dpor")  # type: ignore[attr-defined]
+        # Defensively free the tool ID if it's still claimed from a previous
+        # run that was interrupted (e.g. by pytest-timeout) before
+        # _teardown_monitoring could call free_tool_id.  Without this,
+        # use_tool_id raises "tool N is already in use" and every subsequent
+        # test in the suite fails.
+        try:
+            mon.use_tool_id(tool_id, "frontrun._dpor")  # type: ignore[attr-defined]
+        except ValueError:
+            # Tool ID still held from a previous interrupted run — force cleanup.
+            mon.set_events(tool_id, 0)  # type: ignore[attr-defined]
+            mon.register_callback(tool_id, mon.events.PY_START, None)  # type: ignore[attr-defined]
+            mon.register_callback(tool_id, mon.events.PY_RETURN, None)  # type: ignore[attr-defined]
+            mon.register_callback(tool_id, mon.events.INSTRUCTION, None)  # type: ignore[attr-defined]
+            mon.free_tool_id(tool_id)  # type: ignore[attr-defined]
+            mon.use_tool_id(tool_id, "frontrun._dpor")  # type: ignore[attr-defined]
+
         mon.set_events(tool_id, mon.events.PY_START | mon.events.PY_RETURN | mon.events.INSTRUCTION)  # type: ignore[attr-defined]
 
         scheduler = self.scheduler
@@ -1800,6 +2049,39 @@ class DporBytecodeRunner:
             # the *new* scheduler.  Letting it through would call engine
             # methods on the wrong execution, causing PyO3 borrow conflicts.
             if getattr(_dpor_tls, "scheduler", None) is not scheduler:
+                return None
+
+            # --- Scheduling coarsening ---
+            # Non-shared opcodes (LOAD_FAST, STORE_FAST, BINARY_OP +, COPY,
+            # SWAP, etc.) only manipulate thread-local state.  Process the
+            # shadow stack directly without entering the scheduler, avoiding
+            # a yield that would create an unnecessary DPOR scheduling point.
+            #
+            # CALL opcodes need special handling: _is_shared_opcode returns
+            # False for them so we check the shadow stack to see if the
+            # callable is a C-method that would report shared access.
+            if not _is_shared_opcode(code, instruction_offset):
+                # Check if this is a CALL opcode that needs shadow stack inspection.
+                # When detect_io is enabled, all CALL opcodes must yield because
+                # I/O events arrive from C-level LD_PRELOAD interception.
+                instrs = _get_instructions(code)
+                instr = instrs.get(instruction_offset)
+                if instr is not None and instr.opname in _CALL_OPCODES:
+                    if _detect_io:
+                        frame = sys._getframe(1)
+                        scheduler.report_and_wait(frame, thread_id)
+                        return None
+                    frame = sys._getframe(1)
+                    shadow = scheduler.get_shadow_stack(id(frame))
+                    argc = instr.arg or 0
+                    if _call_might_report_access(shadow, argc):
+                        scheduler.report_and_wait(frame, thread_id)
+                        return None
+                    # No C-method detected; process shadow stack without yield
+                    _process_opcode(frame, scheduler, thread_id)
+                    return None
+                frame = sys._getframe(1)
+                _process_opcode(frame, scheduler, thread_id)
                 return None
 
             # Use sys._getframe() to get the actual frame for _process_opcode.
@@ -2127,6 +2409,7 @@ def _reproduce_dpor_counterexample(
     reproduce_on_failure: int,
     lock_timeout: int | None,
     invariant: Callable[[T], bool] | None = None,
+    detect_io: bool = True,
 ) -> tuple[int, int]:
     """Measure how often a DPOR counterexample reproduces under the DPOR runner.
 
@@ -2157,7 +2440,7 @@ def _reproduce_dpor_counterexample(
                     setup,
                     threads,
                     timeout=timeout_per_run,
-                    detect_io=False,
+                    detect_io=detect_io,
                     deadlock_timeout=deadlock_timeout,
                 )
                 if invariant is not None and not invariant(replay_state):
@@ -2271,6 +2554,7 @@ def explore_dpor(
     )
 
     result = InterleavingResult(property_holds=True)
+    stable_ids = StableObjectIds()
     # Shared lock serialising ALL PyO3 calls to engine/execution objects.
     # On free-threaded Python, PyO3 &mut self borrows panic rather than
     # block when contested, so we need a Python-level lock shared across
@@ -2310,6 +2594,7 @@ def explore_dpor(
             if total_deadline is not None and time.monotonic() > total_deadline:
                 break
             clear_insert_tracker()
+            stable_ids.reset_for_execution()
             with engine_lock:
                 execution = engine.begin_execution()
             recorder = TraceRecorder()
@@ -2325,6 +2610,7 @@ def explore_dpor(
                 trace_recorder=recorder,
                 preload_bridge=preload_bridge,
                 detect_io=detect_io,
+                stable_ids=stable_ids,
             )
             runner = DporBytecodeRunner(scheduler, detect_io=detect_io, preload_bridge=preload_bridge)
 
@@ -2378,6 +2664,7 @@ def explore_dpor(
                         reproduce_on_failure=reproduce_on_failure,
                         lock_timeout=lock_timeout,
                         invariant=None,
+                        detect_io=detect_io,
                     )
                     result.reproduction_attempts = attempts
                     result.reproduction_successes = successes
@@ -2415,6 +2702,7 @@ def explore_dpor(
                         reproduce_on_failure=reproduce_on_failure,
                         lock_timeout=lock_timeout,
                         invariant=invariant,
+                        detect_io=detect_io,
                     )
                     result.reproduction_attempts = attempts
                     result.reproduction_successes = successes

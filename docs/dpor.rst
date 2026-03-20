@@ -38,21 +38,28 @@ this collapses an exponential search space down to a handful of executions.
 Algorithm overview
 ------------------
 
-Frontrun implements the classic DPOR algorithm from `Flanagan and Godefroid
-(POPL 2005) <https://dl.acm.org/doi/10.1145/1040305.1040315>`_ with optional
-`preemption bounding
+Frontrun implements a hybrid DPOR algorithm combining ideas from classic DPOR
+(`Flanagan and Godefroid, POPL 2005
+<https://dl.acm.org/doi/10.1145/1040305.1040315>`_) and Optimal DPOR (`Abdulla
+et al., "Source Sets", JACM 2017
+<https://doi.org/10.1145/3073408>`_), with optional `preemption bounding
 <https://www.microsoft.com/en-us/research/publication/iterative-context-bounding-for-systematic-testing-of-multithreaded-programs/>`_.
-The algorithm works in three phases that repeat until no unexplored
-interleavings remain:
+
+The core loop repeats until no unexplored interleavings remain:
 
 1. **Execute** the program under a deterministic schedule, recording every
    shared-memory access and synchronization event.
-2. **Detect dependencies** --- pairs of concurrent accesses to the same object
-   where at least one is a write. For each dependency, insert a *backtrack
-   point* in the exploration tree so that the alternative ordering will be tried
-   in a future execution.
-3. **Advance** to the next unexplored path by backtracking through the
-   exploration tree in depth-first order.
+2. **Detect races** --- pairs of concurrent accesses to the same object where
+   at least one is a write.  Races are collected during execution and processed
+   at the end (deferred race detection, Algorithm 2 of the JACM'17 paper).
+3. **Compute wakeup sequences** --- for each race, compute the ``notdep``
+   sequence (independent events between the two racing accesses) and insert it
+   into the **wakeup tree** at the appropriate branch.
+4. **Propagate sleep sets** --- threads whose next actions are independent of
+   the chosen thread's action are kept asleep, preventing redundant
+   exploration of equivalent interleavings.
+5. **Advance** to the next unexplored path by picking the next branch from the
+   wakeup tree in depth-first order.
 
 
 Key concepts
@@ -186,10 +193,15 @@ to this object?*  The dependency (or **conflict**) relation is:
      \text{obj}(e_i) = \text{obj}(e_j) \;\wedge\;
      \bigl(\text{kind}(e_i) = W \;\lor\; \text{kind}(e_j) = W\bigr)
 
-In the implementation:
+In the implementation, there are four access kinds with the following
+conflict rules:
 
-- A **read** depends on the last **write** (two reads never conflict).
-- A **write** depends on the last access of **any** kind.
+- **Read** conflicts with **Write** and **WeakWrite** (but not other Reads).
+- **Write** conflicts with all other access kinds.
+- **WeakWrite** conflicts with **Read** and **Write** (but not other
+  WeakWrites or WeakReads). This models container subscript writes where
+  different keys on the same container are independent.
+- **WeakRead** conflicts only with **Write**.
 
 If such a prior access :math:`e_p` exists and its ``dpor_vv`` is *not*
 ``partial_le`` of the current thread's ``dpor_vv``, the two accesses are
@@ -198,12 +210,15 @@ concurrent and could race:
 .. math::
 
    \text{dep}(e_p, e_c) \;\wedge\; e_p \| e_c
-   \implies \text{insert backtrack at branch}(e_p)
+   \implies \text{insert wakeup sequence at branch}(e_p)
 
-The engine inserts a backtrack point at the exploration-tree branch where the
-prior access was made, marking the current thread for exploration there. This
-ensures a future execution will try scheduling the current thread at that
-earlier point, reversing the order of the two conflicting operations.
+The engine collects the race as a ``PendingRace`` and, at the end of the
+execution, computes a ``notdep`` wakeup sequence and inserts it into the
+wakeup tree at the branch where the prior access was made. It also performs
+immediate inline backtracking (inserting a single-thread sequence) for
+responsiveness. This ensures a future execution will try scheduling the
+racing thread at that earlier point, reversing the order of the two
+conflicting operations.
 
 
 Synchronization events
@@ -255,10 +270,18 @@ The engine maintains a ``Path`` --- a sequence of ``Branch`` nodes, one per
 scheduling decision. Each branch records:
 
 - The **status** of every thread at that point (disabled, pending, active,
-  backtrack, visited, blocked, or yielded).
+  visited, blocked, or yielded).
 - Which thread was **chosen** (the ``active_thread``).
 - The cumulative **preemption count** (how many times a runnable thread was
   preempted in favor of a different thread up to this point).
+- A **wakeup tree** --- an ordered tree of thread-ID sequences representing
+  interleavings still to be explored at this branch (Definition 6.1 of the
+  JACM'17 paper, p.21--22).
+- A **sleep set** --- threads whose next actions are independent of the
+  chosen thread's action and therefore need not be explored at this branch.
+- **Access tracking** --- per-thread records of which objects were accessed
+  and with what kind (read, write, weak-write, weak-read), used for
+  independence checks during sleep set propagation.
 
 To illustrate, consider a two-thread program where DPOR finds one conflict.
 The exploration tree looks like:
@@ -268,17 +291,18 @@ The exploration tree looks like:
    Branch 0              Branch 1            Branch 2            Branch 3
    ┌─────────────┐       ┌─────────────┐     ┌─────────────┐     ┌──────────────┐
    │ T0: Active  │  -->  │ T0: Active  │ --> │ T1: Active  │ --> │ T1: Active   │
-   │ T1: Pending │       │ T1: Pending │     │ T0: Pending │     │ T0: Disabled │ 
+   │ T1: Pending │       │ T1: Pending │     │ T0: Pending │     │ T0: Disabled │
+   │ wut: {}     │       │ wut: {}     │     │ wut: {}     │     │ wut: {}      │
    └─────────────┘       └─────────────┘     └─────────────┘     └──────────────┘
                             ^
                             │
                        CONFLICT DETECTED between
                        T0's write here and T1's
-                       later write: mark T1 as
-                       Backtrack at Branch 1
+                       later write: insert [T1]
+                       into wakeup tree at Branch 1
 
-After the first execution completes, ``step()`` walks backward, finds the
-backtrack at Branch 1, and schedules T1 there instead:
+After the first execution completes, ``step()`` walks backward, finds Branch 1
+has a non-empty wakeup tree, and picks the next thread from it:
 
 .. code-block:: text
 
@@ -286,10 +310,37 @@ backtrack at Branch 1, and schedules T1 there instead:
    ┌─────────────┐       ┌─────────────┐
    │ T0: Active  │  -->  │ T1: Active  │ --> ...
    │ T1: Pending │       │ T0: Visited │
+   │ wut: {}     │       │ wut: {}     │
    └─────────────┘       └─────────────┘
 
 The prefix up to Branch 0 is replayed identically; only the decision at
 Branch 1 changes.
+
+Wakeup trees
+~~~~~~~~~~~~~~
+
+A wakeup tree (``WakeupTree``) is an ordered tree of thread-ID sequences.
+Each path from the root to a leaf represents a sequence of scheduling
+decisions to explore. The tree merges shared prefixes and deduplicates
+sequences automatically.
+
+Key operations:
+
+``insert(sequence)``
+    Add a scheduling sequence to the tree. Shared prefixes are merged; new
+    branches are added at the rightmost position.
+
+``min_thread()``
+    Return the minimum thread ID among root-level branches. Used as a
+    deterministic proxy for the paper's :math:`\prec` ordering.
+
+``subtree(thread_id)``
+    Extract the subtree for a given thread. When thread *p* is chosen at a
+    branch, the subtree for *p* becomes the wakeup guidance for subsequent
+    branches (Algorithm 2 line 17: ``WuT' = subtree(wut(E), p)``).
+
+``remove_branch(thread_id)``
+    Remove the branch starting with *thread_id* after it has been explored.
 
 Scheduling
 ~~~~~~~~~~~
@@ -297,34 +348,93 @@ Scheduling
 When the engine needs to pick the next thread:
 
 1. If we are **replaying** a previously recorded path (``pos < branches.len``),
-   return the same choice as before. This is how the engine deterministically
-   re-executes the shared prefix leading to a backtrack point.
+   return the same choice as before and propagate sleep sets forward using
+   independence checks. This is how the engine deterministically re-executes
+   the shared prefix leading to a backtrack point.
 
-2. Otherwise this is a **new** scheduling decision. The engine prefers the
-   currently active thread (to minimize preemptions) and creates a new
-   ``Branch`` recording the decision and the status of all threads.
+2. Otherwise this is a **new** scheduling decision. If a wakeup subtree
+   provides guidance (from a multi-step wakeup sequence), the guided thread
+   is chosen. Otherwise the engine prefers the currently active thread (to
+   minimize preemptions). A new ``Branch`` is created recording the decision,
+   thread statuses, and access information.
 
-Backtracking
-~~~~~~~~~~~~~
+Backtracking and wakeup sequence insertion
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-When the engine calls ``backtrack(path_id, thread_id)`` it marks ``thread_id``
-for future exploration at branch ``path_id``. The thread's status at that
-branch changes from ``Pending`` to ``Backtrack``.
+Race detection uses a **hybrid approach**: immediate inline backtracking for
+single-step races (Algorithm 1 style) plus deferred ``notdep`` sequence
+computation for multi-step wakeup sequences (Algorithm 2 style).
+
+When ``process_access()`` detects a race between events *e* and *e'*:
+
+1. **Inline**: Insert ``[thread_id]`` into the wakeup tree at the branch
+   where *e* occurred (unless the thread is already in the sleep set).
+2. **Deferred**: Collect a ``PendingRace`` record for later processing.
+
+At the end of each execution, ``next_execution()`` processes all deferred
+races:
+
+1. For each race, compute ``notdep(e, E).e'`` --- the sequence of events
+   between *e* and *e'* that are independent of *e*, followed by *e'*.
+   Same-thread events and events with conflicting accesses are excluded.
+2. Insert the ``notdep`` sequence into the wakeup tree at branch *e*.
+   This enables exploration of interleavings where the independent events
+   run before the racing thread, producing better state-space coverage
+   than single-thread backtracking alone.
 
 When the current execution finishes, ``step()`` walks backward through the
 branch list:
 
-1. Mark the current branch's active thread as ``Visited``.
-2. Look for any thread marked ``Backtrack`` in this branch.
-3. If found, promote it to ``Active``, set it as the branch's new choice, and
-   reset the replay position. The next execution will replay up to this branch
-   and then diverge.
-4. If no backtrack thread is found, pop the branch and continue walking
-   backward.
-5. If all branches are exhausted, exploration is complete.
+1. Save the active thread's access information in the trace cache
+   (``prev_thread_all_accesses``) for sleep set propagation in future
+   executions.
+2. Mark the current branch's active thread as ``Visited`` and add it to
+   the sleep set.
+3. Remove the current thread's branch from the wakeup tree.
+4. Look for a non-empty wakeup tree in this branch. Pick the next thread
+   via ``min_thread()`` and extract the subtree for wakeup guidance.
+5. If the wakeup tree is empty, pop the branch and continue walking backward.
+6. If all branches are exhausted, exploration is complete.
 
-This is a standard depth-first search over the tree of scheduling choices,
-pruned by DPOR so that only branches with genuine conflicts are explored.
+Sleep set propagation
+~~~~~~~~~~~~~~~~~~~~~~
+
+Sleep sets prevent redundant exploration of equivalent interleavings. A thread
+is **asleep** at a branch if its next action is independent of all the actions
+that will be taken before it next runs.
+
+The propagation works in two stages:
+
+1. **During replay**: At each replayed position, ``propagate_sleep()`` carries
+   sleeping threads forward. For each sleeping thread *q*, the engine checks
+   whether *q*'s recorded accesses are independent of the active thread *p*'s
+   accesses (using ``accesses_are_independent()``). If independent, *q* stays
+   asleep; if conflicting, *q* is woken.
+
+2. **At new branches**: Beyond the replay prefix, sleep set propagation uses
+   the **trace cache** (``prev_thread_all_accesses``) --- the union of all
+   accesses each thread performed in the previous execution. This conservative
+   approximation considers ALL of a sleeping thread's future accesses, not
+   just one position's snapshot. If any future access would conflict, the
+   thread is woken.
+
+The independence check (``access_kinds_conflict()``) mirrors the engine's
+conflict semantics:
+
+- **Read + Read**: independent (reads commute)
+- **WeakWrite + WeakWrite**: independent (different keys on same container)
+- **Write + anything**: dependent (writes conflict with all access kinds)
+
+This is particularly effective for *writer-readers* patterns: when a writer
+and multiple readers access the same object, the readers' accesses are
+independent of each other, so DPOR explores only :math:`2^N` interleavings
+for *N* readers (matching the theoretical optimum from JACM'17 Table 1)
+instead of :math:`(N+1)!`.
+
+This is a depth-first search over the tree of scheduling choices, pruned by
+DPOR so that only branches with genuine conflicts are explored, and further
+reduced by sleep sets so that equivalent orderings of independent actions are
+not re-explored.
 
 
 Preemption bounding
@@ -526,40 +636,59 @@ corresponds to the `Mazurkiewicz traces
 <https://en.wikipedia.org/wiki/Trace_theory>`_ --- equivalence classes of
 interleavings under independent-operation reordering.
 
+Sleep set propagation further reduces exploration by recognizing fine-grained
+independence. For example, a writer with *N* readers on the same object
+requires :math:`2^N` interleavings (each reader can go before or after the
+writer), not :math:`(N+1)!` --- the reader orderings are equivalent.
+
 
 Data structures
 ---------------
 
-The implementation is split across six Rust modules in ``crates/dpor/src/``:
+The implementation is split across seven Rust modules in ``crates/dpor/src/``:
 
 ``vv.rs`` --- Vector clocks
     ``VersionVec``: a contiguous ``Vec<u32>`` indexed by thread ID with
     ``increment``, ``join``, ``partial_le``, and ``concurrent_with`` operations.
 
 ``access.rs`` --- Access records
-    ``AccessKind`` (``Read`` | ``Write``) and ``Access``, which stores the
-    ``path_id`` (branch index where the access occurred), the thread's
-    ``dpor_vv`` at that moment, and the ``thread_id``.
+    ``AccessKind`` (``Read``, ``Write``, ``WeakWrite``, ``WeakRead``) and
+    ``Access``, which stores the ``path_id`` (branch index where the access
+    occurred), the thread's ``dpor_vv`` at that moment, and the ``thread_id``.
+    ``WeakWrite`` is used for container subscript writes (different keys on the
+    same container are independent); ``WeakRead`` is used for container loads
+    before subscripting.
 
 ``object.rs`` --- Shared object state
-    ``ObjectState`` tracks the last access and last write access to each object.
-    ``last_dependent_access(kind)`` returns the relevant prior access for
-    conflict detection.
+    ``ObjectState`` tracks per-thread access history for each access kind.
+    ``dependent_accesses(kind)`` returns all prior accesses that conflict with
+    the new access for race detection.
 
 ``thread.rs`` --- Thread state
-    ``Thread`` holds the two vector clocks (``causality`` and ``dpor_vv``) and
-    the ``finished``/``blocked`` flags. ``ThreadStatus`` is the per-branch
+    ``Thread`` holds two vector clocks (``causality`` and ``dpor_vv``) plus
+    ``io_vv`` (for I/O operations, which omit lock-based happens-before so
+    that I/O always appears concurrent). ``ThreadStatus`` is the per-branch
     status enum used by the exploration tree.
 
+``wakeup_tree.rs`` --- Wakeup trees
+    ``WakeupTree`` and ``WakeupNode``: an ordered tree of thread-ID sequences
+    for exploring alternative interleavings (Definition 6.1, JACM'17 p.21--22).
+    Supports insert, remove, subtree extraction, and min-thread queries.
+
 ``path.rs`` --- Exploration tree
-    ``Branch`` and ``Path``. ``Path`` drives scheduling, backtracking, and
-    depth-first advancement through the exploration tree.
+    ``Branch`` and ``Path``. Each ``Branch`` holds thread statuses, a wakeup
+    tree, a sleep set, and per-thread access records. ``Path`` drives
+    scheduling (with sleep set propagation and wakeup subtree guidance),
+    backtracking (with ``notdep`` sequence computation), and depth-first
+    advancement. The ``prev_thread_all_accesses`` trace cache enables sleep
+    set propagation to new branches beyond the replay prefix.
 
 ``engine.rs`` --- Orchestration
     ``DporEngine`` ties everything together. ``Execution`` holds per-run state
-    (threads, objects, lock release clocks, schedule trace). The engine
-    processes accesses and syncs, inserts backtrack points, and advances to the
-    next execution.
+    (threads, objects, lock release clocks, schedule trace). The engine detects
+    races during execution, collects them as ``PendingRace`` entries, processes
+    deferred races at the end of each execution to compute ``notdep`` wakeup
+    sequences, and advances to the next execution.
 
 
 Python API
@@ -601,9 +730,13 @@ module. The two Python-visible classes are ``PyDporEngine`` and
            break  # all interleavings explored
 
 ``report_access(execution, thread_id, object_id, kind)``
-    Report a shared-memory access. ``kind`` is ``"read"`` or ``"write"``.
-    ``object_id`` is an opaque ``u64`` that uniquely identifies the shared
-    object (e.g., ``id(obj)``).
+    Report a shared-memory access. ``kind`` is one of ``"read"``, ``"write"``,
+    ``"weak_write"`` (container subscript writes --- different keys on the
+    same container are independent), or ``"weak_read"`` (container loads
+    before subscripting). ``object_id`` is an opaque ``u64`` that uniquely
+    identifies the shared object. Frontrun uses stable monotonic IDs
+    (``StableObjectIds``) rather than ``id(obj)`` to ensure object keys are
+    consistent across executions.
 
 ``report_sync(execution, thread_id, event_type, sync_id)``
     Report a synchronization event. ``event_type`` is one of
@@ -648,6 +781,16 @@ Further reading
   Model Checking Software"
   <https://dl.acm.org/doi/10.1145/1040305.1040315>`_, POPL 2005 --- the
   original DPOR paper.
+- Parosh Aziz Abdulla, Stavros Aronis, Bengt Jonsson, and Konstantinos Sagonas,
+  `"Optimal Dynamic Partial Order Reduction"
+  <https://dl.acm.org/doi/10.1145/2535838.2535845>`_, POPL 2014 --- source
+  sets and optimal exploration.
+- Parosh Aziz Abdulla, Stavros Aronis, Bengt Jonsson, and Konstantinos Sagonas,
+  `"Source Sets: A Foundation for Optimal Dynamic Partial Order Reduction"
+  <https://doi.org/10.1145/3073408>`_, JACM 2017 --- the full journal version
+  with wakeup trees, deferred race detection, ``notdep`` sequences, and
+  algorithms for locks/disabling. Frontrun's DPOR engine implements key ideas
+  from Algorithms 1 and 2 of this paper.
 - Madanlal Musuvathi and Shaz Qadeer, `"Iterative Context Bounding for
   Systematic Testing of Multithreaded Programs"
   <https://www.microsoft.com/en-us/research/publication/iterative-context-bounding-for-systematic-testing-of-multithreaded-programs/>`_,

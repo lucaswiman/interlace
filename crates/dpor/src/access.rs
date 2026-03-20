@@ -1,4 +1,9 @@
 //! DPOR access tracking.
+//!
+//! Records shared memory accesses for race detection. Two accesses form a
+//! **race** (JACM'17 Def 3.3 p.13-14) when they are from different threads,
+//! at least one is a write, they access the same object, and they are not
+//! ordered by the happens-before relation.
 
 use crate::vv::VersionVec;
 
@@ -25,6 +30,10 @@ pub enum AccessKind {
 }
 
 /// Records an access to a shared object for DPOR dependency detection.
+/// The `path_id` identifies the scheduling point (position in the execution
+/// sequence E), used to determine where to insert backtrack points.
+/// The `dpor_vv` captures the happens-before state at the time of access,
+/// used to check for races: e ⋖_E e' when ¬(e →_E e') (JACM'17 p.13-14).
 #[derive(Clone, Debug)]
 pub struct Access {
     pub path_id: usize,
@@ -37,6 +46,9 @@ impl Access {
         Self { path_id, dpor_vv, thread_id }
     }
 
+    /// Check if this access happens-before the given vector clock.
+    /// Paper: e →_E e' (Def 3.2, JACM'17 p.12). When this returns false,
+    /// the two events are concurrent and form a race (Def 3.3 p.13-14).
     pub fn happens_before(&self, later_vv: &VersionVec) -> bool {
         self.dpor_vv.partial_le(later_vv)
     }
