@@ -313,26 +313,23 @@ class IOEventDispatcher:
                 break
 
     def poll(self) -> None:
-        """Synchronously read all available pipe data and dispatch events.
+        """Synchronously flush pipe data and dispatch events.
 
-        On free-threaded Python (3.13t+) the background reader thread may
-        not have processed pipe data by the time the calling thread reaches
-        its next scheduling point.  Calling ``poll()`` from the DPOR drain
-        path ensures events are available immediately.
+        The background reader thread may have consumed bytes from the pipe
+        but not yet dispatched them to listeners (it holds ``_pipe_lock``
+        across the entire read→parse→dispatch cycle).  A ``select(0)``
+        guard would see an empty pipe and return early, missing events
+        that are mid-dispatch.
 
-        Uses ``select()`` as a fast guard: ``select`` is not intercepted by
-        the LD_PRELOAD library, whereas ``os.read`` is — each intercepted
-        read triggers ``getpeername`` + ``readlink`` syscalls on the pipe fd.
-        Skipping ``os.read`` when the pipe is empty avoids that overhead on
-        every opcode boundary.
+        Instead, we always call ``_read_parse_dispatch()`` which acquires
+        ``_pipe_lock``.  This synchronises with any in-progress reader
+        dispatch *and* reads any remaining data from the pipe (the read
+        end is non-blocking, so this is cheap when the pipe is empty).
+        The pipe read fd is excluded from LD_PRELOAD interception via
+        ``is_pipe_fd()``, so calling ``os.read`` on it incurs no extra
+        syscall overhead.
         """
         if self._read_fd is None or self._stopped:
-            return
-        try:
-            ready, _, _ = _select_mod.select([self._read_fd], [], [], 0)
-        except (OSError, ValueError):
-            return
-        if not ready:
             return
         self._read_parse_dispatch()
 
