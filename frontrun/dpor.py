@@ -2409,6 +2409,7 @@ def _reproduce_dpor_counterexample(
     reproduce_on_failure: int,
     lock_timeout: int | None,
     invariant: Callable[[T], bool] | None = None,
+    detect_io: bool = True,
 ) -> tuple[int, int]:
     """Measure how often a DPOR counterexample reproduces under the DPOR runner.
 
@@ -2439,7 +2440,7 @@ def _reproduce_dpor_counterexample(
                     setup,
                     threads,
                     timeout=timeout_per_run,
-                    detect_io=False,
+                    detect_io=detect_io,
                     deadlock_timeout=deadlock_timeout,
                 )
                 if invariant is not None and not invariant(replay_state):
@@ -2663,6 +2664,7 @@ def explore_dpor(
                         reproduce_on_failure=reproduce_on_failure,
                         lock_timeout=lock_timeout,
                         invariant=None,
+                        detect_io=detect_io,
                     )
                     result.reproduction_attempts = attempts
                     result.reproduction_successes = successes
@@ -2700,6 +2702,7 @@ def explore_dpor(
                         reproduce_on_failure=reproduce_on_failure,
                         lock_timeout=lock_timeout,
                         invariant=invariant,
+                        detect_io=detect_io,
                     )
                     result.reproduction_attempts = attempts
                     result.reproduction_successes = successes
