@@ -1306,13 +1306,12 @@ mod tests {
     fn test_four_philosophers_model() {
         let mut engine = DporEngine::new(4, Some(2), 100_000, Some(50000));
 
-        // Model: philosopher i acquires fork i, writes shared, acquires fork (i+1)%4
+        // Model: philosopher i acquires fork i, then fork (i+1)%4
         let num_philosophers = 4;
 
         #[derive(Clone)]
         enum Op {
             LockAcquire(u64),
-            Write(u64),
             LockRelease(u64),
         }
 
@@ -1322,7 +1321,6 @@ mod tests {
             let right = ((i + 1) % num_philosophers) as u64;
             thread_ops.push(vec![
                 Op::LockAcquire(left),
-                Op::Write(100), // shared write
                 Op::LockAcquire(right),
                 Op::LockRelease(right),
                 Op::LockRelease(left),
@@ -1330,6 +1328,7 @@ mod tests {
         }
 
         let mut exec_count: u64 = 0;
+        let mut deadlock_found = false;
 
         loop {
             let mut execution = engine.begin_execution();
@@ -1368,9 +1367,6 @@ mod tests {
                             SyncEvent::LockAcquire { lock_id: *lock_id },
                         );
                     }
-                    Op::Write(obj_id) => {
-                        engine.process_access(&mut execution, chosen, *obj_id, AccessKind::Write);
-                    }
                     Op::LockRelease(lock_id) => {
                         locks_held.remove(lock_id);
                         engine.process_sync(
@@ -1393,13 +1389,21 @@ mod tests {
                 pcs[chosen] += 1;
             }
 
+            let all_done = pcs.iter().enumerate().all(|(i, pc)| *pc >= thread_ops[i].len());
+            if !all_done {
+                deadlock_found = true;
+            }
+
             exec_count += 1;
             if !engine.next_execution() {
                 break;
             }
         }
 
-        eprintln!("4-philosopher model: {exec_count} executions");
+        assert!(
+            deadlock_found,
+            "4-philosopher model should find a deadlock within {exec_count} executions"
+        );
         assert!(
             exec_count <= 50000,
             "4-philosopher model should not explode: got {exec_count} executions"

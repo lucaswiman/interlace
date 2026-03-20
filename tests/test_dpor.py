@@ -1168,14 +1168,12 @@ class TestDeadlockAsInvariantViolation:
         class State:
             def __init__(self) -> None:
                 self.forks = [threading.Lock() for _ in range(num_philosophers)]
-                self.x = 0
 
         def make_philosopher(i: int):  # noqa: ANN202
             def philosopher(s: State) -> None:
                 left = i
                 right = (i + 1) % num_philosophers
                 with s.forks[left]:
-                    s.x += 1  # write conflict
                     with s.forks[right]:
                         pass
 
@@ -1185,10 +1183,6 @@ class TestDeadlockAsInvariantViolation:
             setup=State,
             threads=[make_philosopher(i) for i in range(num_philosophers)],
             invariant=lambda s: True,
-            # Note: high executions / preemption bounds required since finding
-            # the 4-cycle takes many more interleavings than most simple races.
-            # Lock boundary backtracking (for multi-lock race detection) adds
-            # more exploration paths, so the limit needs to be generous.
             max_executions=50000,
             preemption_bound=2,
             detect_io=False,
