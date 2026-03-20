@@ -1161,7 +1161,7 @@ class TestDeadlockAsInvariantViolation:
         )
 
     def test_dining_philosophers_four(self) -> None:
-        """Four dining philosophers with lock-order inversion on a circular set."""
+        """Four dining philosophers — pure lock-ordering deadlock on a circular set."""
 
         num_philosophers = 4
 
@@ -1200,6 +1200,48 @@ class TestDeadlockAsInvariantViolation:
         assert result.reproduction_successes == 10, (
             f"Expected 10/10 reproductions, got {result.reproduction_successes}/{result.reproduction_attempts}"
         )
+
+    def test_dining_philosophers_three_with_shared_write(self) -> None:
+        """Three dining philosophers with a shared write inside the critical section.
+
+        The ``s.x += 1`` generates both LOAD_ATTR (read) and STORE_ATTR (write)
+        at the opcode level, creating read-write conflicts between all threads.
+        This significantly expands the DPOR search tree compared to pure lock
+        operations, so we use N=3 to keep the exploration tractable.
+        """
+
+        num_philosophers = 3
+
+        class State:
+            def __init__(self) -> None:
+                self.forks = [threading.Lock() for _ in range(num_philosophers)]
+                self.x = 0
+
+        def make_philosopher(i: int):  # noqa: ANN202
+            def philosopher(s: State) -> None:
+                left = i
+                right = (i + 1) % num_philosophers
+                with s.forks[left]:
+                    s.x += 1
+                    with s.forks[right]:
+                        pass
+
+            return philosopher
+
+        result = explore_dpor(
+            setup=State,
+            threads=[make_philosopher(i) for i in range(num_philosophers)],
+            invariant=lambda s: True,
+            max_executions=50000,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=True,
+        )
+
+        assert not result.property_holds, "Dining philosophers deadlock should be found"
+        assert result.explanation is not None
+        assert "deadlock" in result.explanation.lower()
 
 
 # ---------------------------------------------------------------------------
