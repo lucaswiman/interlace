@@ -1077,6 +1077,129 @@ def _expand_slice_reads(
         _report_read(engine, execution, thread_id, container, repr(idx), lock, stable_ids)
 
 
+# ---------------------------------------------------------------------------
+# Scheduling coarsening: only yield at shared-access opcodes
+# ---------------------------------------------------------------------------
+#
+# Most opcodes (LOAD_FAST, STORE_FAST, BINARY_OP +, COPY, SWAP, etc.) only
+# manipulate thread-local state (the evaluation stack and f_locals).  They
+# never call _report_read/_report_write, so the DPOR engine doesn't need to
+# consider them as scheduling points.  By skipping the scheduler yield for
+# these opcodes, we dramatically reduce the DPOR search tree.
+#
+# Opcodes in _SHARED_ACCESS_OPCODES *may* report shared memory accesses and
+# must go through the full scheduler yield path.  Everything else just updates
+# the shadow stack without yielding.
+
+_SHARED_ACCESS_OPCODES = frozenset(
+    {
+        # Attribute access on (potentially shared) objects
+        "LOAD_ATTR",
+        "STORE_ATTR",
+        "DELETE_ATTR",
+        "LOAD_METHOD",  # 3.10 only
+        # Global / name access
+        "LOAD_GLOBAL",
+        "STORE_GLOBAL",
+        "LOAD_NAME",
+        # Closure / cell variable access
+        "LOAD_DEREF",
+        "STORE_DEREF",
+        # Subscript / slice access
+        "BINARY_SUBSCR",
+        "STORE_SUBSCR",
+        "DELETE_SUBSCR",
+        "BINARY_SLICE",
+        "STORE_SLICE",
+        # BINARY_OP may be subscript on 3.14 (checked at call site)
+        "BINARY_OP",
+        # Function / method calls (may invoke C-level methods)
+        "CALL",
+        "CALL_FUNCTION",
+        "CALL_METHOD",
+        "CALL_KW",
+        "CALL_FUNCTION_KW",
+        "CALL_FUNCTION_EX",
+        # Iterator operations on (potentially mutable) containers
+        "GET_ITER",
+        "FOR_ITER",
+    }
+)
+
+
+_CALL_OPCODES = frozenset({"CALL", "CALL_FUNCTION", "CALL_METHOD", "CALL_KW", "CALL_FUNCTION_KW", "CALL_FUNCTION_EX"})
+
+
+def _call_might_report_access(shadow: ShadowStack, argc: int) -> bool:
+    """Quick pre-check: does this CALL likely involve a C-method that reports access?
+
+    Mirrors the detection strategies in ``_process_opcode``'s CALL handler.
+    Returns True if any detectable C-method pattern is found on the shadow stack.
+    False negatives would miss accesses; false positives are harmless (extra scheduling).
+    """
+    scan_depth = min(argc + 3, len(shadow.stack))
+    for i in range(scan_depth):
+        item = shadow.stack[-(i + 1)]
+        if item is None:
+            continue
+        item_type = type(item)
+
+        # Strategy 1: Passthrough builtins (setattr, getattr, len, etc.)
+        if id(item) in _PASSTHROUGH_BUILTINS:
+            return True
+
+        # Strategy 2: Bound C methods on mutable __self__
+        if item_type is _BUILTIN_METHOD_TYPE or item_type is _METHOD_WRAPPER_TYPE:
+            self_obj = getattr(item, "__self__", None)
+            if self_obj is not None:
+                if not isinstance(self_obj, _IMMUTABLE_TYPES):
+                    return True  # C method on mutable object
+                # Check for immutable-self methods that read arguments (e.g. str.join)
+                method_name = getattr(item, "__name__", None)
+                if method_name in _IMMUTABLE_SELF_ARG_READERS:
+                    return True
+
+        # Strategy 2b: Container constructors (list, dict, etc.)
+        if item_type is type and item in _CONTAINER_CONSTRUCTORS:
+            return True
+
+        # Strategy 3: Wrapper descriptors on mutable types
+        if item_type is _WRAPPER_DESCRIPTOR_TYPE:
+            objclass = getattr(item, "__objclass__", None)
+            if objclass is not None and not issubclass(objclass, _IMMUTABLE_TYPES):
+                return True
+
+    return False
+
+
+def _is_shared_opcode(code: Any, instruction_offset: int) -> bool:
+    """Check whether an opcode at the given offset might access shared state.
+
+    Returns True for opcodes in _SHARED_ACCESS_OPCODES, with a special case
+    for BINARY_OP: only subscript variants (``[]``, ``NB_SUBSCR``) are shared;
+    arithmetic variants (+, -, *, etc.) are not.
+
+    CALL opcodes are NOT checked here — they require shadow stack inspection
+    via ``_call_might_report_access`` and are handled separately in the callbacks.
+    """
+    instrs = _get_instructions(code)
+    instr = instrs.get(instruction_offset)
+    if instr is None:
+        return False
+    op = instr.opname
+    # CALL opcodes are handled separately (need shadow stack inspection)
+    if op in _CALL_OPCODES:
+        return False
+    if op not in _SHARED_ACCESS_OPCODES:
+        return False
+    # BINARY_OP is only shared when it's a subscript operation (3.14+)
+    if op == "BINARY_OP":
+        argrepr = instr.argrepr
+        if not argrepr or ("[" not in argrepr and "NB_SUBSCR" not in argrepr.upper()):
+            return False
+    return True
+
+
 def _process_opcode(
     frame: Any,
     scheduler: DporScheduler,
@@ -1792,6 +1915,29 @@ class DporBytecodeRunner:
                 return None
 
             if event == "opcode":
+                # --- Scheduling coarsening ---
+                # Non-shared opcodes only manipulate thread-local state.
+                # Process the shadow stack directly without a scheduler yield.
+                # CALL opcodes need shadow stack inspection to decide.
+                # When detect_io is enabled, skip coarsening for CALL opcodes
+                # because I/O events arrive from C-level LD_PRELOAD interception
+                # and need scheduling points around open/read/write calls.
+                if not _is_shared_opcode(frame.f_code, frame.f_lasti):
+                    instrs = _get_instructions(frame.f_code)
+                    instr = instrs.get(frame.f_lasti)
+                    if instr is not None and instr.opname in _CALL_OPCODES:
+                        if _detect_io:
+                            scheduler.report_and_wait(frame, thread_id)
+                            frame.f_locals  # noqa: B018  — refresh f_locals before LocalsToFast
+                            return trace
+                        shadow = scheduler.get_shadow_stack(id(frame))
+                        argc = instr.arg or 0
+                        if _call_might_report_access(shadow, argc):
+                            scheduler.report_and_wait(frame, thread_id)
+                            frame.f_locals  # noqa: B018  — refresh f_locals before LocalsToFast
+                            return trace
+                    _process_opcode(frame, scheduler, thread_id)
+                    return trace
                 scheduler.report_and_wait(frame, thread_id)
                 # CPython 3.10-3.11 bug workaround: after our trace callback
                 # returns, CPython calls PyFrame_LocalsToFast(frame, 1) which
@@ -1903,6 +2049,39 @@ class DporBytecodeRunner:
             # the *new* scheduler.  Letting it through would call engine
             # methods on the wrong execution, causing PyO3 borrow conflicts.
             if getattr(_dpor_tls, "scheduler", None) is not scheduler:
+                return None
+
+            # --- Scheduling coarsening ---
+            # Non-shared opcodes (LOAD_FAST, STORE_FAST, BINARY_OP +, COPY,
+            # SWAP, etc.) only manipulate thread-local state.  Process the
+            # shadow stack directly without entering the scheduler, avoiding
+            # a yield that would create an unnecessary DPOR scheduling point.
+            #
+            # CALL opcodes need special handling: _is_shared_opcode returns
+            # False for them so we check the shadow stack to see if the
+            # callable is a C-method that would report shared access.
+            if not _is_shared_opcode(code, instruction_offset):
+                # Check if this is a CALL opcode that needs shadow stack inspection.
+                # When detect_io is enabled, all CALL opcodes must yield because
+                # I/O events arrive from C-level LD_PRELOAD interception.
+                instrs = _get_instructions(code)
+                instr = instrs.get(instruction_offset)
+                if instr is not None and instr.opname in _CALL_OPCODES:
+                    if _detect_io:
+                        frame = sys._getframe(1)
+                        scheduler.report_and_wait(frame, thread_id)
+                        return None
+                    frame = sys._getframe(1)
+                    shadow = scheduler.get_shadow_stack(id(frame))
+                    argc = instr.arg or 0
+                    if _call_might_report_access(shadow, argc):
+                        scheduler.report_and_wait(frame, thread_id)
+                        return None
+                    # No C-method detected; process shadow stack without yield
+                    _process_opcode(frame, scheduler, thread_id)
+                    return None
+                frame = sys._getframe(1)
+                _process_opcode(frame, scheduler, thread_id)
                 return None
 
             # Use sys._getframe() to get the actual frame for _process_opcode.
