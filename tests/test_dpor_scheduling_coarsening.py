@@ -110,6 +110,72 @@ class TestSchedulingCoarsening:
             f"Expected <=500 executions with scheduling coarsening, got {result.num_explored}"
         )
 
+    def test_dining_philosophers_two_exhaustive(self) -> None:
+        """Two dining philosophers with shared write, exhaustive exploration."""
+        num_philosophers = 2
+
+        class State:
+            def __init__(self) -> None:
+                self.forks = [threading.Lock() for _ in range(num_philosophers)]
+                self.x = 0
+
+        def make_philosopher(i: int):  # noqa: ANN202
+            def philosopher(s: State) -> None:
+                left = i
+                right = (i + 1) % num_philosophers
+                with s.forks[left]:
+                    s.x += 1
+                    with s.forks[right]:
+                        pass
+
+            return philosopher
+
+        result = explore_dpor(
+            setup=State,
+            threads=[make_philosopher(i) for i in range(num_philosophers)],
+            invariant=lambda s: True,
+            max_executions=5000,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=False,
+        )
+
+        print(f"\nN=2 exhaustive: {result.num_explored} executions, failures={len(result.failures)}")
+
+    def test_dining_philosophers_three_exhaustive(self) -> None:
+        """Three dining philosophers with shared write, exhaustive exploration."""
+        num_philosophers = 3
+
+        class State:
+            def __init__(self) -> None:
+                self.forks = [threading.Lock() for _ in range(num_philosophers)]
+                self.x = 0
+
+        def make_philosopher(i: int):  # noqa: ANN202
+            def philosopher(s: State) -> None:
+                left = i
+                right = (i + 1) % num_philosophers
+                with s.forks[left]:
+                    s.x += 1
+                    with s.forks[right]:
+                        pass
+
+            return philosopher
+
+        result = explore_dpor(
+            setup=State,
+            threads=[make_philosopher(i) for i in range(num_philosophers)],
+            invariant=lambda s: True,
+            max_executions=50000,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=False,
+        )
+
+        print(f"\nN=3 exhaustive: {result.num_explored} executions, failures={len(result.failures)}")
+
     def test_lost_update_still_detected(self) -> None:
         """Scheduling coarsening must not hide real races.
 
