@@ -30,6 +30,10 @@ A large number of bugfixes from having Claude run frontrun against dozens of ope
 source libraries. DPOR should now be more accurate about identifying conflict
 points and succeed in identifying more complex races.
 
+**Optimal DPOR**
+
+Switched DPOR backend to use wakeup trees and source sets, meaning that each equivalence class of trace should be explored exactly once.
+
 0.1.0 (2026-02-27)
 -------------------
 
