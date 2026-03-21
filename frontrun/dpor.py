@@ -392,6 +392,20 @@ class DporScheduler:
         """Block until it's this thread's turn. Returns False when done."""
         return self._report_and_wait(None, thread_id)
 
+    def _all_other_live_threads_blocked_by_current(self, thread_id: int) -> bool:
+        from frontrun._deadlock import get_wait_for_graph
+
+        graph = get_wait_for_graph()
+        if graph is None:
+            return False
+        live_other_threads = {
+            tid for tid in range(self.num_threads) if tid != thread_id and tid not in self._threads_done
+        }
+        if not live_other_threads:
+            return True
+        blocked_threads = graph.reverse_reachable_threads_from(thread_id)
+        return live_other_threads.issubset(blocked_threads)
+
     def report_and_wait(self, frame: Any, thread_id: int) -> bool:
         """Report accesses for an opcode and wait for this thread's turn.
 
@@ -476,6 +490,14 @@ class DporScheduler:
                     if self._finished or self._error:
                         return False
                     if self._current_thread == thread_id:
+                        current_pending = self._pending_io_by_thread.get(thread_id)
+                        if (
+                            frame is None
+                            and current_pending
+                            and self._lock_depth_by_thread.get(thread_id, 0) > 0
+                            and self._all_other_live_threads_blocked_by_current(thread_id)
+                        ):
+                            return True
                         _flush_other_pending_io_for_current_io()
                         # Flush deferred I/O only once this thread actually owns
                         # the current DPOR step. On free-threaded Python a thread

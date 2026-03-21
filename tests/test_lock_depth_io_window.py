@@ -18,6 +18,7 @@ The intended rule is:
 
 from __future__ import annotations
 
+from frontrun._deadlock import install_wait_for_graph, uninstall_wait_for_graph
 from frontrun.dpor import DporScheduler, _dpor_tls
 
 
@@ -32,8 +33,10 @@ class _FakeExecution:
 class _FakeEngine:
     def __init__(self) -> None:
         self.io_calls: list[tuple[int, int, str]] = []
+        self.schedule_calls = 0
 
     def schedule(self, execution: _FakeExecution) -> int | None:
+        self.schedule_calls += 1
         runnable = execution.runnable_threads()
         return runnable[0] if runnable else None
 
@@ -45,6 +48,7 @@ class TestLockDepthIoWindow:
     def teardown_method(self) -> None:
         _dpor_tls.pending_io = []
         _dpor_tls.lock_depth = 0
+        uninstall_wait_for_graph()
 
     def test_flushes_current_thread_pending_io_immediately_outside_lock(self) -> None:
         engine = _FakeEngine()
@@ -98,3 +102,29 @@ class TestLockDepthIoWindow:
         assert engine.io_calls == [(0, 789, "write"), (1, 999, "read")]
         assert scheduler._pending_io_by_thread[0] == []
         assert _dpor_tls.pending_io == []
+
+    def test_skips_io_scheduling_point_when_all_other_threads_wait_on_held_locks(self) -> None:
+        engine = _FakeEngine()
+        execution = _FakeExecution([0, 1])
+        scheduler = DporScheduler(engine, execution, num_threads=2)
+        graph = install_wait_for_graph()
+        graph.add_holding(0, 123, kind="lock")
+        graph.add_waiting(1, 123, kind="lock")
+
+        pending_io = [(321, "write")]
+        scheduler._pending_io_by_thread[0] = pending_io
+        scheduler._lock_depth_by_thread[0] = 1
+        scheduler._current_thread = 0
+        _dpor_tls.pending_io = pending_io
+        _dpor_tls.lock_depth = 1
+        baseline_schedule_calls = engine.schedule_calls
+
+        assert scheduler._report_and_wait(None, 0)
+
+        assert engine.schedule_calls == baseline_schedule_calls, (
+            "When all other live threads are transitively blocked behind the "
+            "current thread's held locks, the I/O boundary should not create a "
+            "new scheduling point."
+        )
+        assert engine.io_calls == []
+        assert _dpor_tls.pending_io == [(321, "write")]
