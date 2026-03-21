@@ -297,6 +297,7 @@ class DporScheduler:
         preload_bridge: _PreloadBridge | None = None,
         detect_io: bool = False,
         stable_ids: StableObjectIds | None = None,
+        track_dunder_dict_accesses: bool = False,
     ) -> None:
         self.engine = engine
         self.execution = execution
@@ -306,6 +307,7 @@ class DporScheduler:
         self._preload_bridge = preload_bridge
         self._detect_io = detect_io
         self._stable_ids = stable_ids if stable_ids is not None else StableObjectIds()
+        self._track_dunder_dict_accesses = track_dunder_dict_accesses
         # On free-threaded Python, PyO3 &mut self borrows are non-blocking
         # (try-or-panic).  A single engine_lock serialises ALL calls to the
         # engine and execution objects across worker threads, the sync
@@ -1403,7 +1405,8 @@ def _process_opcode(
         _report_read(engine, execution, thread_id, obj, attr, elock, sids)
         # Also report on obj.__dict__ so LOAD_ATTR conflicts with
         # STORE_SUBSCR on the same __dict__ (cross-path detection).
-        if obj is not None:
+        # Off by default: doubles wakeup tree insertions for rare benefit.
+        if getattr(scheduler, "_track_dunder_dict_accesses", False) and obj is not None:
             try:
                 _obj_dict = object.__getattribute__(obj, "__dict__")
                 _report_read(engine, execution, thread_id, _obj_dict, attr, elock, sids)
@@ -1447,7 +1450,8 @@ def _process_opcode(
         _report_write(engine, execution, thread_id, obj, instr.argval, elock, sids)
         # Also report on obj.__dict__ so STORE_ATTR conflicts with
         # STORE_SUBSCR on the same __dict__ (cross-path detection).
-        if obj is not None:
+        # Off by default: doubles wakeup tree insertions for rare benefit.
+        if getattr(scheduler, "_track_dunder_dict_accesses", False) and obj is not None:
             try:
                 _obj_dict = object.__getattribute__(obj, "__dict__")
                 _report_write(engine, execution, thread_id, _obj_dict, instr.argval, elock, sids)
@@ -2535,6 +2539,7 @@ def explore_dpor(
     warn_nondeterministic_sql: bool = True,
     lock_timeout: int | None = None,
     trace_packages: list[str] | None = None,
+    track_dunder_dict_accesses: bool = False,
 ) -> InterleavingResult:
     """Systematically explore interleavings using DPOR.
 
@@ -2585,6 +2590,12 @@ def explore_dpor(
             trace in addition to user code.  By default, code in
             site-packages is skipped.  Use this to include specific
             installed packages, e.g. ``["django_*", "mylib.*"]``.
+        track_dunder_dict_accesses: If True, report accesses on ``obj.__dict__``
+            in addition to direct attribute accesses.  This catches the
+            rare case where one thread uses ``self.x = v`` and another
+            uses ``self.__dict__['x'] = v``, but doubles wakeup tree
+            insertions and can cause combinatorial explosion.  Default
+            False.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample found.
@@ -2667,6 +2678,7 @@ def explore_dpor(
                 preload_bridge=preload_bridge,
                 detect_io=detect_io,
                 stable_ids=stable_ids,
+                track_dunder_dict_accesses=track_dunder_dict_accesses,
             )
             runner = DporBytecodeRunner(scheduler, detect_io=detect_io, preload_bridge=preload_bridge)
 
