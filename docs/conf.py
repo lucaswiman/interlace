@@ -1,6 +1,8 @@
 # Configuration file for Sphinx documentation builder
+import os
 import sys
 from pathlib import Path
+from typing import Any
 
 # Add parent directory to path so we can import frontrun
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -64,3 +66,36 @@ html_theme_options = {
     "source_branch": "main",
     "source_directory": "docs/",
 }
+
+
+def _generate_dpor_example_report(app: Any) -> None:
+    """Generate an interactive HTML report for the bank-transfer race example.
+
+    The report is written to docs/_static/dpor_bank_transfer.html so that
+    Sphinx copies it into the built site automatically.  The script is run
+    via the ``frontrun`` CLI wrapper (same directory as sys.executable) so
+    that the LD_PRELOAD environment is set up correctly.  If the frontrun
+    binary or Rust DPOR extension is not available the step is silently
+    skipped so that the rest of the documentation still builds.
+    """
+    import subprocess
+
+    report_path = os.path.join(os.path.dirname(__file__), "_static", "dpor_bank_transfer.html")
+    example_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples", "dpor_bank_transfer.py"))
+    frontrun_bin = os.path.join(os.path.dirname(sys.executable), "frontrun")
+    try:
+        result = subprocess.run(
+            [frontrun_bin, "python", example_file, report_path],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        if result.stdout.strip():
+            print(result.stdout.strip())
+        print(f"Generated DPOR example report: {report_path}")
+    except Exception as exc:
+        print(f"Warning: skipping DPOR example report generation ({exc})")
+
+
+def setup(app: Any) -> None:
+    app.connect("builder-inited", _generate_dpor_example_report)

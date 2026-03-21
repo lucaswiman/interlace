@@ -229,6 +229,74 @@ Async trace markers let you control interleaving at ``await`` boundaries:
    assert account.balance == 150  # one transfer lost
 
 
+Interactive HTML Exploration Reports
+--------------------------------------
+
+``explore_dpor()`` can write a self-contained interactive HTML report that
+lets you step through every explored execution, inspect thread switch-points,
+and see the conflicting attribute accesses that caused each reordering.
+
+**Generating a report from pytest** --- pass ``--frontrun-report PATH`` to the
+``frontrun`` test runner:
+
+.. code-block:: bash
+
+   frontrun pytest tests/ --frontrun-report dpor_report.html
+
+**Generating a report from a script** --- set ``_global_report_path`` before
+calling ``explore_dpor()``:
+
+.. code-block:: python
+
+   import frontrun._report
+   from frontrun.dpor import explore_dpor
+
+   class Accounts:
+       def __init__(self) -> None:
+           self.a = 100
+           self.b = 100
+           self.c = 100
+
+   def transfer_a_to_b(accounts: Accounts) -> None:
+       if accounts.a >= 60:
+           accounts.a -= 60
+           accounts.b += 60
+
+   def transfer_b_to_c(accounts: Accounts) -> None:
+       if accounts.b >= 80:
+           accounts.b -= 80
+           accounts.c += 80
+
+   frontrun._report._global_report_path = "dpor_report.html"
+   try:
+       result = explore_dpor(
+           setup=Accounts,
+           threads=[transfer_a_to_b, transfer_b_to_c],
+           invariant=lambda accs: accs.a + accs.b + accs.c == 300,
+           preemption_bound=2,
+       )
+       print(result.explanation)
+   finally:
+       frontrun._report._global_report_path = None
+
+The race here is a classic **lost update on account B**: both threads
+read-modify-write ``accounts.b`` without any lock.  When one thread's write
+overwrites the other's, the total balance drifts away from 300.
+
+`View an example report generated from this code <_static/dpor_bank_transfer.html>`_
+
+The report shows every explored interleaving as a timeline.  Executions where
+the invariant holds are shown in green; failing ones in red.  Click any
+execution button or use the arrow keys to step through them.  Each switch-point
+panel shows the source line and opcode where the scheduler switched threads,
+making it easy to pinpoint exactly which access caused the conflict.
+
+The source for the example above lives in
+``examples/dpor_bank_transfer.py``; run it directly to regenerate the report::
+
+    python examples/dpor_bank_transfer.py my_report.html
+
+
 Real-World Case Study: SQLAlchemy ORM
 ---------------------------------------
 
