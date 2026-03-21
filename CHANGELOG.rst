@@ -3,7 +3,7 @@ Changelog
 
 All releases: https://github.com/lucaswiman/frontrun/releases
 
-0.2.0 (unreleased)
+0.2.0 (2026-03-20)
 -------------------
 
 **Redis and SQL conflict detection**
