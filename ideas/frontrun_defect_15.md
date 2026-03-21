@@ -39,9 +39,9 @@ creates additional cross-thread conflict points:
 
 - `articles` row: READ (SELECT) vs WRITE (UPDATE) — 2 conflicts
 - `articles:seq`: READ (UPDATE phantom) vs READ — more conflicts
-- `revisions` table: WEAK_WRITE vs WEAK_WRITE (no conflict, fixed)
-- `versions:seq`: READ (SELECT) vs WEAK_WRITE (INSERT) — the real one
-- `versions` table: READ vs WEAK_WRITE — another real one
+- `revisions` table: WRITE vs WRITE — conflict even though rows differ
+- `versions:seq`: READ (SELECT) vs WRITE (INSERT) — the real one
+- `versions` table: READ vs WRITE — another real one
 
 DPOR explores all interleavings in its backtrack tree.  With only the
 version operations, the tree is small enough (2-4 interleavings) to
@@ -95,14 +95,6 @@ Approach 2 seems most promising for the general case — many real-world
 races involve operations on table X interspersed with operations on
 table Y, and DPOR shouldn't let Y-conflicts prevent exploration of
 X-interleavings.
-
-## Changes already made
-
-- **INSERT weak_write** (`_sql_cursor.py`): INSERT operations use
-  `weak_write` for table-level and `:seq` resources.  Two concurrent
-  INSERTs to the same table don't conflict (different rows), eliminating
-  false INSERT-INSERT backtrack points.  SELECT-INSERT phantom read
-  detection is preserved via READ-WEAK_WRITE conflicts.
 
 ## Test cases
 
