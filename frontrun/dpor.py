@@ -2066,12 +2066,11 @@ class DporBytecodeRunner:
                 # I/O events arrive from C-level LD_PRELOAD interception.
                 instrs = _get_instructions(code)
                 instr = instrs.get(instruction_offset)
+                frame = sys._getframe(1)
                 if instr is not None and instr.opname in _CALL_OPCODES:
                     if _detect_io:
-                        frame = sys._getframe(1)
                         scheduler.report_and_wait(frame, thread_id)
                         return None
-                    frame = sys._getframe(1)
                     shadow = scheduler.get_shadow_stack(id(frame))
                     argc = instr.arg or 0
                     if _call_might_report_access(shadow, argc):
@@ -2080,7 +2079,6 @@ class DporBytecodeRunner:
                     # No C-method detected; process shadow stack without yield
                     _process_opcode(frame, scheduler, thread_id)
                     return None
-                frame = sys._getframe(1)
                 _process_opcode(frame, scheduler, thread_id)
                 return None
 
