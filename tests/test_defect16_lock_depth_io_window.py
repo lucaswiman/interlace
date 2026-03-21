@@ -4,16 +4,16 @@ Problem statement
 -----------------
 
 Sync DPOR buffers I/O in ``pending_io`` and reports it to the Rust engine at
-the next scheduling point. Historically that flush was gated only on
-``lock_depth == 0``. That is unsound: if thread A holds an unrelated lock but
-thread B is still runnable, deferring A's I/O moves the wakeup-tree insertion
-point past a real race window.
+the next scheduling point. Deferring every I/O until ``lock_depth == 0`` keeps
+same-lock critical sections compact, but it can hide a real race window when a
+different thread reaches a competing I/O operation before the lock is released.
 
-The sound condition is scheduler-based, not lock-count-based:
+The intended rule is:
 
-  - If another thread is runnable, pending I/O must flush immediately.
-  - Deferral is only safe while the current thread is inside a lock and no
-    competing thread can run.
+  - A thread keeps its own pending I/O buffered while it is inside a lock.
+  - When another thread reaches a real I/O boundary, deferred I/O from
+    lock-held threads must be flushed before the current thread reports its own
+    I/O.
 """
 
 from __future__ import annotations
@@ -46,34 +46,55 @@ class TestLockDepthIoWindow:
         _dpor_tls.pending_io = []
         _dpor_tls.lock_depth = 0
 
-    def test_flushes_pending_io_inside_lock_when_other_thread_is_runnable(self) -> None:
-        engine = _FakeEngine()
-        execution = _FakeExecution([0, 1])
-        scheduler = DporScheduler(engine, execution, num_threads=2)
-
-        _dpor_tls.pending_io = [(123, "write")]
-        _dpor_tls.lock_depth = 1
-
-        assert scheduler._report_and_wait(None, 0)
-
-        assert engine.io_calls == [(0, 123, "write")], (
-            "Pending I/O should flush immediately when another thread is runnable, "
-            "even if the current thread still holds a lock."
-        )
-        assert _dpor_tls.pending_io == []
-
-    def test_keeps_pending_io_buffered_while_inside_lock_and_no_other_thread_can_run(self) -> None:
+    def test_flushes_current_thread_pending_io_immediately_outside_lock(self) -> None:
         engine = _FakeEngine()
         execution = _FakeExecution([0])
         scheduler = DporScheduler(engine, execution, num_threads=1)
 
-        _dpor_tls.pending_io = [(456, "read")]
+        pending_io = [(123, "write")]
+        scheduler._pending_io_by_thread[0] = pending_io
+        scheduler._lock_depth_by_thread[0] = 0
+        _dpor_tls.pending_io = pending_io
+        _dpor_tls.lock_depth = 0
+
+        assert scheduler._report_and_wait(None, 0)
+
+        assert engine.io_calls == [(0, 123, "write")]
+        assert _dpor_tls.pending_io == []
+
+    def test_keeps_current_thread_pending_io_buffered_inside_lock(self) -> None:
+        engine = _FakeEngine()
+        execution = _FakeExecution([0, 1])
+        scheduler = DporScheduler(engine, execution, num_threads=2)
+
+        pending_io = [(456, "read")]
+        scheduler._pending_io_by_thread[0] = pending_io
+        scheduler._lock_depth_by_thread[0] = 1
+        _dpor_tls.pending_io = pending_io
         _dpor_tls.lock_depth = 1
 
         assert scheduler._report_and_wait(None, 0)
 
-        assert engine.io_calls == [], (
-            "Deferral should remain in place when the current thread is inside a "
-            "lock and no competing thread is runnable."
-        )
+        assert engine.io_calls == []
         assert _dpor_tls.pending_io == [(456, "read")]
+
+    def test_flushes_other_threads_deferred_io_when_current_thread_reaches_io_boundary(self) -> None:
+        engine = _FakeEngine()
+        execution = _FakeExecution([0, 1])
+        scheduler = DporScheduler(engine, execution, num_threads=2)
+
+        deferred_other = [(789, "write")]
+        current_io = [(999, "read")]
+        scheduler._pending_io_by_thread[0] = deferred_other
+        scheduler._pending_io_by_thread[1] = current_io
+        scheduler._lock_depth_by_thread[0] = 1
+        scheduler._lock_depth_by_thread[1] = 0
+        scheduler._current_thread = 1
+        _dpor_tls.pending_io = current_io
+        _dpor_tls.lock_depth = 0
+
+        assert scheduler._report_and_wait(None, 1)
+
+        assert engine.io_calls == [(0, 789, "write"), (1, 999, "read")]
+        assert scheduler._pending_io_by_thread[0] == []
+        assert _dpor_tls.pending_io == []
