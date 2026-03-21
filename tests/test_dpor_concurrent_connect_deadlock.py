@@ -1,17 +1,17 @@
-"""Regression test for Defect #15: DPOR deadlock when tracing django-reversion code.
+"""Regression test for Defect #15: DPOR cannot find django-reversion races.
 
-django-reversion DPOR tests deadlock because tracing reversion code creates
-a massive number of false conflict points.  Both threads execute
-reversion.revisions code (signal handlers, version creation), and every
-LOAD_GLOBAL / LOAD_ATTR in that code reports a READ on the *same* module
-globals dict and class __dict__ objects.  DPOR treats these as real
-conflicts, creating exponentially many backtrack points that drown out
-the actual database-level race.
+django-reversion's ``create_revision()`` pattern involves many SQL
+operations per thread (INSERT Revision, INSERT Version, SELECT for
+ignore_duplicates check, plus the original model operations).  Each SQL
+operation becomes a DPOR scheduling point and conflict point.  The
+resulting explosion of the backtrack tree prevents DPOR from reaching
+the critical interleaving that reveals the race condition, even though
+the race exists and is easily triggered by hand.
 
-Without tracing reversion code, DPOR finds the ignore_duplicates race in
-2 interleavings (~10 s).  With trace_packages=["reversion.*"], DPOR
-explores 50+ interleavings in 60 s without ever reaching the critical
-interleaving — effectively a deadlock from the user's perspective.
+Without django-reversion (plain Django ORM with 2-3 SQL operations per
+thread), DPOR finds races in 2 interleavings.  With django-reversion's
+create_revision() (8+ SQL operations per thread), DPOR explores 30-80
+interleavings in 60 s without finding the race.
 """
 
 from __future__ import annotations
@@ -133,62 +133,68 @@ def _pg_available():
 
 
 # ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-class _State:
-    def __init__(self) -> None:
-        Article.objects.all().delete()
-        Revision.objects.all().delete()
-        Version.objects.all().delete()
-        with reversion_mod.create_revision():
-            self.article = Article.objects.create(title="Test Article", content="initial")
-            reversion_mod.set_comment("Initial version")
-        self.results: list[str | None] = [None, None]
-
-
-def _make_thread_fn(idx: int):
-    def _thread_fn(state: _State) -> None:
-        try:
-            with reversion_mod.create_revision():
-                article = Article.objects.get(pk=state.article.pk)
-                article.content = "updated"
-                article.save()
-                reversion_mod.set_comment(f"Edit by thread {idx}")
-            state.results[idx] = "saved"
-        except Exception as exc:
-            state.results[idx] = f"error: {type(exc).__name__}: {exc}"
-
-    return _thread_fn
-
-
-def _invariant(state: _State) -> bool:
-    if not (state.results[0] == "saved" and state.results[1] == "saved"):
-        return True
-    version_count = Version.objects.filter(object_id=str(state.article.pk)).count()
-    return version_count <= 2
-
-
-# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 class TestDporReversionDeadlock:
-    """Defect #15: DPOR cannot find django-reversion races when tracing reversion code."""
+    """Defect #15: DPOR cannot find django-reversion races.
 
-    def test_dpor_finds_race_with_reversion_traced(self, _pg_available) -> None:
-        """DPOR should find the ignore_duplicates TOCTOU race even when
-        tracing reversion code.
+    The many SQL operations inside create_revision() create too many
+    I/O-level conflict points, causing DPOR's backtrack tree to explode.
+    DPOR explores dozens of interleavings but never reaches the critical
+    schedule that reveals the ignore_duplicates TOCTOU race.
+    """
 
-        With trace_packages=["reversion.*"], both threads execute
-        reversion.revisions code that touches the same module globals
-        and class __dict__ objects.  Every LOAD_GLOBAL / LOAD_ATTR is
-        reported as a shared-memory access, creating false conflicts
-        that explode the backtrack tree.
+    def test_dpor_finds_duplicate_version_race(self, _pg_available) -> None:
+        """Two concurrent create_revision() blocks saving the same object
+        with identical content should be detected as a race by DPOR.
 
-        Without trace_packages, DPOR finds this race in 2 interleavings.
-        With trace_packages, DPOR explores 50+ interleavings in 60 s
-        and never reaches the critical schedule.
+        Both threads:
+        1. Read the Article (SELECT)
+        2. Save it inside create_revision() — triggers reversion's
+           _add_to_revision() via post_save signal
+        3. _add_to_revision() checks ignore_duplicates (SELECT previous
+           version — both see none yet)
+        4. On context exit, _save_revision() creates Revision + Version
+
+        Invariant: with ignore_duplicates=True, at most 2 total Versions
+        (seed + 1 update) should exist.  The race creates 3.
+
+        Without django-reversion, DPOR finds equivalent races in 2
+        interleavings.  With create_revision(), the many SQL operations
+        (8+ per thread) create too many conflict points and DPOR cannot
+        reach the critical interleaving within the timeout.
         """
-        require_active("test_dpor_finds_race_with_reversion_traced")
+        require_active("test_dpor_finds_duplicate_version_race")
+
+        class _State:
+            def __init__(self) -> None:
+                Article.objects.all().delete()
+                Revision.objects.all().delete()
+                Version.objects.all().delete()
+                with reversion_mod.create_revision():
+                    self.article = Article.objects.create(title="Test Article", content="initial")
+                    reversion_mod.set_comment("Initial version")
+                self.results: list[str | None] = [None, None]
+
+        def _make_thread_fn(idx: int):
+            def _thread_fn(state: _State) -> None:
+                try:
+                    with reversion_mod.create_revision():
+                        article = Article.objects.get(pk=state.article.pk)
+                        article.content = "updated"
+                        article.save()
+                        reversion_mod.set_comment(f"Edit by thread {idx}")
+                    state.results[idx] = "saved"
+                except Exception as exc:
+                    state.results[idx] = f"error: {type(exc).__name__}: {exc}"
+
+            return _thread_fn
+
+        def _invariant(state: _State) -> bool:
+            if not (state.results[0] == "saved" and state.results[1] == "saved"):
+                return True
+            version_count = Version.objects.filter(object_id=str(state.article.pk)).count()
+            return version_count <= 2
 
         result = django_dpor(
             setup=_State,
@@ -197,13 +203,11 @@ class TestDporReversionDeadlock:
             deadlock_timeout=15.0,
             timeout_per_run=30.0,
             total_timeout=60.0,
-            trace_packages=["reversion.*"],
         )
 
         assert not result.property_holds, (
-            f"DPOR should find the duplicate-version race, but false "
-            f"conflict points from tracing reversion module globals / "
-            f"class __dict__ prevent it from reaching the critical "
-            f"interleaving (Defect #15).\n"
+            f"DPOR should find the duplicate-version race, but the many "
+            f"SQL-level conflict points inside create_revision() prevent "
+            f"DPOR from reaching the critical interleaving (Defect #15).\n"
             f"num_explored={result.num_explored}"
         )

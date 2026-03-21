@@ -116,6 +116,29 @@ class TraceFilter:
 
         return False
 
+    def is_library_code(self, filename: str) -> bool:
+        """Check whether *filename* is traced library code (from ``trace_packages``).
+
+        Returns True when the file is in a skip directory (site-packages)
+        AND it matches one of the ``trace_packages`` patterns.  Returns
+        False for user code (outside skip dirs) and for non-traced library
+        code.
+
+        This is used for scheduling coarsening: read-only opcodes in
+        library code don't need DPOR scheduling points because the
+        library's internal state is effectively immutable during test
+        execution.
+        """
+        if self._pattern is None:
+            return False
+
+        for skip_dir in _SKIP_DIRS:
+            if filename.startswith(skip_dir):
+                module_name = _filename_to_module(filename)
+                return module_name is not None and bool(self._pattern.match(module_name))
+
+        return False
+
 
 _DEFAULT_FILTER = TraceFilter()
 
@@ -153,6 +176,14 @@ def should_trace_file(filename: str) -> bool:
     Delegates to the currently active :class:`TraceFilter`.
     """
     return get_active_trace_filter().should_trace_file(filename)
+
+
+def is_library_code(filename: str) -> bool:
+    """Check whether a file is traced library code (from ``trace_packages``).
+
+    Delegates to the currently active :class:`TraceFilter`.
+    """
+    return get_active_trace_filter().is_library_code(filename)
 
 
 def is_dynamic_code(filename: str) -> bool:
