@@ -36,6 +36,7 @@ Usage::
 from __future__ import annotations
 
 import dis
+import linecache
 import sys
 import threading
 import time
@@ -277,6 +278,9 @@ class _PreloadBridge:
 # ---------------------------------------------------------------------------
 
 
+_SENTINEL = object()
+
+
 class DporScheduler:
     """Controls thread execution at opcode granularity, driven by the DPOR engine.
 
@@ -298,6 +302,7 @@ class DporScheduler:
         preload_bridge: _PreloadBridge | None = None,
         detect_io: bool = False,
         stable_ids: StableObjectIds | None = None,
+        switch_point_collector: list[Any] | None = None,
         track_dunder_dict_accesses: bool = False,
     ) -> None:
         self.engine = engine
@@ -308,7 +313,9 @@ class DporScheduler:
         self._preload_bridge = preload_bridge
         self._detect_io = detect_io
         self._stable_ids = stable_ids if stable_ids is not None else StableObjectIds()
+        self._switch_point_collector = switch_point_collector
         self._track_dunder_dict_accesses = track_dunder_dict_accesses
+        self._step_event_collector: dict[int, Any] | None = {} if switch_point_collector is not None else None
         # On free-threaded Python, PyO3 &mut self borrows are non-blocking
         # (try-or-panic).  A single engine_lock serialises ALL calls to the
         # engine and execution objects across worker threads, the sync
@@ -515,11 +522,35 @@ class DporScheduler:
                         # Without this, a preempted thread's accesses land at the
                         # preemption branch where the other thread is Active,
                         # making wakeup tree insertions at that position impossible.
+                        # Save frame info before _process_opcode clears it,
+                        # in case we need to record a switch/step point.
+                        _switch_frame = frame
+                        # Snapshot shadow stack before _process_opcode pops values.
+                        # For STORE_ATTR: stack is [..., value, obj] — we want value (TOS1).
+                        # For LOAD_ATTR: stack is [..., obj] — value will be on TOS after.
+                        _pre_opcode_stack = None
+                        if self._step_event_collector is not None and frame is not None:
+                            _pre_stacks = getattr(_dpor_tls, "_shadow_stacks", None)
+                            if _pre_stacks:
+                                _pre_shadow = _pre_stacks.get(id(frame))
+                                if _pre_shadow and _pre_shadow.stack:
+                                    _pre_opcode_stack = list(_pre_shadow.stack[-3:])  # last 3 elements
                         if frame is not None:
                             _process_opcode(frame, self, thread_id)
                             frame = None  # only process once
+                        # Record step event for the report
+                        if self._switch_point_collector is not None and _switch_frame is not None:
+                            self._capture_step_event(_switch_frame, thread_id, _pre_opcode_stack)
                         # It's our turn. After executing one opcode, schedule next.
                         next_thread = self._schedule_next()
+                        # Record switch point if thread changes and collector is active
+                        if (
+                            self._switch_point_collector is not None
+                            and next_thread is not None
+                            and next_thread != thread_id
+                            and _switch_frame is not None
+                        ):
+                            self._capture_switch_point(_switch_frame, thread_id, next_thread)
                         self._current_thread = next_thread
                         if next_thread is None:
                             self._finished = True
@@ -567,6 +598,125 @@ class DporScheduler:
             if self._error is None:
                 self._error = error
             self._condition.notify_all()
+
+    def _capture_switch_point(self, frame: Any, from_thread: int, to_thread: int) -> None:
+        """Capture a SwitchPoint when the scheduler switches threads."""
+        from frontrun._report import SwitchPoint, _safe_repr
+
+        code = frame.f_code
+        lineno = frame.f_lineno
+        instr = _get_instructions(code).get(frame.f_lasti)
+        opcode = instr.opname if instr else ""
+        source_line = linecache.getline(code.co_filename, lineno).strip()
+
+        # Snapshot shadow stack top 5
+        shadow_top5: list[str] = []
+        stacks = getattr(_dpor_tls, "_shadow_stacks", None)
+        if stacks:
+            shadow = stacks.get(id(frame))
+            if shadow and shadow.stack:
+                for i in range(min(5, len(shadow.stack))):
+                    shadow_top5.append(_safe_repr(shadow.stack[-(i + 1)]))
+
+        # Get access info from the most recent trace event
+        access_type: str | None = None
+        attr_name: str | None = None
+        obj_type_name: str | None = None
+        if self.trace_recorder and self.trace_recorder.events:
+            last_ev = self.trace_recorder.events[-1]
+            if last_ev.thread_id == from_thread:
+                access_type = last_ev.access_type
+                attr_name = last_ev.attr_name
+                obj_type_name = last_ev.obj_type_name
+
+        # schedule_trace length gives current position (after schedule() appended)
+        with self._engine_lock:
+            schedule_len = len(self.execution.schedule_trace)
+        schedule_index = schedule_len - 1  # index of the just-scheduled step
+
+        sp = SwitchPoint(
+            schedule_index=schedule_index,
+            from_thread=from_thread,
+            to_thread=to_thread,
+            filename=code.co_filename,
+            lineno=lineno,
+            function_name=code.co_name,
+            opcode=opcode,
+            source_line=source_line,
+            shadow_stack_top5=shadow_top5,
+            access_type=access_type,
+            attr_name=attr_name,
+            obj_type_name=obj_type_name,
+        )
+        self._switch_point_collector.append(sp)  # type: ignore[union-attr]
+
+    def _capture_step_event(self, frame: Any, thread_id: int, pre_opcode_stack: list[Any] | None = None) -> None:
+        """Capture a StepEvent keyed by schedule index (path_id)."""
+        from frontrun._report import StepEvent, _safe_repr
+
+        if self._step_event_collector is None:
+            return
+        code = frame.f_code
+        lineno = frame.f_lineno
+        instr = _get_instructions(code).get(frame.f_lasti)
+        opcode = instr.opname if instr else ""
+        source_line = linecache.getline(code.co_filename, lineno).strip()
+
+        # Get access info from the most recent trace event
+        access_type: str | None = None
+        attr_name: str | None = None
+        obj_type_name: str | None = None
+        if self.trace_recorder and self.trace_recorder.events:
+            last_ev = self.trace_recorder.events[-1]
+            if last_ev.thread_id == thread_id:
+                access_type = last_ev.access_type
+                attr_name = last_ev.attr_name
+                obj_type_name = last_ev.obj_type_name
+
+        # Capture the value involved in the access.
+        # The trace callback fires *before* the instruction executes, so for
+        # LOAD_ATTR we read the attribute that's about to be loaded, and for
+        # STORE_ATTR we show the current (pre-store) value.
+        # We read from the actual Python objects rather than the shadow stack,
+        # which only tracks object identity (its elements are often None).
+        value_repr: str | None = None
+        try:
+            if attr_name and obj_type_name and opcode in ("LOAD_ATTR", "STORE_ATTR") and instr:
+                attr = instr.argval
+                if attr:
+                    # Find the object in frame locals — look for instances of the right type
+                    for local_val in frame.f_locals.values():
+                        if type(local_val).__name__ == obj_type_name:
+                            val = getattr(local_val, attr, _SENTINEL)
+                            if val is not _SENTINEL and not callable(val):
+                                value_repr = _safe_repr(val)
+                                break
+            elif opcode in ("LOAD_GLOBAL", "STORE_GLOBAL") and instr:
+                name = instr.argval
+                if name and name in frame.f_globals:
+                    val = frame.f_globals[name]
+                    if not callable(val):
+                        value_repr = _safe_repr(val)
+        except Exception:
+            pass
+
+        # Key by schedule index (= len(schedule_trace) - 1, the most recently
+        # scheduled step). This aligns with path_id used in race detection.
+        with self._engine_lock:
+            schedule_idx = len(self.execution.schedule_trace) - 1
+
+        self._step_event_collector[schedule_idx] = StepEvent(
+            thread_id=thread_id,
+            filename=code.co_filename,
+            lineno=lineno,
+            function_name=code.co_name,
+            opcode=opcode,
+            source_line=source_line,
+            access_type=access_type,
+            attr_name=attr_name,
+            obj_type_name=obj_type_name,
+            value_repr=value_repr,
+        )
 
     @staticmethod
     def get_shadow_stack(frame_id: int) -> ShadowStack:
@@ -949,6 +1099,11 @@ def _make_object_key(obj_id: int, name: Any) -> int:
     return hash((obj_id, name)) & 0xFFFFFFFFFFFFFFFF
 
 
+# Module-level reverse map: object_key -> human-readable description.
+# Set to a dict when report collection is active, None otherwise.
+_object_key_reverse_map: dict[int, str] | None = None
+
+
 class StableObjectIds:
     """Assign monotonically increasing stable IDs to Python objects.
 
@@ -991,6 +1146,15 @@ class StableObjectIds:
         self._next_id = 0
 
 
+def _register_object_key(key: int, obj: Any, name: Any) -> None:
+    """Register a human-readable description for an object key in the reverse map."""
+    rmap = _object_key_reverse_map
+    if rmap is not None and key not in rmap:
+        type_name = type(obj).__name__
+        name_str = str(name) if name is not None else ""
+        rmap[key] = f"{type_name}.{name_str}" if name_str else type_name
+
+
 def _report_read(
     engine: PyDporEngine,
     execution: PyExecution,
@@ -1001,8 +1165,10 @@ def _report_read(
     stable_ids: StableObjectIds,
 ) -> None:
     if obj is not None:
+        key = _make_object_key(stable_ids.get(obj), name)
+        _register_object_key(key, obj, name)
         with lock:
-            engine.report_access(execution, thread_id, _make_object_key(stable_ids.get(obj), name), "read")
+            engine.report_access(execution, thread_id, key, "read")
 
 
 def _report_first_read(
@@ -1022,8 +1188,10 @@ def _report_first_read(
     detecting TOCTOU patterns.
     """
     if obj is not None:
+        key = _make_object_key(stable_ids.get(obj), name)
+        _register_object_key(key, obj, name)
         with lock:
-            engine.report_first_access(execution, thread_id, _make_object_key(stable_ids.get(obj), name), "read")
+            engine.report_first_access(execution, thread_id, key, "read")
 
 
 def _report_write(
@@ -1036,8 +1204,10 @@ def _report_write(
     stable_ids: StableObjectIds,
 ) -> None:
     if obj is not None:
+        key = _make_object_key(stable_ids.get(obj), name)
+        _register_object_key(key, obj, name)
         with lock:
-            engine.report_access(execution, thread_id, _make_object_key(stable_ids.get(obj), name), "write")
+            engine.report_access(execution, thread_id, key, "write")
 
 
 def _report_weak_read(
@@ -1058,8 +1228,10 @@ def _report_weak_read(
     conflicting with C-method writes (append, clear, etc.).
     """
     if obj is not None:
+        key = _make_object_key(stable_ids.get(obj), name)
+        _register_object_key(key, obj, name)
         with lock:
-            engine.report_access(execution, thread_id, _make_object_key(stable_ids.get(obj), name), "weak_read")
+            engine.report_access(execution, thread_id, key, "weak_read")
 
 
 def _report_weak_write(
@@ -1079,8 +1251,10 @@ def _report_weak_write(
     while still conflicting with C-method reads (iteration, ``len()``, etc.).
     """
     if obj is not None:
+        key = _make_object_key(stable_ids.get(obj), name)
+        _register_object_key(key, obj, name)
         with lock:
-            engine.report_access(execution, thread_id, _make_object_key(stable_ids.get(obj), name), "weak_write")
+            engine.report_access(execution, thread_id, key, "weak_write")
 
 
 def _subscript_key_name(key: Any) -> Any:
@@ -2661,6 +2835,50 @@ def explore_dpor(
     if lock_timeout is not None:
         set_lock_timeout(lock_timeout)
 
+    # Set up report collection if --frontrun-report is active
+    from frontrun._report import (
+        ExecutionRecord,
+        ExplorationReport,
+        _MAX_RECORDED_EXECUTIONS,
+        _global_report_path,
+        generate_html_report,
+    )
+
+    def _build_race_info(raw_races: list[tuple[int, int, int, int | None]]) -> list[dict[str, Any]] | None:
+        if not raw_races:
+            return None
+        rmap = _object_key_reverse_map or {}
+        result = []
+        # Track (prev_step, current_step, thread_id) to deduplicate dict.__dict__
+        # shadows of real attribute accesses
+        seen_steps: set[tuple[int, int, int]] = set()
+        for r in raw_races:
+            obj_name = rmap.get(r[3], f"object {r[3]}") if r[3] is not None else None
+            key = (r[0], r[1], r[2])
+            # Skip dict.X entries when we already have a Type.X entry for the same steps
+            if obj_name and obj_name.startswith("dict."):
+                if key in seen_steps:
+                    continue
+            seen_steps.add(key)
+            result.append({
+                "prev_step": r[0],
+                "current_step": r[1],
+                "thread_id": r[2],
+                "object": obj_name,
+            })
+        return result or None
+
+    global _object_key_reverse_map
+
+    report_path = _global_report_path
+    report: ExplorationReport | None = None
+    if report_path is not None:
+        report = ExplorationReport(
+            num_threads=num_threads,
+            thread_names=[f"Thread {i}" for i in range(num_threads)],
+        )
+        _object_key_reverse_map = {}
+
     try:
         while True:
             if total_deadline is not None and time.monotonic() > total_deadline:
@@ -2673,6 +2891,9 @@ def explore_dpor(
             # Clear bridge state for this new execution.
             if preload_bridge is not None:
                 preload_bridge.clear()
+            # Set up switch point collection for the report
+            _collecting_report = report is not None and len(report.executions) < _MAX_RECORDED_EXECUTIONS
+            switch_points: list[Any] = [] if _collecting_report else []
             scheduler = DporScheduler(
                 engine,
                 execution,
@@ -2683,6 +2904,7 @@ def explore_dpor(
                 preload_bridge=preload_bridge,
                 detect_io=detect_io,
                 stable_ids=stable_ids,
+                switch_point_collector=switch_points if _collecting_report else None,
                 track_dunder_dict_accesses=track_dunder_dict_accesses,
             )
             runner = DporBytecodeRunner(scheduler, detect_io=detect_io, preload_bridge=preload_bridge)
@@ -2750,6 +2972,25 @@ def explore_dpor(
                 if stop_on_first:
                     with _INSTR_CACHE_LOCK:
                         _INSTR_CACHE.clear()
+                    if report is not None and report_path is not None:
+                        # Record the failing execution before generating report
+                        if _collecting_report:
+                            with engine_lock:
+                                schedule_trace_r = list(execution.schedule_trace)
+                                raw_races = engine.pending_races()
+                            race_info = _build_race_info(raw_races)
+                            report.executions.append(
+                                ExecutionRecord(
+                                    index=len(report.executions),
+                                    schedule_trace=schedule_trace_r,
+                                    switch_points=switch_points,
+                                    invariant_held=False,
+                                    was_deadlock=True,
+                                    race_info=race_info,
+                                    step_events=scheduler._step_event_collector or {},
+                                )
+                            )
+                        generate_html_report(report, report_path)
                     return result
 
             if warn_nondeterministic_sql:
@@ -2800,11 +3041,52 @@ def explore_dpor(
                     # Clear cache before returning
                     with _INSTR_CACHE_LOCK:
                         _INSTR_CACHE.clear()
+                    if report is not None and report_path is not None:
+                        if _collecting_report:
+                            with engine_lock:
+                                schedule_trace_r2 = list(execution.schedule_trace)
+                                raw_races2 = engine.pending_races()
+                            race_info2 = _build_race_info(raw_races2)
+                            report.executions.append(
+                                ExecutionRecord(
+                                    index=len(report.executions),
+                                    schedule_trace=schedule_trace_r2,
+                                    switch_points=switch_points,
+                                    invariant_held=False,
+                                    was_deadlock=False,
+                                    race_info=race_info2,
+                                    step_events=scheduler._step_event_collector or {},
+                                )
+                            )
+                        generate_html_report(report, report_path)
                     return result
 
             # Clear instruction cache between executions to avoid stale code ids
             with _INSTR_CACHE_LOCK:
                 _INSTR_CACHE.clear()
+
+            # Collect report data before next_execution() consumes pending races
+            if _collecting_report and report is not None:
+                with engine_lock:
+                    schedule_trace = list(execution.schedule_trace)
+                    raw_races = engine.pending_races()
+                race_info = _build_race_info(raw_races)
+                was_deadlock = isinstance(scheduler._error, DeadlockError)
+                # Check if this specific execution failed: it was appended to failures
+                # with the current num_explored as its execution number
+                this_exec_failed = any(n == result.num_explored for n, _ in result.failures)
+                invariant_held = not was_deadlock and not this_exec_failed
+                report.executions.append(
+                    ExecutionRecord(
+                        index=len(report.executions),
+                        schedule_trace=schedule_trace,
+                        switch_points=switch_points,
+                        invariant_held=invariant_held,
+                        was_deadlock=was_deadlock,
+                        race_info=race_info,
+                        step_events=scheduler._step_event_collector or {},
+                    )
+                )
 
             with engine_lock:
                 if not engine.next_execution():
@@ -2814,5 +3096,10 @@ def explore_dpor(
         set_lock_timeout(prev_lock_timeout)
         if preload_dispatcher is not None:
             preload_dispatcher.stop()
+
+    # Generate HTML report if requested
+    if report is not None and report_path is not None:
+        generate_html_report(report, report_path)
+    _object_key_reverse_map = None
 
     return result

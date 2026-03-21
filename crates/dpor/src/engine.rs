@@ -382,6 +382,12 @@ impl DporEngine {
     pub fn num_threads(&self) -> usize {
         self.num_threads
     }
+
+    /// Return a snapshot of the pending races detected during the current execution.
+    /// Call before `next_execution()` which consumes them.
+    pub fn pending_races(&self) -> &[PendingRace] {
+        &self.pending_races
+    }
 }
 
 #[cfg(test)]

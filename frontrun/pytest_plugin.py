@@ -48,6 +48,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Disable cooperative lock patching even when running under `frontrun` CLI.",
     )
+    group.addoption(
+        "--frontrun-report",
+        default=None,
+        metavar="PATH",
+        help="Generate interactive HTML report of DPOR exploration at PATH.",
+    )
 
 
 def _should_patch(config: pytest.Config) -> bool:
@@ -67,6 +73,13 @@ def _should_patch(config: pytest.Config) -> bool:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    # Set up report path if requested
+    report_path = config.getoption("--frontrun-report", default=None)
+    if report_path:
+        import frontrun._report
+
+        frontrun._report._global_report_path = report_path
+
     if not _should_patch(config):
         return
 
@@ -76,6 +89,11 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
+    # Clear report path
+    import frontrun._report
+
+    frontrun._report._global_report_path = None
+
     if not _should_patch(config):
         return
 
