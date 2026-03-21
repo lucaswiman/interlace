@@ -37,18 +37,8 @@ def pg_tables():
         cur.execute("DROP TABLE IF EXISTS defect15_versions CASCADE")
         cur.execute("DROP TABLE IF EXISTS defect15_revisions CASCADE")
         cur.execute("DROP TABLE IF EXISTS defect15_articles CASCADE")
-        cur.execute(
-            "CREATE TABLE defect15_articles ("
-            "  id SERIAL PRIMARY KEY,"
-            "  content TEXT NOT NULL"
-            ")"
-        )
-        cur.execute(
-            "CREATE TABLE defect15_revisions ("
-            "  id SERIAL PRIMARY KEY,"
-            "  comment TEXT NOT NULL"
-            ")"
-        )
+        cur.execute("CREATE TABLE defect15_articles (  id SERIAL PRIMARY KEY,  content TEXT NOT NULL)")
+        cur.execute("CREATE TABLE defect15_revisions (  id SERIAL PRIMARY KEY,  comment TEXT NOT NULL)")
         cur.execute(
             "CREATE TABLE defect15_versions ("
             "  id SERIAL PRIMARY KEY,"
@@ -76,17 +66,10 @@ class _State:
             cur.execute("DELETE FROM defect15_versions")
             cur.execute("DELETE FROM defect15_revisions")
             cur.execute("DELETE FROM defect15_articles")
-            cur.execute(
-                "INSERT INTO defect15_articles (id, content) VALUES (1, 'initial')"
-            )
+            cur.execute("INSERT INTO defect15_articles (id, content) VALUES (1, 'initial')")
             # Seed version (like django-reversion's initial revision)
-            cur.execute(
-                "INSERT INTO defect15_revisions (id, comment) VALUES (1, 'seed')"
-            )
-            cur.execute(
-                "INSERT INTO defect15_versions (revision_id, article_id, content) "
-                "VALUES (1, 1, 'initial')"
-            )
+            cur.execute("INSERT INTO defect15_revisions (id, comment) VALUES (1, 'seed')")
+            cur.execute("INSERT INTO defect15_versions (revision_id, article_id, content) VALUES (1, 1, 'initial')")
         conn.close()
         self.results: list[str | None] = [None, None]
 
@@ -112,9 +95,7 @@ def _make_orm_style_thread(idx: int):
         try:
             with conn.cursor() as cur:
                 # 1. SELECT article (ORM .get())
-                cur.execute(
-                    "SELECT id, content FROM defect15_articles WHERE id = 1"
-                )
+                cur.execute("SELECT id, content FROM defect15_articles WHERE id = 1")
                 cur.fetchone()
 
                 # 2. UPDATE article (ORM .save())
@@ -124,10 +105,7 @@ def _make_orm_style_thread(idx: int):
                 )
 
                 # 3. Dedup check (ignore_duplicates SELECT)
-                cur.execute(
-                    "SELECT id FROM defect15_versions "
-                    "WHERE article_id = 1 ORDER BY id DESC LIMIT 1"
-                )
+                cur.execute("SELECT id FROM defect15_versions WHERE article_id = 1 ORDER BY id DESC LIMIT 1")
                 latest = cur.fetchone()
                 if latest is not None:
                     cur.execute(
@@ -150,8 +128,7 @@ def _make_orm_style_thread(idx: int):
 
                 # 5. INSERT version
                 cur.execute(
-                    "INSERT INTO defect15_versions (revision_id, article_id, content) "
-                    "VALUES (%s, 1, %s)",
+                    "INSERT INTO defect15_versions (revision_id, article_id, content) VALUES (%s, 1, %s)",
                     (rev_id, "updated"),
                 )
 
@@ -171,9 +148,7 @@ def _invariant(state: _State) -> bool:
     conn = psycopg2.connect(_DSN)
     conn.autocommit = True
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT COUNT(*) FROM defect15_versions WHERE article_id = 1"
-        )
+        cur.execute("SELECT COUNT(*) FROM defect15_versions WHERE article_id = 1")
         count = cur.fetchone()[0]
     conn.close()
     return count <= 2
@@ -189,10 +164,7 @@ def test_simple_check_then_insert_is_found(pg_tables) -> None:
             conn.autocommit = False
             try:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT id FROM defect15_versions "
-                        "WHERE article_id = 1 AND content = 'updated'"
-                    )
+                    cur.execute("SELECT id FROM defect15_versions WHERE article_id = 1 AND content = 'updated'")
                     if cur.fetchone() is not None:
                         conn.rollback()
                         state.results[idx] = "skipped"
@@ -203,8 +175,7 @@ def test_simple_check_then_insert_is_found(pg_tables) -> None:
                     )
                     rev_id = cur.fetchone()[0]
                     cur.execute(
-                        "INSERT INTO defect15_versions (revision_id, article_id, content) "
-                        "VALUES (%s, 1, %s)",
+                        "INSERT INTO defect15_versions (revision_id, article_id, content) VALUES (%s, 1, %s)",
                         (rev_id, "updated"),
                     )
                 conn.commit()
@@ -230,8 +201,7 @@ def test_simple_check_then_insert_is_found(pg_tables) -> None:
     )
 
     assert not result.property_holds, (
-        f"Expected DPOR to find the simple check-then-insert race. "
-        f"num_explored={result.num_explored}"
+        f"Expected DPOR to find the simple check-then-insert race. num_explored={result.num_explored}"
     )
 
 
