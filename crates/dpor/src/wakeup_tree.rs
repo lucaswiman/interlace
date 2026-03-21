@@ -161,7 +161,7 @@ impl WakeupTree {
         // The paper (Def 6.2, JACM'17 p.22) would check if any existing branch
         // "covers" this sequence via v ∼[E] w (Lemma 6.2). We skip that check
         // and always add — sound but not optimal. The sleep set check at the
-        // call site (backtrack()) already filters some redundant inserts.
+        // call site (insert_wakeup()) already filters some redundant inserts.
         let mut node = WakeupNode {
             thread_id,
             children: Vec::new(),

@@ -6,7 +6,7 @@ completely separate from the existing bytecode.py random exploration.
 
 The approach:
 1. A Rust DPOR engine (frontrun._dpor) manages the exploration tree,
-   vector clocks, and backtrack set computation.
+   vector clocks, and wakeup tree exploration.
 2. Python drives execution: runs threads under sys.settrace opcode
    tracing, uses a shadow stack to detect shared-memory accesses,
    and feeds access/sync events to the Rust engine.
@@ -245,8 +245,8 @@ class _PreloadBridge:
             # "write", only the LAST write per thread would be tracked,
             # and early access positions (e.g. a SELECT recv) would be
             # overwritten by later ones (e.g. a COMMIT recv).  With
-            # read/write distinction, DPOR iteratively backtracks through
-            # the send/recv pairs to reach the critical interleaving.
+            # read/write distinction, DPOR iteratively explores wakeup tree
+            # branches through the send/recv pairs to reach the critical interleaving.
             kind = "write" if event.kind == "write" else "read"
             obj_key = _make_object_key(hash(event.resource_id), event.resource_id)
             detail, call_chain = get_active_sql_io_context(event.tid)
@@ -458,7 +458,7 @@ class DporScheduler:
                         # the current DPOR step. On free-threaded Python a thread
                         # can reach report_and_wait while another thread still owns
                         # the step; flushing earlier stamps the access onto the
-                        # wrong path_id and can hide the backtrack point.
+                        # wrong path_id and can hide the wakeup tree insertion point.
                         _flush_pending_io()
                         # Process opcode accesses only when it's our turn.
                         # Deferring this until the thread is scheduled ensures
@@ -466,7 +466,7 @@ class DporScheduler:
                         # (after any intervening operations by other threads).
                         # Without this, a preempted thread's accesses land at the
                         # preemption branch where the other thread is Active,
-                        # making backtracks at that position impossible.
+                        # making wakeup tree insertions at that position impossible.
                         if frame is not None:
                             _process_opcode(frame, self, thread_id)
                             frame = None  # only process once
@@ -1272,7 +1272,7 @@ def _process_opcode(
         # Without this, LOAD_GLOBAL/STORE_GLOBAL races are invisible to DPOR.
         # Uses first-access semantics so ``global += 1`` (LOAD_GLOBAL + STORE_GLOBAL)
         # doesn't overwrite the position of an earlier read, enabling DPOR to
-        # backtrack between the read and a subsequent write.
+        # insert into the wakeup tree between the read and a subsequent write.
         _report_first_read(engine, execution, thread_id, frame.f_globals, instr.argval, elock, sids)
 
     elif op == "LOAD_NAME":
@@ -1651,7 +1651,7 @@ def _process_opcode(
                 # Coarse-grained read for conflict with C-method writes (append,
                 # insert, etc.) and other container-level operations.  Uses regular
                 # (last-access) semantics: each iteration overwrites the previous read
-                # position.  This means backtracks target the LAST iteration, which
+                # position.  This means wakeup tree entries target the LAST iteration, which
                 # allows the other thread to interleave after some elements have
                 # already been read — catching mid-iteration mutation races.
                 _report_read(engine, execution, thread_id, _iter_container, "__cmethods__", elock, sids)
@@ -2006,7 +2006,7 @@ class DporBytecodeRunner:
             # In I/O-detection mode, skip dynamically generated code
             # (e.g. dataclass __init__ from exec/compile in libraries).
             # These create thousands of extra scheduling points that
-            # drown out I/O-based backtrack points.  Safe to DISABLE
+            # drown out I/O-based wakeup tree entries.  Safe to DISABLE
             # because each exec() creates a fresh code object.
             if _detect_io and code.co_filename.startswith("<"):
                 return mon.DISABLE  # type: ignore[attr-defined]
@@ -2174,7 +2174,7 @@ class DporBytecodeRunner:
         _dpor_tls.execution = execution
 
         # IO detection: defer I/O reports until the thread exits all locks
-        # so that the DPOR backtrack point lands at a scheduling point where
+        # so that the DPOR wakeup tree insertion lands at a scheduling point where
         # the other thread can actually run (not blocked on the lock).
         _dpor_tls.lock_depth = 0
         _dpor_tls.pending_io = []

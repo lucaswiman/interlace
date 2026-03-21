@@ -83,7 +83,7 @@ impl PyDporEngine {
     /// but keeps the earliest access per thread rather than the latest.
     /// Used for container-level keys where multiple writes to the same
     /// container should preserve the first write's position for
-    /// fine-grained backtracking.
+    /// fine-grained wakeup tree insertion.
     fn report_first_access(
         &mut self,
         execution: &mut PyExecution,

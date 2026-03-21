@@ -4,10 +4,11 @@
 //! A Foundation for Optimal Dynamic Partial Order Reduction", JACM 2017.
 //!
 //! **Current algorithm**: Uses wakeup trees (Algorithm 2, JACM'17 p.24-25) as
-//! the backtrack data structure, but performs race detection during execution
-//! (Algorithm 1 style, JACM'17 p.16) rather than only at maximal executions.
-//! Sleep sets are local per-branch (not yet propagated across scheduling points).
-//! Source set filtering is disabled (all racing threads are added to backtrack).
+//! the exploration structure, with race detection during execution (Algorithm 1
+//! style, JACM'17 p.16) as well as deferred notdep processing (Algorithm 2).
+//! Sleep sets are propagated across scheduling points using trace caching.
+//! Source set filtering is disabled (all racing threads are inserted into
+//! wakeup trees).
 //!
 //! Each scheduling point (Branch) maintains:
 //!
@@ -100,10 +101,9 @@ pub struct Branch {
     pub active_thread: usize,
     pub preemptions: u32,
     /// Wakeup tree: threads/sequences to explore at this scheduling point.
-    /// Replaces the classic Backtrack thread status.
     /// Paper: wut(E) in Algorithm 2 (JACM'17 p.24).
     pub wakeup: WakeupTree,
-    /// Sleep set: threads that should not be added as backtracks because
+    /// Sleep set: threads excluded from wakeup tree insertion because
     /// an equivalent execution starting with them has already been explored.
     /// Indexed by thread ID; `true` = sleeping.
     /// Paper: sleep(E) in Algorithm 2 (JACM'17 p.24). Tracks Visited threads
@@ -425,31 +425,31 @@ impl Path {
                 propagated.insert(tid, tid_accesses);
             }
             // If dependent, the thread wakes up — it must be available for
-            // backtracking at this position since its equivalent trace may
-            // not have been explored.
+            // wakeup tree insertion at this position since its equivalent
+            // trace may not have been explored.
         }
 
         self.branches[pos].propagated_sleep_accesses = propagated;
     }
 
-    /// Mark thread_id for backtracking at branch path_id.
-    /// Uses wakeup tree insertion and sleep set filtering.
+    /// Insert thread_id into the wakeup tree at branch path_id.
+    /// Filters against sleep sets and preemption bounds before insertion.
     ///
     /// This is called during execution (Algorithm 1 style, JACM'17 p.16 lines
-    /// 5-9). In full Optimal-DPOR (Algorithm 2, p.24 lines 2-6), race detection
-    /// is deferred to maximal executions and inserts notdep sequences rather
-    /// than single threads. See ideas/optimal_dpor.md Phase 3.
+    /// 5-9) to ensure all racing threads are added to the wakeup tree inline.
+    /// Deferred notdep processing (Algorithm 2, p.24 lines 2-6) may later
+    /// insert multi-step sequences for the same races.
     ///
     /// `_race_object`: the object involved in the race. Reserved for future
     /// source set filtering (Def 4.3, JACM'17 p.15; requires sleep sets).
-    pub fn backtrack(&mut self, path_id: usize, thread_id: usize, _race_object: Option<u64>) {
+    pub fn insert_wakeup(&mut self, path_id: usize, thread_id: usize, _race_object: Option<u64>) {
         if path_id >= self.branches.len() {
             return;
         }
 
         let branch = &self.branches[path_id];
 
-        // Only runnable threads can be backtracked
+        // Only runnable threads can be added to the wakeup tree
         match branch.threads.get(thread_id).copied() {
             Some(ThreadStatus::Pending) | Some(ThreadStatus::Yield) => {}
             _ => return,
@@ -480,7 +480,7 @@ impl Path {
         if let Some(bound) = self.preemption_bound {
             let branch = &self.branches[path_id];
             if branch.active_thread != thread_id && branch.preemptions >= bound {
-                self.add_conservative_backtrack(path_id, thread_id, bound);
+                self.add_conservative_wakeup(path_id, thread_id, bound);
                 return;
             }
         }
@@ -494,7 +494,7 @@ impl Path {
     }
 
     /// Advance to the next unexplored execution path.
-    /// Uses wakeup trees instead of scanning for Backtrack status.
+    /// Picks the next thread from the wakeup tree at the deepest branch.
     ///
     /// Implements the while loop of Algorithm 2 lines 14-20 (JACM'17 p.24-25):
     ///   while ∃p ∈ wut(E):
@@ -640,11 +640,11 @@ impl Path {
     /// (all threads finished or blocked), we process each detected race and
     /// insert notdep sequences into wakeup trees at the appropriate positions.
     ///
-    /// **Hybrid approach**: The engine also calls `backtrack()` inline during
-    /// execution for each race (Algorithm 1 style). The deferred notdep
+    /// **Hybrid approach**: The engine also calls `insert_wakeup()` inline
+    /// during execution for each race (Algorithm 1 style). The deferred notdep
     /// processing here only adds ADDITIONAL coverage: notdep sequences whose
     /// first thread differs from the racing thread AND the racing thread is
-    /// already covered by the inline backtrack. When notdep starts with a
+    /// already covered by the inline insertion. When notdep starts with a
     /// different thread, it provides multi-step guidance through independent
     /// intermediates.
     ///
@@ -677,11 +677,11 @@ impl Path {
     ///   if sleep(E') ∩ WI[E'](v) = ∅ then      — not sleep-set blocked
     ///     wut(E') := insert[E'](v, wut(E'))    — add to wakeup tree
     ///
-    /// **Hybrid semantics**: Since the engine also performs inline `backtrack()`
+    /// **Hybrid semantics**: Since the engine also performs inline `insert_wakeup()`
     /// for the racing thread (Algorithm 1 style), the deferred processing here
     /// only adds value when the notdep sequence has independent intermediates
     /// (i.e., starts with a different thread than the racing thread). When
-    /// `notdep = [thread_id]` (no intermediates), the inline `backtrack()` has
+    /// `notdep = [thread_id]` (no intermediates), the inline `insert_wakeup()` has
     /// already handled it. When `notdep = [T_indep, ..., thread_id]`, we insert
     /// the full sequence for multi-step guidance — but only if this doesn't
     /// disrupt exploration order (the first thread must be feasible).
@@ -694,7 +694,7 @@ impl Path {
         let notdep = self.compute_notdep(path_id, race.current_path_id, race.thread_id);
 
         // Skip if notdep has no independent intermediates — the inline
-        // backtrack() already inserted [thread_id] for this race.
+        // insert_wakeup() already inserted [thread_id] for this race.
         if notdep.len() <= 1 {
             return;
         }
@@ -742,7 +742,7 @@ impl Path {
         true
     }
 
-    fn add_conservative_backtrack(&mut self, path_id: usize, thread_id: usize, bound: u32) {
+    fn add_conservative_wakeup(&mut self, path_id: usize, thread_id: usize, bound: u32) {
         for i in (0..path_id).rev() {
             let branch = &self.branches[i];
             if let Some(status) = branch.threads.get(thread_id) {
@@ -780,10 +780,10 @@ mod tests {
     }
 
     #[test]
-    fn test_backtrack_and_step() {
+    fn test_insert_wakeup_and_step() {
         let mut path = Path::new(None);
         path.schedule(&[0, 1], 0, 2);
-        path.backtrack(0, 1, None);
+        path.insert_wakeup(0, 1, None);
         assert!(path.step());
         let chosen = path.schedule(&[0, 1], 0, 2);
         assert_eq!(chosen, Some(1));
@@ -803,7 +803,7 @@ mod tests {
 
         let chosen = path.schedule(&[0, 1], 0, 2).unwrap();
         executions.push(chosen);
-        path.backtrack(0, 1, None);
+        path.insert_wakeup(0, 1, None);
 
         assert!(path.step());
         let chosen = path.schedule(&[0, 1], 0, 2).unwrap();
@@ -817,8 +817,8 @@ mod tests {
     fn test_preemption_bounding_zero() {
         let mut path = Path::new(Some(0));
         path.schedule(&[0, 1], 0, 2);
-        path.backtrack(0, 1, None);
-        // With bound=0, backtrack to thread 1 is a preemption and should be suppressed
+        path.insert_wakeup(0, 1, None);
+        // With bound=0, wakeup insertion for thread 1 is a preemption and should be suppressed
         assert!(!path.step());
     }
 
@@ -829,8 +829,8 @@ mod tests {
         // step() picks the minimum thread ID from the wakeup tree
         let mut path = Path::new(None);
         path.schedule(&[0, 1, 2], 0, 3);
-        path.backtrack(0, 2, None); // add 2 first
-        path.backtrack(0, 1, None); // add 1 second
+        path.insert_wakeup(0, 2, None); // add 2 first
+        path.insert_wakeup(0, 1, None); // add 1 second
 
         // step() should pick the minimum index (1), not insertion order (2)
         assert!(path.step());
@@ -846,28 +846,28 @@ mod tests {
         path.schedule(&[0, 1, 2], 0, 3);
         // Record some access for thread 0
         path.record_access(0, 100, AccessKind::Write);
-        path.backtrack(0, 1, None);
+        path.insert_wakeup(0, 1, None);
 
         // step() marks 0 as Visited and adds to sleep set
         assert!(path.step());
 
-        // Now if a race suggests backtracking to 0 at position 0, it should be skipped
-        path.backtrack(0, 0, None); // 0 is Visited, so this should be a no-op
+        // Now if a race suggests inserting 0 into the wakeup tree at position 0, it should be skipped
+        path.insert_wakeup(0, 0, None); // 0 is Visited, so this should be a no-op
         // The wakeup tree should not have thread 0 (only thread 1 was from step())
         // This just verifies the Visited check prevents re-adding
     }
 
     #[test]
-    fn test_visited_thread_cannot_be_backtracked() {
+    fn test_visited_thread_excluded_from_wakeup() {
         use crate::access::AccessKind;
         // After exploring T0 at position 0, T0 is Visited and in the sleep set.
-        // Backtracks to T0 at position 0 should be rejected.
+        // Wakeup insertions for T0 at position 0 should be rejected.
         let mut path = Path::new(None);
         path.schedule(&[0, 1, 2], 0, 3);
         path.record_access(0, 100, AccessKind::Write);
 
-        // Add backtrack for T1
-        path.backtrack(0, 1, None);
+        // Add T1 to wakeup tree
+        path.insert_wakeup(0, 1, None);
 
         // step() → T0 becomes Visited, sleep[0] = true. T1 becomes Active.
         assert!(path.step());
@@ -875,28 +875,28 @@ mod tests {
         assert_eq!(path.branches[0].threads[0], ThreadStatus::Visited);
         assert_eq!(path.branches[0].threads[1], ThreadStatus::Active);
 
-        // Try to backtrack T0 at position 0 — rejected because T0 is Visited
-        path.backtrack(0, 0, None);
+        // Try to insert T0 at position 0 — rejected because T0 is Visited
+        path.insert_wakeup(0, 0, None);
         // T2 should still be addable
-        path.backtrack(0, 2, None);
+        path.insert_wakeup(0, 2, None);
         assert!(path.branches[0].wakeup.contains_thread(2));
     }
 
     #[test]
-    fn test_duplicate_backtrack_rejected() {
+    fn test_duplicate_wakeup_rejected() {
         let mut path = Path::new(None);
         path.schedule(&[0, 1], 0, 2);
-        path.backtrack(0, 1, None);
-        path.backtrack(0, 1, None); // duplicate
+        path.insert_wakeup(0, 1, None);
+        path.insert_wakeup(0, 1, None); // duplicate
         // Wakeup tree should have only one entry
         assert_eq!(path.branches[0].wakeup.root_threads(), vec![1]);
     }
 
     #[test]
-    fn test_backtrack_to_disabled_rejected() {
+    fn test_wakeup_disabled_thread_rejected() {
         let mut path = Path::new(None);
         path.schedule(&[0], 0, 2); // Only thread 0 is runnable; thread 1 is Disabled
-        path.backtrack(0, 1, None);
+        path.insert_wakeup(0, 1, None);
         assert!(path.branches[0].wakeup.is_empty());
     }
 
@@ -907,30 +907,30 @@ mod tests {
         let mut path = Path::new(None);
         path.schedule(&[0, 1, 2, 3], 0, 4);
 
-        path.backtrack(0, 1, Some(100));
-        path.backtrack(0, 2, Some(100));
-        path.backtrack(0, 3, Some(200));
+        path.insert_wakeup(0, 1, Some(100));
+        path.insert_wakeup(0, 2, Some(100));
+        path.insert_wakeup(0, 3, Some(200));
 
         assert_eq!(path.branches[0].wakeup.root_threads(), vec![1, 2, 3]);
     }
 
-    /// Verify that `contains_thread` in `backtrack()` correctly deduplicates:
+    /// Verify that `contains_thread` in `insert_wakeup()` correctly deduplicates:
     /// same thread is rejected, different threads (even on same object) are added.
     #[test]
     fn test_source_set_check_via_contains_thread() {
         let mut path = Path::new(None);
         path.schedule(&[0, 1, 2, 3], 0, 4);
 
-        // First backtrack for object 100: T1 added
-        path.backtrack(0, 1, Some(100));
+        // First wakeup insertion for object 100: T1 added
+        path.insert_wakeup(0, 1, Some(100));
         assert!(path.branches[0].wakeup.contains_thread(1));
 
         // Different thread, same object: T2 also added (different initials)
-        path.backtrack(0, 2, Some(100));
+        path.insert_wakeup(0, 2, Some(100));
         assert!(path.branches[0].wakeup.contains_thread(2));
 
-        // Same thread again: duplicate rejected by contains_thread
-        path.backtrack(0, 1, Some(100));
+        // Same thread again: duplicate rejected by contains_thread check
+        path.insert_wakeup(0, 1, Some(100));
         assert_eq!(path.branches[0].wakeup.root_threads(), vec![1, 2]);
     }
 
@@ -955,9 +955,9 @@ mod tests {
         path.schedule(&[1, 2], 1, 3);
         path.record_access(1, 200, AccessKind::Read);
 
-        // Add backtrack for T1 at pos 0 and T2 at pos 1
-        path.backtrack(0, 1, None);
-        path.backtrack(1, 2, None);
+        // Add T1 to wakeup tree at pos 0 and T2 at pos 1
+        path.insert_wakeup(0, 1, None);
+        path.insert_wakeup(1, 2, None);
 
         // step(): pops to pos 1 (T1 Visited, wakeup has T2). T2 active at pos 1.
         assert!(path.step());
@@ -973,7 +973,7 @@ mod tests {
         // Propagation from pos 0 to pos 1 during replay:
         // No threads are sleeping at pos 0 (T0 is Active, never Visited there).
         // T1 is locally sleeping at pos 1 (Visited), but that's handled by
-        // the local sleep check in backtrack(), not by propagation.
+        // the local sleep check in insert_wakeup(), not by propagation.
         // Propagation only carries sleeping threads FROM the source position.
         assert!(
             path.branches[1].propagated_sleep_accesses.is_empty(),
@@ -1006,7 +1006,7 @@ mod tests {
         path.record_access(1, 200, AccessKind::Read);
 
         // Backtrack T1 at pos 0
-        path.backtrack(0, 1, None);
+        path.insert_wakeup(0, 1, None);
 
         // step(): saves trace, T0 → Visited at pos 0
         assert!(path.step());
@@ -1048,7 +1048,7 @@ mod tests {
         path.record_access(1, 100, AccessKind::Write);
 
         // Backtrack T1 at pos 0
-        path.backtrack(0, 1, None);
+        path.insert_wakeup(0, 1, None);
 
         // step(): saves trace, T0 → Visited
         assert!(path.step());
@@ -1198,9 +1198,9 @@ mod tests {
         path.schedule(&[1, 2], 1, 3);
         path.record_access(1, 100, AccessKind::Read); // T1 reads obj 100
 
-        // Add backtracks
-        path.backtrack(0, 2, None);
-        path.backtrack(1, 2, None);
+        // Add to wakeup trees
+        path.insert_wakeup(0, 2, None);
+        path.insert_wakeup(1, 2, None);
 
         // step(): pops to pos 1 (T1 Visited, wakeup has T2). T2 active at pos 1.
         assert!(path.step());

@@ -31,7 +31,7 @@ pub enum AccessKind {
 
 /// Records an access to a shared object for DPOR dependency detection.
 /// The `path_id` identifies the scheduling point (position in the execution
-/// sequence E), used to determine where to insert backtrack points.
+/// sequence E), used to determine where to insert into wakeup trees.
 /// The `dpor_vv` captures the happens-before state at the time of access,
 /// used to check for races: e ⋖_E e' when ¬(e →_E e') (JACM'17 p.13-14).
 #[derive(Clone, Debug)]
