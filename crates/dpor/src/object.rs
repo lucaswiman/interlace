@@ -18,9 +18,9 @@ pub type ObjectId = u64;
 /// Maintains per-thread maps of the most recent read and the most recent
 /// write.  A **Write** by another thread depends on *both* the latest
 /// read and the latest write from each other thread, because the
-/// backtrack points differ: backtracking at a read position allows the
-/// adversary to interleave between a read and a subsequent write on the
-/// same object (TOCTOU bugs), while backtracking at the write position
+/// wakeup tree insertions differ: inserting at a read position allows the
+/// scheduler to interleave between a read and a subsequent write on the
+/// same object (TOCTOU bugs), while inserting at the write position
 /// only reorders complete read-write pairs.
 #[derive(Clone, Debug)]
 pub struct ObjectState {
@@ -51,7 +51,7 @@ impl ObjectState {
     ///
     /// - A **Read** depends on writes from *other* threads (reads are independent).
     /// - A **Write** depends on both reads and writes from *other* threads.
-    ///   Returning both ensures DPOR creates backtrack points at read
+    ///   Returning both ensures DPOR inserts into wakeup trees at read
     ///   positions (for TOCTOU detection) and write positions (for
     ///   write-write ordering).
     pub fn dependent_accesses(&self, kind: AccessKind, current_thread: usize) -> Vec<&Access> {
@@ -178,8 +178,9 @@ impl ObjectState {
 
     /// Like [`record_access`] but keeps the **first** (earliest) access for
     /// each thread rather than overwriting with the latest.  Used for I/O
-    /// objects where the earliest position creates the most useful backtrack
-    /// target (e.g. between a SELECT and UPDATE in a database transaction).
+    /// objects where the earliest position creates the most useful wakeup
+    /// tree insertion point (e.g. between a SELECT and UPDATE in a database
+    /// transaction).
     pub fn record_io_access(&mut self, access: Access, kind: AccessKind) {
         let thread_id = access.thread_id;
         match kind {

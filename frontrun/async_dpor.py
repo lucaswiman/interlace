@@ -8,7 +8,7 @@ exactly once.
 
 The approach:
 1. A Rust DPOR engine (frontrun._dpor) manages the exploration tree,
-   vector clocks, and backtrack set computation.
+   vector clocks, and wakeup tree exploration.
 2. Python drives execution: each task's coroutine is wrapped with
    ``_AutoPauseCoroutine`` which intercepts every ``await`` yield and
    inserts a DPOR scheduling decision.  No user code changes needed.
@@ -707,8 +707,8 @@ class AsyncDporScheduler(InterleavedLoop):
         # reporting entirely.  The I/O-level reporters already capture the
         # real key/table conflicts.  Running _process_opcode on user frames
         # would still pick up shared Python state (module globals, class
-        # objects, connection pool internals) creating false DPOR backtrack
-        # points and excess path exploration for independent I/O operations.
+        # objects, connection pool internals) creating false DPOR wakeup tree
+        # entries and excess path exploration for independent I/O operations.
         if self._detect_sql or self._detect_redis:
             return
         token = _in_trace_processing.set(True)

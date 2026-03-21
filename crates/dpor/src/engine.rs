@@ -134,13 +134,13 @@ impl DporEngine {
 
     /// Report a shared memory access and detect races.
     ///
-    /// Uses a **hybrid** approach: immediate inline backtracking (Algorithm 1
-    /// style, JACM'17 p.16 lines 5-9) ensures all races create backtrack points
-    /// for the racing thread, while deferred race collection (Algorithm 2 style,
-    /// JACM'17 p.24 lines 1-6) enables notdep sequence optimization at maximal
-    /// executions.
+    /// Uses a **hybrid** approach: immediate inline wakeup tree insertion
+    /// (Algorithm 1 style, JACM'17 p.16 lines 5-9) ensures all races add
+    /// the racing thread to the wakeup tree, while deferred race collection
+    /// (Algorithm 2 style, JACM'17 p.24 lines 1-6) enables notdep sequence
+    /// optimization at maximal executions.
     ///
-    /// The inline backtrack ensures correctness (no races are dropped due to
+    /// The inline insertion ensures correctness (no races are dropped due to
     /// notdep feasibility issues). The deferred notdep processing adds multi-step
     /// wakeup sequences that can reduce redundant exploration by guiding through
     /// independent intermediate events.
@@ -158,9 +158,9 @@ impl DporEngine {
 
         for prev_access in object_state.dependent_accesses(kind, thread_id) {
             if !prev_access.happens_before(&current_dpor_vv) {
-                // Inline backtrack: immediate single-thread insertion ensures
-                // the racing thread is always added (Algorithm 1 style).
-                self.path.backtrack(prev_access.path_id, thread_id, Some(object_id));
+                // Inline wakeup insertion: immediate single-thread insertion
+                // ensures the racing thread is always added (Algorithm 1 style).
+                self.path.insert_wakeup(prev_access.path_id, thread_id, Some(object_id));
                 // Also collect for deferred notdep processing (Algorithm 2 style).
                 // The notdep sequence may provide a better multi-step wakeup
                 // sequence that guides through independent intermediates.
@@ -187,9 +187,10 @@ impl DporEngine {
     ///
     /// This is useful for container-level access keys (`__cmethods__`)
     /// where a thread performs multiple writes to the same container.
-    /// By keeping the first write position, DPOR can backtrack to the
-    /// earliest point, enabling exploration of interleavings where
-    /// another thread runs between the first and subsequent writes.
+    /// By keeping the first write position, DPOR can insert into the
+    /// wakeup tree at the earliest point, enabling exploration of
+    /// interleavings where another thread runs between the first and
+    /// subsequent writes.
     pub fn process_first_access(
         &mut self,
         execution: &mut Execution,
@@ -204,7 +205,7 @@ impl DporEngine {
 
         for prev_access in object_state.dependent_accesses(kind, thread_id) {
             if !prev_access.happens_before(&current_dpor_vv) {
-                self.path.backtrack(prev_access.path_id, thread_id, Some(object_id));
+                self.path.insert_wakeup(prev_access.path_id, thread_id, Some(object_id));
                 self.pending_races.push(PendingRace {
                     prev_path_id: prev_access.path_id,
                     current_path_id,
@@ -240,7 +241,7 @@ impl DporEngine {
 
         for prev_access in object_state.dependent_accesses(kind, thread_id) {
             if !prev_access.happens_before(&current_io_vv) {
-                self.path.backtrack(prev_access.path_id, thread_id, Some(object_id));
+                self.path.insert_wakeup(prev_access.path_id, thread_id, Some(object_id));
                 self.pending_races.push(PendingRace {
                     prev_path_id: prev_access.path_id,
                     current_path_id,
@@ -267,7 +268,7 @@ impl DporEngine {
     /// locks by relaxing Assumption 3.1 (processes can disable each other).
     /// Our approach is different: we use a separate `io_vv` vector clock that
     /// omits lock HB edges, making lock operations always appear concurrent
-    /// for backtracking purposes. This is conservative (may over-explore)
+    /// for wakeup tree insertion. This is conservative (may over-explore)
     /// but catches multi-lock races that pure HB-based tracking would miss.
     pub fn process_sync(
         &mut self,
@@ -289,8 +290,8 @@ impl DporEngine {
                 // Report lock acquire as an I/O access (Write to virtual lock
                 // object).  This uses io_vv (no lock-based HB) so that lock
                 // operations on the same lock by different threads always
-                // appear concurrent — creating backtrack points at lock
-                // boundaries.  First-access semantics ensure the backtrack
+                // appear concurrent — creating wakeup tree entries at lock
+                // boundaries.  First-access semantics ensure the insertion
                 // targets the earliest lock position, which is critical for
                 // multi-lock race detection: it lets DPOR explore orderings
                 // where thread B runs between thread A's two critical sections
@@ -313,7 +314,7 @@ impl DporEngine {
                 execution.lock_release_vv.insert(lock_id, vv);
                 // Report lock release as an I/O access to a SEPARATE
                 // virtual object (distinct from the acquire object).
-                // This creates backtrack points at lock release positions,
+                // This creates wakeup tree entries at lock release positions,
                 // which is critical for multi-lock races: the "gap"
                 // between two critical sections starts at the release.
                 // Using a different XOR constant ensures the release
@@ -1209,8 +1210,8 @@ mod tests {
         // Mazurkiewicz traces are determined by the relative order of
         // T0 and T2's writes to X. T1 can go anywhere without changing
         // the trace equivalence class. With pure deferred+notdep, this
-        // gives exactly 2. With the hybrid approach (inline backtrack +
-        // deferred notdep), the inline backtracks may add single-thread
+        // gives exactly 2. With the hybrid approach (inline wakeup +
+        // deferred notdep), the inline insertions may add single-thread
         // entries that create a few extra explorations, but the count
         // should remain small.
         assert!(
