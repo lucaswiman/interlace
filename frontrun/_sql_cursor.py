@@ -615,9 +615,20 @@ def _report_sql_access(
 
                     report_or_buffer(fk.ref_table, "read", ref_pred_rows)
 
-            # Report writes
+            # Report writes.  INSERT targets use weak_write for both the
+            # table-level resource and the :seq resource (defect #15).
+            # Two concurrent INSERTs to the same table create different
+            # rows and shouldn't conflict with each other — only with
+            # SELECTs/UPDATEs that read the table.  weak_write conflicts
+            # with reads and writes but NOT with other weak_writes, so
+            # INSERT-INSERT doesn't create a backtrack point while
+            # SELECT-INSERT (phantom read) still does.
+            insert_tables = access.write_tables - access.read_tables
             for table in access.write_tables:
-                report_or_buffer(table, "write", pred_rows)
+                if table in insert_tables:
+                    report_or_buffer(table, "weak_write", pred_rows)
+                else:
+                    report_or_buffer(table, "write", pred_rows)
 
             # Phantom read detection (sequence-number tracking):
             # SELECT depends on which rows exist in a table.  If a concurrent
@@ -628,9 +639,10 @@ def _report_sql_access(
             #
             # Fix: use the table's :seq resource as a "membership" marker.
             # - Pure-read tables (SELECT) report READ on :seq.
-            # - INSERT tables report WRITE on :seq (moved here from
-            #   _capture_insert_id so the write is flushed at the INSERT's
-            #   scheduling point, not left as orphaned pending_io).
+            # - INSERT tables report WEAK_WRITE on :seq (defect #15 fix):
+            #   weak_write still conflicts with SELECT's READ (detecting
+            #   phantom reads) but not with other INSERTs' weak_writes
+            #   (avoiding false INSERT-INSERT conflicts).
             # - DELETE tables report WRITE on :seq.
             # - UPDATE tables report READ on :seq (defect #6 fix): UPDATE
             #   results depend on which rows exist (like SELECT), so
@@ -638,8 +650,9 @@ def _report_sql_access(
             #   clause are phantom reads. We use READ (not WRITE) to avoid
             #   false write-write conflicts between UPDATEs on different rows.
             #
-            # This creates READ-WRITE conflicts between SELECT/UPDATE and
-            # INSERT/DELETE, detecting phantom read races.
+            # This creates READ-WEAK_WRITE conflicts between SELECT/UPDATE
+            # and INSERT, and READ-WRITE conflicts between SELECT/UPDATE
+            # and DELETE, detecting phantom read races.
             pure_read_tables = access.read_tables - access.write_tables
             for table in pure_read_tables:
                 _report_or_buffer(
@@ -647,14 +660,11 @@ def _report_sql_access(
                     _sql_sequence_resource_id(table, db_scope=db_scope),
                     "read",
                 )
-            # INSERT targets: in write_tables but NOT in read_tables (INSERT
-            # doesn't read the target table, unlike UPDATE/DELETE).
-            insert_tables = access.write_tables - access.read_tables
             for table in insert_tables:
                 _report_or_buffer(
                     reporter,
                     _sql_sequence_resource_id(table, db_scope=db_scope),
-                    "write",
+                    "weak_write",
                 )
             delete_tables = access.delete_tables or set()
             for table in delete_tables:

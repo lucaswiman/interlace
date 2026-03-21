@@ -1,17 +1,19 @@
 """Regression test for Defect #15: DPOR cannot find django-reversion races.
 
-django-reversion's ``create_revision()`` pattern involves many SQL
-operations per thread (INSERT Revision, INSERT Version, SELECT for
-ignore_duplicates check, plus the original model operations).  Each SQL
-operation becomes a DPOR scheduling point and conflict point.  The
-resulting explosion of the backtrack tree prevents DPOR from reaching
-the critical interleaving that reveals the race condition, even though
-the race exists and is easily triggered by hand.
+django-reversion's ``ignore_duplicates`` race requires true concurrent
+execution — both threads' SELECT (the dedup check) must run while
+neither thread's INSERT has committed yet.  DPOR's cooperative scheduler
+runs SQL statements sequentially through separate PostgreSQL connections.
+Under READ COMMITTED isolation, each statement immediately sees all
+previously committed data, so thread B's SELECT always sees thread A's
+committed version (or vice versa).  The dedup check always succeeds and
+the race is never triggered.
 
-Without django-reversion (plain Django ORM with 2-3 SQL operations per
-thread), DPOR finds races in 2 interleavings.  With django-reversion's
-create_revision() (8+ SQL operations per thread), DPOR explores 30-80
-interleavings in 60 s without finding the race.
+This is a fundamental limitation: DPOR interleaves at SQL scheduling
+points but each SQL statement runs to completion atomically against real
+PostgreSQL.  Races that depend on overlapping transaction windows (where
+uncommitted writes from one transaction are invisible to another's reads)
+cannot be detected by sequential interleaving alone.
 """
 
 from __future__ import annotations
@@ -136,33 +138,26 @@ def _pg_available():
 # Tests
 # ---------------------------------------------------------------------------
 class TestDporReversionDeadlock:
-    """Defect #15: DPOR cannot find django-reversion races.
+    """Defect #15: DPOR cannot find django-reversion's ignore_duplicates race.
 
-    The many SQL operations inside create_revision() create too many
-    I/O-level conflict points, causing DPOR's backtrack tree to explode.
-    DPOR explores dozens of interleavings but never reaches the critical
-    schedule that reveals the ignore_duplicates TOCTOU race.
+    The race requires overlapping transaction windows: both threads'
+    SELECT (the dedup check) must execute while neither thread's INSERT
+    has been committed.  DPOR runs SQL sequentially, so under READ
+    COMMITTED the dedup check always sees previously committed data and
+    the race is never triggered.
     """
 
     def test_dpor_finds_duplicate_version_race(self, _pg_available) -> None:
-        """Two concurrent create_revision() blocks saving the same object
-        with identical content should be detected as a race by DPOR.
+        """DPOR should find the ignore_duplicates TOCTOU race.
 
-        Both threads:
-        1. Read the Article (SELECT)
-        2. Save it inside create_revision() — triggers reversion's
-           _add_to_revision() via post_save signal
-        3. _add_to_revision() checks ignore_duplicates (SELECT previous
-           version — both see none yet)
-        4. On context exit, _save_revision() creates Revision + Version
+        Two concurrent create_revision() blocks saving the same object
+        with identical content should both pass the ignore_duplicates
+        check (each sees no matching version because the other hasn't
+        committed yet) and create duplicate Version rows.
 
-        Invariant: with ignore_duplicates=True, at most 2 total Versions
-        (seed + 1 update) should exist.  The race creates 3.
-
-        Without django-reversion, DPOR finds equivalent races in 2
-        interleavings.  With create_revision(), the many SQL operations
-        (8+ per thread) create too many conflict points and DPOR cannot
-        reach the critical interleaving within the timeout.
+        Currently fails because DPOR's sequential SQL execution means
+        one thread's SELECT always sees the other's committed INSERT,
+        making the dedup check work correctly in every interleaving.
         """
         require_active("test_dpor_finds_duplicate_version_race")
 
@@ -202,12 +197,12 @@ class TestDporReversionDeadlock:
             invariant=_invariant,
             deadlock_timeout=15.0,
             timeout_per_run=30.0,
-            total_timeout=60.0,
         )
 
         assert not result.property_holds, (
-            f"DPOR should find the duplicate-version race, but the many "
-            f"SQL-level conflict points inside create_revision() prevent "
-            f"DPOR from reaching the critical interleaving (Defect #15).\n"
+            f"DPOR should find the duplicate-version race, but "
+            f"sequential SQL execution under READ COMMITTED means the "
+            f"dedup check always sees committed data — the race requires "
+            f"overlapping transaction windows (Defect #15).\n"
             f"num_explored={result.num_explored}"
         )
