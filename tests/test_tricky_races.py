@@ -221,6 +221,7 @@ class TestDictDirectAccessRace:
             invariant=lambda s: s.value == 2,
             detect_io=False,
             deadlock_timeout=5.0,
+            track_dunder_dict_accesses=True,
         )
         assert not result.property_holds
 
@@ -350,6 +351,7 @@ class TestVarsAliasRace:
             invariant=lambda s: s.value == 2,
             detect_io=False,
             deadlock_timeout=5.0,
+            track_dunder_dict_accesses=True,
         )
         assert not result.property_holds
 

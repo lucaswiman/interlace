@@ -3,6 +3,20 @@ Changelog
 
 All releases: https://github.com/lucaswiman/frontrun/releases
 
+Unreleased
+----------
+
+* **Interactive HTML report** — ``--frontrun-report=path.html`` pytest flag
+  generates a self-contained HTML file visualising the full DPOR exploration:
+  SVG timelines, clickable switch points, side-by-side race views with source
+  context and values, keyboard/swipe navigation.
+
+* **``track_dunder_dict_accesses`` parameter** — ``explore_dpor()`` no longer
+  reports ``obj.__dict__`` accesses by default.  The duplicate conflict points
+  doubled wakeup tree insertions for every attribute race with negligible
+  benefit (only catches the rare ``self.x`` vs ``self.__dict__['x']`` cross-path).
+  Pass ``track_dunder_dict_accesses=True`` to restore the old behaviour.
+
 0.2.0 (2026-03-20)
 -------------------
 
