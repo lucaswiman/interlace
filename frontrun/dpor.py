@@ -75,7 +75,6 @@ from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
 from frontrun._tracing import TraceFilter as _TraceFilter
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
-from frontrun._tracing import is_library_code as _is_library_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.cli import require_active as _require_frontrun_env
@@ -1902,11 +1901,6 @@ class DporBytecodeRunner:
             if event == "call":
                 filename = frame.f_code.co_filename
                 if _should_trace_file(filename):
-                    # --- Library-code coarsening (defect #15) ---
-                    # Don't trace opcodes inside library code; real
-                    # conflicts are detected at the I/O boundary.
-                    if _is_library_code(filename):
-                        return None
                     # Skip dynamically generated code (<string>, etc.)
                     # unless its caller is user code.  In I/O mode, skip
                     # all dynamic code unconditionally.
@@ -1944,7 +1938,6 @@ class DporBytecodeRunner:
                             return trace
                     _process_opcode(frame, scheduler, thread_id)
                     return trace
-
                 scheduler.report_and_wait(frame, thread_id)
                 # CPython 3.10-3.11 bug workaround: after our trace callback
                 # returns, CPython calls PyFrame_LocalsToFast(frame, 1) which
@@ -2009,16 +2002,6 @@ class DporBytecodeRunner:
             # corrupting monitoring state for subsequent DPOR iterations
             # and tests that share the same tool ID.
             if not _should_trace_file(code.co_filename):
-                return mon.DISABLE  # type: ignore[attr-defined]
-            # --- Library-code coarsening (defect #15) ---
-            # Library code (site-packages matched by trace_packages) has
-            # effectively-immutable internal state.  Tracing its opcodes
-            # creates false conflict points on shared module dicts and
-            # class __dict__ objects, causing a combinatorial explosion
-            # of the backtrack tree.  Disable monitoring entirely for
-            # library code — real conflicts (SQL, Redis) are detected by
-            # _intercept_execute / LD_PRELOAD, not opcode tracing.
-            if _is_library_code(code.co_filename):
                 return mon.DISABLE  # type: ignore[attr-defined]
             # In I/O-detection mode, skip dynamically generated code
             # (e.g. dataclass __init__ from exec/compile in libraries).
