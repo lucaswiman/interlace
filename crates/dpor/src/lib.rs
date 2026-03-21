@@ -159,6 +159,17 @@ impl PyDporEngine {
     fn num_threads(&self) -> usize {
         self.inner.num_threads()
     }
+
+    /// Return pending races detected during the current execution.
+    /// Each race is (prev_path_id, current_path_id, thread_id, race_object).
+    /// Call before next_execution() which consumes them.
+    fn pending_races(&self) -> Vec<(usize, usize, usize, Option<u64>)> {
+        self.inner
+            .pending_races()
+            .iter()
+            .map(|r| (r.prev_path_id, r.current_path_id, r.thread_id, r.race_object))
+            .collect()
+    }
 }
 
 impl PyDporEngine {
