@@ -2149,6 +2149,20 @@ class DporBytecodeRunner:
                             execution.unblock_thread(waiter)
                         engine.report_sync(execution, thread_id, "lock_release", obj_id)
                     _dpor_tls.lock_depth = max(0, getattr(_dpor_tls, "lock_depth", 1) - 1)
+                    # Flush deferred I/O immediately at the lock-release scheduling
+                    # point.  engine.schedule() for the lock.release CALL opcode has
+                    # already run (advancing path.pos), so the Rust engine's
+                    # current_position().saturating_sub(1) still resolves to the
+                    # lock-release step's path_id.  Reporting here attributes I/O
+                    # to that step rather than a later one, giving DPOR accurate
+                    # conflict positions without forcing every CALL to be a SP.
+                    if getattr(_dpor_tls, "lock_depth", 0) == 0:
+                        _pending_io: list[tuple[int, str]] | None = getattr(_dpor_tls, "pending_io", None)
+                        if _pending_io:
+                            for _obj_key, _io_kind in _pending_io:
+                                with engine_lock:
+                                    engine.report_io_access(execution, thread_id, _obj_key, _io_kind)
+                            _pending_io.clear()
                     # Wake threads that may now be schedulable
                     with scheduler._condition:
                         scheduler._condition.notify_all()
