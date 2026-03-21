@@ -408,7 +408,17 @@ class DporScheduler:
 
                 def _flush_pending_io() -> None:
                     pending_io: list[tuple[int, str]] | None = getattr(_dpor_tls, "pending_io", None)
-                    if pending_io and getattr(_dpor_tls, "lock_depth", 0) == 0:
+                    if not pending_io:
+                        return
+
+                    # Deferring I/O past a scheduling point is only safe while
+                    # this thread is inside locks AND no other thread can run.
+                    # If another thread is runnable, moving the I/O report to a
+                    # later unlock shifts the wakeup-tree insertion point past a
+                    # real race window.
+                    lock_depth = getattr(_dpor_tls, "lock_depth", 0)
+                    other_runnable = any(tid != thread_id for tid in self.execution.runnable_threads())
+                    if lock_depth == 0 or other_runnable:
                         engine = self.engine
                         execution = self.execution
                         for obj_key, io_kind in pending_io:
@@ -2171,9 +2181,10 @@ class DporBytecodeRunner:
         _dpor_tls.engine = engine
         _dpor_tls.execution = execution
 
-        # IO detection: defer I/O reports until the thread exits all locks
-        # so that the DPOR wakeup tree insertion lands at a scheduling point where
-        # the other thread can actually run (not blocked on the lock).
+        # IO detection: defer I/O reports only while this thread is inside
+        # locks and no competing thread is runnable. Once another thread can
+        # run, pending I/O must flush immediately so the wakeup tree records
+        # the real race window rather than a later unlock.
         _dpor_tls.lock_depth = 0
         _dpor_tls.pending_io = []
 
