@@ -48,6 +48,12 @@ target/
 # Docs build
 docs/_build/
 
+# Generated docs assets (produced at build time, not checked in)
+docs/_static/dpor_*.html
+
+# Ad-hoc DPOR exploration reports
+dpor_report.html
+
 # External repos (cloned for case study tests)
 docs/case_studies/external_repos/
 docs/external_repos/
