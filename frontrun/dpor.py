@@ -327,6 +327,13 @@ class DporScheduler:
         # Used to block threads in the DPOR execution when they're spinning
         # on a cooperative lock, and unblock them when the lock is released.
         self._lock_waiters: dict[int, set[int]] = {}
+        # Per-thread deferred I/O buffers. Lists are shared with thread-local
+        # storage so other threads can flush deferred I/O when they reach a
+        # real competing I/O boundary.
+        self._pending_io_by_thread: dict[int, list[tuple[int, str]]] = {}
+        # Per-thread lock nesting depth mirrored from TLS for cross-thread
+        # deferred-I/O flush decisions.
+        self._lock_depth_by_thread: dict[int, int] = {}
 
         # Maps iterator id → original container object. When GET_ITER creates
         # an iterator from a mutable container, we record the mapping so that
@@ -385,6 +392,20 @@ class DporScheduler:
         """Block until it's this thread's turn. Returns False when done."""
         return self._report_and_wait(None, thread_id)
 
+    def _all_other_live_threads_blocked_by_current(self, thread_id: int) -> bool:
+        from frontrun._deadlock import get_wait_for_graph
+
+        graph = get_wait_for_graph()
+        if graph is None:
+            return False
+        live_other_threads = {
+            tid for tid in range(self.num_threads) if tid != thread_id and tid not in self._threads_done
+        }
+        if not live_other_threads:
+            return True
+        blocked_threads = graph.reverse_reachable_threads_from(thread_id)
+        return live_other_threads.issubset(blocked_threads)
+
     def report_and_wait(self, frame: Any, thread_id: int) -> bool:
         """Report accesses for an opcode and wait for this thread's turn.
 
@@ -406,15 +427,30 @@ class DporScheduler:
             _scheduler_tls._in_dpor_machinery = True
             try:
 
-                def _flush_pending_io() -> None:
-                    pending_io: list[tuple[int, str]] | None = getattr(_dpor_tls, "pending_io", None)
-                    if pending_io and getattr(_dpor_tls, "lock_depth", 0) == 0:
-                        engine = self.engine
-                        execution = self.execution
-                        for obj_key, io_kind in pending_io:
-                            with self._engine_lock:
-                                engine.report_io_access(execution, thread_id, obj_key, io_kind)
-                        pending_io.clear()
+                def _flush_pending_io_for(flush_thread_id: int, *, allow_inside_lock: bool = False) -> None:
+                    pending_io = self._pending_io_by_thread.get(flush_thread_id)
+                    if not pending_io:
+                        return
+                    if not allow_inside_lock and self._lock_depth_by_thread.get(flush_thread_id, 0) > 0:
+                        return
+                    engine = self.engine
+                    execution = self.execution
+                    for obj_key, io_kind in pending_io:
+                        with self._engine_lock:
+                            engine.report_io_access(execution, flush_thread_id, obj_key, io_kind)
+                    pending_io.clear()
+
+                def _flush_other_pending_io_for_current_io() -> None:
+                    current_pending = self._pending_io_by_thread.get(thread_id)
+                    if not current_pending:
+                        return
+                    for other_thread_id, pending_io in self._pending_io_by_thread.items():
+                        if other_thread_id == thread_id or not pending_io:
+                            continue
+                        # Another thread reached a real I/O boundary, so any
+                        # deferred I/O from this thread is now part of a real
+                        # race window and must become visible to the engine.
+                        _flush_pending_io_for(other_thread_id, allow_inside_lock=True)
 
                 # Merge LD_PRELOAD I/O events (C-level send/recv from e.g.
                 # psycopg2) into the thread's pending_io list.  The preload
@@ -454,12 +490,21 @@ class DporScheduler:
                     if self._finished or self._error:
                         return False
                     if self._current_thread == thread_id:
+                        current_pending = self._pending_io_by_thread.get(thread_id)
+                        if (
+                            frame is None
+                            and current_pending
+                            and self._lock_depth_by_thread.get(thread_id, 0) > 0
+                            and self._all_other_live_threads_blocked_by_current(thread_id)
+                        ):
+                            return True
+                        _flush_other_pending_io_for_current_io()
                         # Flush deferred I/O only once this thread actually owns
                         # the current DPOR step. On free-threaded Python a thread
                         # can reach report_and_wait while another thread still owns
                         # the step; flushing earlier stamps the access onto the
                         # wrong path_id and can hide the wakeup tree insertion point.
-                        _flush_pending_io()
+                        _flush_pending_io_for(thread_id)
                         # Process opcode accesses only when it's our turn.
                         # Deferring this until the thread is scheduled ensures
                         # that accesses are recorded at the correct path_id
@@ -2066,12 +2111,11 @@ class DporBytecodeRunner:
                 # I/O events arrive from C-level LD_PRELOAD interception.
                 instrs = _get_instructions(code)
                 instr = instrs.get(instruction_offset)
+                frame = sys._getframe(1)
                 if instr is not None and instr.opname in _CALL_OPCODES:
                     if _detect_io:
-                        frame = sys._getframe(1)
                         scheduler.report_and_wait(frame, thread_id)
                         return None
-                    frame = sys._getframe(1)
                     shadow = scheduler.get_shadow_stack(id(frame))
                     argc = instr.arg or 0
                     if _call_might_report_access(shadow, argc):
@@ -2080,7 +2124,6 @@ class DporBytecodeRunner:
                     # No C-method detected; process shadow stack without yield
                     _process_opcode(frame, scheduler, thread_id)
                     return None
-                frame = sys._getframe(1)
                 _process_opcode(frame, scheduler, thread_id)
                 return None
 
@@ -2148,7 +2191,9 @@ class DporBytecodeRunner:
                             waiter_set.discard(thread_id)
                             execution.unblock_thread(thread_id)
                         engine.report_sync(execution, thread_id, "lock_acquire", obj_id)
-                    _dpor_tls.lock_depth = getattr(_dpor_tls, "lock_depth", 0) + 1
+                    new_depth = getattr(_dpor_tls, "lock_depth", 0) + 1
+                    _dpor_tls.lock_depth = new_depth
+                    scheduler._lock_depth_by_thread[thread_id] = new_depth
                     return
                 if event == "lock_release":
                     with engine_lock:
@@ -2156,7 +2201,9 @@ class DporBytecodeRunner:
                         for waiter in waiters:
                             execution.unblock_thread(waiter)
                         engine.report_sync(execution, thread_id, "lock_release", obj_id)
-                    _dpor_tls.lock_depth = max(0, getattr(_dpor_tls, "lock_depth", 1) - 1)
+                    new_depth = max(0, getattr(_dpor_tls, "lock_depth", 1) - 1)
+                    _dpor_tls.lock_depth = new_depth
+                    scheduler._lock_depth_by_thread[thread_id] = new_depth
                     # Wake threads that may now be schedulable
                     with scheduler._condition:
                         scheduler._condition.notify_all()
@@ -2173,11 +2220,16 @@ class DporBytecodeRunner:
         _dpor_tls.engine = engine
         _dpor_tls.execution = execution
 
-        # IO detection: defer I/O reports until the thread exits all locks
-        # so that the DPOR wakeup tree insertion lands at a scheduling point where
-        # the other thread can actually run (not blocked on the lock).
+        # IO detection: defer I/O reports while this thread is inside locks.
+        # If another thread later reaches a real I/O boundary, it will flush
+        # these deferred accesses before reporting its own I/O so the race
+        # window is preserved without adding spurious paths for threads that
+        # only block on the same lock.
         _dpor_tls.lock_depth = 0
-        _dpor_tls.pending_io = []
+        self.scheduler._lock_depth_by_thread[thread_id] = 0
+        pending_io: list[tuple[int, str]] = []
+        _dpor_tls.pending_io = pending_io
+        self.scheduler._pending_io_by_thread[thread_id] = pending_io
 
         # Register OS TID → DPOR thread ID mapping for LD_PRELOAD events.
         if self._preload_bridge is not None:
@@ -2216,6 +2268,7 @@ class DporBytecodeRunner:
 
     def _teardown_dpor_tls(self) -> None:
         """Clean up both shared and DPOR-specific TLS."""
+        _tid = getattr(_dpor_tls, "thread_id", None)
         if self._preload_bridge is not None:
             self._preload_bridge.unregister_thread(threading.get_native_id())
 
@@ -2252,6 +2305,9 @@ class DporBytecodeRunner:
         _dpor_tls.execution = None
         _dpor_tls.lock_depth = 0
         _dpor_tls.pending_io = []
+        if _tid is not None:
+            self.scheduler._lock_depth_by_thread.pop(_tid, None)
+            self.scheduler._pending_io_by_thread.pop(_tid, None)
 
     def _run_thread_settrace(
         self,

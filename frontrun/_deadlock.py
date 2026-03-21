@@ -120,6 +120,41 @@ class WaitForGraph:
         with self._lock:
             self._edges.clear()
 
+    def reverse_reachable_threads_from(self, thread_id: int) -> set[int]:
+        """Return threads transitively blocked behind *thread_id*'s held locks.
+
+        Traverses the wait-for graph with edges reversed:
+
+        - ``lock -> holder`` becomes ``holder -> lock``
+        - ``thread -> waited_lock`` becomes ``waited_lock -> thread``
+
+        Starting from ``("thread", thread_id)``, the reachable thread nodes are
+        exactly the threads that are directly or transitively waiting on locks
+        currently held (possibly indirectly) by *thread_id*.
+        """
+        start = ("thread", thread_id)
+        with self._lock:
+            reverse_edges: dict[tuple[str, int], set[tuple[str, int]]] = {}
+            for src, dsts in self._edges.items():
+                for dst in dsts:
+                    reverse_edges.setdefault(dst, set()).add(src)
+
+            visited: set[tuple[str, int]] = {start}
+            stack: list[tuple[str, int]] = [start]
+            reachable_threads: set[int] = set()
+
+            while stack:
+                node = stack.pop()
+                for neighbor in reverse_edges.get(node, ()):
+                    if neighbor in visited:
+                        continue
+                    visited.add(neighbor)
+                    stack.append(neighbor)
+                    if neighbor[0] == "thread":
+                        reachable_threads.add(neighbor[1])
+
+            return reachable_threads
+
     # -- internal ----------------------------------------------------------
 
     def _find_cycle_from(self, start: tuple[str, int]) -> list[tuple[str, int]] | None:

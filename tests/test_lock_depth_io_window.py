@@ -1,0 +1,130 @@
+"""Regression tests for sound I/O deferral while holding locks.
+
+Problem statement
+-----------------
+
+Sync DPOR buffers I/O in ``pending_io`` and reports it to the Rust engine at
+the next scheduling point. Deferring every I/O until ``lock_depth == 0`` keeps
+same-lock critical sections compact, but it can hide a real race window when a
+different thread reaches a competing I/O operation before the lock is released.
+
+The intended rule is:
+
+  - A thread keeps its own pending I/O buffered while it is inside a lock.
+  - When another thread reaches a real I/O boundary, deferred I/O from
+    lock-held threads must be flushed before the current thread reports its own
+    I/O.
+"""
+
+from __future__ import annotations
+
+from frontrun._deadlock import install_wait_for_graph, uninstall_wait_for_graph
+from frontrun.dpor import DporScheduler, _dpor_tls
+
+
+class _FakeExecution:
+    def __init__(self, runnable: list[int]) -> None:
+        self._runnable = list(runnable)
+
+    def runnable_threads(self) -> list[int]:
+        return list(self._runnable)
+
+
+class _FakeEngine:
+    def __init__(self) -> None:
+        self.io_calls: list[tuple[int, int, str]] = []
+        self.schedule_calls = 0
+
+    def schedule(self, execution: _FakeExecution) -> int | None:
+        self.schedule_calls += 1
+        runnable = execution.runnable_threads()
+        return runnable[0] if runnable else None
+
+    def report_io_access(self, execution: _FakeExecution, thread_id: int, object_id: int, kind: str) -> None:
+        self.io_calls.append((thread_id, object_id, kind))
+
+
+class TestLockDepthIoWindow:
+    def teardown_method(self) -> None:
+        _dpor_tls.pending_io = []
+        _dpor_tls.lock_depth = 0
+        uninstall_wait_for_graph()
+
+    def test_flushes_current_thread_pending_io_immediately_outside_lock(self) -> None:
+        engine = _FakeEngine()
+        execution = _FakeExecution([0])
+        scheduler = DporScheduler(engine, execution, num_threads=1)
+
+        pending_io = [(123, "write")]
+        scheduler._pending_io_by_thread[0] = pending_io
+        scheduler._lock_depth_by_thread[0] = 0
+        _dpor_tls.pending_io = pending_io
+        _dpor_tls.lock_depth = 0
+
+        assert scheduler._report_and_wait(None, 0)
+
+        assert engine.io_calls == [(0, 123, "write")]
+        assert _dpor_tls.pending_io == []
+
+    def test_keeps_current_thread_pending_io_buffered_inside_lock(self) -> None:
+        engine = _FakeEngine()
+        execution = _FakeExecution([0, 1])
+        scheduler = DporScheduler(engine, execution, num_threads=2)
+
+        pending_io = [(456, "read")]
+        scheduler._pending_io_by_thread[0] = pending_io
+        scheduler._lock_depth_by_thread[0] = 1
+        _dpor_tls.pending_io = pending_io
+        _dpor_tls.lock_depth = 1
+
+        assert scheduler._report_and_wait(None, 0)
+
+        assert engine.io_calls == []
+        assert _dpor_tls.pending_io == [(456, "read")]
+
+    def test_flushes_other_threads_deferred_io_when_current_thread_reaches_io_boundary(self) -> None:
+        engine = _FakeEngine()
+        execution = _FakeExecution([0, 1])
+        scheduler = DporScheduler(engine, execution, num_threads=2)
+
+        deferred_other = [(789, "write")]
+        current_io = [(999, "read")]
+        scheduler._pending_io_by_thread[0] = deferred_other
+        scheduler._pending_io_by_thread[1] = current_io
+        scheduler._lock_depth_by_thread[0] = 1
+        scheduler._lock_depth_by_thread[1] = 0
+        scheduler._current_thread = 1
+        _dpor_tls.pending_io = current_io
+        _dpor_tls.lock_depth = 0
+
+        assert scheduler._report_and_wait(None, 1)
+
+        assert engine.io_calls == [(0, 789, "write"), (1, 999, "read")]
+        assert scheduler._pending_io_by_thread[0] == []
+        assert _dpor_tls.pending_io == []
+
+    def test_skips_io_scheduling_point_when_all_other_threads_wait_on_held_locks(self) -> None:
+        engine = _FakeEngine()
+        execution = _FakeExecution([0, 1])
+        scheduler = DporScheduler(engine, execution, num_threads=2)
+        graph = install_wait_for_graph()
+        graph.add_holding(0, 123, kind="lock")
+        graph.add_waiting(1, 123, kind="lock")
+
+        pending_io = [(321, "write")]
+        scheduler._pending_io_by_thread[0] = pending_io
+        scheduler._lock_depth_by_thread[0] = 1
+        scheduler._current_thread = 0
+        _dpor_tls.pending_io = pending_io
+        _dpor_tls.lock_depth = 1
+        baseline_schedule_calls = engine.schedule_calls
+
+        assert scheduler._report_and_wait(None, 0)
+
+        assert engine.schedule_calls == baseline_schedule_calls, (
+            "When all other live threads are transitively blocked behind the "
+            "current thread's held locks, the I/O boundary should not create a "
+            "new scheduling point."
+        )
+        assert engine.io_calls == []
+        assert _dpor_tls.pending_io == [(321, "write")]
