@@ -388,6 +388,35 @@ class DporTimeline extends HTMLElement {
       return map;
     })();
 
+    // Synthesize the missing lock_wait event for the deadlock-triggering thread.
+    // That thread's wait fires SchedulerAbort before _sync_reporter records it,
+    // so it's absent from lock_events. We find the gap by checking which (thread, lock)
+    // wait pair in the cycle description isn't present in the recorded events.
+    let syntheticDeadlockWait = null;
+    if (exec.was_deadlock && exec.deadlock_cycle_description) {
+      const recordedWaits = new Set(
+        (exec.lock_events || []).filter(le => le.event_type === 'wait').map(le => `${le.thread_id}:${le.lock_id}`)
+      );
+      const cycleNodes = exec.deadlock_cycle_description.split(' -> ');
+      for (let ci = 0; ci < cycleNodes.length - 1; ci += 2) {
+        const waiterStr = cycleNodes[ci];
+        const lockStr = cycleNodes[ci + 1];
+        if (!waiterStr.startsWith('thread ') || !lockStr.startsWith('lock 0x')) continue;
+        const waiterId = parseInt(waiterStr.slice(7));
+        const lockId = parseInt(lockStr.slice(7), 16);
+        if (!recordedWaits.has(`${waiterId}:${lockId}`)) {
+          // Find the last schedule step in trace where this thread ran
+          let lastIdx = trace.length - 1;
+          for (let k = trace.length - 1; k >= 0; k--) {
+            if (trace[k] === waiterId) { lastIdx = k; break; }
+          }
+          if (!lockIdToLabel.has(lockId)) lockIdToLabel.set(lockId, 'L' + lockIdToLabel.size);
+          syntheticDeadlockWait = { schedule_index: lastIdx, thread_id: waiterId, event_type: 'wait', lock_id: lockId };
+          break;
+        }
+      }
+    }
+
     // Smart row lookup: acquire → forward search (thread's NEXT run = where it resumes with the lock);
     // wait/release → backward search (thread's last run = where the event happened).
     function findRowForLockEvent(le) {
@@ -448,6 +477,30 @@ class DporTimeline extends HTMLElement {
       lockMarks += `<circle cx="${tickX1}" cy="${ty}" r="2.5" fill="${color}"/>`;
       lockMarks += `<text x="${tickX1 - 3}" y="${ty + 3}" fill="${color}" font-size="9" text-anchor="end" style="pointer-events:none">${label}</text>`;
       lockMarks += `</g>`;
+    }
+
+    // Render the synthesized deadlock-trigger wait event (dispatches select-deadlock on click)
+    if (syntheticDeadlockWait) {
+      const le = syntheticDeadlockWait;
+      const row = findRowForLockEvent(le);
+      if (row) {
+        const tx = threadX(le.thread_id);
+        const baseY = headerHeight + row.y * stepHeight;
+        const offsetKey = `${row.realIdx}:${le.thread_id}`;
+        const offsetIdx = lockOffsets.get(offsetKey) || 0;
+        lockOffsets.set(offsetKey, offsetIdx + 1);
+        const ty = baseY + offsetIdx * 10;
+        const color = '#f9e2af';
+        const label = (lockIdToLabel.get(le.lock_id) || '?') + ' ⊙';
+        const tickX1 = tx - 30;
+        const tickX2 = tx + 5;
+        lockMarks += `<g class="deadlock-marker" style="cursor:pointer">`;
+        lockMarks += `<rect x="${tickX1 - 48}" y="${ty - 7}" width="83" height="14" fill="transparent"/>`;
+        lockMarks += `<line x1="${tickX1}" y1="${ty}" x2="${tickX2}" y2="${ty}" stroke="${color}" stroke-width="1"/>`;
+        lockMarks += `<circle cx="${tickX1}" cy="${ty}" r="2.5" fill="${color}"/>`;
+        lockMarks += `<text x="${tickX1 - 3}" y="${ty + 3}" fill="${color}" font-size="9" text-anchor="end" style="pointer-events:none">${label}</text>`;
+        lockMarks += `</g>`;
+      }
     }
 
     // Deadlock: draw a single clickable "DEADLOCK" marker below the last rendered row
@@ -545,9 +598,8 @@ class DporTimeline extends HTMLElement {
       });
     });
 
-    // Click handler for deadlock marker
-    const dlMarker = this.shadowRoot.querySelector('.deadlock-marker');
-    if (dlMarker) {
+    // Click handlers for deadlock markers (the DEADLOCK badge + synthetic trigger wait tick)
+    this.shadowRoot.querySelectorAll('.deadlock-marker').forEach(dlMarker => {
       dlMarker.addEventListener('click', (e) => {
         e.stopPropagation();
         this.dispatchEvent(new CustomEvent('select-deadlock', {
@@ -555,7 +607,7 @@ class DporTimeline extends HTMLElement {
           bubbles: true, composed: true
         }));
       });
-    }
+    });
 
     // Click handlers for lock events
     // Pass pre-computed lockStateAtEvent so the modal doesn't need to recompute
