@@ -2370,7 +2370,9 @@ class DporBytecodeRunner:
                         scheduler._lock_waiters.setdefault(obj_id, set()).add(thread_id)
                         execution.block_thread(thread_id)
                         _trace_len_wait = len(execution.schedule_trace)
-                        _trace_snap_wait = list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
+                        _trace_snap_wait = (
+                            list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
+                        )
                     if scheduler._error is not None:
                         # Capture teardown boundary once, then suppress all further events.
                         if scheduler._deadlock_at is None:
@@ -2395,7 +2397,9 @@ class DporBytecodeRunner:
                             execution.unblock_thread(thread_id)
                         engine.report_sync(execution, thread_id, "lock_acquire", obj_id)
                         _trace_len_acq = len(execution.schedule_trace)
-                        _trace_snap_acq = list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
+                        _trace_snap_acq = (
+                            list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
+                        )
                     new_depth = getattr(_dpor_tls, "lock_depth", 0) + 1
                     _dpor_tls.lock_depth = new_depth
                     scheduler._lock_depth_by_thread[thread_id] = new_depth
@@ -2423,7 +2427,9 @@ class DporBytecodeRunner:
                             execution.unblock_thread(waiter)
                         engine.report_sync(execution, thread_id, "lock_release", obj_id)
                         _trace_len_rel = len(execution.schedule_trace)
-                        _trace_snap_rel = list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
+                        _trace_snap_rel = (
+                            list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
+                        )
                     new_depth = max(0, getattr(_dpor_tls, "lock_depth", 1) - 1)
                     _dpor_tls.lock_depth = new_depth
                     scheduler._lock_depth_by_thread[thread_id] = new_depth
@@ -2883,6 +2889,19 @@ def explore_dpor(
         preload_dispatcher.start()
 
     clear_sql_metadata()
+
+    # Warm SQL parsers (sqlglot) BEFORE the first _patch_locks() call.
+    # sqlglot creates a module-level _import_lock = threading.RLock() on
+    # first import.  If that import happens after _patch_locks() replaces
+    # threading.RLock with CooperativeRLock, the lock becomes cooperative.
+    # If a worker thread is then killed while holding it (e.g. timeout),
+    # the underlying real lock stays locked forever, causing deadlocks in
+    # later phases (_reproduce_dpor_counterexample).  Warming here ensures
+    # the lock is a real RLock.
+    if detect_io:
+        from frontrun._sql_cursor import _warm_sql_parsers
+
+        _warm_sql_parsers()
 
     # Inject SET lock_timeout on new PG connections (defect #6 workaround).
     from frontrun._sql_cursor import get_lock_timeout, set_lock_timeout
