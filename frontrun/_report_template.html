@@ -42,12 +42,47 @@ const DATA = JSON.parse(document.getElementById('dpor-data').textContent);
 class DporNav extends HTMLElement {
   connectedCallback() {
     this.attachShadow({ mode: 'open' });
+    this._page = 0;
+    this._showFailed = false;
     this.render();
+  }
+
+  static get observedAttributes() { return ['current']; }
+  attributeChangedCallback() { if (this.shadowRoot) this._syncPageToCurrent(); }
+
+  _isFail(ex) { return !ex.invariant_held || ex.was_deadlock; }
+
+  _syncPageToCurrent() {
+    const execs = DATA.executions;
+    const current = parseInt(this.getAttribute('current') || '0');
+    const filtered = this._showFailed ? execs.map((ex, i) => ({ex, i})).filter(({ex}) => this._isFail(ex)) : execs.map((ex, i) => ({ex, i}));
+    const pos = filtered.findIndex(({i}) => i === current);
+    if (pos >= 0) {
+      const pageSize = this._pageSize();
+      const targetPage = Math.floor(pos / pageSize);
+      if (targetPage !== this._page) { this._page = targetPage; }
+    }
+    this.render();
+  }
+
+  _pageSize() {
+    const w = (this.shadowRoot.host.offsetWidth || window.innerWidth) - 380;
+    return Math.max(10, Math.floor(w / 38));
   }
 
   render() {
     const execs = DATA.executions;
-    const current = this.getAttribute('current') || '0';
+    const current = parseInt(this.getAttribute('current') || '0');
+    const failCount = execs.filter(ex => this._isFail(ex)).length;
+    const filtered = this._showFailed
+      ? execs.map((ex, i) => ({ex, i})).filter(({ex}) => this._isFail(ex))
+      : execs.map((ex, i) => ({ex, i}));
+    const pageSize = this._pageSize();
+    const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    if (this._page >= totalPages) this._page = totalPages - 1;
+    const page = this._page;
+    const pageItems = filtered.slice(page * pageSize, (page + 1) * pageSize);
+
     this.shadowRoot.innerHTML = `
       <style>
         :host {
@@ -59,9 +94,9 @@ class DporNav extends HTMLElement {
           top: 0;
           z-index: 100;
         }
-        .nav-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-        .title { font-size: 14px; font-weight: bold; color: var(--blue); }
-        .exec-buttons { display: flex; gap: 2px; flex-wrap: wrap; }
+        .nav-row { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; overflow: hidden; }
+        .title { font-size: 14px; font-weight: bold; color: var(--blue); white-space: nowrap; }
+        .exec-buttons { display: flex; gap: 2px; flex-shrink: 1; min-width: 0; }
         .exec-btn {
           padding: 2px 8px;
           border: 1px solid var(--border);
@@ -71,28 +106,57 @@ class DporNav extends HTMLElement {
           font-family: var(--mono);
           font-size: 12px;
           border-radius: 3px;
+          flex-shrink: 0;
         }
         .exec-btn:hover { background: var(--bg-hover); }
         .exec-btn.active { background: var(--blue); color: var(--bg); }
         .exec-btn.fail { border-color: var(--red); }
         .exec-btn.fail.active { background: var(--red); }
-        .stats { color: var(--text-dim); font-size: 12px; }
+        .ctrl-btn {
+          padding: 2px 8px;
+          border: 1px solid var(--border);
+          background: transparent;
+          color: var(--text-dim);
+          cursor: pointer;
+          font-family: var(--mono);
+          font-size: 12px;
+          border-radius: 3px;
+          white-space: nowrap;
+          flex-shrink: 0;
+        }
+        .ctrl-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+        .ctrl-btn:disabled { opacity: 0.3; cursor: default; }
+        .ctrl-btn.active-filter { border-color: var(--red); color: var(--red); }
+        .page-info { color: var(--text-dim); font-size: 12px; white-space: nowrap; flex-shrink: 0; }
+        .stats { color: var(--text-dim); font-size: 12px; white-space: nowrap; flex-shrink: 0; }
       </style>
       <div class="nav-row">
         <span class="title">Trace Exploration</span>
+        <button class="ctrl-btn ${this._showFailed ? 'active-filter' : ''}" id="toggle-failed">
+          ${this._showFailed ? `All (${execs.length})` : `Failed (${failCount})`}
+        </button>
+        <button class="ctrl-btn" id="prev-page" ${page === 0 ? 'disabled' : ''}>&lt;</button>
         <div class="exec-buttons">
-          ${execs.map((ex, i) => {
-            const cls = [
-              'exec-btn',
-              i === parseInt(current) ? 'active' : '',
-              (!ex.invariant_held || ex.was_deadlock) ? 'fail' : ''
-            ].filter(Boolean).join(' ');
+          ${pageItems.map(({ex, i}) => {
+            const cls = ['exec-btn', i === current ? 'active' : '', this._isFail(ex) ? 'fail' : ''].filter(Boolean).join(' ');
             return `<button class="${cls}" data-index="${i}">${i}</button>`;
           }).join('')}
         </div>
-        <span class="stats">${execs.length} execution${execs.length !== 1 ? 's' : ''} explored</span>
+        <button class="ctrl-btn" id="next-page" ${page >= totalPages - 1 ? 'disabled' : ''}>&gt;</button>
+        <span class="page-info">${page + 1}/${totalPages}</span>
+        <span class="stats">${filtered.length}${this._showFailed ? '' : '/' + execs.length} explored</span>
       </div>
     `;
+
+    this.shadowRoot.getElementById('toggle-failed').addEventListener('click', () => {
+      this._showFailed = !this._showFailed;
+      this._page = 0;
+      this.render();
+    });
+    const prevBtn = this.shadowRoot.getElementById('prev-page');
+    if (prevBtn && !prevBtn.disabled) prevBtn.addEventListener('click', () => { this._page--; this.render(); });
+    const nextBtn = this.shadowRoot.getElementById('next-page');
+    if (nextBtn && !nextBtn.disabled) nextBtn.addEventListener('click', () => { this._page++; this.render(); });
 
     this.shadowRoot.querySelectorAll('.exec-btn').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -279,7 +343,9 @@ class DporTimeline extends HTMLElement {
           ? headerHeight + row.transitionStartY * stepHeight
           : y;
         const spX = row.isTransitionEnd ? threadX(expandedRows[r-1].threadId) : x;
-        switchCircles += `<circle cx="${spX}" cy="${spY}" r="5" fill="${color}" class="switch-point" data-sp-index="${switches.indexOf(sp)}" style="cursor:pointer"/>`;
+        const spIdx = switches.indexOf(sp);
+        switchCircles += `<circle cx="${spX}" cy="${spY}" r="5" fill="${color}" class="switch-point" data-sp-index="${spIdx}" style="cursor:pointer"/>`;
+        switchCircles += `<text x="${spX + 8}" y="${spY - 6}" fill="var(--text-dim)" font-size="9" text-anchor="start" style="pointer-events:none">${sp.schedule_index}</text>`;
       }
 
       // Thread start marker (downward triangle)
@@ -310,6 +376,47 @@ class DporTimeline extends HTMLElement {
 
     // Build main path SVG from segments
     const mainPathD = mainPathSegments.map(s => `M ${s.startX} ${s.startY} L ${s.endX} ${s.endY}`).join(' ');
+
+    // Build a global lock-id → short label map (L0, L1, …) across all executions
+    const lockIdToLabel = (() => {
+      const map = new Map();
+      for (const ex of DATA.executions) {
+        for (const le of (ex.lock_events || [])) {
+          if (!map.has(le.lock_id)) map.set(le.lock_id, 'L' + map.size);
+        }
+      }
+      return map;
+    })();
+
+    // Build a schedule_index → {y, threadId} lookup from expandedRows
+    const rowByIdx = new Map();
+    for (const row of expandedRows) {
+      if (!rowByIdx.has(row.realIdx)) rowByIdx.set(row.realIdx, row);
+    }
+
+    // Render lock acquire/release tick marks
+    let lockMarks = '';
+    // Track per-(schedule_index, threadId) offset to stack multiple events at same step
+    const lockOffsets = new Map();
+    for (const le of (exec.lock_events || [])) {
+      const row = rowByIdx.get(le.schedule_index);
+      if (!row) continue;
+      const tx = threadX(le.thread_id);
+      const baseY = headerHeight + row.y * stepHeight;
+      const offsetKey = `${le.schedule_index}:${le.thread_id}`;
+      const offsetIdx = lockOffsets.get(offsetKey) || 0;
+      lockOffsets.set(offsetKey, offsetIdx + 1);
+      const ty = baseY + offsetIdx * 10;
+
+      const isAcquire = le.event_type === 'acquire';
+      const color = isAcquire ? '#a6e3a1' : '#8888aa';
+      const label = (lockIdToLabel.get(le.lock_id) || '?') + (isAcquire ? ' ⊕' : ' ⊖');
+      const tickX1 = tx - 30;
+      const tickX2 = tx + 5;
+      lockMarks += `<line x1="${tickX1}" y1="${ty}" x2="${tickX2}" y2="${ty}" stroke="${color}" stroke-width="1"/>`;
+      lockMarks += `<circle cx="${tickX1}" cy="${ty}" r="2.5" fill="${color}"/>`;
+      lockMarks += `<text x="${tickX1 - 3}" y="${ty + 3}" fill="${color}" font-size="9" text-anchor="end" style="pointer-events:none">${label}</text>`;
+    }
 
     // Thread column headers
     let headers = '';
@@ -371,6 +478,7 @@ class DporTimeline extends HTMLElement {
         ${headers}
         <path d="${mainPathD}" fill="none" stroke="var(--blue)" stroke-width="2"/>
         ${transitionLines}
+        ${lockMarks}
         ${threadStartMarkers}
         ${threadEndMarkers}
         ${switchCircles}
