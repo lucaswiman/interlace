@@ -108,6 +108,22 @@ class TestFormatCycleWithLockNames:
         result = format_cycle(cycle)
         assert "lock 0xff" in result
 
+    def test_lock_kind_with_stable_id_map(self) -> None:
+        cycle = [("thread", 0), ("lock", 0xFF), ("thread", 1), ("lock", 0xAB)]
+        lock_id_map = {0xFF: 2, 0xAB: 5}
+        result = format_cycle(cycle, lock_id_map=lock_id_map)
+        assert "lock 2" in result
+        assert "lock 5" in result
+        assert "0x" not in result
+
+    def test_lock_kind_partial_stable_id_map(self) -> None:
+        """Locks not in the map fall back to hex format."""
+        cycle = [("thread", 0), ("lock", 0xFF), ("thread", 1), ("lock", 0xAB)]
+        lock_id_map = {0xFF: 2}
+        result = format_cycle(cycle, lock_id_map=lock_id_map)
+        assert "lock 2" in result
+        assert "lock 0xab" in result
+
     def test_thread_kind(self) -> None:
         cycle = [("thread", 3)]
         result = format_cycle(cycle)

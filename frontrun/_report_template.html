@@ -422,6 +422,14 @@ class DporTimeline extends HTMLElement {
       return map;
     })();
 
+    // Parse a lock reference from the cycle description.
+    // Handles both new format "lock <decimal>" and legacy "lock 0x<hex>".
+    function parseLockRef(lockStr) {
+      if (lockStr.startsWith('lock 0x')) return parseInt(lockStr.slice(7), 16);
+      if (lockStr.startsWith('lock '))   return parseInt(lockStr.slice(5));
+      return NaN;
+    }
+
     // Synthesize the missing lock_wait event for the deadlock-triggering thread.
     // That thread's wait fires SchedulerAbort before _sync_reporter records it,
     // so it's absent from lock_events. We find the gap by checking which (thread, lock)
@@ -435,9 +443,10 @@ class DporTimeline extends HTMLElement {
       for (let ci = 0; ci < cycleNodes.length - 1; ci += 2) {
         const waiterStr = cycleNodes[ci];
         const lockStr = cycleNodes[ci + 1];
-        if (!waiterStr.startsWith('thread ') || !lockStr.startsWith('lock 0x')) continue;
+        if (!waiterStr.startsWith('thread ') || !lockStr.startsWith('lock ')) continue;
         const waiterId = parseInt(waiterStr.slice(7));
-        const lockId = parseInt(lockStr.slice(7), 16);
+        const lockId = parseLockRef(lockStr);
+        if (isNaN(lockId)) continue;
         if (!recordedWaits.has(`${waiterId}:${lockId}`)) {
           // Find the last schedule step in trace where this thread ran
           let lastIdx = trace.length - 1;
@@ -992,7 +1001,8 @@ class DporModal extends HTMLElement {
     // The triggering thread never recorded a lock_wait (SchedulerAbort fired first),
     // so its waiting edge and the corresponding held-by edge are missing from lock_events.
     // Fill them in by parsing deadlock_cycle_description.
-    // Format: "thread X -> lock 0xHEX -> thread Y -> lock 0xHEX -> ..."
+    // Format: "thread X -> lock ID -> thread Y -> lock ID -> ..."
+    // (ID is a decimal stable lock ID, or legacy "0xHEX" for older reports.)
     // Semantics: threadNodes[i] waits for lockNodes[i], lockNodes[i] is held by threadNodes[i+1 mod n].
     const cycleNodes = exec.deadlock_cycle_description
       ? exec.deadlock_cycle_description.split(' -> ')
@@ -1000,11 +1010,12 @@ class DporModal extends HTMLElement {
     // cycleNodes alternates: thread, lock, thread, lock, … ending at a lock
     for (let i = 0; i < cycleNodes.length - 1; i += 2) {
       const waiterStr = cycleNodes[i];       // "thread X"
-      const lockStr   = cycleNodes[i + 1];   // "lock 0xHEX"
+      const lockStr   = cycleNodes[i + 1];   // "lock ID"
       const holderStr = cycleNodes[(i + 2) % cycleNodes.length]; // next thread (wraps)
-      if (!waiterStr.startsWith('thread ') || !lockStr.startsWith('lock 0x')) continue;
+      if (!waiterStr.startsWith('thread ') || !lockStr.startsWith('lock ')) continue;
       const waiterId = parseInt(waiterStr.slice(7));
-      const lockId   = parseInt(lockStr.slice(7), 16);
+      const lockId   = parseLockRef(lockStr);
+      if (isNaN(lockId)) continue;
       const holderId = parseInt(holderStr.slice(7));
       if (!waiting.has(lockId)) waiting.set(lockId, new Set());
       waiting.get(lockId).add(waiterId);

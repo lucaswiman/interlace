@@ -2351,8 +2351,32 @@ class DporBytecodeRunner:
         #   "lock_wait"    → execution.block_thread  (DPOR skips this thread)
         #   "lock_acquire" → execution.unblock_thread (DPOR can schedule again)
         #   "lock_release" → unblock all waiters for this lock
-        def _sync_reporter(event: str, obj_id: int) -> None:
+        # XOR masks matching Rust DporEngine constants for virtual lock objects.
+        lock_object_xor = 0x4C4F_434B_4C4F_434B  # "LOCKLOCK"
+        lock_release_xor = 0x524C_5345_524C_5345  # "RLSERLSE"
+
+        def _register_lock_in_reverse_map(stable_id: int, lock_obj: object) -> None:
+            """Register virtual lock objects in the reverse map for human-readable race info."""
+            rmap = _object_key_reverse_map
+            if rmap is None:
+                return
+            type_name = type(lock_obj).__name__
+            acq_key = stable_id ^ lock_object_xor
+            rel_key = stable_id ^ lock_release_xor
+            if acq_key not in rmap:
+                rmap[acq_key] = f"{type_name}(id={stable_id}).acquire"
+            if rel_key not in rmap:
+                rmap[rel_key] = f"{type_name}(id={stable_id}).release"
+
+        def _sync_reporter(event: str, obj_id: int, lock_obj: object) -> None:
             from frontrun._cooperative import _scheduler_tls
+
+            # Use stable IDs so that lock identifiers are consistent across
+            # DPOR executions (each execution creates fresh state via setup(),
+            # so raw id() values change).  This is the same mechanism used for
+            # shared-object access tracking.
+            stable_lock_id = scheduler._stable_ids.get(lock_obj)
+            _register_lock_in_reverse_map(stable_lock_id, lock_obj)
 
             # Set reentrancy guard so that GC-triggered __del__ chains
             # (e.g., redis.Redis.__del__) that acquire cooperative locks
@@ -2362,7 +2386,7 @@ class DporBytecodeRunner:
             try:
                 if event == "lock_wait":
                     with engine_lock:
-                        scheduler._lock_waiters.setdefault(obj_id, set()).add(thread_id)
+                        scheduler._lock_waiters.setdefault(stable_lock_id, set()).add(thread_id)
                         execution.block_thread(thread_id)
                         _trace_len_wait = len(execution.schedule_trace)
                         _trace_snap_wait = (
@@ -2381,16 +2405,18 @@ class DporBytecodeRunner:
                             max(0, len(_trace_snap_wait) - 1),
                         )
                         scheduler._lock_event_collector.append(  # type: ignore[union-attr]
-                            _LockEvent(schedule_index=_wait_idx, thread_id=thread_id, event_type="wait", lock_id=obj_id)
+                            _LockEvent(
+                                schedule_index=_wait_idx, thread_id=thread_id, event_type="wait", lock_id=stable_lock_id
+                            )
                         )
                     return
                 if event == "lock_acquire":
                     with engine_lock:
-                        waiter_set = scheduler._lock_waiters.get(obj_id)
+                        waiter_set = scheduler._lock_waiters.get(stable_lock_id)
                         if waiter_set is not None and thread_id in waiter_set:
                             waiter_set.discard(thread_id)
                             execution.unblock_thread(thread_id)
-                        engine.report_sync(execution, thread_id, "lock_acquire", obj_id)
+                        engine.report_sync(execution, thread_id, "lock_acquire", stable_lock_id)
                         _trace_len_acq = len(execution.schedule_trace)
                         _trace_snap_acq = (
                             list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
@@ -2411,16 +2437,19 @@ class DporBytecodeRunner:
                         )
                         scheduler._lock_event_collector.append(  # type: ignore[union-attr]
                             _LockEvent(
-                                schedule_index=_acq_idx, thread_id=thread_id, event_type="acquire", lock_id=obj_id
+                                schedule_index=_acq_idx,
+                                thread_id=thread_id,
+                                event_type="acquire",
+                                lock_id=stable_lock_id,
                             )
                         )
                     return
                 if event == "lock_release":
                     with engine_lock:
-                        waiters = scheduler._lock_waiters.pop(obj_id, set())
+                        waiters = scheduler._lock_waiters.pop(stable_lock_id, set())
                         for waiter in waiters:
                             execution.unblock_thread(waiter)
-                        engine.report_sync(execution, thread_id, "lock_release", obj_id)
+                        engine.report_sync(execution, thread_id, "lock_release", stable_lock_id)
                         _trace_len_rel = len(execution.schedule_trace)
                         _trace_snap_rel = (
                             list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
@@ -2441,7 +2470,10 @@ class DporBytecodeRunner:
                         )
                         scheduler._lock_event_collector.append(  # type: ignore[union-attr]
                             _LockEvent(
-                                schedule_index=_rel_idx, thread_id=thread_id, event_type="release", lock_id=obj_id
+                                schedule_index=_rel_idx,
+                                thread_id=thread_id,
+                                event_type="release",
+                                lock_id=stable_lock_id,
                             )
                         )
                     # Wake threads that may now be schedulable
@@ -2449,7 +2481,7 @@ class DporBytecodeRunner:
                         scheduler._condition.notify_all()
                     return
                 with engine_lock:
-                    engine.report_sync(execution, thread_id, event, obj_id)
+                    engine.report_sync(execution, thread_id, event, stable_lock_id)
             finally:
                 _scheduler_tls._in_dpor_machinery = False
 
