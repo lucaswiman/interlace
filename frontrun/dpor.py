@@ -2388,7 +2388,9 @@ class DporBytecodeRunner:
                     with engine_lock:
                         scheduler._lock_waiters.setdefault(stable_lock_id, set()).add(thread_id)
                         execution.block_thread(thread_id)
-                        _trace_len_wait = len(execution.schedule_trace)
+                        _trace_len_wait = (
+                            len(execution.schedule_trace) if scheduler._lock_event_collector is not None else 0
+                        )
                         _trace_snap_wait = (
                             list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
                         )
@@ -2417,7 +2419,9 @@ class DporBytecodeRunner:
                             waiter_set.discard(thread_id)
                             execution.unblock_thread(thread_id)
                         engine.report_sync(execution, thread_id, "lock_acquire", stable_lock_id)
-                        _trace_len_acq = len(execution.schedule_trace)
+                        _trace_len_acq = (
+                            len(execution.schedule_trace) if scheduler._lock_event_collector is not None else 0
+                        )
                         _trace_snap_acq = (
                             list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
                         )
@@ -2450,7 +2454,9 @@ class DporBytecodeRunner:
                         for waiter in waiters:
                             execution.unblock_thread(waiter)
                         engine.report_sync(execution, thread_id, "lock_release", stable_lock_id)
-                        _trace_len_rel = len(execution.schedule_trace)
+                        _trace_len_rel = (
+                            len(execution.schedule_trace) if scheduler._lock_event_collector is not None else 0
+                        )
                         _trace_snap_rel = (
                             list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
                         )
