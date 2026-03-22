@@ -11,12 +11,10 @@ on:
     types: [published]
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
-  group: "pages"
+  group: "pages-main"
   cancel-in-progress: true
 
 jobs:
@@ -57,21 +55,11 @@ jobs:
           source .venv/bin/activate
           make docs-html
 
-      - name: Upload artifact
-        if: github.event_name == 'release'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: 'docs/_build/html'
-
-  deploy:
-    name: Deploy Documentation
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'release'
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
       - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+        if: github.event_name == 'release'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: docs/_build/html
+          keep_files: true
+          exclude_assets: 'debug'
