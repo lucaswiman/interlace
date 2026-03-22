@@ -68,34 +68,53 @@ html_theme_options = {
 }
 
 
-def _generate_dpor_example_report(app: Any) -> None:
-    """Generate an interactive HTML report for the bank-transfer race example.
+def _run_example(example_file: str, report_path: str, extra_args: list[str] | None = None) -> None:
+    """Run *example_file* via ``frontrun python`` and write a report to *report_path*.
 
-    The report is written to docs/_static/dpor_bank_transfer.html so that
-    Sphinx copies it into the built site automatically.  The script is run
-    via the ``frontrun`` CLI wrapper (same directory as sys.executable) so
-    that the LD_PRELOAD environment is set up correctly.  If the frontrun
-    binary or Rust DPOR extension is not available the step is silently
-    skipped so that the rest of the documentation still builds.
+    Uses the ``frontrun`` binary that lives alongside ``sys.executable`` so the
+    LD_PRELOAD environment is set up correctly.  Fails silently so the rest of
+    the documentation still builds when the Rust extension is unavailable.
     """
     import subprocess
 
-    report_path = os.path.join(os.path.dirname(__file__), "_static", "dpor_bank_transfer.html")
-    example_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples", "dpor_bank_transfer.py"))
     frontrun_bin = os.path.join(os.path.dirname(sys.executable), "frontrun")
+    cmd = [frontrun_bin, "python", example_file, report_path] + (extra_args or [])
     try:
-        result = subprocess.run(
-            [frontrun_bin, "python", example_file, report_path],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         if result.stdout.strip():
             print(result.stdout.strip())
         print(f"Generated DPOR example report: {report_path}")
     except Exception as exc:
-        print(f"Warning: skipping DPOR example report generation ({exc})")
+        print(f"Warning: skipping {os.path.basename(example_file)} ({exc})")
+
+
+def _generate_dpor_example_reports(app: Any) -> None:
+    """Generate all interactive HTML reports for the documentation examples."""
+    static_dir = os.path.join(os.path.dirname(__file__), "_static")
+    examples_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples"))
+
+    _run_example(
+        os.path.join(examples_dir, "dpor_bank_transfer.py"),
+        os.path.join(static_dir, "dpor_bank_transfer.html"),
+    )
+    _run_example(
+        os.path.join(examples_dir, "dpor_bank_transfer_locked.py"),
+        os.path.join(static_dir, "dpor_bank_transfer_locked.html"),
+    )
+    _run_example(
+        os.path.join(examples_dir, "dpor_sqlite_counter.py"),
+        os.path.join(static_dir, "dpor_sqlite_counter.html"),
+    )
+    _run_example(
+        os.path.join(examples_dir, "dpor_sqlite_counter.py"),
+        os.path.join(static_dir, "dpor_sqlite_counter_fixed.html"),
+        extra_args=["fixed"],
+    )
+    _run_example(
+        os.path.join(examples_dir, "dpor_dining_philosophers.py"),
+        os.path.join(static_dir, "dpor_dining_philosophers.html"),
+    )
 
 
 def setup(app: Any) -> None:
-    app.connect("builder-inited", _generate_dpor_example_report)
+    app.connect("builder-inited", _generate_dpor_example_reports)
