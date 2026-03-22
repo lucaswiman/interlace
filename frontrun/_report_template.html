@@ -273,6 +273,15 @@ class DporTimeline extends HTMLElement {
       lastStepForThread.set(trace[s], s);
     }
 
+    // Threads involved in the deadlock cycle should not get a "done" marker —
+    // they didn't finish normally; they were stuck waiting.
+    const deadlockedThreads = new Set();
+    if (exec.was_deadlock && exec.deadlock_cycle_description) {
+      for (const part of exec.deadlock_cycle_description.split(' -> ')) {
+        if (part.startsWith('thread ')) deadlockedThreads.add(parseInt(part.slice(7)));
+      }
+    }
+
     // Build SVG elements
     let mainPathSegments = [];  // blue vertical segments (same-thread runs)
     let transitionLines = '';   // diagonal transition lines (different color)
@@ -356,8 +365,8 @@ class DporTimeline extends HTMLElement {
         threadStartMarkers += `<text x="${x}" y="${y - 13}" text-anchor="middle" fill="var(--text-dim)" font-size="9">start</text>`;
       }
 
-      // Thread completion marker
-      if (row.realIdx === lastStepForThread.get(row.threadId)) {
+      // Thread completion marker — omit for threads caught in a deadlock cycle
+      if (row.realIdx === lastStepForThread.get(row.threadId) && !deadlockedThreads.has(row.threadId)) {
         const color = 'var(--green)';
         threadEndMarkers += `<rect x="${x - 5}" y="${y - 2}" width="10" height="4" fill="${color}" rx="1"/>`;
         threadEndMarkers += `<text x="${x}" y="${y + 14}" text-anchor="middle" fill="var(--text-dim)" font-size="9">done</text>`;
