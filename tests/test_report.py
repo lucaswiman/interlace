@@ -105,7 +105,7 @@ def test_generate_html_report():
         assert "<!DOCTYPE html>" in html
         assert "dpor-report" in html
         # The JSON should be embedded
-        assert '"num_threads": 2' in html
+        assert '"num_threads":2' in html
         assert "/* __DPOR_REPORT_DATA__ */" not in html
     finally:
         os.unlink(path)
@@ -143,7 +143,7 @@ def test_explore_dpor_with_report():
 
         # Extract JSON from the HTML
         assert "dpor-report" in html
-        assert '"num_threads": 2' in html
+        assert '"num_threads":2' in html
 
         # Parse the embedded JSON to verify structure
         # Find the JSON between the script tags
