@@ -94,6 +94,12 @@ class ExecutionRecord:
     race_info: list[dict[str, Any]] | None = None
     step_events: dict[int, StepEvent] = field(default_factory=dict)
     lock_events: list[LockEvent] = field(default_factory=list)
+    # Length of schedule_trace at the moment an error was first detected.
+    # Steps at/after this index are teardown artifacts; renderer should stop here.
+    deadlock_at: int | None = None
+    # Human-readable description of the deadlock cycle, e.g.
+    # "thread 0 -> lock 0x... -> thread 1 -> lock 0x... -> thread 0"
+    deadlock_cycle_description: str | None = None
 
 
 @dataclass

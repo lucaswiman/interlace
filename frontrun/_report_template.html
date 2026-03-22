@@ -185,8 +185,10 @@ class DporTimeline extends HTMLElement {
     const exec = DATA.executions[execIdx];
     if (!exec) return;
 
-    const trace = exec.schedule_trace;
-    const switches = exec.switch_points;
+    // Truncate teardown steps that happen after the deadlock is detected.
+    const deadlockAt = exec.deadlock_at ?? null;
+    const trace = deadlockAt !== null ? exec.schedule_trace.slice(0, deadlockAt) : exec.schedule_trace;
+    const switches = exec.switch_points.filter(sp => sp.schedule_index < trace.length);
     const numThreads = DATA.num_threads;
 
     // Layout constants
@@ -448,6 +450,18 @@ class DporTimeline extends HTMLElement {
       lockMarks += `</g>`;
     }
 
+    // Deadlock: draw a single clickable "DEADLOCK" marker below the last rendered row
+    let deadlockMarkers = '';
+    if (exec.was_deadlock && expandedRows.length > 0) {
+      const lastRow = expandedRows[expandedRows.length - 1];
+      const dlY = headerHeight + lastRow.y * stepHeight + stepHeight + 10;
+      const dlX = svgWidth / 2;
+      deadlockMarkers = `<g class="deadlock-marker" style="cursor:pointer">` +
+        `<rect x="${dlX - 50}" y="${dlY - 10}" width="100" height="20" rx="3" fill="rgba(243,139,168,0.15)" stroke="var(--red)" stroke-width="1"/>` +
+        `<text x="${dlX}" y="${dlY + 4}" text-anchor="middle" fill="var(--red)" font-size="11" font-weight="bold">⚠ DEADLOCK</text>` +
+        `</g>`;
+    }
+
     // Thread column headers
     let headers = '';
     for (let t = 0; t < numThreads; t++) {
@@ -474,6 +488,7 @@ class DporTimeline extends HTMLElement {
       `;
     }
 
+
     this.shadowRoot.innerHTML = `
       <style>
         :host { display: block; padding: 16px; overflow: auto; }
@@ -495,6 +510,7 @@ class DporTimeline extends HTMLElement {
         .race-item:hover { background: var(--bg-hover); }
         svg { display: block; margin: 0 auto; }
         .switch-point:hover { r: 7; }
+        .deadlock-marker:hover rect { fill: rgba(243,139,168,0.25); }
       </style>
       <div class="exec-header">
         <div class="exec-title">
@@ -509,6 +525,7 @@ class DporTimeline extends HTMLElement {
         <path d="${mainPathD}" fill="none" stroke="var(--blue)" stroke-width="2"/>
         ${transitionLines}
         ${lockMarks}
+        ${deadlockMarkers}
         ${threadStartMarkers}
         ${threadEndMarkers}
         ${switchCircles}
@@ -527,6 +544,18 @@ class DporTimeline extends HTMLElement {
         }));
       });
     });
+
+    // Click handler for deadlock marker
+    const dlMarker = this.shadowRoot.querySelector('.deadlock-marker');
+    if (dlMarker) {
+      dlMarker.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.dispatchEvent(new CustomEvent('select-deadlock', {
+          detail: { executionIndex: execIdx },
+          bubbles: true, composed: true
+        }));
+      });
+    }
 
     // Click handlers for lock events
     // Pass pre-computed lockStateAtEvent so the modal doesn't need to recompute
@@ -592,6 +621,13 @@ class DporModal extends HTMLElement {
     this._execIdx = execIdx;
     this._leIdx = leIdx;
     this._lockStateAtEvent = lockStateAtEvent || [];
+    this.render();
+  }
+
+  showDeadlock(execIdx) {
+    this._visible = true;
+    this._mode = 'deadlock';
+    this._execIdx = execIdx;
     this.render();
   }
 
@@ -728,6 +764,8 @@ class DporModal extends HTMLElement {
       this._renderRace();
     } else if (this._mode === 'lock') {
       this._renderLock();
+    } else if (this._mode === 'deadlock') {
+      this._renderDeadlock();
     } else {
       this._renderSwitch();
     }
@@ -833,6 +871,116 @@ class DporModal extends HTMLElement {
         this.render();
       });
     });
+  }
+
+  _renderDeadlock() {
+    const exec = DATA.executions[this._execIdx];
+
+    const lockIdToLabel = (() => {
+      const map = new Map();
+      for (const ex of DATA.executions)
+        for (const le of (ex.lock_events || []))
+          if (!map.has(le.lock_id)) map.set(le.lock_id, 'L' + map.size);
+      return map;
+    })();
+
+    // Reconstruct final lock state from lock_events (already truncated at deadlock point)
+    const heldBy = new Map();    // lock_id → thread_id
+    const waiting = new Map();   // lock_id → Set<thread_id>
+    for (const le of (exec.lock_events || [])) {
+      if (le.event_type === 'acquire') {
+        heldBy.set(le.lock_id, le.thread_id);
+        if (waiting.has(le.lock_id)) waiting.get(le.lock_id).delete(le.thread_id);
+      } else if (le.event_type === 'release') {
+        heldBy.delete(le.lock_id);
+      } else if (le.event_type === 'wait') {
+        if (!waiting.has(le.lock_id)) waiting.set(le.lock_id, new Set());
+        waiting.get(le.lock_id).add(le.thread_id);
+      }
+    }
+
+    // The triggering thread never recorded a lock_wait (SchedulerAbort fired first),
+    // so its waiting edge and the corresponding held-by edge are missing from lock_events.
+    // Fill them in by parsing deadlock_cycle_description.
+    // Format: "thread X -> lock 0xHEX -> thread Y -> lock 0xHEX -> ..."
+    // Semantics: threadNodes[i] waits for lockNodes[i], lockNodes[i] is held by threadNodes[i+1 mod n].
+    const cycleNodes = exec.deadlock_cycle_description
+      ? exec.deadlock_cycle_description.split(' -> ')
+      : [];
+    // cycleNodes alternates: thread, lock, thread, lock, … ending at a lock
+    for (let i = 0; i < cycleNodes.length - 1; i += 2) {
+      const waiterStr = cycleNodes[i];       // "thread X"
+      const lockStr   = cycleNodes[i + 1];   // "lock 0xHEX"
+      const holderStr = cycleNodes[(i + 2) % cycleNodes.length]; // next thread (wraps)
+      if (!waiterStr.startsWith('thread ') || !lockStr.startsWith('lock 0x')) continue;
+      const waiterId = parseInt(waiterStr.slice(7));
+      const lockId   = parseInt(lockStr.slice(7), 16);
+      const holderId = parseInt(holderStr.slice(7));
+      if (!waiting.has(lockId)) waiting.set(lockId, new Set());
+      waiting.get(lockId).add(waiterId);
+      if (!heldBy.has(lockId)) heldBy.set(lockId, holderId);
+    }
+
+    // Build rows: one per lock that's held or waited on
+    const allLockIds = new Set([...heldBy.keys(), ...waiting.keys()]);
+    let tableRows = '';
+    for (const lockId of allLockIds) {
+      const lbl = lockIdToLabel.get(lockId) || '?';
+      const holder = heldBy.get(lockId);
+      const ws = waiting.get(lockId) || new Set();
+      const holderStr = holder !== undefined ? (DATA.thread_names[holder] || `Thread ${holder}`) : '—';
+      const waitStr = ws.size > 0
+        ? [...ws].map(t => DATA.thread_names[t] || `Thread ${t}`).join(', ')
+        : '—';
+      tableRows += `<tr>
+        <td style="color:var(--yellow);padding:6px 12px">${this._escapeHtml(lbl)}</td>
+        <td style="color:var(--blue);padding:6px 12px">${this._escapeHtml(holderStr)}</td>
+        <td style="color:var(--text-dim);padding:6px 12px">${this._escapeHtml(waitStr)}</td>
+      </tr>`;
+    }
+    if (!tableRows) tableRows = `<tr><td colspan="3" style="padding:6px 12px;color:var(--text-dim)">No lock state recorded.</td></tr>`;
+
+    // Cycle description — append the starting node to visually close the cycle
+    let cycleHtml = '';
+    if (cycleNodes.length > 0) {
+      const esc = (s) => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+      const displayNodes = [...cycleNodes, cycleNodes[0]]; // close the loop
+      const parts = displayNodes.map(p =>
+        p.startsWith('thread ')
+          ? `<span style="color:var(--blue)">${esc(p)}</span>`
+          : `<span style="color:var(--yellow)">${esc(p)}</span>`
+      );
+      cycleHtml = `<div class="section">
+        <div class="section-title">Wait-for cycle</div>
+        <div style="font-size:12px;line-height:2">${parts.join('<span style="color:var(--text-dim)"> → </span>')}</div>
+      </div>`;
+    }
+
+    this.shadowRoot.innerHTML = `
+      ${this._modalStyles()}
+      <style>
+        table { border-collapse: collapse; width: 100%; }
+        th { text-align: left; padding: 4px 12px; color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+        td { border-bottom: 1px solid rgba(69,71,90,0.4); font-size: 12px; }
+      </style>
+      <div class="overlay" id="overlay"></div>
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title" style="color:var(--red)">⚠ Deadlock — Lock Wait State</span>
+          <button class="close-btn" id="close-btn">&times;</button>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Lock state at deadlock detection</div>
+          <table>
+            <thead><tr><th>Lock</th><th>Held by</th><th>Waiting</th></tr></thead>
+            <tbody>${tableRows}</tbody>
+          </table>
+        </div>
+
+        ${cycleHtml}
+      </div>
+    `;
   }
 
   _renderLock() {
@@ -1039,6 +1187,11 @@ class DporReport extends HTMLElement {
     this.addEventListener('select-lock', (e) => {
       const modal = this.shadowRoot.querySelector('dpor-modal');
       if (modal) modal.showLock(e.detail.executionIndex, e.detail.lockEventIndex, e.detail.lockStateAtEvent);
+    });
+
+    this.addEventListener('select-deadlock', (e) => {
+      const modal = this.shadowRoot.querySelector('dpor-modal');
+      if (modal) modal.showDeadlock(e.detail.executionIndex);
     });
 
     // Keyboard navigation: arrows switch traces or navigate modal
