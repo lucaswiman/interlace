@@ -380,42 +380,72 @@ class DporTimeline extends HTMLElement {
     // Build a global lock-id → short label map (L0, L1, …) across all executions
     const lockIdToLabel = (() => {
       const map = new Map();
-      for (const ex of DATA.executions) {
-        for (const le of (ex.lock_events || [])) {
+      for (const ex of DATA.executions)
+        for (const le of (ex.lock_events || []))
           if (!map.has(le.lock_id)) map.set(le.lock_id, 'L' + map.size);
-        }
-      }
       return map;
     })();
 
-    // Build a schedule_index → {y, threadId} lookup from expandedRows
-    const rowByIdx = new Map();
-    for (const row of expandedRows) {
-      if (!rowByIdx.has(row.realIdx)) rowByIdx.set(row.realIdx, row);
+    // Smart row lookup: acquire → forward search (thread's NEXT run = where it resumes with the lock);
+    // wait/release → backward search (thread's last run = where the event happened).
+    function findRowForLockEvent(le) {
+      if (le.event_type === 'acquire') {
+        for (const row of expandedRows)
+          if (row.threadId === le.thread_id && row.realIdx >= le.schedule_index) return row;
+      }
+      let best = null;
+      for (const row of expandedRows) {
+        if (row.threadId !== le.thread_id) continue;
+        if (row.realIdx > le.schedule_index) continue;
+        if (!best || row.realIdx > best.realIdx) best = row;
+      }
+      return best;
     }
 
-    // Render lock acquire/release tick marks
-    let lockMarks = '';
-    // Track per-(schedule_index, threadId) offset to stack multiple events at same step
-    const lockOffsets = new Map();
+    // Compute cumulative lock state at each event (for the tooltip modal)
+    const lockStateAtEvent = [];
+    const _heldBy = new Map();   // lock_id → thread_id
+    const _waiting = new Map();  // lock_id → Set<thread_id>
     for (const le of (exec.lock_events || [])) {
-      const row = rowByIdx.get(le.schedule_index);
+      lockStateAtEvent.push({ heldBy: new Map(_heldBy), waiting: new Map([..._waiting].map(([k, v]) => [k, new Set(v)])) });
+      if (le.event_type === 'acquire') {
+        _heldBy.set(le.lock_id, le.thread_id);
+        if (_waiting.has(le.lock_id)) _waiting.get(le.lock_id).delete(le.thread_id);
+      } else if (le.event_type === 'release') {
+        _heldBy.delete(le.lock_id);
+      } else if (le.event_type === 'wait') {
+        if (!_waiting.has(le.lock_id)) _waiting.set(le.lock_id, new Set());
+        _waiting.get(le.lock_id).add(le.thread_id);
+      }
+    }
+
+    // Render lock acquire/release/wait tick marks
+    let lockMarks = '';
+    const lockOffsets = new Map();
+    for (let leIdx = 0; leIdx < (exec.lock_events || []).length; leIdx++) {
+      const le = exec.lock_events[leIdx];
+      const row = findRowForLockEvent(le);
       if (!row) continue;
       const tx = threadX(le.thread_id);
       const baseY = headerHeight + row.y * stepHeight;
-      const offsetKey = `${le.schedule_index}:${le.thread_id}`;
+      const offsetKey = `${row.realIdx}:${le.thread_id}`;
       const offsetIdx = lockOffsets.get(offsetKey) || 0;
       lockOffsets.set(offsetKey, offsetIdx + 1);
       const ty = baseY + offsetIdx * 10;
 
       const isAcquire = le.event_type === 'acquire';
-      const color = isAcquire ? '#a6e3a1' : '#8888aa';
-      const label = (lockIdToLabel.get(le.lock_id) || '?') + (isAcquire ? ' ⊕' : ' ⊖');
+      const isWait = le.event_type === 'wait';
+      const color = isAcquire ? '#a6e3a1' : isWait ? '#f9e2af' : '#8888aa';
+      const symbol = isAcquire ? ' ⊕' : isWait ? ' ⊙' : ' ⊖';
+      const label = (lockIdToLabel.get(le.lock_id) || '?') + symbol;
       const tickX1 = tx - 30;
       const tickX2 = tx + 5;
+      lockMarks += `<g class="lock-event" data-le-index="${leIdx}" style="cursor:pointer">`;
+      lockMarks += `<rect x="${tickX1 - 48}" y="${ty - 7}" width="83" height="14" fill="transparent"/>`;
       lockMarks += `<line x1="${tickX1}" y1="${ty}" x2="${tickX2}" y2="${ty}" stroke="${color}" stroke-width="1"/>`;
       lockMarks += `<circle cx="${tickX1}" cy="${ty}" r="2.5" fill="${color}"/>`;
       lockMarks += `<text x="${tickX1 - 3}" y="${ty + 3}" fill="${color}" font-size="9" text-anchor="end" style="pointer-events:none">${label}</text>`;
+      lockMarks += `</g>`;
     }
 
     // Thread column headers
@@ -498,6 +528,19 @@ class DporTimeline extends HTMLElement {
       });
     });
 
+    // Click handlers for lock events
+    // Pass pre-computed lockStateAtEvent so the modal doesn't need to recompute
+    this.shadowRoot.querySelectorAll('.lock-event').forEach(g => {
+      g.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const leIdx = parseInt(g.dataset.leIndex);
+        this.dispatchEvent(new CustomEvent('select-lock', {
+          detail: { executionIndex: execIdx, lockEventIndex: leIdx, lockStateAtEvent },
+          bubbles: true, composed: true
+        }));
+      });
+    });
+
     // Click handlers for race items in the header
     this.shadowRoot.querySelectorAll('.race-item').forEach(item => {
       item.addEventListener('click', (e) => {
@@ -518,10 +561,12 @@ class DporModal extends HTMLElement {
   connectedCallback() {
     this.attachShadow({ mode: 'open' });
     this._visible = false;
-    this._mode = 'switch'; // 'switch' or 'race'
+    this._mode = 'switch'; // 'switch', 'race', or 'lock'
     this._execIdx = 0;
     this._spIdx = 0;
     this._raceIdx = 0;
+    this._leIdx = 0;
+    this._lockStateAtEvent = [];
     this.render();
   }
 
@@ -541,6 +586,15 @@ class DporModal extends HTMLElement {
     this.render();
   }
 
+  showLock(execIdx, leIdx, lockStateAtEvent) {
+    this._visible = true;
+    this._mode = 'lock';
+    this._execIdx = execIdx;
+    this._leIdx = leIdx;
+    this._lockStateAtEvent = lockStateAtEvent || [];
+    this.render();
+  }
+
   hide() {
     this._visible = false;
     this.render();
@@ -551,17 +605,15 @@ class DporModal extends HTMLElement {
     if (this._mode === 'race') {
       const races = DATA.executions[this._execIdx].race_info || [];
       const next = this._raceIdx + dir;
-      if (next >= 0 && next < races.length) {
-        this._raceIdx = next;
-        this.render();
-      }
+      if (next >= 0 && next < races.length) { this._raceIdx = next; this.render(); }
+    } else if (this._mode === 'lock') {
+      const events = DATA.executions[this._execIdx].lock_events || [];
+      const next = this._leIdx + dir;
+      if (next >= 0 && next < events.length) { this._leIdx = next; this.render(); }
     } else {
       const switches = DATA.executions[this._execIdx].switch_points;
       const next = this._spIdx + dir;
-      if (next >= 0 && next < switches.length) {
-        this._spIdx = next;
-        this.render();
-      }
+      if (next >= 0 && next < switches.length) { this._spIdx = next; this.render(); }
     }
   }
 
@@ -674,6 +726,8 @@ class DporModal extends HTMLElement {
 
     if (this._mode === 'race') {
       this._renderRace();
+    } else if (this._mode === 'lock') {
+      this._renderLock();
     } else {
       this._renderSwitch();
     }
@@ -781,6 +835,100 @@ class DporModal extends HTMLElement {
     });
   }
 
+  _renderLock() {
+    const exec = DATA.executions[this._execIdx];
+    const events = exec.lock_events || [];
+    const le = events[this._leIdx];
+    if (!le) { this.hide(); return; }
+
+    const lockIdToLabel = (() => {
+      const map = new Map();
+      for (const ex of DATA.executions)
+        for (const lev of (ex.lock_events || []))
+          if (!map.has(lev.lock_id)) map.set(lev.lock_id, 'L' + map.size);
+      return map;
+    })();
+
+    // State BEFORE this event (captured during timeline render; fallback: recompute)
+    let stateSnap = this._lockStateAtEvent[this._leIdx];
+    if (!stateSnap) {
+      // Recompute from events
+      const heldBy = new Map(); const waiting = new Map();
+      for (let i = 0; i < this._leIdx; i++) {
+        const lev = events[i];
+        if (lev.event_type === 'acquire') { heldBy.set(lev.lock_id, lev.thread_id); if (waiting.has(lev.lock_id)) waiting.get(lev.lock_id).delete(lev.thread_id); }
+        else if (lev.event_type === 'release') { heldBy.delete(lev.lock_id); }
+        else if (lev.event_type === 'wait') { if (!waiting.has(lev.lock_id)) waiting.set(lev.lock_id, new Set()); waiting.get(lev.lock_id).add(lev.thread_id); }
+      }
+      stateSnap = { heldBy, waiting };
+    }
+
+    const lockLabel = lockIdToLabel.get(le.lock_id) || '?';
+    const threadName = DATA.thread_names[le.thread_id] || `Thread ${le.thread_id}`;
+    const eventVerb = le.event_type === 'acquire' ? 'acquired' : le.event_type === 'release' ? 'released' : 'waiting for';
+    const eventColor = le.event_type === 'acquire' ? 'var(--green)' : le.event_type === 'release' ? 'var(--text-dim)' : 'var(--yellow)';
+
+    // This lock's state before the event
+    const holder = stateSnap.heldBy.get(le.lock_id);
+    const heldStr = holder !== undefined ? (DATA.thread_names[holder] || `Thread ${holder}`) : 'free';
+    const waitSet = stateSnap.waiting.get(le.lock_id) || new Set();
+    const waitersStr = waitSet.size > 0
+      ? [...waitSet].map(t => DATA.thread_names[t] || `Thread ${t}`).join(', ')
+      : 'none';
+
+    // All locks state
+    const allLocks = new Set([...stateSnap.heldBy.keys(), ...stateSnap.waiting.keys()]);
+    let allLockRows = '';
+    for (const lockId of allLocks) {
+      const lbl = lockIdToLabel.get(lockId) || '?';
+      const h = stateSnap.heldBy.get(lockId);
+      const ws = stateSnap.waiting.get(lockId) || new Set();
+      const hStr = h !== undefined ? (DATA.thread_names[h] || `Thread ${h}`) : 'free';
+      const wStr = ws.size > 0 ? [...ws].map(t => DATA.thread_names[t] || `Thread ${t}`).join(', ') : 'none';
+      allLockRows += `<div style="margin-bottom:4px"><span style="color:var(--yellow)">${this._escapeHtml(lbl)}</span> &nbsp; held by: <span style="color:var(--blue)">${this._escapeHtml(hStr)}</span> &nbsp; waiting: <span style="color:var(--text-dim)">${this._escapeHtml(wStr)}</span></div>`;
+    }
+    if (!allLockRows) allLockRows = '<div class="dim">No locks held or waited on before this event.</div>';
+
+    const canPrev = this._leIdx > 0;
+    const canNext = this._leIdx < events.length - 1;
+
+    this.shadowRoot.innerHTML = `
+      ${this._modalStyles()}
+      <div class="overlay" id="overlay"></div>
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title">Lock Event ${this._leIdx + 1} of ${events.length}</span>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <div class="nav-buttons">
+              <button class="nav-btn" id="prev-btn" ${canPrev ? '' : 'disabled'}>&larr; Prev</button>
+              <button class="nav-btn" id="next-btn" ${canNext ? '' : 'disabled'}>Next &rarr;</button>
+            </div>
+            <button class="close-btn" id="close-btn">&times;</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Event</div>
+          <div class="info-grid">
+            <span class="info-label">Thread:</span><span style="color:var(--blue)">${this._escapeHtml(threadName)}</span>
+            <span class="info-label">Action:</span><span style="color:${eventColor}">${eventVerb} ${this._escapeHtml(lockLabel)}</span>
+            <span class="info-label">Schedule step:</span><span>${le.schedule_index}</span>
+            <span class="info-label">${this._escapeHtml(lockLabel)} held by:</span><span style="color:var(--blue)">${this._escapeHtml(heldStr)}</span>
+            <span class="info-label">${this._escapeHtml(lockLabel)} waiting:</span><span style="color:var(--text-dim)">${this._escapeHtml(waitersStr)}</span>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">All lock state (before this event)</div>
+          ${allLockRows}
+        </div>
+      </div>
+    `;
+
+    if (canPrev) this.shadowRoot.getElementById('prev-btn').addEventListener('click', () => { this._leIdx--; this.render(); });
+    if (canNext) this.shadowRoot.getElementById('next-btn').addEventListener('click', () => { this._leIdx++; this.render(); });
+  }
+
   _renderRace() {
     const exec = DATA.executions[this._execIdx];
     const races = exec.race_info || [];
@@ -886,6 +1034,11 @@ class DporReport extends HTMLElement {
     this.addEventListener('select-race', (e) => {
       const modal = this.shadowRoot.querySelector('dpor-modal');
       if (modal) modal.showRace(e.detail.executionIndex, e.detail.raceIndex);
+    });
+
+    this.addEventListener('select-lock', (e) => {
+      const modal = this.shadowRoot.querySelector('dpor-modal');
+      if (modal) modal.showLock(e.detail.executionIndex, e.detail.lockEventIndex, e.detail.lockStateAtEvent);
     });
 
     // Keyboard navigation: arrows switch traces or navigate modal
