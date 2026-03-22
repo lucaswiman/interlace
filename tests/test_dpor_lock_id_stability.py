@@ -25,6 +25,7 @@ class DiningState:
 
 def test_lock_ids_stable_across_executions(tmp_path: Path) -> None:
     """Lock IDs in the HTML report must be the same across all executions."""
+
     def setup() -> DiningState:
         return DiningState()
 
@@ -62,8 +63,7 @@ def test_lock_ids_stable_across_executions(tmp_path: Path) -> None:
 
     # With 2 locks we should see exactly 2 unique lock IDs across ALL executions.
     assert len(lock_ids) == 2, (
-        f"Expected exactly 2 unique lock IDs across all executions, "
-        f"got {len(lock_ids)}: {sorted(lock_ids)}"
+        f"Expected exactly 2 unique lock IDs across all executions, got {len(lock_ids)}: {sorted(lock_ids)}"
     )
 
     # Lock IDs should be small stable integers, not raw memory addresses.
@@ -111,10 +111,6 @@ def test_lock_race_objects_have_readable_names(tmp_path: Path) -> None:
 
     if lock_races:
         for name in lock_races:
-            assert "CooperativeLock" in name, (
-                f"Lock race object should mention CooperativeLock, got: {name}"
-            )
+            assert "CooperativeLock" in name, f"Lock race object should mention CooperativeLock, got: {name}"
             # Should NOT be just "object <number>"
-            assert not name.startswith("object "), (
-                f"Lock race object should have a readable name, not: {name}"
-            )
+            assert not name.startswith("object "), f"Lock race object should have a readable name, not: {name}"

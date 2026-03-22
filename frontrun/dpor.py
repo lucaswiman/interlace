@@ -2405,7 +2405,9 @@ class DporBytecodeRunner:
                             max(0, len(_trace_snap_wait) - 1),
                         )
                         scheduler._lock_event_collector.append(  # type: ignore[union-attr]
-                            _LockEvent(schedule_index=_wait_idx, thread_id=thread_id, event_type="wait", lock_id=stable_lock_id)
+                            _LockEvent(
+                                schedule_index=_wait_idx, thread_id=thread_id, event_type="wait", lock_id=stable_lock_id
+                            )
                         )
                     return
                 if event == "lock_acquire":
@@ -2435,7 +2437,10 @@ class DporBytecodeRunner:
                         )
                         scheduler._lock_event_collector.append(  # type: ignore[union-attr]
                             _LockEvent(
-                                schedule_index=_acq_idx, thread_id=thread_id, event_type="acquire", lock_id=stable_lock_id
+                                schedule_index=_acq_idx,
+                                thread_id=thread_id,
+                                event_type="acquire",
+                                lock_id=stable_lock_id,
                             )
                         )
                     return
@@ -2465,7 +2470,10 @@ class DporBytecodeRunner:
                         )
                         scheduler._lock_event_collector.append(  # type: ignore[union-attr]
                             _LockEvent(
-                                schedule_index=_rel_idx, thread_id=thread_id, event_type="release", lock_id=stable_lock_id
+                                schedule_index=_rel_idx,
+                                thread_id=thread_id,
+                                event_type="release",
+                                lock_id=stable_lock_id,
                             )
                         )
                     # Wake threads that may now be schedulable
