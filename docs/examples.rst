@@ -283,18 +283,47 @@ The race here is a classic **lost update on account B**: both threads
 read-modify-write ``accounts.b`` without any lock.  When one thread's write
 overwrites the other's, the total balance drifts away from 300.
 
-`View an example report generated from this code <_static/dpor_bank_transfer.html>`_
-
 The report shows every explored interleaving as a timeline.  Executions where
 the invariant holds are shown in green; failing ones in red.  Click any
 execution button or use the arrow keys to step through them.  Each switch-point
 panel shows the source line and opcode where the scheduler switched threads,
 making it easy to pinpoint exactly which access caused the conflict.
 
-The source for the example above lives in
-``examples/dpor_bank_transfer.py``; run it directly to regenerate the report::
+**Example reports** (generated at documentation build time):
+
+- `Bank transfer — racy <_static/dpor_bank_transfer.html>`_: 10 interleavings, 6 failing.
+  Both threads share account B without a lock.
+- `Bank transfer — locked <_static/dpor_bank_transfer_locked.html>`_: 3 interleavings, all passing.
+  A single ``threading.Lock`` makes each transfer atomic; DPOR verifies safety with far fewer paths.
+- `SQLite counter — racy <_static/dpor_sqlite_counter.html>`_: 4 interleavings, 2 failing.
+  Two threads each read-modify-write a SQLite counter; DPOR detects the SQL-level conflict.
+- `SQLite counter — fixed <_static/dpor_sqlite_counter_fixed.html>`_: 2 interleavings, all passing.
+  A single ``UPDATE counter SET value = value + 1`` eliminates the race.
+- `Dining philosophers (3) <_static/dpor_dining_philosophers.html>`_: 1000 interleavings explored,
+  148 deadlocking.  Three philosophers always grab the left fork first, creating a circular wait.
+
+Run any example directly to regenerate its report::
 
     python examples/dpor_bank_transfer.py my_report.html
+    python examples/dpor_bank_transfer_locked.py my_report.html
+    python examples/dpor_sqlite_counter.py my_report.html
+    python examples/dpor_sqlite_counter.py my_report.html fixed
+    python examples/dpor_dining_philosophers.py my_report.html
+
+
+Locking and path reduction
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The locked bank transfer illustrates an important property of DPOR: when
+operations are protected by a lock, DPOR explores far fewer interleavings
+because the only meaningful ordering question is *which thread acquires the
+lock first*.  Compare the 10-path racy report against the 3-path locked
+report to see this directly.
+
+The ``stop_on_first=False`` parameter (used in all the examples above) tells
+DPOR to continue exploring after the first failure.  The default
+``stop_on_first=True`` stops as soon as a violation is found, which is usually
+what you want in a test suite.
 
 
 Real-World Case Study: SQLAlchemy ORM
