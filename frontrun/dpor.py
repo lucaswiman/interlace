@@ -316,6 +316,9 @@ class DporScheduler:
         self._track_dunder_dict_accesses = track_dunder_dict_accesses
         self._step_event_collector: dict[int, Any] | None = {} if switch_point_collector is not None else None
         self._lock_event_collector: list[Any] | None = [] if switch_point_collector is not None else None
+        # Captured at the moment the first error fires (schedule_trace length then).
+        # Steps at/after this index are teardown artifacts and should not be rendered.
+        self._deadlock_at: int | None = None
         # On free-threaded Python, PyO3 &mut self borrows are non-blocking
         # (try-or-panic).  A single engine_lock serialises ALL calls to the
         # engine and execution objects across worker threads, the sync
@@ -2362,6 +2365,11 @@ class DporBytecodeRunner:
                         scheduler._lock_waiters.setdefault(obj_id, set()).add(thread_id)
                         execution.block_thread(thread_id)
                         _trace_snap_wait = list(execution.schedule_trace)
+                    if scheduler._error is not None:
+                        # Capture teardown boundary once, then suppress all further events.
+                        if scheduler._deadlock_at is None:
+                            scheduler._deadlock_at = len(_trace_snap_wait)
+                        return
                     if scheduler._lock_event_collector is not None:
                         from frontrun._report import LockEvent as _LockEvent
 
@@ -2384,6 +2392,10 @@ class DporBytecodeRunner:
                     new_depth = getattr(_dpor_tls, "lock_depth", 0) + 1
                     _dpor_tls.lock_depth = new_depth
                     scheduler._lock_depth_by_thread[thread_id] = new_depth
+                    if scheduler._error is not None:
+                        if scheduler._deadlock_at is None:
+                            scheduler._deadlock_at = len(_trace_snap_acq)
+                        return
                     if scheduler._lock_event_collector is not None:
                         from frontrun._report import LockEvent as _LockEvent
 
@@ -2407,6 +2419,10 @@ class DporBytecodeRunner:
                     new_depth = max(0, getattr(_dpor_tls, "lock_depth", 1) - 1)
                     _dpor_tls.lock_depth = new_depth
                     scheduler._lock_depth_by_thread[thread_id] = new_depth
+                    if scheduler._error is not None:
+                        if scheduler._deadlock_at is None:
+                            scheduler._deadlock_at = len(_trace_snap_rel)
+                        return
                     if scheduler._lock_event_collector is not None:
                         from frontrun._report import LockEvent as _LockEvent
 
@@ -3023,6 +3039,8 @@ def explore_dpor(
                                     race_info=race_info,
                                     step_events=scheduler._step_event_collector or {},
                                     lock_events=scheduler._lock_event_collector or [],
+                                    deadlock_at=scheduler._deadlock_at,
+                                    deadlock_cycle_description=getattr(scheduler._error, "cycle_description", None),
                                 )
                             )
                         generate_html_report(report, report_path)
@@ -3092,6 +3110,7 @@ def explore_dpor(
                                     race_info=race_info2,
                                     step_events=scheduler._step_event_collector or {},
                                     lock_events=scheduler._lock_event_collector or [],
+                                    deadlock_at=scheduler._deadlock_at,
                                 )
                             )
                         generate_html_report(report, report_path)
@@ -3122,6 +3141,10 @@ def explore_dpor(
                         race_info=race_info,
                         step_events=scheduler._step_event_collector or {},
                         lock_events=scheduler._lock_event_collector or [],
+                        deadlock_at=scheduler._deadlock_at,
+                        deadlock_cycle_description=getattr(scheduler._error, "cycle_description", None)
+                        if was_deadlock
+                        else None,
                     )
                 )
 
