@@ -9,6 +9,12 @@ on:
   pull_request:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag to build and deploy docs from (e.g. v0.1.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -24,11 +30,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Inject release version
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         run: |
-          VERSION="${{ github.ref_name }}"
+          VERSION="${{ inputs.ref || github.ref_name }}"
           if [[ $VERSION =~ ^v(.+)$ ]]; then VERSION="${BASH_REMATCH[1]}"; fi
           python3 -c "
           import re, pathlib
@@ -56,7 +64,7 @@ jobs:
           make docs-html
 
       - name: Deploy to GitHub Pages
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
