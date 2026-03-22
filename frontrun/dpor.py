@@ -315,6 +315,7 @@ class DporScheduler:
         self._switch_point_collector = switch_point_collector
         self._track_dunder_dict_accesses = track_dunder_dict_accesses
         self._step_event_collector: dict[int, Any] | None = {} if switch_point_collector is not None else None
+        self._lock_event_collector: list[Any] | None = [] if switch_point_collector is not None else None
         # On free-threaded Python, PyO3 &mut self borrows are non-blocking
         # (try-or-panic).  A single engine_lock serialises ALL calls to the
         # engine and execution objects across worker threads, the sync
@@ -614,8 +615,7 @@ class DporScheduler:
         if stacks:
             shadow = stacks.get(id(frame))
             if shadow and shadow.stack:
-                for i in range(min(5, len(shadow.stack))):
-                    shadow_top5.append(_safe_repr(shadow.stack[-(i + 1)]))
+                shadow_top5.extend(_safe_repr(shadow.stack[-(i + 1)]) for i in range(min(5, len(shadow.stack))))
 
         # Get access info from the most recent trace event
         access_type: str | None = None
@@ -2369,9 +2369,18 @@ class DporBytecodeRunner:
                             waiter_set.discard(thread_id)
                             execution.unblock_thread(thread_id)
                         engine.report_sync(execution, thread_id, "lock_acquire", obj_id)
+                        schedule_idx = len(execution.schedule_trace) - 1
                     new_depth = getattr(_dpor_tls, "lock_depth", 0) + 1
                     _dpor_tls.lock_depth = new_depth
                     scheduler._lock_depth_by_thread[thread_id] = new_depth
+                    if scheduler._lock_event_collector is not None:
+                        from frontrun._report import LockEvent as _LockEvent
+
+                        scheduler._lock_event_collector.append(
+                            _LockEvent(
+                                schedule_index=schedule_idx, thread_id=thread_id, event_type="acquire", lock_id=obj_id
+                            )
+                        )
                     return
                 if event == "lock_release":
                     with engine_lock:
@@ -2379,9 +2388,18 @@ class DporBytecodeRunner:
                         for waiter in waiters:
                             execution.unblock_thread(waiter)
                         engine.report_sync(execution, thread_id, "lock_release", obj_id)
+                        schedule_idx = len(execution.schedule_trace) - 1
                     new_depth = max(0, getattr(_dpor_tls, "lock_depth", 1) - 1)
                     _dpor_tls.lock_depth = new_depth
                     scheduler._lock_depth_by_thread[thread_id] = new_depth
+                    if scheduler._lock_event_collector is not None:
+                        from frontrun._report import LockEvent as _LockEvent
+
+                        scheduler._lock_event_collector.append(
+                            _LockEvent(
+                                schedule_index=schedule_idx, thread_id=thread_id, event_type="release", lock_id=obj_id
+                            )
+                        )
                     # Wake threads that may now be schedulable
                     with scheduler._condition:
                         scheduler._condition.notify_all()
@@ -2832,9 +2850,9 @@ def explore_dpor(
 
     # Set up report collection if --frontrun-report is active
     from frontrun._report import (
+        _MAX_RECORDED_EXECUTIONS,
         ExecutionRecord,
         ExplorationReport,
-        _MAX_RECORDED_EXECUTIONS,
         _global_report_path,
         generate_html_report,
     )
@@ -2855,12 +2873,14 @@ def explore_dpor(
                 if key in seen_steps:
                     continue
             seen_steps.add(key)
-            result.append({
-                "prev_step": r[0],
-                "current_step": r[1],
-                "thread_id": r[2],
-                "object": obj_name,
-            })
+            result.append(
+                {
+                    "prev_step": r[0],
+                    "current_step": r[1],
+                    "thread_id": r[2],
+                    "object": obj_name,
+                }
+            )
         return result or None
 
     global _object_key_reverse_map
@@ -2983,6 +3003,7 @@ def explore_dpor(
                                     was_deadlock=True,
                                     race_info=race_info,
                                     step_events=scheduler._step_event_collector or {},
+                                    lock_events=scheduler._lock_event_collector or [],
                                 )
                             )
                         generate_html_report(report, report_path)
@@ -3051,6 +3072,7 @@ def explore_dpor(
                                     was_deadlock=False,
                                     race_info=race_info2,
                                     step_events=scheduler._step_event_collector or {},
+                                    lock_events=scheduler._lock_event_collector or [],
                                 )
                             )
                         generate_html_report(report, report_path)
@@ -3080,6 +3102,7 @@ def explore_dpor(
                         was_deadlock=was_deadlock,
                         race_info=race_info,
                         step_events=scheduler._step_event_collector or {},
+                        lock_events=scheduler._lock_event_collector or [],
                     )
                 )
 

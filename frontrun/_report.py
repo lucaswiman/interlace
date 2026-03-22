@@ -13,7 +13,6 @@ import os
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Global sentinel set by the pytest plugin (--frontrun-report flag)
 # ---------------------------------------------------------------------------
@@ -23,7 +22,7 @@ _global_report_path: str | None = None
 _MAX_RECORDED_EXECUTIONS = 1000
 
 
-def _safe_repr(obj: Any, max_len: int = 80) -> str:
+def _safe_repr(obj: Any, max_len: int = 80) -> str:  # pyright: ignore[reportUnusedFunction]
     """Return a truncated repr() of an object, safe for JSON embedding."""
     try:
         r = repr(obj)
@@ -74,6 +73,16 @@ class SwitchPoint:
 
 
 @dataclass(slots=True)
+class LockEvent:
+    """A lock acquire or release event recorded during one DPOR execution."""
+
+    schedule_index: int
+    thread_id: int
+    event_type: str  # "acquire" or "release"
+    lock_id: int  # Python id() of the lock object
+
+
+@dataclass(slots=True)
 class ExecutionRecord:
     """Record of one DPOR execution."""
 
@@ -84,6 +93,7 @@ class ExecutionRecord:
     was_deadlock: bool
     race_info: list[dict[str, Any]] | None = None
     step_events: dict[int, StepEvent] = field(default_factory=dict)
+    lock_events: list[LockEvent] = field(default_factory=list)
 
 
 @dataclass
