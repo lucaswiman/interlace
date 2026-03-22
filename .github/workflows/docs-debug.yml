@@ -1,0 +1,53 @@
+name: Deploy Debug Docs
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build debug docs from'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: "pages-debug"
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy Debug Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Create virtual environment
+        run: uv venv
+
+      - name: Install dependencies
+        run: uv pip install -e .[dev]
+
+      - name: Build documentation
+        run: |
+          source .venv/bin/activate
+          make docs-html
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: docs/_build/html
+          destination_dir: debug
+          keep_files: true
