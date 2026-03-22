@@ -84,7 +84,7 @@ def clear_context() -> None:
 # Optional sync reporter (used by DPOR for happens-before tracking)
 # ---------------------------------------------------------------------------
 
-SyncReporter = Callable[[str, int], None]  # (event_name, object_id) -> None
+SyncReporter = Callable[[str, int, object], None]  # (event_name, object_id, lock_object) -> None
 
 
 def get_sync_reporter() -> SyncReporter | None:
@@ -263,7 +263,7 @@ class CooperativeLock:
             prev = getattr(_scheduler_tls, "_in_dpor_machinery", False)
             _scheduler_tls._in_dpor_machinery = True
             try:
-                reporter(event, self._object_id)
+                reporter(event, self._object_id, self)
             finally:
                 _scheduler_tls._in_dpor_machinery = prev
 
@@ -417,7 +417,7 @@ class CooperativeRLock:
             prev = getattr(_scheduler_tls, "_in_dpor_machinery", False)
             _scheduler_tls._in_dpor_machinery = True
             try:
-                reporter(event, self._object_id)
+                reporter(event, self._object_id, self)
             finally:
                 _scheduler_tls._in_dpor_machinery = prev
 
@@ -460,7 +460,7 @@ class CooperativeSemaphore:
             prev = getattr(_scheduler_tls, "_in_dpor_machinery", False)
             _scheduler_tls._in_dpor_machinery = True
             try:
-                reporter(event, self._object_id)
+                reporter(event, self._object_id, self)
             finally:
                 _scheduler_tls._in_dpor_machinery = prev
 
