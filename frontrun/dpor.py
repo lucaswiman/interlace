@@ -2369,20 +2369,21 @@ class DporBytecodeRunner:
                     with engine_lock:
                         scheduler._lock_waiters.setdefault(obj_id, set()).add(thread_id)
                         execution.block_thread(thread_id)
-                        _trace_snap_wait = list(execution.schedule_trace)
+                        _trace_len_wait = len(execution.schedule_trace)
+                        _trace_snap_wait = list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
                     if scheduler._error is not None:
                         # Capture teardown boundary once, then suppress all further events.
                         if scheduler._deadlock_at is None:
-                            scheduler._deadlock_at = len(_trace_snap_wait)
+                            scheduler._deadlock_at = _trace_len_wait
                         return
-                    if scheduler._lock_event_collector is not None:
+                    if _trace_snap_wait is not None:
                         from frontrun._report import LockEvent as _LockEvent
 
                         _wait_idx = next(
                             (i for i in range(len(_trace_snap_wait) - 1, -1, -1) if _trace_snap_wait[i] == thread_id),
                             max(0, len(_trace_snap_wait) - 1),
                         )
-                        scheduler._lock_event_collector.append(
+                        scheduler._lock_event_collector.append(  # type: ignore[union-attr]
                             _LockEvent(schedule_index=_wait_idx, thread_id=thread_id, event_type="wait", lock_id=obj_id)
                         )
                     return
@@ -2393,22 +2394,23 @@ class DporBytecodeRunner:
                             waiter_set.discard(thread_id)
                             execution.unblock_thread(thread_id)
                         engine.report_sync(execution, thread_id, "lock_acquire", obj_id)
-                        _trace_snap_acq = list(execution.schedule_trace)
+                        _trace_len_acq = len(execution.schedule_trace)
+                        _trace_snap_acq = list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
                     new_depth = getattr(_dpor_tls, "lock_depth", 0) + 1
                     _dpor_tls.lock_depth = new_depth
                     scheduler._lock_depth_by_thread[thread_id] = new_depth
                     if scheduler._error is not None:
                         if scheduler._deadlock_at is None:
-                            scheduler._deadlock_at = len(_trace_snap_acq)
+                            scheduler._deadlock_at = _trace_len_acq
                         return
-                    if scheduler._lock_event_collector is not None:
+                    if _trace_snap_acq is not None:
                         from frontrun._report import LockEvent as _LockEvent
 
                         _acq_idx = next(
                             (i for i in range(len(_trace_snap_acq) - 1, -1, -1) if _trace_snap_acq[i] == thread_id),
                             max(0, len(_trace_snap_acq) - 1),
                         )
-                        scheduler._lock_event_collector.append(
+                        scheduler._lock_event_collector.append(  # type: ignore[union-attr]
                             _LockEvent(
                                 schedule_index=_acq_idx, thread_id=thread_id, event_type="acquire", lock_id=obj_id
                             )
@@ -2420,22 +2422,23 @@ class DporBytecodeRunner:
                         for waiter in waiters:
                             execution.unblock_thread(waiter)
                         engine.report_sync(execution, thread_id, "lock_release", obj_id)
-                        _trace_snap_rel = list(execution.schedule_trace)
+                        _trace_len_rel = len(execution.schedule_trace)
+                        _trace_snap_rel = list(execution.schedule_trace) if scheduler._lock_event_collector is not None else None
                     new_depth = max(0, getattr(_dpor_tls, "lock_depth", 1) - 1)
                     _dpor_tls.lock_depth = new_depth
                     scheduler._lock_depth_by_thread[thread_id] = new_depth
                     if scheduler._error is not None:
                         if scheduler._deadlock_at is None:
-                            scheduler._deadlock_at = len(_trace_snap_rel)
+                            scheduler._deadlock_at = _trace_len_rel
                         return
-                    if scheduler._lock_event_collector is not None:
+                    if _trace_snap_rel is not None:
                         from frontrun._report import LockEvent as _LockEvent
 
                         _rel_idx = next(
                             (i for i in range(len(_trace_snap_rel) - 1, -1, -1) if _trace_snap_rel[i] == thread_id),
                             max(0, len(_trace_snap_rel) - 1),
                         )
-                        scheduler._lock_event_collector.append(
+                        scheduler._lock_event_collector.append(  # type: ignore[union-attr]
                             _LockEvent(
                                 schedule_index=_rel_idx, thread_id=thread_id, event_type="release", lock_id=obj_id
                             )
