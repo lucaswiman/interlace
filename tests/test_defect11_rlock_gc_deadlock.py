@@ -54,7 +54,7 @@ class TestRLockGCReentrancyGuard:
         try:
             set_context(scheduler, 0)  # type: ignore[arg-type]
 
-            def reporter(event: str, obj_id: int) -> None:
+            def reporter(event: str, obj_id: int, lock_obj: object) -> None:
                 nonlocal release_reporter_called
                 if event == "lock_release":
                     release_reporter_called = True
@@ -108,7 +108,7 @@ class TestRLockGCReentrancyGuard:
         try:
             set_context(scheduler, 0)  # type: ignore[arg-type]
 
-            def reporter(event: str, obj_id: int) -> None:
+            def reporter(event: str, obj_id: int, lock_obj: object) -> None:
                 events.append(event)
 
             set_sync_reporter(reporter)
@@ -145,7 +145,7 @@ class TestRLockGCReentrancyGuard:
 
         try:
             set_context(scheduler, 0)  # type: ignore[arg-type]
-            set_sync_reporter(lambda event, obj_id: None)
+            set_sync_reporter(lambda event, obj_id, lock_obj: None)
 
             # Acquire twice (reentrant)
             rlock.acquire()

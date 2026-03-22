@@ -184,14 +184,26 @@ class WaitForGraph:
         return None
 
 
-def format_cycle(cycle: list[tuple[str, int]], lock_names: dict[int, str] | None = None) -> str:
-    """Human-readable description of a deadlock cycle."""
+def format_cycle(
+    cycle: list[tuple[str, int]],
+    lock_names: dict[int, str] | None = None,
+    lock_id_map: dict[int, int] | None = None,
+) -> str:
+    """Human-readable description of a deadlock cycle.
+
+    *lock_id_map* maps raw ``id(lock_obj)`` → stable integer ID (from
+    :class:`StableObjectIds`).  When provided, regular locks are formatted as
+    ``lock <stable_id>`` instead of ``lock 0x<hex_addr>``, keeping the cycle
+    description consistent with the lock-event data in HTML reports.
+    """
     parts: list[str] = []
     for kind, ident in cycle:
         if kind == "thread":
             parts.append(f"thread {ident}")
         elif kind == "row_lock" and lock_names and ident in lock_names:
             parts.append(f"row_lock {lock_names[ident]}")
+        elif kind == "lock" and lock_id_map and ident in lock_id_map:
+            parts.append(f"lock {lock_id_map[ident]}")
         else:
             parts.append(f"lock 0x{ident:x}")
     return " -> ".join(parts)
