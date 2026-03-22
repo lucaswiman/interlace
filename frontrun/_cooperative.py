@@ -84,7 +84,7 @@ def clear_context() -> None:
 # Optional sync reporter (used by DPOR for happens-before tracking)
 # ---------------------------------------------------------------------------
 
-SyncReporter = Callable[[str, int], None]  # (event_name, object_id) -> None
+SyncReporter = Callable[[str, int, object], None]  # (event_name, object_id, lock_object) -> None
 
 
 def get_sync_reporter() -> SyncReporter | None:
@@ -122,7 +122,10 @@ def _check_lock_cycle(graph: Any, thread_id: int, object_id: int, scheduler: Any
     cycle = graph.add_waiting(thread_id, object_id)
     if cycle is not None:
         graph.remove_waiting(thread_id, object_id)
-        desc = format_cycle(cycle)
+        # Pass the stable-ID mapping so the cycle description uses the same
+        # integer lock IDs as the lock-event timeline in HTML reports.
+        lock_id_map = getattr(getattr(scheduler, "_stable_ids", None), "_map", None)
+        desc = format_cycle(cycle, lock_id_map=lock_id_map)
         scheduler.report_error(DeadlockError(f"Lock-ordering deadlock detected: {desc}", desc))
         raise SchedulerAbort(desc)
 
@@ -263,7 +266,7 @@ class CooperativeLock:
             prev = getattr(_scheduler_tls, "_in_dpor_machinery", False)
             _scheduler_tls._in_dpor_machinery = True
             try:
-                reporter(event, self._object_id)
+                reporter(event, self._object_id, self)
             finally:
                 _scheduler_tls._in_dpor_machinery = prev
 
@@ -417,7 +420,7 @@ class CooperativeRLock:
             prev = getattr(_scheduler_tls, "_in_dpor_machinery", False)
             _scheduler_tls._in_dpor_machinery = True
             try:
-                reporter(event, self._object_id)
+                reporter(event, self._object_id, self)
             finally:
                 _scheduler_tls._in_dpor_machinery = prev
 
@@ -460,7 +463,7 @@ class CooperativeSemaphore:
             prev = getattr(_scheduler_tls, "_in_dpor_machinery", False)
             _scheduler_tls._in_dpor_machinery = True
             try:
-                reporter(event, self._object_id)
+                reporter(event, self._object_id, self)
             finally:
                 _scheduler_tls._in_dpor_machinery = prev
 
