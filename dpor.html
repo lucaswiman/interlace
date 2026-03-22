@@ -1,0 +1,1060 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="./">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Examples" href="examples.html"><link rel="prev" title="DPOR in Practice" href="dpor_guide.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>DPOR: Dynamic Partial Order Reduction - Frontrun 0.2.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="_static/custom.css?v=58a6b0e8" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="index.html"><div class="brand">Frontrun 0.2.0 documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
+  
+  <span class="sidebar-brand-text">Frontrun 0.2.0 documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="approaches.html">How Frontrun Works</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dpor_guide.html">DPOR in Practice</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">DPOR: Dynamic Partial Order Reduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="orm_race.html">SQLAlchemy Lost-Update Race Condition</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sql-technical-details.html">SQL Conflict Detection – Technical Details</a></li>
+<li class="toctree-l1"><a class="reference internal" href="redis.html">Redis Conflict Detection – Technical Details</a></li>
+<li class="toctree-l1"><a class="reference internal" href="trace_filtering.html">Trace Filtering</a></li>
+<li class="toctree-l1"><a class="reference internal" href="internals.html">How It Works Under the Hood</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="CASE_STUDIES.html">Frontrun Case Studies: Concurrency Bug Detection</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="https://github.com/lucaswiman/frontrun/blob/main/docs/dpor.rst?plain=true" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div><div class="edit-this-page">
+  <a class="muted-link" href="https://github.com/lucaswiman/frontrun/edit/main/docs/dpor.rst" rel="edit" title="Edit this page">
+    <svg><use href="#svg-pencil"></use></svg>
+    <span class="visually-hidden">Edit this page</span>
+  </a>
+</div><div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="dpor-dynamic-partial-order-reduction">
+<h1>DPOR: Dynamic Partial Order Reduction<a class="headerlink" href="#dpor-dynamic-partial-order-reduction" title="Link to this heading">¶</a></h1>
+<p>Frontrun includes a built-in <a class="reference external" href="https://en.wikipedia.org/wiki/Partial_order_reduction">DPOR</a> engine for
+<em>systematic</em> concurrency testing. Where the bytecode explorer samples random
+interleavings hoping to hit a bug, DPOR guarantees that every meaningfully
+different interleaving is explored exactly once — and nothing redundant is
+ever re-run.</p>
+<p>The engine is written in Rust for performance and exposed to Python via PyO3.
+Its design is inspired by the <a class="reference external" href="https://github.com/tokio-rs/loom">loom</a>
+library for Rust, which pioneered the idea of embedding a DPOR-based model
+checker directly into a language’s test harness.</p>
+<section id="why-dpor">
+<h2>Why DPOR?<a class="headerlink" href="#why-dpor" title="Link to this heading">¶</a></h2>
+<p>Consider two threads, each executing <em>n</em> shared-memory operations. The total
+number of possible interleavings is:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\binom{2n}{n} = \frac{(2n)!}{(n!)^2}\]</div>
+</div>
+<p>For <em>n</em> = 3 that is 20 interleavings; for <em>n</em> = 10 it is 184,756. The number
+grows exponentially — yet most of these interleavings produce the same
+observable outcome. If the threads access disjoint variables, <em>every</em> ordering
+is equivalent and only one execution is needed.</p>
+<p>DPOR exploits this insight. It tracks which operations actually <em>conflict</em>
+(access the same object with at least one write) and only explores alternative
+orderings at those conflict points. For programs with mostly thread-local work
+this collapses an exponential search space down to a handful of executions.</p>
+</section>
+<section id="algorithm-overview">
+<h2>Algorithm overview<a class="headerlink" href="#algorithm-overview" title="Link to this heading">¶</a></h2>
+<p>Frontrun implements a hybrid DPOR algorithm combining ideas from classic DPOR
+(<a class="reference external" href="https://dl.acm.org/doi/10.1145/1040305.1040315">Flanagan and Godefroid, POPL 2005</a>) and Optimal DPOR (<a class="reference external" href="https://doi.org/10.1145/3073408">Abdulla
+et al., “Source Sets”, JACM 2017</a>), with optional <a class="reference external" href="https://www.microsoft.com/en-us/research/publication/iterative-context-bounding-for-systematic-testing-of-multithreaded-programs/">preemption bounding</a>.</p>
+<p>The core loop repeats until no unexplored interleavings remain:</p>
+<ol class="arabic simple">
+<li><p><strong>Execute</strong> the program under a deterministic schedule, recording every
+shared-memory access and synchronization event.</p></li>
+<li><p><strong>Detect races</strong> — pairs of concurrent accesses to the same object where
+at least one is a write.  Races are collected during execution and processed
+at the end (deferred race detection, Algorithm 2 of the JACM’17 paper).</p></li>
+<li><p><strong>Compute wakeup sequences</strong> — for each race, compute the <code class="docutils literal notranslate"><span class="pre">notdep</span></code>
+sequence (independent events between the two racing accesses) and insert it
+into the <strong>wakeup tree</strong> at the appropriate branch.</p></li>
+<li><p><strong>Propagate sleep sets</strong> — threads whose next actions are independent of
+the chosen thread’s action are kept asleep, preventing redundant
+exploration of equivalent interleavings.</p></li>
+<li><p><strong>Advance</strong> to the next unexplored path by picking the next branch from the
+wakeup tree in depth-first order.</p></li>
+</ol>
+<section id="key-concepts">
+<h3>Key concepts<a class="headerlink" href="#key-concepts" title="Link to this heading">¶</a></h3>
+<p>Before diving into the details, here are the core ideas in abstract form.</p>
+<p>A <strong>trace</strong> is a sequence of operations (events) performed by all threads
+during one execution:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\sigma = e_1, e_2, \ldots, e_k\]</div>
+</div>
+<p>Two operations <span class="math notranslate nohighlight">\(e_i\)</span> and <span class="math notranslate nohighlight">\(e_j\)</span> are <strong>dependent</strong> if they access
+the same shared object and at least one is a write. Operations that are
+independent can be freely reordered without changing the outcome.</p>
+<p>Two operations are <strong>co-enabled</strong> if both threads could have been scheduled at
+that point. The DPOR algorithm identifies pairs of operations that are both
+dependent <em>and</em> co-enabled — these are the only points where exploring a
+different scheduling order could produce a different result.</p>
+<p>For example, consider a trace of four events on two threads accessing objects
+<em>x</em> and <em>y</em>:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\sigma = \underbrace{W_0(x)}_{e_1},\;
+         \underbrace{R_0(y)}_{e_2},\;
+         \underbrace{W_1(x)}_{e_3},\;
+         \underbrace{R_1(y)}_{e_4}\]</div>
+</div>
+<p>Here <span class="math notranslate nohighlight">\(W_t(o)\)</span> means thread <em>t</em> writes object <em>o</em> and <span class="math notranslate nohighlight">\(R_t(o)\)</span>
+means thread <em>t</em> reads object <em>o</em>. Events <span class="math notranslate nohighlight">\(e_1\)</span> and <span class="math notranslate nohighlight">\(e_3\)</span> are
+dependent (both access <em>x</em>, one is a write). Events <span class="math notranslate nohighlight">\(e_2\)</span> and
+<span class="math notranslate nohighlight">\(e_4\)</span> are independent (both are reads of <em>y</em>). DPOR would insert a
+backtrack point to try scheduling thread 1 before <span class="math notranslate nohighlight">\(e_1\)</span>, producing a
+trace where <span class="math notranslate nohighlight">\(W_1(x)\)</span> precedes <span class="math notranslate nohighlight">\(W_0(x)\)</span>.</p>
+</section>
+<section id="happens-before-and-vector-clocks">
+<span id="dpor-happens-before"></span><h3>Happens-before and vector clocks<a class="headerlink" href="#happens-before-and-vector-clocks" title="Link to this heading">¶</a></h3>
+<p>Two operations are <em>concurrent</em> if neither <a class="reference external" href="https://en.wikipedia.org/wiki/Happened-before">happens before</a> the other. The happens-before
+relation <span class="math notranslate nohighlight">\(\to\)</span> is the smallest partial order satisfying:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\begin{split}\text{(program order)} \quad &amp; e_i \to e_j
+  \text{ if } e_i \text{ and } e_j \text{ are by the same thread and }
+  i &lt; j \\
+\text{(synchronization)} \quad &amp; \text{release}(l) \to \text{acquire}(l)
+  \text{ for lock } l \\
+\text{(spawn)} \quad &amp; \text{spawn}(t) \to e
+  \text{ for any first event } e \text{ of thread } t \\
+\text{(join)} \quad &amp; e \to \text{join}(t)
+  \text{ for any last event } e \text{ of thread } t \\
+\text{(transitivity)} \quad &amp; e_i \to e_k
+  \text{ if } e_i \to e_j \text{ and } e_j \to e_k\end{split}\]</div>
+</div>
+<p>Two events <span class="math notranslate nohighlight">\(e_i\)</span> and <span class="math notranslate nohighlight">\(e_j\)</span> are <strong>concurrent</strong> (written
+<span class="math notranslate nohighlight">\(e_i \| e_j\)</span>) when <span class="math notranslate nohighlight">\(e_i \not\to e_j\)</span> and <span class="math notranslate nohighlight">\(e_j \not\to e_i\)</span>.</p>
+<p>Frontrun tracks happens-before using <a class="reference external" href="https://en.wikipedia.org/wiki/Vector_clock">vector clocks</a> (<code class="docutils literal notranslate"><span class="pre">VersionVec</span></code>). A vector clock
+is an array of counters with one entry per thread (stored as a contiguous
+<code class="docutils literal notranslate"><span class="pre">Vec&lt;u32&gt;</span></code> indexed by thread ID):</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V : \text{ThreadId} \to \mathbb{N}\]</div>
+</div>
+<p>The key operations are:</p>
+<dl>
+<dt><code class="docutils literal notranslate"><span class="pre">increment(thread_id)</span></code></dt><dd><p>Advance the local component: <span class="math notranslate nohighlight">\(V[t] \leftarrow V[t] + 1\)</span>. Called each
+time a thread is scheduled.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">join(other)</span></code></dt><dd><p>Point-wise maximum: <span class="math notranslate nohighlight">\(V[i] \leftarrow \max(V[i], V'[i])\)</span> for all <em>i</em>.
+Used when synchronization transfers causal knowledge between threads.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">partial_le(other)</span></code></dt><dd><p>Returns true if <span class="math notranslate nohighlight">\(V[i] \le V'[i]\)</span> for every component. If
+<code class="docutils literal notranslate"><span class="pre">a.partial_le(b)</span></code> then <em>a</em> happens before <em>b</em>:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V \le V' \iff \forall\, i : V[i] \le V'[i]\]</div>
+</div>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">concurrent_with(other)</span></code></dt><dd><p>True when neither clock dominates the other:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V \| V' \iff V \not\le V' \;\wedge\; V' \not\le V\]</div>
+</div>
+</dd>
+</dl>
+<p>Each thread carries <em>two</em> vector clocks:</p>
+<dl class="simple">
+<dt><code class="docutils literal notranslate"><span class="pre">causality</span></code></dt><dd><p>Tracks the program’s semantic happens-before relation. Updated when
+synchronization primitives (locks, joins, spawns) transfer ordering
+information between threads.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code></dt><dd><p>Tracks the scheduler’s branch decisions. Incremented each time the thread
+is scheduled, and merged (via the same component-wise-max <code class="docutils literal notranslate"><span class="pre">join</span></code>
+operation) on synchronization events just like <code class="docutils literal notranslate"><span class="pre">causality</span></code>. This is the
+clock used for DPOR dependency detection — it tells us whether two
+scheduling decisions were causally ordered or concurrent.</p>
+</dd>
+</dl>
+</section>
+<section id="conflict-detection">
+<h3>Conflict detection<a class="headerlink" href="#conflict-detection" title="Link to this heading">¶</a></h3>
+<p>Every shared-memory access is reported to the engine with a thread ID, an
+object ID, and a kind (read or write). The engine maintains an <code class="docutils literal notranslate"><span class="pre">ObjectState</span></code>
+for each object, recording the last access of any kind and the last write
+access separately.</p>
+<p>When a new access arrives the engine asks: <em>what was the last dependent access
+to this object?</em>  The dependency (or <strong>conflict</strong>) relation is:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\text{dep}(e_i, e_j) \iff
+  \text{obj}(e_i) = \text{obj}(e_j) \;\wedge\;
+  \bigl(\text{kind}(e_i) = W \;\lor\; \text{kind}(e_j) = W\bigr)\]</div>
+</div>
+<p>In the implementation, there are four access kinds with the following
+conflict rules:</p>
+<ul class="simple">
+<li><p><strong>Read</strong> conflicts with <strong>Write</strong> and <strong>WeakWrite</strong> (but not other Reads).</p></li>
+<li><p><strong>Write</strong> conflicts with all other access kinds.</p></li>
+<li><p><strong>WeakWrite</strong> conflicts with <strong>Read</strong> and <strong>Write</strong> (but not other
+WeakWrites or WeakReads). This models container subscript writes where
+different keys on the same container are independent.</p></li>
+<li><p><strong>WeakRead</strong> conflicts only with <strong>Write</strong>.</p></li>
+</ul>
+<p>If such a prior access <span class="math notranslate nohighlight">\(e_p\)</span> exists and its <code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code> is <em>not</em>
+<code class="docutils literal notranslate"><span class="pre">partial_le</span></code> of the current thread’s <code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code>, the two accesses are
+concurrent and could race:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\text{dep}(e_p, e_c) \;\wedge\; e_p \| e_c
+\implies \text{insert wakeup sequence at branch}(e_p)\]</div>
+</div>
+<p>The engine collects the race as a <code class="docutils literal notranslate"><span class="pre">PendingRace</span></code> and, at the end of the
+execution, computes a <code class="docutils literal notranslate"><span class="pre">notdep</span></code> wakeup sequence and inserts it into the
+wakeup tree at the branch where the prior access was made. It also performs
+immediate inline backtracking (inserting a single-thread sequence) for
+responsiveness. This ensures a future execution will try scheduling the
+racing thread at that earlier point, reversing the order of the two
+conflicting operations.</p>
+</section>
+<section id="synchronization-events">
+<h3>Synchronization events<a class="headerlink" href="#synchronization-events" title="Link to this heading">¶</a></h3>
+<p>Synchronization primitives update the <code class="docutils literal notranslate"><span class="pre">causality</span></code> (and <code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code>) clocks so
+that accesses ordered by proper synchronization are not flagged as conflicts:</p>
+<dl>
+<dt><strong>Lock acquire</strong></dt><dd><p>The acquiring thread joins the vector clock that was stored when the lock
+was last released:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V_t \leftarrow V_t \sqcup V_{\text{lock}}\]</div>
+</div>
+<p>This establishes that the acquire happens after the previous release.</p>
+</dd>
+<dt><strong>Lock release</strong></dt><dd><p>The releasing thread’s current causality clock is stored on the lock for
+future acquirers:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V_{\text{lock}} \leftarrow V_t\]</div>
+</div>
+</dd>
+<dt><strong>Thread join</strong></dt><dd><p>The joining thread joins both the causality and DPOR clocks of the joined
+thread. All of the joined thread’s operations now happen before the
+joiner’s subsequent operations:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V_t \leftarrow V_t \sqcup V_{t'}\]</div>
+</div>
+</dd>
+<dt><strong>Thread spawn</strong></dt><dd><p>The child thread inherits the parent’s causality and DPOR clocks. The
+parent’s operations before the spawn happen before the child’s operations:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V_{\text{child}} \leftarrow V_{\text{child}} \sqcup V_{\text{parent}}\]</div>
+</div>
+</dd>
+</dl>
+</section>
+</section>
+<section id="the-exploration-tree">
+<h2>The exploration tree<a class="headerlink" href="#the-exploration-tree" title="Link to this heading">¶</a></h2>
+<p>The engine maintains a <code class="docutils literal notranslate"><span class="pre">Path</span></code> — a sequence of <code class="docutils literal notranslate"><span class="pre">Branch</span></code> nodes, one per
+scheduling decision. Each branch records:</p>
+<ul class="simple">
+<li><p>The <strong>status</strong> of every thread at that point (disabled, pending, active,
+visited, blocked, or yielded).</p></li>
+<li><p>Which thread was <strong>chosen</strong> (the <code class="docutils literal notranslate"><span class="pre">active_thread</span></code>).</p></li>
+<li><p>The cumulative <strong>preemption count</strong> (how many times a runnable thread was
+preempted in favor of a different thread up to this point).</p></li>
+<li><p>A <strong>wakeup tree</strong> — an ordered tree of thread-ID sequences representing
+interleavings still to be explored at this branch (Definition 6.1 of the
+JACM’17 paper, p.21–22).</p></li>
+<li><p>A <strong>sleep set</strong> — threads whose next actions are independent of the
+chosen thread’s action and therefore need not be explored at this branch.</p></li>
+<li><p><strong>Access tracking</strong> — per-thread records of which objects were accessed
+and with what kind (read, write, weak-write, weak-read), used for
+independence checks during sleep set propagation.</p></li>
+</ul>
+<p>To illustrate, consider a two-thread program where DPOR finds one conflict.
+The exploration tree looks like:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>Branch 0              Branch 1            Branch 2            Branch 3
+┌─────────────┐       ┌─────────────┐     ┌─────────────┐     ┌──────────────┐
+│ T0: Active  │  --&gt;  │ T0: Active  │ --&gt; │ T1: Active  │ --&gt; │ T1: Active   │
+│ T1: Pending │       │ T1: Pending │     │ T0: Pending │     │ T0: Disabled │
+│ wut: {}     │       │ wut: {}     │     │ wut: {}     │     │ wut: {}      │
+└─────────────┘       └─────────────┘     └─────────────┘     └──────────────┘
+                         ^
+                         │
+                    CONFLICT DETECTED between
+                    T0&#39;s write here and T1&#39;s
+                    later write: insert [T1]
+                    into wakeup tree at Branch 1
+</pre></div>
+</div>
+<p>After the first execution completes, <code class="docutils literal notranslate"><span class="pre">step()</span></code> walks backward, finds Branch 1
+has a non-empty wakeup tree, and picks the next thread from it:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>Branch 0              Branch 1 (replayed, different choice)
+┌─────────────┐       ┌─────────────┐
+│ T0: Active  │  --&gt;  │ T1: Active  │ --&gt; ...
+│ T1: Pending │       │ T0: Visited │
+│ wut: {}     │       │ wut: {}     │
+└─────────────┘       └─────────────┘
+</pre></div>
+</div>
+<p>The prefix up to Branch 0 is replayed identically; only the decision at
+Branch 1 changes.</p>
+<section id="wakeup-trees">
+<h3>Wakeup trees<a class="headerlink" href="#wakeup-trees" title="Link to this heading">¶</a></h3>
+<p>A wakeup tree (<code class="docutils literal notranslate"><span class="pre">WakeupTree</span></code>) is an ordered tree of thread-ID sequences.
+Each path from the root to a leaf represents a sequence of scheduling
+decisions to explore. The tree merges shared prefixes and deduplicates
+sequences automatically.</p>
+<p>Key operations:</p>
+<dl class="simple">
+<dt><code class="docutils literal notranslate"><span class="pre">insert(sequence)</span></code></dt><dd><p>Add a scheduling sequence to the tree. Shared prefixes are merged; new
+branches are added at the rightmost position.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">min_thread()</span></code></dt><dd><p>Return the minimum thread ID among root-level branches. Used as a
+deterministic proxy for the paper’s <span class="math notranslate nohighlight">\(\prec\)</span> ordering.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">subtree(thread_id)</span></code></dt><dd><p>Extract the subtree for a given thread. When thread <em>p</em> is chosen at a
+branch, the subtree for <em>p</em> becomes the wakeup guidance for subsequent
+branches (Algorithm 2 line 17: <code class="docutils literal notranslate"><span class="pre">WuT'</span> <span class="pre">=</span> <span class="pre">subtree(wut(E),</span> <span class="pre">p)</span></code>).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">remove_branch(thread_id)</span></code></dt><dd><p>Remove the branch starting with <em>thread_id</em> after it has been explored.</p>
+</dd>
+</dl>
+</section>
+<section id="scheduling">
+<h3>Scheduling<a class="headerlink" href="#scheduling" title="Link to this heading">¶</a></h3>
+<p>When the engine needs to pick the next thread:</p>
+<ol class="arabic simple">
+<li><p>If we are <strong>replaying</strong> a previously recorded path (<code class="docutils literal notranslate"><span class="pre">pos</span> <span class="pre">&lt;</span> <span class="pre">branches.len</span></code>),
+return the same choice as before and propagate sleep sets forward using
+independence checks. This is how the engine deterministically re-executes
+the shared prefix leading to a backtrack point.</p></li>
+<li><p>Otherwise this is a <strong>new</strong> scheduling decision. If a wakeup subtree
+provides guidance (from a multi-step wakeup sequence), the guided thread
+is chosen. Otherwise the engine prefers the currently active thread (to
+minimize preemptions). A new <code class="docutils literal notranslate"><span class="pre">Branch</span></code> is created recording the decision,
+thread statuses, and access information.</p></li>
+</ol>
+</section>
+<section id="backtracking-and-wakeup-sequence-insertion">
+<h3>Backtracking and wakeup sequence insertion<a class="headerlink" href="#backtracking-and-wakeup-sequence-insertion" title="Link to this heading">¶</a></h3>
+<p>Race detection uses a <strong>hybrid approach</strong>: immediate inline backtracking for
+single-step races (Algorithm 1 style) plus deferred <code class="docutils literal notranslate"><span class="pre">notdep</span></code> sequence
+computation for multi-step wakeup sequences (Algorithm 2 style).</p>
+<p>When <code class="docutils literal notranslate"><span class="pre">process_access()</span></code> detects a race between events <em>e</em> and <em>e’</em>:</p>
+<ol class="arabic simple">
+<li><p><strong>Inline</strong>: Insert <code class="docutils literal notranslate"><span class="pre">[thread_id]</span></code> into the wakeup tree at the branch
+where <em>e</em> occurred (unless the thread is already in the sleep set).</p></li>
+<li><p><strong>Deferred</strong>: Collect a <code class="docutils literal notranslate"><span class="pre">PendingRace</span></code> record for later processing.</p></li>
+</ol>
+<p>At the end of each execution, <code class="docutils literal notranslate"><span class="pre">next_execution()</span></code> processes all deferred
+races:</p>
+<ol class="arabic simple">
+<li><p>For each race, compute <code class="docutils literal notranslate"><span class="pre">notdep(e,</span> <span class="pre">E).e'</span></code> — the sequence of events
+between <em>e</em> and <em>e’</em> that are independent of <em>e</em>, followed by <em>e’</em>.
+Same-thread events and events with conflicting accesses are excluded.</p></li>
+<li><p>Insert the <code class="docutils literal notranslate"><span class="pre">notdep</span></code> sequence into the wakeup tree at branch <em>e</em>.
+This enables exploration of interleavings where the independent events
+run before the racing thread, producing better state-space coverage
+than single-thread backtracking alone.</p></li>
+</ol>
+<p>When the current execution finishes, <code class="docutils literal notranslate"><span class="pre">step()</span></code> walks backward through the
+branch list:</p>
+<ol class="arabic simple">
+<li><p>Save the active thread’s access information in the trace cache
+(<code class="docutils literal notranslate"><span class="pre">prev_thread_all_accesses</span></code>) for sleep set propagation in future
+executions.</p></li>
+<li><p>Mark the current branch’s active thread as <code class="docutils literal notranslate"><span class="pre">Visited</span></code> and add it to
+the sleep set.</p></li>
+<li><p>Remove the current thread’s branch from the wakeup tree.</p></li>
+<li><p>Look for a non-empty wakeup tree in this branch. Pick the next thread
+via <code class="docutils literal notranslate"><span class="pre">min_thread()</span></code> and extract the subtree for wakeup guidance.</p></li>
+<li><p>If the wakeup tree is empty, pop the branch and continue walking backward.</p></li>
+<li><p>If all branches are exhausted, exploration is complete.</p></li>
+</ol>
+</section>
+<section id="sleep-set-propagation">
+<h3>Sleep set propagation<a class="headerlink" href="#sleep-set-propagation" title="Link to this heading">¶</a></h3>
+<p>Sleep sets prevent redundant exploration of equivalent interleavings. A thread
+is <strong>asleep</strong> at a branch if its next action is independent of all the actions
+that will be taken before it next runs.</p>
+<p>The propagation works in two stages:</p>
+<ol class="arabic simple">
+<li><p><strong>During replay</strong>: At each replayed position, <code class="docutils literal notranslate"><span class="pre">propagate_sleep()</span></code> carries
+sleeping threads forward. For each sleeping thread <em>q</em>, the engine checks
+whether <em>q</em>’s recorded accesses are independent of the active thread <em>p</em>’s
+accesses (using <code class="docutils literal notranslate"><span class="pre">accesses_are_independent()</span></code>). If independent, <em>q</em> stays
+asleep; if conflicting, <em>q</em> is woken.</p></li>
+<li><p><strong>At new branches</strong>: Beyond the replay prefix, sleep set propagation uses
+the <strong>trace cache</strong> (<code class="docutils literal notranslate"><span class="pre">prev_thread_all_accesses</span></code>) — the union of all
+accesses each thread performed in the previous execution. This conservative
+approximation considers ALL of a sleeping thread’s future accesses, not
+just one position’s snapshot. If any future access would conflict, the
+thread is woken.</p></li>
+</ol>
+<p>The independence check (<code class="docutils literal notranslate"><span class="pre">access_kinds_conflict()</span></code>) mirrors the engine’s
+conflict semantics:</p>
+<ul class="simple">
+<li><p><strong>Read + Read</strong>: independent (reads commute)</p></li>
+<li><p><strong>WeakWrite + WeakWrite</strong>: independent (different keys on same container)</p></li>
+<li><p><strong>Write + anything</strong>: dependent (writes conflict with all access kinds)</p></li>
+</ul>
+<p>This is particularly effective for <em>writer-readers</em> patterns: when a writer
+and multiple readers access the same object, the readers’ accesses are
+independent of each other, so DPOR explores only <span class="math notranslate nohighlight">\(2^N\)</span> interleavings
+for <em>N</em> readers (matching the theoretical optimum from JACM’17 Table 1)
+instead of <span class="math notranslate nohighlight">\((N+1)!\)</span>.</p>
+<p>This is a depth-first search over the tree of scheduling choices, pruned by
+DPOR so that only branches with genuine conflicts are explored, and further
+reduced by sleep sets so that equivalent orderings of independent actions are
+not re-explored.</p>
+</section>
+</section>
+<section id="id1">
+<h2>Preemption bounding<a class="headerlink" href="#id1" title="Link to this heading">¶</a></h2>
+<p>Real programs often have far more conflicts than can feasibly be explored.
+<em>Preemption bounding</em> limits exploration to executions with at most <em>k</em>
+preemptions (context switches away from a runnable thread). Empirical research
+has shown that most concurrency bugs surface with very few preemptions —
+<a class="reference external" href="https://www.microsoft.com/en-us/research/publication/iterative-context-bounding-for-systematic-testing-of-multithreaded-programs/">Musuvathi and Qadeer (2007)</a>
+found that a bound of 2 is sufficient to catch the vast majority of bugs in
+practice.</p>
+<p>When a backtrack point would create a preemption that exceeds the bound, the
+engine falls back to <code class="docutils literal notranslate"><span class="pre">add_conservative_backtrack</span></code>: it walks backward through
+earlier branches looking for a point where the same thread can be explored
+without exceeding the preemption budget. This maintains soundness within the
+bounded exploration — every execution with at most <em>k</em> preemptions that
+differs in a dependent operation will still be explored.</p>
+<p>With preemption bounding, the number of explored executions is polynomial in
+the program length for a fixed bound <em>k</em>:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[O\!\left(\binom{n}{k}\right)\]</div>
+</div>
+<p>where <em>n</em> is the number of scheduling points, versus the exponential
+<span class="math notranslate nohighlight">\(O(t^n)\)</span> for <em>t</em> threads without bounding.</p>
+</section>
+<section id="abstract-reduction-example">
+<h2>Abstract reduction example<a class="headerlink" href="#abstract-reduction-example" title="Link to this heading">¶</a></h2>
+<p>To see how DPOR prunes the search space, consider three events by two threads:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[e_1 = W_0(x), \quad e_2 = R_1(y), \quad e_3 = W_1(x)\]</div>
+</div>
+<p>Events <span class="math notranslate nohighlight">\(e_1\)</span> and <span class="math notranslate nohighlight">\(e_3\)</span> are <strong>dependent</strong> (both access <em>x</em>, at
+least one is a write). Events <span class="math notranslate nohighlight">\(e_1\)</span> and <span class="math notranslate nohighlight">\(e_2\)</span> are <strong>independent</strong>
+(different objects). Events <span class="math notranslate nohighlight">\(e_2\)</span> and <span class="math notranslate nohighlight">\(e_3\)</span> are <strong>independent</strong>
+(same thread — program-ordered).</p>
+<p>A naive scheduler would explore all interleavings:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\begin{split}&amp;(1)\; e_1, e_2, e_3 \qquad
+ (2)\; e_1, e_3, e_2 \qquad
+ (3)\; e_2, e_1, e_3 \\
+&amp;(4)\; e_2, e_3, e_1 \qquad
+ (5)\; e_3, e_1, e_2 \qquad
+ (6)\; e_3, e_2, e_1\end{split}\]</div>
+</div>
+<p>But interleavings that only swap independent events produce the same result.
+For example, (1) <span class="math notranslate nohighlight">\(e_1, e_2, e_3\)</span> and (3) <span class="math notranslate nohighlight">\(e_2, e_1, e_3\)</span> differ
+only in the order of <span class="math notranslate nohighlight">\(e_1\)</span> and <span class="math notranslate nohighlight">\(e_2\)</span>, which are independent — so
+they are equivalent. The equivalence classes (called <a class="reference external" href="https://en.wikipedia.org/wiki/Trace_theory">Mazurkiewicz traces</a>) are:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\{(1), (3)\} \quad \text{and} \quad \{(4), (5), (6), (2)\}\]</div>
+</div>
+<p>DPOR explores <strong>one representative per class</strong> — here just 2 executions
+instead of 6. The reduction is even more dramatic with more threads and more
+thread-local work.</p>
+</section>
+<section id="worked-example-concurrent-counter">
+<h2>Worked example: concurrent counter<a class="headerlink" href="#worked-example-concurrent-counter" title="Link to this heading">¶</a></h2>
+<p>Consider the classic lost-update bug: two threads each read a shared counter,
+increment locally, and write back.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">counter</span> <span class="o">=</span> <span class="mi">0</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">thread_0</span><span class="p">():</span>
+    <span class="n">local</span> <span class="o">=</span> <span class="n">counter</span>    <span class="c1"># R_0(counter)</span>
+    <span class="n">counter</span> <span class="o">=</span> <span class="n">local</span><span class="o">+</span><span class="mi">1</span>  <span class="c1"># W_0(counter)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">thread_1</span><span class="p">():</span>
+    <span class="n">local</span> <span class="o">=</span> <span class="n">counter</span>    <span class="c1"># R_1(counter)</span>
+    <span class="n">counter</span> <span class="o">=</span> <span class="n">local</span><span class="o">+</span><span class="mi">1</span>  <span class="c1"># W_1(counter)</span>
+</pre></div>
+</div>
+<p>There are four shared-memory operations, giving
+<span class="math notranslate nohighlight">\(\binom{4}{2} = 6\)</span> possible interleavings in total. Let’s trace
+how DPOR explores them.</p>
+<section id="execution-1-t0-runs-to-completion-then-t1">
+<h3>Execution 1: T0 runs to completion, then T1<a class="headerlink" href="#execution-1-t0-runs-to-completion-then-t1" title="Link to this heading">¶</a></h3>
+<p>The engine’s default scheduling preference is to keep running the current
+thread, producing:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>Step   Thread   Operation        Object    Kind
+──────────────────────────────────────────────────
+ 0      T0      R_0(counter)     counter   read
+ 1      T0      W_0(counter)     counter   write
+ 2      T1      R_1(counter)     counter   read
+ 3      T1      W_1(counter)     counter   write
+
+Result: counter = 2  (correct)
+</pre></div>
+</div>
+<p>Vector clocks evolve as follows (showing <code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code> as <code class="docutils literal notranslate"><span class="pre">[T0,</span> <span class="pre">T1]</span></code>):</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>Step 0:  T0 scheduled  →  T0.dpor_vv = [1, 0]
+         R_0(counter): no prior access → no conflict
+
+Step 1:  T0 scheduled  →  T0.dpor_vv = [2, 0]
+         W_0(counter): last dependent = R_0 at step 0 with vv [1, 0]
+         [1, 0] ≤ [2, 0]?  YES → happens-before, no backtrack
+
+Step 2:  T1 scheduled  →  T1.dpor_vv = [0, 1]
+         R_1(counter): last dependent = W_0 at step 1 with vv [2, 0]
+         [2, 0] ≤ [0, 1]?  NO → CONCURRENT!
+         ⟹ backtrack: mark T1 for exploration at branch 1
+
+Step 3:  T1 scheduled  →  T1.dpor_vv = [0, 2]
+         W_1(counter): last dependent = W_0 at step 1 with vv [2, 0]
+         [2, 0] ≤ [0, 2]?  NO → concurrent, but T1 already marked
+</pre></div>
+</div>
+<p>One backtrack point was inserted at branch 1 (step 1), marking T1 for
+exploration there.</p>
+</section>
+<section id="execution-2-t0-does-one-step-then-t1-runs">
+<h3>Execution 2: T0 does one step, then T1 runs<a class="headerlink" href="#execution-2-t0-does-one-step-then-t1-runs" title="Link to this heading">¶</a></h3>
+<p>The engine replays the prefix through branch 0 (T0 at step 0), then at
+branch 1 schedules T1 instead of T0:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>Step   Thread   Operation        Object    Kind
+──────────────────────────────────────────────────
+ 0      T0      R_0(counter)     counter   read     (replayed)
+ 1      T1      R_1(counter)     counter   read     ← different choice
+ 2      T0      W_0(counter)     counter   write
+ 3      T1      W_1(counter)     counter   write
+
+Result: counter = 1  (BUG! lost update)
+</pre></div>
+</div>
+<p>Both threads read <code class="docutils literal notranslate"><span class="pre">counter</span> <span class="pre">=</span> <span class="pre">0</span></code>, then both write <code class="docutils literal notranslate"><span class="pre">1</span></code>. The engine has
+found the bug in just 2 executions out of the 6 possible interleavings.</p>
+</section>
+<section id="why-not-more-executions">
+<h3>Why not more executions?<a class="headerlink" href="#why-not-more-executions" title="Link to this heading">¶</a></h3>
+<p>DPOR did not need to explore orderings like T1-first-then-T0 because they
+would be reached by the same backtrack mechanism from the other direction. The
+key insight is that only the <em>relative order of dependent operations</em> matters.
+Swapping two independent events (like <span class="math notranslate nohighlight">\(R_0(x)\)</span> and <span class="math notranslate nohighlight">\(R_1(y)\)</span>)
+produces an equivalent trace, so DPOR skips it.</p>
+</section>
+<section id="reduction-in-practice">
+<h3>Reduction in practice<a class="headerlink" href="#reduction-in-practice" title="Link to this heading">¶</a></h3>
+<p>The following table shows how DPOR reduces the exploration space as programs
+grow:</p>
+<div class="table-wrapper colwidths-given docutils container">
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 28.6%" />
+<col style="width: 21.4%" />
+<col style="width: 21.4%" />
+<col style="width: 28.6%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Scenario</p></th>
+<th class="head"><p>Naive</p></th>
+<th class="head"><p>DPOR</p></th>
+<th class="head"><p>Reduction</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>2 threads, 2 ops each, same object</p></td>
+<td><p>6</p></td>
+<td><p>2</p></td>
+<td><p>3x</p></td>
+</tr>
+<tr class="row-odd"><td><p>2 threads, 5 ops each, same object</p></td>
+<td><p>252</p></td>
+<td><p>2</p></td>
+<td><p>126x</p></td>
+</tr>
+<tr class="row-even"><td><p>2 threads, 2 ops each, disjoint objects</p></td>
+<td><p>6</p></td>
+<td><p>1</p></td>
+<td><p>6x</p></td>
+</tr>
+<tr class="row-odd"><td><p>3 threads, 2 ops each, one shared object</p></td>
+<td><p>90</p></td>
+<td><p>6</p></td>
+<td><p>15x</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>For threads accessing disjoint objects the reduction is total (one execution
+regardless of operation count). When threads share objects, the explored set
+corresponds to the <a class="reference external" href="https://en.wikipedia.org/wiki/Trace_theory">Mazurkiewicz traces</a> — equivalence classes of
+interleavings under independent-operation reordering.</p>
+<p>Sleep set propagation further reduces exploration by recognizing fine-grained
+independence. For example, a writer with <em>N</em> readers on the same object
+requires <span class="math notranslate nohighlight">\(2^N\)</span> interleavings (each reader can go before or after the
+writer), not <span class="math notranslate nohighlight">\((N+1)!\)</span> — the reader orderings are equivalent.</p>
+</section>
+</section>
+<section id="data-structures">
+<h2>Data structures<a class="headerlink" href="#data-structures" title="Link to this heading">¶</a></h2>
+<p>The implementation is split across seven Rust modules in <code class="docutils literal notranslate"><span class="pre">crates/dpor/src/</span></code>:</p>
+<dl class="simple">
+<dt><code class="docutils literal notranslate"><span class="pre">vv.rs</span></code> — Vector clocks</dt><dd><p><code class="docutils literal notranslate"><span class="pre">VersionVec</span></code>: a contiguous <code class="docutils literal notranslate"><span class="pre">Vec&lt;u32&gt;</span></code> indexed by thread ID with
+<code class="docutils literal notranslate"><span class="pre">increment</span></code>, <code class="docutils literal notranslate"><span class="pre">join</span></code>, <code class="docutils literal notranslate"><span class="pre">partial_le</span></code>, and <code class="docutils literal notranslate"><span class="pre">concurrent_with</span></code> operations.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">access.rs</span></code> — Access records</dt><dd><p><code class="docutils literal notranslate"><span class="pre">AccessKind</span></code> (<code class="docutils literal notranslate"><span class="pre">Read</span></code>, <code class="docutils literal notranslate"><span class="pre">Write</span></code>, <code class="docutils literal notranslate"><span class="pre">WeakWrite</span></code>, <code class="docutils literal notranslate"><span class="pre">WeakRead</span></code>) and
+<code class="docutils literal notranslate"><span class="pre">Access</span></code>, which stores the <code class="docutils literal notranslate"><span class="pre">path_id</span></code> (branch index where the access
+occurred), the thread’s <code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code> at that moment, and the <code class="docutils literal notranslate"><span class="pre">thread_id</span></code>.
+<code class="docutils literal notranslate"><span class="pre">WeakWrite</span></code> is used for container subscript writes (different keys on the
+same container are independent); <code class="docutils literal notranslate"><span class="pre">WeakRead</span></code> is used for container loads
+before subscripting.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">object.rs</span></code> — Shared object state</dt><dd><p><code class="docutils literal notranslate"><span class="pre">ObjectState</span></code> tracks per-thread access history for each access kind.
+<code class="docutils literal notranslate"><span class="pre">dependent_accesses(kind)</span></code> returns all prior accesses that conflict with
+the new access for race detection.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">thread.rs</span></code> — Thread state</dt><dd><p><code class="docutils literal notranslate"><span class="pre">Thread</span></code> holds two vector clocks (<code class="docutils literal notranslate"><span class="pre">causality</span></code> and <code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code>) plus
+<code class="docutils literal notranslate"><span class="pre">io_vv</span></code> (for I/O operations, which omit lock-based happens-before so
+that I/O always appears concurrent). <code class="docutils literal notranslate"><span class="pre">ThreadStatus</span></code> is the per-branch
+status enum used by the exploration tree.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">wakeup_tree.rs</span></code> — Wakeup trees</dt><dd><p><code class="docutils literal notranslate"><span class="pre">WakeupTree</span></code> and <code class="docutils literal notranslate"><span class="pre">WakeupNode</span></code>: an ordered tree of thread-ID sequences
+for exploring alternative interleavings (Definition 6.1, JACM’17 p.21–22).
+Supports insert, remove, subtree extraction, and min-thread queries.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">path.rs</span></code> — Exploration tree</dt><dd><p><code class="docutils literal notranslate"><span class="pre">Branch</span></code> and <code class="docutils literal notranslate"><span class="pre">Path</span></code>. Each <code class="docutils literal notranslate"><span class="pre">Branch</span></code> holds thread statuses, a wakeup
+tree, a sleep set, and per-thread access records. <code class="docutils literal notranslate"><span class="pre">Path</span></code> drives
+scheduling (with sleep set propagation and wakeup subtree guidance),
+backtracking (with <code class="docutils literal notranslate"><span class="pre">notdep</span></code> sequence computation), and depth-first
+advancement. The <code class="docutils literal notranslate"><span class="pre">prev_thread_all_accesses</span></code> trace cache enables sleep
+set propagation to new branches beyond the replay prefix.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">engine.rs</span></code> — Orchestration</dt><dd><p><code class="docutils literal notranslate"><span class="pre">DporEngine</span></code> ties everything together. <code class="docutils literal notranslate"><span class="pre">Execution</span></code> holds per-run state
+(threads, objects, lock release clocks, schedule trace). The engine detects
+races during execution, collects them as <code class="docutils literal notranslate"><span class="pre">PendingRace</span></code> entries, processes
+deferred races at the end of each execution to compute <code class="docutils literal notranslate"><span class="pre">notdep</span></code> wakeup
+sequences, and advances to the next execution.</p>
+</dd>
+</dl>
+</section>
+<section id="python-api">
+<h2>Python API<a class="headerlink" href="#python-api" title="Link to this heading">¶</a></h2>
+<p>The Rust engine is exposed to Python via PyO3 as the <code class="docutils literal notranslate"><span class="pre">frontrun._dpor</span></code> native
+module. The two Python-visible classes are <code class="docutils literal notranslate"><span class="pre">PyDporEngine</span></code> and
+<code class="docutils literal notranslate"><span class="pre">PyExecution</span></code>.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._dpor</span><span class="w"> </span><span class="kn">import</span> <span class="n">PyDporEngine</span><span class="p">,</span> <span class="n">PyExecution</span>
+
+<span class="n">engine</span> <span class="o">=</span> <span class="n">PyDporEngine</span><span class="p">(</span>
+    <span class="n">num_threads</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+    <span class="n">preemption_bound</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>       <span class="c1"># optional; None = unbounded</span>
+    <span class="n">max_branches</span><span class="o">=</span><span class="mi">100_000</span><span class="p">,</span>     <span class="c1"># safety limit per execution</span>
+    <span class="n">max_executions</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>      <span class="c1"># optional cap on total executions</span>
+<span class="p">)</span>
+
+<span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+    <span class="n">execution</span> <span class="o">=</span> <span class="n">engine</span><span class="o">.</span><span class="n">begin_execution</span><span class="p">()</span>
+
+    <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+        <span class="n">thread_id</span> <span class="o">=</span> <span class="n">engine</span><span class="o">.</span><span class="n">schedule</span><span class="p">(</span><span class="n">execution</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">thread_id</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">break</span>  <span class="c1"># deadlock or branch limit</span>
+
+        <span class="c1"># ... run thread_id until it performs a shared access ...</span>
+
+        <span class="n">engine</span><span class="o">.</span><span class="n">report_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">object_id</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">)</span>
+        <span class="c1"># or: engine.report_sync(execution, thread_id, &quot;lock_acquire&quot;, lock_id)</span>
+
+        <span class="n">execution</span><span class="o">.</span><span class="n">finish_thread</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+
+    <span class="c1"># check invariants on this execution&#39;s final state ...</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">engine</span><span class="o">.</span><span class="n">next_execution</span><span class="p">():</span>
+        <span class="k">break</span>  <span class="c1"># all interleavings explored</span>
+</pre></div>
+</div>
+<dl class="simple">
+<dt><code class="docutils literal notranslate"><span class="pre">report_access(execution,</span> <span class="pre">thread_id,</span> <span class="pre">object_id,</span> <span class="pre">kind)</span></code></dt><dd><p>Report a shared-memory access. <code class="docutils literal notranslate"><span class="pre">kind</span></code> is one of <code class="docutils literal notranslate"><span class="pre">&quot;read&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;write&quot;</span></code>,
+<code class="docutils literal notranslate"><span class="pre">&quot;weak_write&quot;</span></code> (container subscript writes — different keys on the
+same container are independent), or <code class="docutils literal notranslate"><span class="pre">&quot;weak_read&quot;</span></code> (container loads
+before subscripting). <code class="docutils literal notranslate"><span class="pre">object_id</span></code> is an opaque <code class="docutils literal notranslate"><span class="pre">u64</span></code> that uniquely
+identifies the shared object. Frontrun uses stable monotonic IDs
+(<code class="docutils literal notranslate"><span class="pre">StableObjectIds</span></code>) rather than <code class="docutils literal notranslate"><span class="pre">id(obj)</span></code> to ensure object keys are
+consistent across executions.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">report_sync(execution,</span> <span class="pre">thread_id,</span> <span class="pre">event_type,</span> <span class="pre">sync_id)</span></code></dt><dd><p>Report a synchronization event. <code class="docutils literal notranslate"><span class="pre">event_type</span></code> is one of
+<code class="docutils literal notranslate"><span class="pre">&quot;lock_acquire&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;lock_release&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;thread_join&quot;</span></code>,
+<code class="docutils literal notranslate"><span class="pre">&quot;thread_spawn&quot;</span></code>. <code class="docutils literal notranslate"><span class="pre">sync_id</span></code> identifies the lock or thread.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">next_execution()</span></code></dt><dd><p>Advance to the next unexplored path. Returns <code class="docutils literal notranslate"><span class="pre">False</span></code> when exploration
+is complete.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">execution.finish_thread(thread_id)</span></code></dt><dd><p>Mark a thread as finished (no more operations).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">execution.block_thread(thread_id)</span></code> / <code class="docutils literal notranslate"><span class="pre">execution.unblock_thread(thread_id)</span></code></dt><dd><p>Mark a thread as blocked or unblocked (e.g., waiting on a lock).</p>
+</dd>
+</dl>
+<p>Properties: <code class="docutils literal notranslate"><span class="pre">engine.executions_completed</span></code>, <code class="docutils literal notranslate"><span class="pre">engine.tree_depth</span></code>,
+<code class="docutils literal notranslate"><span class="pre">engine.num_threads</span></code>, <code class="docutils literal notranslate"><span class="pre">execution.schedule_trace</span></code>, <code class="docutils literal notranslate"><span class="pre">execution.aborted</span></code>.</p>
+</section>
+<section id="complexity">
+<h2>Complexity<a class="headerlink" href="#complexity" title="Link to this heading">¶</a></h2>
+<p><strong>Per access:</strong> <span class="math notranslate nohighlight">\(O(T)\)</span> where <span class="math notranslate nohighlight">\(T\)</span> is the number of threads,
+dominated by the vector-clock comparison.</p>
+<p><strong>Space:</strong> <span class="math notranslate nohighlight">\(O(D \cdot T + O)\)</span> where <span class="math notranslate nohighlight">\(D\)</span> is the exploration tree
+depth and <span class="math notranslate nohighlight">\(O\)</span> is the number of unique shared objects. Only the last two
+accesses per object are retained.</p>
+<p><strong>Executions:</strong> In the worst case exponential in the number of dependent
+operations, but in practice DPOR prunes the vast majority of redundant
+interleavings. With preemption bounding at bound <span class="math notranslate nohighlight">\(k\)</span>, the explored
+subset is <span class="math notranslate nohighlight">\(O\!\left(\binom{n}{k}\right)\)</span> which is polynomial in program length <em>n</em>
+for fixed <em>k</em>.</p>
+</section>
+<section id="further-reading">
+<h2>Further reading<a class="headerlink" href="#further-reading" title="Link to this heading">¶</a></h2>
+<ul class="simple">
+<li><p>Cormac Flanagan and Patrice Godefroid, <a class="reference external" href="https://dl.acm.org/doi/10.1145/1040305.1040315">“Dynamic Partial-Order Reduction for
+Model Checking Software”</a>, POPL 2005 — the
+original DPOR paper.</p></li>
+<li><p>Parosh Aziz Abdulla, Stavros Aronis, Bengt Jonsson, and Konstantinos Sagonas,
+<a class="reference external" href="https://dl.acm.org/doi/10.1145/2535838.2535845">“Optimal Dynamic Partial Order Reduction”</a>, POPL 2014 — source
+sets and optimal exploration.</p></li>
+<li><p>Parosh Aziz Abdulla, Stavros Aronis, Bengt Jonsson, and Konstantinos Sagonas,
+<a class="reference external" href="https://doi.org/10.1145/3073408">“Source Sets: A Foundation for Optimal Dynamic Partial Order Reduction”</a>, JACM 2017 — the full journal version
+with wakeup trees, deferred race detection, <code class="docutils literal notranslate"><span class="pre">notdep</span></code> sequences, and
+algorithms for locks/disabling. Frontrun’s DPOR engine implements key ideas
+from Algorithms 1 and 2 of this paper.</p></li>
+<li><p>Madanlal Musuvathi and Shaz Qadeer, <a class="reference external" href="https://www.microsoft.com/en-us/research/publication/iterative-context-bounding-for-systematic-testing-of-multithreaded-programs/">“Iterative Context Bounding for
+Systematic Testing of Multithreaded Programs”</a>,
+PLDI 2007 — preemption bounding.</p></li>
+<li><p><a class="reference external" href="https://en.wikipedia.org/wiki/Partial_order_reduction">Partial order reduction (Wikipedia)</a></p></li>
+<li><p><a class="reference external" href="https://en.wikipedia.org/wiki/Vector_clock">Vector clock (Wikipedia)</a></p></li>
+<li><p><a class="reference external" href="https://en.wikipedia.org/wiki/Trace_theory">Mazurkiewicz trace theory (Wikipedia)</a></p></li>
+<li><p><a class="reference external" href="https://github.com/tokio-rs/loom">loom</a> — Rust concurrency testing
+library that inspired this implementation.</p></li>
+</ul>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="examples.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Examples</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="dpor_guide.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">DPOR in Practice</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, Lucas Wiman
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">DPOR: Dynamic Partial Order Reduction</a><ul>
+<li><a class="reference internal" href="#why-dpor">Why DPOR?</a></li>
+<li><a class="reference internal" href="#algorithm-overview">Algorithm overview</a><ul>
+<li><a class="reference internal" href="#key-concepts">Key concepts</a></li>
+<li><a class="reference internal" href="#happens-before-and-vector-clocks">Happens-before and vector clocks</a></li>
+<li><a class="reference internal" href="#conflict-detection">Conflict detection</a></li>
+<li><a class="reference internal" href="#synchronization-events">Synchronization events</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#the-exploration-tree">The exploration tree</a><ul>
+<li><a class="reference internal" href="#wakeup-trees">Wakeup trees</a></li>
+<li><a class="reference internal" href="#scheduling">Scheduling</a></li>
+<li><a class="reference internal" href="#backtracking-and-wakeup-sequence-insertion">Backtracking and wakeup sequence insertion</a></li>
+<li><a class="reference internal" href="#sleep-set-propagation">Sleep set propagation</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#id1">Preemption bounding</a></li>
+<li><a class="reference internal" href="#abstract-reduction-example">Abstract reduction example</a></li>
+<li><a class="reference internal" href="#worked-example-concurrent-counter">Worked example: concurrent counter</a><ul>
+<li><a class="reference internal" href="#execution-1-t0-runs-to-completion-then-t1">Execution 1: T0 runs to completion, then T1</a></li>
+<li><a class="reference internal" href="#execution-2-t0-does-one-step-then-t1-runs">Execution 2: T0 does one step, then T1 runs</a></li>
+<li><a class="reference internal" href="#why-not-more-executions">Why not more executions?</a></li>
+<li><a class="reference internal" href="#reduction-in-practice">Reduction in practice</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#data-structures">Data structures</a></li>
+<li><a class="reference internal" href="#python-api">Python API</a></li>
+<li><a class="reference internal" href="#complexity">Complexity</a></li>
+<li><a class="reference internal" href="#further-reading">Further reading</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="_static/documentation_options.js?v=938c9ccc"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/scripts/furo.js?v=46bd48cc"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+    </body>
+</html>
