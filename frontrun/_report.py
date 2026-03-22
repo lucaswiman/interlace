@@ -22,6 +22,11 @@ _global_report_path: str | None = None
 _MAX_RECORDED_EXECUTIONS = 1000
 
 
+def _strip_none(d: dict[str, Any]) -> dict[str, Any]:
+    """Remove keys with None values to reduce JSON size."""
+    return {k: v for k, v in d.items() if v is not None}
+
+
 def _safe_repr(obj: Any, max_len: int = 80) -> str:  # pyright: ignore[reportUnusedFunction]
     """Return a truncated repr() of an object, safe for JSON embedding."""
     try:
@@ -134,9 +139,20 @@ class ExplorationReport:
         exec_dicts = []
         for ex in self.executions:
             d = asdict(ex)
-            # Convert step_events from {int: StepEvent} to {str: dict} for JSON
-            d["step_events"] = {str(k): v for k, v in d["step_events"].items()}
-            exec_dicts.append(d)
+            # Only keep step_events that are referenced by race_info — the race
+            # modal is the only consumer.  This dramatically reduces JSON size
+            # since most steps are never displayed.
+            referenced_steps: set[int] = set()
+            if ex.race_info:
+                for race in ex.race_info:
+                    referenced_steps.add(race["prev_step"])
+                    referenced_steps.add(race["current_step"])
+            d["step_events"] = {str(k): _strip_none(v) for k, v in d["step_events"].items() if k in referenced_steps}
+            # Strip None values from switch_points, lock_events, and top-level fields
+            d["switch_points"] = [_strip_none(sp) for sp in d["switch_points"]]
+            d["lock_events"] = [_strip_none(le) for le in d["lock_events"]]
+            # Remove top-level None fields (race_info, deadlock_at, deadlock_cycle_description)
+            exec_dicts.append(_strip_none(d))
         data = {
             "version": 1,
             "num_threads": self.num_threads,
@@ -144,7 +160,7 @@ class ExplorationReport:
             "executions": exec_dicts,
             "source_files": self.source_files,
         }
-        return json.dumps(data, indent=2)
+        return json.dumps(data, separators=(",", ":"))
 
 
 # ---------------------------------------------------------------------------
