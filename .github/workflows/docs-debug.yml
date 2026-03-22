@@ -1,0 +1,97 @@
+name: Deploy Debug Docs
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build debug docs from'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Debug Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout debug branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          path: debug-src
+          fetch-depth: 0
+
+      - name: Determine latest release tag
+        id: release
+        run: |
+          cd debug-src
+          TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "")
+          if [ -z "$TAG" ]; then
+            echo "No release tag found — will use main branch for base docs"
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          else
+            echo "Latest release tag: $TAG"
+            echo "ref=$TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout release ref for base docs
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.ref }}
+          path: release-src
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Build base docs from release
+        run: |
+          cd release-src
+          uv venv
+          uv pip install -e .[dev]
+          source .venv/bin/activate
+          make docs-html
+
+      - name: Build debug docs from branch
+        run: |
+          cd debug-src
+          uv venv
+          uv pip install -e .[dev]
+          source .venv/bin/activate
+          make docs-html
+
+      - name: Combine docs
+        run: |
+          mkdir -p combined
+          cp -r release-src/docs/_build/html/* combined/
+          cp -r debug-src/docs/_build/html combined/debug
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'combined'
+
+  deploy:
+    name: Deploy Debug Documentation
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}debug
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
