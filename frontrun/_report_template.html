@@ -94,7 +94,7 @@ class DporNav extends HTMLElement {
           top: 0;
           z-index: 100;
         }
-        .nav-row { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; overflow: hidden; }
+        .nav-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; overflow: hidden; }
         .title { font-size: 14px; font-weight: bold; color: var(--blue); white-space: nowrap; }
         .exec-buttons { display: flex; gap: 2px; flex-shrink: 1; min-width: 0; }
         .exec-btn {
@@ -129,6 +129,14 @@ class DporNav extends HTMLElement {
         .ctrl-btn.active-filter { border-color: var(--red); color: var(--red); }
         .page-info { color: var(--text-dim); font-size: 12px; white-space: nowrap; flex-shrink: 0; }
         .stats { color: var(--text-dim); font-size: 12px; white-space: nowrap; flex-shrink: 0; }
+        @media (max-width: 600px) {
+          :host { padding: 6px 8px; }
+          .nav-row { gap: 4px; }
+          .title { font-size: 12px; }
+          .exec-buttons { flex-wrap: wrap; }
+          .exec-btn { padding: 4px 6px; font-size: 11px; min-width: 28px; }
+          .ctrl-btn { padding: 4px 6px; font-size: 11px; }
+        }
       </style>
       <div class="nav-row">
         <span class="title">Trace Exploration</span>
@@ -152,6 +160,23 @@ class DporNav extends HTMLElement {
       this._showFailed = !this._showFailed;
       this._page = 0;
       this.render();
+      // Notify parent that filter changed so keyboard/swipe respects it
+      this.dispatchEvent(new CustomEvent('filter-changed', {
+        detail: { showFailed: this._showFailed },
+        bubbles: true, composed: true
+      }));
+      // If current execution isn't in filtered list, select first filtered one
+      const current = parseInt(this.getAttribute('current') || '0');
+      const execs = DATA.executions;
+      if (this._showFailed && !this._isFail(execs[current])) {
+        const firstFailed = execs.findIndex(ex => this._isFail(ex));
+        if (firstFailed >= 0) {
+          this.dispatchEvent(new CustomEvent('select-execution', {
+            detail: { index: firstFailed },
+            bubbles: true, composed: true
+          }));
+        }
+      }
     });
     const prevBtn = this.shadowRoot.getElementById('prev-page');
     if (prevBtn && !prevBtn.disabled) prevBtn.addEventListener('click', () => { this._page--; this.render(); });
@@ -774,6 +799,10 @@ class DporModal extends HTMLElement {
         .nav-btn:hover:not(:disabled) { background: var(--bg-hover); }
         .nav-btn:disabled { opacity: 0.3; cursor: default; }
         .race-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        @media (max-width: 600px) {
+          .race-pair { grid-template-columns: 1fr; }
+          .modal-header { flex-wrap: wrap; gap: 8px; }
+        }
         .race-side { }
         .race-side-title { font-size: 12px; font-weight: bold; margin-bottom: 6px; }
         .step-tag {
@@ -1225,14 +1254,43 @@ customElements.define('dpor-modal', DporModal);
 
 // ---- <dpor-report> (root) ----
 class DporReport extends HTMLElement {
+  _isFail(ex) { return !ex.invariant_held || ex.was_deadlock; }
+
+  _filteredIndices() {
+    if (!this._showFailed) return DATA.executions.map((_, i) => i);
+    return DATA.executions.map((ex, i) => ({ex, i})).filter(({ex}) => this._isFail(ex)).map(({i}) => i);
+  }
+
+  _navigateFiltered(dir) {
+    const indices = this._filteredIndices();
+    if (indices.length === 0) return;
+    const pos = indices.indexOf(this._currentExec);
+    let nextPos;
+    if (pos < 0) {
+      // Current not in filtered list — jump to nearest in the direction
+      nextPos = dir > 0 ? 0 : indices.length - 1;
+    } else {
+      nextPos = pos + dir;
+    }
+    if (nextPos >= 0 && nextPos < indices.length) {
+      this._currentExec = indices[nextPos];
+      this.render();
+    }
+  }
+
   connectedCallback() {
     this.attachShadow({ mode: 'open' });
     this._currentExec = 0;
+    this._showFailed = false;
     this.render();
 
     this.addEventListener('select-execution', (e) => {
       this._currentExec = e.detail.index;
       this.render();
+    });
+
+    this.addEventListener('filter-changed', (e) => {
+      this._showFailed = e.detail.showFailed;
     });
 
     this.addEventListener('select-switch', (e) => {
@@ -1255,6 +1313,12 @@ class DporReport extends HTMLElement {
       if (modal) modal.showDeadlock(e.detail.executionIndex);
     });
 
+    // Re-render nav on resize so page size adapts (e.g. device rotation)
+    window.addEventListener('resize', () => {
+      const nav = this.shadowRoot.querySelector('dpor-nav');
+      if (nav) nav.render();
+    });
+
     // Keyboard navigation: arrows switch traces or navigate modal
     document.addEventListener('keydown', (e) => {
       const modal = this.shadowRoot.querySelector('dpor-modal');
@@ -1266,12 +1330,8 @@ class DporReport extends HTMLElement {
           // Navigate within modal (prev/next race or switch point)
           modal.navigate(dir);
         } else {
-          // Switch between traces
-          const next = this._currentExec + dir;
-          if (next >= 0 && next < DATA.executions.length) {
-            this._currentExec = next;
-            this.render();
-          }
+          // Navigate respecting the active filter
+          this._navigateFiltered(dir);
         }
         e.preventDefault();
       }
@@ -1291,11 +1351,8 @@ class DporReport extends HTMLElement {
       if (modalVisible) {
         modal.navigate(dir);
       } else {
-        const next = this._currentExec + dir;
-        if (next >= 0 && next < DATA.executions.length) {
-          this._currentExec = next;
-          this.render();
-        }
+        // Navigate respecting the active filter
+        this._navigateFiltered(dir);
       }
     }, { passive: true });
   }
