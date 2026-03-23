@@ -1322,6 +1322,7 @@ _SHARED_ACCESS_OPCODES = frozenset(
         "STORE_ATTR",
         "DELETE_ATTR",
         "LOAD_METHOD",  # 3.10 only
+        "LOAD_SPECIAL",  # 3.14+ context manager __enter__/__exit__
         # Global / name access
         "LOAD_GLOBAL",
         "STORE_GLOBAL",
@@ -1660,6 +1661,25 @@ def _process_opcode(
         _report_write(engine, execution, thread_id, obj, instr.argval, elock, sids)
         if recorder is not None and obj is not None:
             recorder.record(thread_id, frame, opcode=op, access_type="write", attr_name=instr.argval, obj=obj)
+
+    elif op == "LOAD_SPECIAL":
+        # New in 3.14: replaces LOAD_ATTR for ``__enter__`` / ``__exit__``
+        # in ``with`` statements.  Pops owner, pushes (attr, self_or_null).
+        # Stack effect = +1 (−1 pop + 2 push).
+        _special_names = {0: "__enter__", 1: "__exit__"}
+        _arg = instr.arg if instr.arg is not None else -1
+        attr = _special_names.get(_arg, f"__special_{_arg}__")
+        obj = shadow.pop()
+        _report_read(engine, execution, thread_id, obj, attr, elock, sids)
+        if obj is not None:
+            try:
+                val = _safe_getattr(obj, attr)
+                shadow.push(val)
+            except Exception:
+                shadow.push(None)
+        else:
+            shadow.push(None)
+        shadow.push(None)  # self_or_null slot
 
     # === Subscript access (dict/list operations) ===
 

@@ -162,3 +162,47 @@ class TestSchedulingCoarsening:
         )
 
         assert result.property_holds
+
+    def test_dining_philosophers_three_trace_count(self) -> None:
+        """Three dining philosophers (pure locks, no shared state) trace count.
+
+        With scheduling coarsening, the pure lock-based dining philosophers
+        should produce a small, bounded number of interleavings.  This
+        regression test ensures the count stays stable across Python versions
+        (the 3.14 LOAD_SPECIAL opcode for context managers must not inflate
+        the search space).
+        """
+
+        class Table:
+            def __init__(self) -> None:
+                self.forks = [threading.Lock() for _ in range(3)]
+
+        def make_philosopher(i: int):  # noqa: ANN202
+            def philosopher(table: Table) -> None:
+                left = i
+                right = (i + 1) % 3
+                with table.forks[left]:
+                    with table.forks[right]:
+                        pass
+
+            return philosopher
+
+        result = explore_dpor(
+            setup=Table,
+            threads=[make_philosopher(i) for i in range(3)],
+            invariant=lambda _: True,
+            max_executions=2000,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=False,
+        )
+
+        assert not result.property_holds, "Deadlock should be found"
+        # The exploration should complete well under the 2000 cap.
+        # On both 3.12 and 3.14, this produces exactly 21 interleavings.
+        assert result.num_explored <= 50, (
+            f"Expected <=50 interleavings for 3-philosopher pure lock example, "
+            f"got {result.num_explored}. Likely a scheduling regression "
+            f"(e.g. unhandled opcode inflating the DPOR search tree)."
+        )
