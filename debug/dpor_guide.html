@@ -1,0 +1,826 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="./">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="DPOR: Dynamic Partial Order Reduction" href="dpor.html"><link rel="prev" title="How Frontrun Works" href="approaches.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>DPOR in Practice - Frontrun 0.0.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="_static/custom.css?v=58a6b0e8" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="index.html"><div class="brand">Frontrun 0.0.0 documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
+  
+  <span class="sidebar-brand-text">Frontrun 0.0.0 documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="approaches.html">How Frontrun Works</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">DPOR in Practice</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dpor.html">DPOR: Dynamic Partial Order Reduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="orm_race.html">SQLAlchemy Lost-Update Race Condition</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sql-technical-details.html">SQL Conflict Detection – Technical Details</a></li>
+<li class="toctree-l1"><a class="reference internal" href="redis.html">Redis Conflict Detection – Technical Details</a></li>
+<li class="toctree-l1"><a class="reference internal" href="trace_filtering.html">Trace Filtering</a></li>
+<li class="toctree-l1"><a class="reference internal" href="internals.html">How It Works Under the Hood</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="CASE_STUDIES.html">Frontrun Case Studies: Concurrency Bug Detection</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="https://github.com/lucaswiman/frontrun/blob/main/docs/dpor_guide.rst?plain=true" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div><div class="edit-this-page">
+  <a class="muted-link" href="https://github.com/lucaswiman/frontrun/edit/main/docs/dpor_guide.rst" rel="edit" title="Edit this page">
+    <svg><use href="#svg-pencil"></use></svg>
+    <span class="visually-hidden">Edit this page</span>
+  </a>
+</div><div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="dpor-in-practice">
+<h1>DPOR in Practice<a class="headerlink" href="#dpor-in-practice" title="Link to this heading">¶</a></h1>
+<p>This is a practical guide to using <code class="docutils literal notranslate"><span class="pre">explore_dpor()</span></code> for systematic
+concurrency testing. For the underlying algorithm and theory, see
+<a class="reference internal" href="dpor.html"><span class="doc">DPOR: Dynamic Partial Order Reduction</span></a>.</p>
+<section id="what-dpor-does">
+<h2>What DPOR does<a class="headerlink" href="#what-dpor-does" title="Link to this heading">¶</a></h2>
+<p>DPOR and the invariant have separate jobs:</p>
+<ul class="simple">
+<li><p><strong>DPOR decides which interleavings to run.</strong> It watches every shared-memory
+access, detects which operations <em>conflict</em> (access the same object with at
+least one write), and uses that information to skip redundant orderings.
+Two interleavings that only differ in the order of independent operations
+(e.g. two reads, or accesses to different objects) are equivalent, so DPOR
+runs only one representative from each equivalence class.</p></li>
+<li><p><strong>The invariant decides whether a bug occurred.</strong> After all threads finish,
+<code class="docutils literal notranslate"><span class="pre">explore_dpor()</span></code> calls your invariant on the final state. DPOR has no
+built-in notion of “correct” — it doesn’t know that <code class="docutils literal notranslate"><span class="pre">counter</span> <span class="pre">==</span> <span class="pre">1</span></code> is
+wrong and <code class="docutils literal notranslate"><span class="pre">counter</span> <span class="pre">==</span> <span class="pre">2</span></code> is right. You supply that judgement via the
+invariant.</p></li>
+</ul>
+<p>(The name “invariant” is standard in tools like this — loom, CHESS, etc. —
+even though it is technically a <em>postcondition</em> checked once after the threads
+finish, not a continuously-monitored loop invariant.)</p>
+<p>Putting the two together:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.dpor</span><span class="w"> </span><span class="kn">import</span> <span class="n">explore_dpor</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">explore_dpor</span><span class="p">(</span>
+    <span class="n">setup</span><span class="o">=</span><span class="n">MyState</span><span class="p">,</span>                         <span class="c1"># called fresh each execution</span>
+    <span class="n">threads</span><span class="o">=</span><span class="p">[</span><span class="n">thread_a</span><span class="p">,</span> <span class="n">thread_b</span><span class="p">],</span>          <span class="c1"># each receives the state</span>
+    <span class="n">invariant</span><span class="o">=</span><span class="k">lambda</span> <span class="n">s</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">is_consistent</span><span class="p">(),</span> <span class="c1"># checked after all threads finish</span>
+<span class="p">)</span>
+
+<span class="k">assert</span> <span class="n">result</span><span class="o">.</span><span class="n">property_holds</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">explanation</span>
+</pre></div>
+</div>
+<ol class="arabic simple">
+<li><p>DPOR picks an interleaving (based on conflict analysis).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">setup()</span></code> creates fresh state; the threads run under that interleaving.</p></li>
+<li><p>The invariant checks the final state.</p></li>
+<li><p>Repeat until all distinct interleavings are covered.</p></li>
+</ol>
+</section>
+<section id="what-it-can-and-cannot-find">
+<h2>What it can and cannot find<a class="headerlink" href="#what-it-can-and-cannot-find" title="Link to this heading">¶</a></h2>
+<p>DPOR explores alternative interleavings only where it detects a <em>conflict</em>
+— two threads accessing the same object with at least one write. The
+detection mechanisms are layered from fine-grained to coarse:</p>
+<p><strong>Fine-grained detection (precise, no false conflicts):</strong></p>
+<ul class="simple">
+<li><p>Attribute reads and writes (<code class="docutils literal notranslate"><span class="pre">self.x</span></code>, <code class="docutils literal notranslate"><span class="pre">obj.field</span> <span class="pre">=</span> <span class="pre">...</span></code>)</p></li>
+<li><p>Subscript reads and writes (<code class="docutils literal notranslate"><span class="pre">d[key]</span></code>, <code class="docutils literal notranslate"><span class="pre">lst[i]</span> <span class="pre">=</span> <span class="pre">...</span></code>)</p></li>
+<li><p>Lock acquire and release (<code class="docutils literal notranslate"><span class="pre">threading.Lock</span></code>, <code class="docutils literal notranslate"><span class="pre">threading.RLock</span></code>)</p></li>
+<li><p>Thread spawn and join</p></li>
+<li><p><strong>Redis commands</strong> — <code class="docutils literal notranslate"><span class="pre">execute_command()</span></code> is intercepted on redis-py
+clients when <code class="docutils literal notranslate"><span class="pre">detect_io=True</span></code> (sync) or <code class="docutils literal notranslate"><span class="pre">detect_redis=True</span></code> (async).
+Each command is classified as a read or write on specific keys; two threads
+operating on <em>different</em> keys are independent.  See <a class="reference internal" href="redis.html"><span class="doc">Redis Conflict Detection – Technical Details</span></a>.</p></li>
+<li><p><strong>SQL statements</strong> — <code class="docutils literal notranslate"><span class="pre">cursor.execute()</span></code> is intercepted at the DBAPI
+layer.  Statements are parsed to per-table (or per-row) resource IDs; two
+threads touching <em>different</em> tables or rows are independent.  See
+<a class="reference internal" href="sql-technical-details.html"><span class="doc">SQL Conflict Detection – Technical Details</span></a>.</p></li>
+</ul>
+<p><strong>Coarse endpoint-level detection (can cause combinatorial explosion):</strong></p>
+<ul class="simple">
+<li><p><strong>Python socket I/O</strong> (<code class="docutils literal notranslate"><span class="pre">connect</span></code>, <code class="docutils literal notranslate"><span class="pre">send</span></code>, <code class="docutils literal notranslate"><span class="pre">sendall</span></code>, <code class="docutils literal notranslate"><span class="pre">recv</span></code>, etc.)
+— monkey-patched when <code class="docutils literal notranslate"><span class="pre">detect_io=True</span></code>.  The resource ID is
+<code class="docutils literal notranslate"><span class="pre">socket:&lt;host&gt;:&lt;port&gt;</span></code>, so <em>every</em> send and recv on the same server
+conflicts with every other send and recv on that server.  Two threads each
+issuing ten Redis commands via the raw socket API would each generate ten
+write (send) and ten read (recv) events, all conflicting — DPOR would
+explore a combinatorial explosion of orderings, most of them spurious.
+Redis and SQL detection avoid this by suppressing socket-level reporting for
+those connections and replacing it with fine-grained resource IDs.</p></li>
+<li><p><strong>C-level socket I/O via LD_PRELOAD</strong> — when running under the
+<code class="docutils literal notranslate"><span class="pre">frontrun</span></code> CLI, the <code class="docutils literal notranslate"><span class="pre">libfrontrun_io.so</span></code> library intercepts libc
+<code class="docutils literal notranslate"><span class="pre">send()</span></code>/<code class="docutils literal notranslate"><span class="pre">recv()</span></code> and reports the same <code class="docutils literal notranslate"><span class="pre">socket:&lt;host&gt;:&lt;port&gt;</span></code> resource
+IDs.  This catches opaque C drivers (libpq, etc.) that bypass Python’s
+<code class="docutils literal notranslate"><span class="pre">socket</span></code> module, but with the same coarseness: all traffic to the same
+endpoint is a potential conflict.  For most database and Redis workloads,
+the SQL/Redis key-level detection should be used instead so that the
+endpoint-level reports are suppressed.</p></li>
+<li><p><strong>File opens</strong> (<code class="docutils literal notranslate"><span class="pre">builtins.open</span></code>) — resource identity is the resolved
+file path; read vs write determined by mode.</p></li>
+</ul>
+<p><strong>Not tracked (DPOR cannot see these at all):</strong></p>
+<ul class="simple">
+<li><p><strong>C-extension shared state.</strong> Shared state modified entirely inside C code
+(NumPy arrays, custom C extensions, etc.) produces no Python bytecode.
+DPOR sees no conflict and explores only one interleaving, regardless of
+whether a race exists.</p></li>
+<li><p><strong>Locks acquired in C without Python wrappers.</strong>  A C extension that manages
+its own mutex without calling through <code class="docutils literal notranslate"><span class="pre">threading.Lock</span></code> is invisible to the
+wait-for-graph and the bytecode tracer.</p></li>
+</ul>
+<p>For cases where DPOR cannot see the shared state, two alternatives are available:</p>
+<ul class="simple">
+<li><p><strong>Bytecode exploration</strong> (<code class="docutils literal notranslate"><span class="pre">explore_interleavings()</span></code>) doesn’t need to
+<em>understand</em> why a schedule is bad — it checks an invariant after each run
+and reports when the invariant fails.  If a C extension mutates shared state
+in a way that breaks your invariant, bytecode exploration will often find the
+bad interleaving by chance.  It won’t know <em>why</em> it’s bad (the error trace
+is less interpretable than DPOR’s), but it will find it.  See
+<a class="reference internal" href="approaches.html"><span class="doc">How Frontrun Works</span></a> for details.</p></li>
+<li><p><strong>Trace markers</strong> let you annotate the points where interleaving matters and
+enumerate the orderings by hand.  This is the most reliable approach when you
+already know the race window.</p></li>
+</ul>
+<p>Beyond invariant violations, DPOR also detects <strong>deadlocks</strong> (via wait-for-graph
+cycle detection) and <strong>crashes</strong> (unhandled exceptions in any thread are
+re-raised after the execution completes).</p>
+<p>Thread functions should also avoid external side effects (writing to files,
+sending network requests, modifying global state outside the <code class="docutils literal notranslate"><span class="pre">setup</span></code> object).
+DPOR replays each interleaving from scratch, so side effects from one replay
+will interfere with the next.</p>
+</section>
+<section id="basic-usage">
+<h2>Basic usage<a class="headerlink" href="#basic-usage" title="Link to this heading">¶</a></h2>
+<p>The <code class="docutils literal notranslate"><span class="pre">explore_dpor()</span></code> function is the main entry point:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.dpor</span><span class="w"> </span><span class="kn">import</span> <span class="n">explore_dpor</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">Counter</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="mi">0</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">increment</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">temp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">value</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="n">temp</span> <span class="o">+</span> <span class="mi">1</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">explore_dpor</span><span class="p">(</span>
+    <span class="n">setup</span><span class="o">=</span><span class="n">Counter</span><span class="p">,</span>
+    <span class="n">threads</span><span class="o">=</span><span class="p">[</span><span class="k">lambda</span> <span class="n">c</span><span class="p">:</span> <span class="n">c</span><span class="o">.</span><span class="n">increment</span><span class="p">(),</span> <span class="k">lambda</span> <span class="n">c</span><span class="p">:</span> <span class="n">c</span><span class="o">.</span><span class="n">increment</span><span class="p">()],</span>
+    <span class="n">invariant</span><span class="o">=</span><span class="k">lambda</span> <span class="n">c</span><span class="p">:</span> <span class="n">c</span><span class="o">.</span><span class="n">value</span> <span class="o">==</span> <span class="mi">2</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="k">assert</span> <span class="n">result</span><span class="o">.</span><span class="n">property_holds</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">explanation</span>
+</pre></div>
+</div>
+<p><strong>Parameters:</strong></p>
+<dl class="simple">
+<dt><code class="docutils literal notranslate"><span class="pre">setup</span></code></dt><dd><p>A callable that creates fresh shared state. Called once per execution so
+that each interleaving starts from a clean slate.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">threads</span></code></dt><dd><p>A list of callables, each receiving the state returned by <code class="docutils literal notranslate"><span class="pre">setup</span></code>.
+The length of this list determines the number of threads.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">invariant</span></code></dt><dd><p>A predicate over the shared state that defines what “correct” means.
+Called after all threads finish each execution. Return <code class="docutils literal notranslate"><span class="pre">True</span></code> if the
+state is valid, <code class="docutils literal notranslate"><span class="pre">False</span></code> if there is a bug. DPOR decides <em>which</em>
+interleavings to try; the invariant decides <em>whether each one passed</em>.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">preemption_bound</span></code> <em>(default: 2)</em></dt><dd><p>Maximum number of preemptions (context switches away from a runnable
+thread) per execution. A bound of 2 catches the vast majority of real
+bugs. Set to <code class="docutils literal notranslate"><span class="pre">None</span></code> for unbounded exploration, but be aware that
+this can be exponentially slower.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">max_executions</span></code> <em>(default: None)</em></dt><dd><p>Safety cap on total executions. Useful for CI where you want a time
+bound.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">max_branches</span></code> <em>(default: 100,000)</em></dt><dd><p>Maximum scheduling points per execution. Prevents runaway on programs
+with very long traces.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">timeout_per_run</span></code> <em>(default: 5.0)</em></dt><dd><p>Timeout in seconds for each individual execution.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">reproduce_on_failure</span></code> <em>(default: 10)</em></dt><dd><p>When a counterexample is found, replay the same schedule this many
+times to measure how reproducible the failure is. The reproduction
+count and percentage appear in <code class="docutils literal notranslate"><span class="pre">result.explanation</span></code>. Set to 0 to
+skip.</p>
+</dd>
+</dl>
+</section>
+<section id="interpreting-results">
+<h2>Interpreting results<a class="headerlink" href="#interpreting-results" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">explore_dpor()</span></code> returns an <code class="docutils literal notranslate"><span class="pre">InterleavingResult</span></code> (the same type used by
+<code class="docutils literal notranslate"><span class="pre">explore_interleavings</span></code>):</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="nd">@dataclass</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">InterleavingResult</span><span class="p">:</span>
+    <span class="n">property_holds</span><span class="p">:</span> <span class="nb">bool</span>                              <span class="c1"># True if invariant held everywhere</span>
+    <span class="n">counterexample</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>           <span class="c1"># first failing schedule</span>
+    <span class="n">num_explored</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>                             <span class="c1"># total interleavings tried</span>
+    <span class="n">unique_interleavings</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>                     <span class="c1"># distinct schedules (= num_explored for DPOR)</span>
+    <span class="n">failures</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="nb">int</span><span class="p">]]]</span> <span class="o">=</span> <span class="o">...</span>       <span class="c1"># all (execution_num, schedule) pairs</span>
+    <span class="n">explanation</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>                    <span class="c1"># human-readable trace of the race</span>
+    <span class="n">reproduction_attempts</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>                    <span class="c1"># number of replay attempts</span>
+    <span class="n">reproduction_successes</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>                   <span class="c1"># how many replays reproduced the failure</span>
+    <span class="n">sql_anomaly</span><span class="p">:</span> <span class="n">SqlAnomaly</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>             <span class="c1"># classified SQL isolation anomaly (if any)</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">counterexample</span></code> is a list of thread IDs representing the order in
+which threads were scheduled. For example, <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">0,</span> <span class="pre">1,</span> <span class="pre">1]</span></code> means thread 0
+ran for two steps, then thread 1 ran for two steps.</p>
+<p>When a race is found, <code class="docutils literal notranslate"><span class="pre">explanation</span></code> contains a formatted trace showing the
+interleaved source lines, the conflict pattern (lost update, write-write, etc.),
+and reproduction statistics. This is the same output for both <code class="docutils literal notranslate"><span class="pre">explore_dpor</span></code>
+and <code class="docutils literal notranslate"><span class="pre">explore_interleavings</span></code>.</p>
+<p>If <code class="docutils literal notranslate"><span class="pre">num_explored</span></code> is 1, your threads probably don’t share any
+state — the engine saw no conflicts and skipped everything. This is a sign
+that either the test is trivially correct or the shared state is not being
+accessed in a way the tracer can see (e.g. through a C extension).</p>
+</section>
+<section id="example-verifying-that-a-lock-fixes-a-race">
+<h2>Example: verifying that a lock fixes a race<a class="headerlink" href="#example-verifying-that-a-lock-fixes-a-race" title="Link to this heading">¶</a></h2>
+<p>A common pattern is to first show that a race exists, then show that adding
+a lock eliminates it:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">threading</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.dpor</span><span class="w"> </span><span class="kn">import</span> <span class="n">explore_dpor</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">UnsafeCounter</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="mi">0</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">increment</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">temp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">value</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="n">temp</span> <span class="o">+</span> <span class="mi">1</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">SafeCounter</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">lock</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Lock</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">increment</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">lock</span><span class="p">:</span>
+            <span class="n">temp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">value</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="n">temp</span> <span class="o">+</span> <span class="mi">1</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_unsafe_counter_has_race</span><span class="p">():</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">explore_dpor</span><span class="p">(</span>
+        <span class="n">setup</span><span class="o">=</span><span class="n">UnsafeCounter</span><span class="p">,</span>
+        <span class="n">threads</span><span class="o">=</span><span class="p">[</span><span class="k">lambda</span> <span class="n">c</span><span class="p">:</span> <span class="n">c</span><span class="o">.</span><span class="n">increment</span><span class="p">(),</span> <span class="k">lambda</span> <span class="n">c</span><span class="p">:</span> <span class="n">c</span><span class="o">.</span><span class="n">increment</span><span class="p">()],</span>
+        <span class="n">invariant</span><span class="o">=</span><span class="k">lambda</span> <span class="n">c</span><span class="p">:</span> <span class="n">c</span><span class="o">.</span><span class="n">value</span> <span class="o">==</span> <span class="mi">2</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="k">assert</span> <span class="n">result</span><span class="o">.</span><span class="n">property_holds</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">explanation</span>  <span class="c1"># fails — has a race!</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_safe_counter_is_correct</span><span class="p">():</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">explore_dpor</span><span class="p">(</span>
+        <span class="n">setup</span><span class="o">=</span><span class="n">SafeCounter</span><span class="p">,</span>
+        <span class="n">threads</span><span class="o">=</span><span class="p">[</span><span class="k">lambda</span> <span class="n">c</span><span class="p">:</span> <span class="n">c</span><span class="o">.</span><span class="n">increment</span><span class="p">(),</span> <span class="k">lambda</span> <span class="n">c</span><span class="p">:</span> <span class="n">c</span><span class="o">.</span><span class="n">increment</span><span class="p">()],</span>
+        <span class="n">invariant</span><span class="o">=</span><span class="k">lambda</span> <span class="n">c</span><span class="p">:</span> <span class="n">c</span><span class="o">.</span><span class="n">value</span> <span class="o">==</span> <span class="mi">2</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="k">assert</span> <span class="n">result</span><span class="o">.</span><span class="n">property_holds</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">explanation</span>
+</pre></div>
+</div>
+</section>
+<section id="example-multiple-shared-objects">
+<h2>Example: multiple shared objects<a class="headerlink" href="#example-multiple-shared-objects" title="Link to this heading">¶</a></h2>
+<p>DPOR tracks objects independently, so races on different attributes are
+detected separately:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.dpor</span><span class="w"> </span><span class="kn">import</span> <span class="n">explore_dpor</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">Bank</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">a</span> <span class="o">=</span> <span class="mi">100</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">b</span> <span class="o">=</span> <span class="mi">100</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">transfer</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">amount</span><span class="p">):</span>
+        <span class="n">temp_a</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">a</span>
+        <span class="n">temp_b</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">b</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">a</span> <span class="o">=</span> <span class="n">temp_a</span> <span class="o">-</span> <span class="n">amount</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">b</span> <span class="o">=</span> <span class="n">temp_b</span> <span class="o">+</span> <span class="n">amount</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_concurrent_transfers_conserve_total</span><span class="p">():</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">explore_dpor</span><span class="p">(</span>
+        <span class="n">setup</span><span class="o">=</span><span class="n">Bank</span><span class="p">,</span>
+        <span class="n">threads</span><span class="o">=</span><span class="p">[</span><span class="k">lambda</span> <span class="n">b</span><span class="p">:</span> <span class="n">b</span><span class="o">.</span><span class="n">transfer</span><span class="p">(</span><span class="mi">50</span><span class="p">),</span> <span class="k">lambda</span> <span class="n">b</span><span class="p">:</span> <span class="n">b</span><span class="o">.</span><span class="n">transfer</span><span class="p">(</span><span class="mi">50</span><span class="p">)],</span>
+        <span class="n">invariant</span><span class="o">=</span><span class="k">lambda</span> <span class="n">b</span><span class="p">:</span> <span class="n">b</span><span class="o">.</span><span class="n">a</span> <span class="o">+</span> <span class="n">b</span><span class="o">.</span><span class="n">b</span> <span class="o">==</span> <span class="mi">200</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="k">assert</span> <span class="n">result</span><span class="o">.</span><span class="n">property_holds</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">explanation</span>  <span class="c1"># fails — total is not conserved</span>
+</pre></div>
+</div>
+</section>
+<section id="c-level-i-o-interception-via-ld-preload">
+<h2>C-level I/O interception via <code class="docutils literal notranslate"><span class="pre">LD_PRELOAD</span></code><a class="headerlink" href="#c-level-i-o-interception-via-ld-preload" title="Link to this heading">¶</a></h2>
+<p>When run under the <code class="docutils literal notranslate"><span class="pre">frontrun</span></code> CLI, the <code class="docutils literal notranslate"><span class="pre">LD_PRELOAD</span></code> library
+(<code class="docutils literal notranslate"><span class="pre">libfrontrun_io.so</span></code>) intercepts C-level I/O — including opaque
+database drivers like psycopg2/libpq. DPOR consumes these events
+automatically when <code class="docutils literal notranslate"><span class="pre">detect_io=True</span></code> (the default).</p>
+<p><strong>How it works:</strong></p>
+<ol class="arabic simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">explore_dpor()</span></code> starts an <code class="docutils literal notranslate"><span class="pre">IOEventDispatcher</span></code> that creates
+an <code class="docutils literal notranslate"><span class="pre">os.pipe()</span></code> and passes the write-end FD to the Rust
+<code class="docutils literal notranslate"><span class="pre">LD_PRELOAD</span></code> library via the <code class="docutils literal notranslate"><span class="pre">FRONTRUN_IO_FD</span></code> environment
+variable. The Rust library writes event records to the pipe for
+every intercepted <code class="docutils literal notranslate"><span class="pre">send</span></code>, <code class="docutils literal notranslate"><span class="pre">recv</span></code>, <code class="docutils literal notranslate"><span class="pre">read</span></code>, <code class="docutils literal notranslate"><span class="pre">write</span></code>, etc.</p></li>
+<li><p>A <code class="docutils literal notranslate"><span class="pre">_PreloadBridge</span></code> maps OS thread IDs (from each event’s <code class="docutils literal notranslate"><span class="pre">tid</span></code>
+field) to DPOR logical thread IDs. Each DPOR-managed thread
+registers its <code class="docutils literal notranslate"><span class="pre">threading.get_native_id()</span></code> → <code class="docutils literal notranslate"><span class="pre">thread_id</span></code> at
+start.</p></li>
+<li><p>At each DPOR scheduling point, the bridge drains buffered events
+for the current thread and feeds them to the Rust DPOR engine via
+<code class="docutils literal notranslate"><span class="pre">engine.report_io_access()</span></code>. The engine tracks the shared
+resource (e.g. <code class="docutils literal notranslate"><span class="pre">socket:127.0.0.1:5432</span></code>) the same way it tracks
+Python-level attribute accesses — via vector clocks and
+conflict detection.</p></li>
+</ol>
+<p>This is what allows DPOR to detect the SQLAlchemy/psycopg2 lost-update
+race (see <a class="reference internal" href="orm_race.html"><span class="doc">SQLAlchemy Lost-Update Race Condition</span></a>): even though psycopg2 calls libc <code class="docutils literal notranslate"><span class="pre">send()</span></code>
+/ <code class="docutils literal notranslate"><span class="pre">recv()</span></code> directly (bypassing Python’s <code class="docutils literal notranslate"><span class="pre">socket</span></code> module), the
+<code class="docutils literal notranslate"><span class="pre">LD_PRELOAD</span></code> library intercepts those calls and DPOR treats the
+shared socket endpoint as a conflict point.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The bytecode explorer does <em>not</em> consume <code class="docutils literal notranslate"><span class="pre">LD_PRELOAD</span></code> events.
+It relies on random scheduling and may still find C-level races
+by chance, but it has no awareness of the underlying I/O conflicts.</p>
+</div>
+</section>
+<section id="orm-helpers-django-dpor-and-sqlalchemy-dpor">
+<h2>ORM helpers: <code class="docutils literal notranslate"><span class="pre">django_dpor</span></code> and <code class="docutils literal notranslate"><span class="pre">sqlalchemy_dpor</span></code><a class="headerlink" href="#orm-helpers-django-dpor-and-sqlalchemy-dpor" title="Link to this heading">¶</a></h2>
+<p>Writing correct <code class="docutils literal notranslate"><span class="pre">explore_dpor()</span></code> tests against a real database requires
+boilerplate: each thread needs its own connection, stale connections from a
+previous execution must be closed, and optional lock timeouts must be injected
+before the thread runs. The <code class="docutils literal notranslate"><span class="pre">frontrun.contrib</span></code> package provides ready-made
+wrappers that handle this automatically.</p>
+<section id="django-dpor">
+<h3><code class="docutils literal notranslate"><span class="pre">django_dpor</span></code><a class="headerlink" href="#django-dpor" title="Link to this heading">¶</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.contrib.django</span><span class="w"> </span><span class="kn">import</span> <span class="n">django_dpor</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">django_dpor</span><span class="p">(</span>
+    <span class="n">setup</span><span class="o">=</span><span class="n">_State</span><span class="p">,</span>
+    <span class="n">threads</span><span class="o">=</span><span class="p">[</span><span class="n">thread_a</span><span class="p">,</span> <span class="n">thread_b</span><span class="p">],</span>
+    <span class="n">invariant</span><span class="o">=</span><span class="k">lambda</span> <span class="n">s</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">login_count</span> <span class="o">==</span> <span class="mi">2</span><span class="p">,</span>
+    <span class="n">lock_timeout</span><span class="o">=</span><span class="mi">500</span><span class="p">,</span>  <span class="c1"># optional, milliseconds</span>
+<span class="p">)</span>
+<span class="k">assert</span> <span class="n">result</span><span class="o">.</span><span class="n">property_holds</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">explanation</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">django_dpor</span></code> wraps <code class="docutils literal notranslate"><span class="pre">explore_dpor</span></code> and:</p>
+<ul class="simple">
+<li><p>Calls <code class="docutils literal notranslate"><span class="pre">connections.close_all()</span></code> before each execution so threads open
+fresh connections (avoids sharing a stale connection across DPOR replays).</p></li>
+<li><p>Calls <code class="docutils literal notranslate"><span class="pre">conn.close()</span></code> / <code class="docutils literal notranslate"><span class="pre">conn.ensure_connection()</span></code> at the start of each
+thread so every thread has its own independent connection.</p></li>
+<li><p>Optionally executes <code class="docutils literal notranslate"><span class="pre">SET</span> <span class="pre">lock_timeout</span> <span class="pre">=</span> <span class="pre">'&lt;N&gt;ms'</span></code> on each connection,
+converting C-level row-lock blocking into a fast PostgreSQL error rather than
+a hang.</p></li>
+</ul>
+<p>All extra keyword arguments are forwarded to <code class="docutils literal notranslate"><span class="pre">explore_dpor</span></code>.</p>
+</section>
+<section id="sqlalchemy-dpor">
+<h3><code class="docutils literal notranslate"><span class="pre">sqlalchemy_dpor</span></code><a class="headerlink" href="#sqlalchemy-dpor" title="Link to this heading">¶</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.contrib.sqlalchemy</span><span class="w"> </span><span class="kn">import</span> <span class="n">sqlalchemy_dpor</span><span class="p">,</span> <span class="n">get_connection</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">sqlalchemy_dpor</span><span class="p">(</span>
+    <span class="n">engine</span><span class="o">=</span><span class="n">engine</span><span class="p">,</span>
+    <span class="n">setup</span><span class="o">=</span><span class="n">_State</span><span class="p">,</span>
+    <span class="n">threads</span><span class="o">=</span><span class="p">[</span><span class="n">thread_a</span><span class="p">,</span> <span class="n">thread_b</span><span class="p">],</span>
+    <span class="n">invariant</span><span class="o">=</span><span class="k">lambda</span> <span class="n">s</span><span class="p">:</span> <span class="n">_read_count</span><span class="p">()</span> <span class="o">==</span> <span class="mi">2</span><span class="p">,</span>
+    <span class="n">lock_timeout</span><span class="o">=</span><span class="mi">500</span><span class="p">,</span>  <span class="c1"># optional, milliseconds</span>
+<span class="p">)</span>
+<span class="k">assert</span> <span class="n">result</span><span class="o">.</span><span class="n">property_holds</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">explanation</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">sqlalchemy_dpor</span></code> wraps <code class="docutils literal notranslate"><span class="pre">explore_dpor</span></code> and:</p>
+<ul class="simple">
+<li><p>Calls <code class="docutils literal notranslate"><span class="pre">engine.dispose()</span></code> before each execution to close pooled connections.</p></li>
+<li><p>Opens a fresh <code class="docutils literal notranslate"><span class="pre">engine.connect()</span></code> connection for each thread and stores it
+in a <code class="docutils literal notranslate"><span class="pre">ContextVar</span></code> so the thread can retrieve it with <code class="docutils literal notranslate"><span class="pre">get_connection()</span></code>.</p></li>
+<li><p>Optionally executes <code class="docutils literal notranslate"><span class="pre">SET</span> <span class="pre">lock_timeout</span> <span class="pre">=</span> <span class="pre">'&lt;N&gt;ms'</span></code> via
+<code class="docutils literal notranslate"><span class="pre">conn.exec_driver_sql()</span></code>.</p></li>
+</ul>
+<p>Inside a thread function, retrieve the per-thread connection with:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.contrib.sqlalchemy</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_connection</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">thread_fn</span><span class="p">(</span><span class="n">state</span><span class="p">):</span>
+    <span class="n">conn</span> <span class="o">=</span> <span class="n">get_connection</span><span class="p">()</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">conn</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">text</span><span class="p">(</span><span class="s2">&quot;SELECT login_count FROM users WHERE id = 1&quot;</span><span class="p">))</span>
+    <span class="o">...</span>
+</pre></div>
+</div>
+<p>Both helpers accept <code class="docutils literal notranslate"><span class="pre">detect_io=True</span></code> (the default) and all other
+<code class="docutils literal notranslate"><span class="pre">explore_dpor</span></code> keyword arguments.</p>
+</section>
+<section id="async-usage">
+<h3>Async usage<a class="headerlink" href="#async-usage" title="Link to this heading">¶</a></h3>
+<p>The same <code class="docutils literal notranslate"><span class="pre">django_dpor</span></code> and <code class="docutils literal notranslate"><span class="pre">sqlalchemy_dpor</span></code> functions also support
+async code.  Pass <code class="docutils literal notranslate"><span class="pre">tasks=</span></code> instead of <code class="docutils literal notranslate"><span class="pre">threads=</span></code> and <code class="docutils literal notranslate"><span class="pre">await</span></code> the
+result:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.contrib.django</span><span class="w"> </span><span class="kn">import</span> <span class="n">django_dpor</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">django_dpor</span><span class="p">(</span>
+    <span class="n">setup</span><span class="o">=</span><span class="n">_State</span><span class="p">,</span>
+    <span class="n">tasks</span><span class="o">=</span><span class="p">[</span><span class="n">task_a</span><span class="p">,</span> <span class="n">task_b</span><span class="p">],</span>
+    <span class="n">invariant</span><span class="o">=</span><span class="k">lambda</span> <span class="n">s</span><span class="p">:</span> <span class="n">s</span><span class="o">.</span><span class="n">login_count</span> <span class="o">==</span> <span class="mi">2</span><span class="p">,</span>
+    <span class="n">lock_timeout</span><span class="o">=</span><span class="mi">500</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="k">assert</span> <span class="n">result</span><span class="o">.</span><span class="n">property_holds</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">explanation</span>
+</pre></div>
+</div>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.contrib.sqlalchemy</span><span class="w"> </span><span class="kn">import</span> <span class="n">sqlalchemy_dpor</span><span class="p">,</span> <span class="n">get_async_connection</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">sqlalchemy_dpor</span><span class="p">(</span>
+    <span class="n">engine</span><span class="o">=</span><span class="n">async_engine</span><span class="p">,</span>
+    <span class="n">setup</span><span class="o">=</span><span class="n">_State</span><span class="p">,</span>
+    <span class="n">tasks</span><span class="o">=</span><span class="p">[</span><span class="n">task_a</span><span class="p">,</span> <span class="n">task_b</span><span class="p">],</span>
+    <span class="n">invariant</span><span class="o">=</span><span class="k">lambda</span> <span class="n">s</span><span class="p">:</span> <span class="n">_read_count</span><span class="p">()</span> <span class="o">==</span> <span class="mi">2</span><span class="p">,</span>
+    <span class="n">lock_timeout</span><span class="o">=</span><span class="mi">500</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>Inside an async task, use <code class="docutils literal notranslate"><span class="pre">get_async_connection()</span></code> to retrieve the
+per-task connection.</p>
+</section>
+</section>
+<section id="redis-key-level-detection">
+<h2>Redis key-level detection<a class="headerlink" href="#redis-key-level-detection" title="Link to this heading">¶</a></h2>
+<p>DPOR intercepts <code class="docutils literal notranslate"><span class="pre">execute_command()</span></code> on redis-py clients and classifies each
+Redis command as a read or write on one or more specific keys.  The DPOR engine
+then treats each Redis key as an independent resource, the same way it treats
+Python-level attribute accesses.</p>
+<p><strong>Sync usage</strong> (<code class="docutils literal notranslate"><span class="pre">detect_io=True</span></code> is the default; no extra parameter needed):</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">redis</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.dpor</span><span class="w"> </span><span class="kn">import</span> <span class="n">explore_dpor</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_redis_lost_update</span><span class="p">(</span><span class="n">redis_port</span><span class="p">):</span>
+    <span class="k">class</span><span class="w"> </span><span class="nc">State</span><span class="p">:</span>
+        <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+            <span class="n">r</span> <span class="o">=</span> <span class="n">redis</span><span class="o">.</span><span class="n">Redis</span><span class="p">(</span><span class="n">port</span><span class="o">=</span><span class="n">redis_port</span><span class="p">,</span> <span class="n">decode_responses</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+            <span class="n">r</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s2">&quot;counter&quot;</span><span class="p">,</span> <span class="s2">&quot;0&quot;</span><span class="p">)</span>
+            <span class="n">r</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">increment</span><span class="p">(</span><span class="n">state</span><span class="p">):</span>
+        <span class="n">r</span> <span class="o">=</span> <span class="n">redis</span><span class="o">.</span><span class="n">Redis</span><span class="p">(</span><span class="n">port</span><span class="o">=</span><span class="n">redis_port</span><span class="p">,</span> <span class="n">decode_responses</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">val</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">r</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;counter&quot;</span><span class="p">))</span>
+        <span class="n">r</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s2">&quot;counter&quot;</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">val</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="n">r</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">invariant</span><span class="p">(</span><span class="n">state</span><span class="p">):</span>
+        <span class="n">r</span> <span class="o">=</span> <span class="n">redis</span><span class="o">.</span><span class="n">Redis</span><span class="p">(</span><span class="n">port</span><span class="o">=</span><span class="n">redis_port</span><span class="p">,</span> <span class="n">decode_responses</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">r</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;counter&quot;</span><span class="p">))</span>
+        <span class="n">r</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">result</span> <span class="o">==</span> <span class="mi">2</span>
+
+    <span class="n">result</span> <span class="o">=</span> <span class="n">explore_dpor</span><span class="p">(</span>
+        <span class="n">setup</span><span class="o">=</span><span class="n">State</span><span class="p">,</span>
+        <span class="n">threads</span><span class="o">=</span><span class="p">[</span><span class="n">increment</span><span class="p">,</span> <span class="n">increment</span><span class="p">],</span>
+        <span class="n">invariant</span><span class="o">=</span><span class="n">invariant</span><span class="p">,</span>
+        <span class="n">detect_io</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>          <span class="c1"># enables Redis key-level patching (default)</span>
+    <span class="p">)</span>
+    <span class="k">assert</span> <span class="ow">not</span> <span class="n">result</span><span class="o">.</span><span class="n">property_holds</span>   <span class="c1"># race detected!</span>
+</pre></div>
+</div>
+<p><strong>Async usage</strong> (<code class="docutils literal notranslate"><span class="pre">detect_redis=True</span></code>):</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">redis.asyncio</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">aioredis</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.async_dpor</span><span class="w"> </span><span class="kn">import</span> <span class="n">explore_async_dpor</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">test_async_redis_check_then_act</span><span class="p">(</span><span class="n">redis_port</span><span class="p">):</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">maybe_init</span><span class="p">(</span><span class="n">state</span><span class="p">):</span>
+        <span class="n">r</span> <span class="o">=</span> <span class="n">aioredis</span><span class="o">.</span><span class="n">Redis</span><span class="p">(</span><span class="n">port</span><span class="o">=</span><span class="n">redis_port</span><span class="p">,</span> <span class="n">decode_responses</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="k">await</span> <span class="n">r</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="s2">&quot;resource&quot;</span><span class="p">):</span>
+            <span class="k">await</span> <span class="n">r</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s2">&quot;resource&quot;</span><span class="p">,</span> <span class="s2">&quot;initialized&quot;</span><span class="p">)</span>
+        <span class="k">await</span> <span class="n">r</span><span class="o">.</span><span class="n">aclose</span><span class="p">()</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">invariant</span><span class="p">(</span><span class="n">state</span><span class="p">):</span>
+        <span class="n">r</span> <span class="o">=</span> <span class="n">aioredis</span><span class="o">.</span><span class="n">Redis</span><span class="p">(</span><span class="n">port</span><span class="o">=</span><span class="n">redis_port</span><span class="p">,</span> <span class="n">decode_responses</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">count</span> <span class="o">=</span> <span class="k">await</span> <span class="n">r</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;resource&quot;</span><span class="p">)</span>
+        <span class="k">await</span> <span class="n">r</span><span class="o">.</span><span class="n">aclose</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">count</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+
+    <span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">explore_async_dpor</span><span class="p">(</span>
+        <span class="n">setup</span><span class="o">=</span><span class="k">lambda</span><span class="p">:</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">tasks</span><span class="o">=</span><span class="p">[</span><span class="n">maybe_init</span><span class="p">,</span> <span class="n">maybe_init</span><span class="p">],</span>
+        <span class="n">invariant</span><span class="o">=</span><span class="k">lambda</span> <span class="n">s</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+        <span class="n">detect_redis</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="p">))</span>
+</pre></div>
+</div>
+<p>DPOR inserts fine-grained scheduling points around each Redis command, so it
+can explore the gap between an <code class="docutils literal notranslate"><span class="pre">EXISTS</span></code> check and the subsequent <code class="docutils literal notranslate"><span class="pre">SET</span></code> —
+the classic TOCTOU (check-then-act) race window.</p>
+<p><strong>What counts as a conflict:</strong></p>
+<ul class="simple">
+<li><p>Any two operations on the <em>same</em> key where at least one is a write.</p></li>
+<li><p>Pipeline batches: each command in the pipeline is reported individually.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">MULTI</span></code>/<code class="docutils literal notranslate"><span class="pre">EXEC</span></code> transactions: commands between <code class="docutils literal notranslate"><span class="pre">MULTI</span></code> and <code class="docutils literal notranslate"><span class="pre">EXEC</span></code> are
+buffered and reported atomically.</p></li>
+</ul>
+<p><strong>What is independent (no conflict, no extra interleavings):</strong></p>
+<ul class="simple">
+<li><p>Two reads on the same key (e.g. two <a href="#id1"><span class="problematic" id="id2">``</span></a>GET``s).</p></li>
+<li><p>Any operations on <em>different</em> keys, even on the same Redis server.</p></li>
+<li><p>Server-level commands (<code class="docutils literal notranslate"><span class="pre">PING</span></code>, <code class="docutils literal notranslate"><span class="pre">INFO</span></code>, <code class="docutils literal notranslate"><span class="pre">CONFIG</span></code>, etc.) that carry no
+key-level semantics.</p></li>
+</ul>
+<p>For the full command classification and technical details, see <a class="reference internal" href="redis.html"><span class="doc">Redis Conflict Detection – Technical Details</span></a>.</p>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="dpor.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">DPOR: Dynamic Partial Order Reduction</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="approaches.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">How Frontrun Works</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, Lucas Wiman
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">DPOR in Practice</a><ul>
+<li><a class="reference internal" href="#what-dpor-does">What DPOR does</a></li>
+<li><a class="reference internal" href="#what-it-can-and-cannot-find">What it can and cannot find</a></li>
+<li><a class="reference internal" href="#basic-usage">Basic usage</a></li>
+<li><a class="reference internal" href="#interpreting-results">Interpreting results</a></li>
+<li><a class="reference internal" href="#example-verifying-that-a-lock-fixes-a-race">Example: verifying that a lock fixes a race</a></li>
+<li><a class="reference internal" href="#example-multiple-shared-objects">Example: multiple shared objects</a></li>
+<li><a class="reference internal" href="#c-level-i-o-interception-via-ld-preload">C-level I/O interception via <code class="docutils literal notranslate"><span class="pre">LD_PRELOAD</span></code></a></li>
+<li><a class="reference internal" href="#orm-helpers-django-dpor-and-sqlalchemy-dpor">ORM helpers: <code class="docutils literal notranslate"><span class="pre">django_dpor</span></code> and <code class="docutils literal notranslate"><span class="pre">sqlalchemy_dpor</span></code></a><ul>
+<li><a class="reference internal" href="#django-dpor"><code class="docutils literal notranslate"><span class="pre">django_dpor</span></code></a></li>
+<li><a class="reference internal" href="#sqlalchemy-dpor"><code class="docutils literal notranslate"><span class="pre">sqlalchemy_dpor</span></code></a></li>
+<li><a class="reference internal" href="#async-usage">Async usage</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#redis-key-level-detection">Redis key-level detection</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="_static/documentation_options.js?v=7026087e"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/scripts/furo.js?v=46bd48cc"></script>
+    </body>
+</html>
