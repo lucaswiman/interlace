@@ -89,8 +89,10 @@ check: lint type-check
 docs: docs-html
 	@echo "Documentation built in docs/_build/html"
 
+SPHINXBUILD ?= $(CURDIR)/.venv-3.14/bin/sphinx-build
+
 docs-html:
-	cd docs && $(MAKE) clean html
+	cd docs && $(MAKE) clean html SPHINXBUILD=$(SPHINXBUILD)
 
 docs-clean:
 	cd docs && rm -rf _build

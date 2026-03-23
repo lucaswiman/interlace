@@ -67,7 +67,7 @@ jobs:
       - name: Build documentation
         run: |
           source .venv/bin/activate
-          make docs-html
+          make docs-html SPHINXBUILD=sphinx-build
 
       - name: Deploy to GitHub Pages
         if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
