@@ -375,6 +375,10 @@ class DporScheduler:
         # indefinitely between a blocked thread and its holder.
         self._row_lock_blocked: dict[int, int] = {}
 
+        # Last path_id snapshot from _schedule_next, used to attribute
+        # lock events to the correct scheduling step on free-threaded Python.
+        self._last_scheduled_path_id: int | None = None
+
         # Request the first scheduling decision
         self._current_thread = self._schedule_next()
 
@@ -385,13 +389,25 @@ class DporScheduler:
         override the decision and schedule the lock holder instead.  This
         prevents the scheduler from cycling between a blocked thread and
         its holder (defect #6).
+
+        Also snapshots ``engine.path_position`` under the engine lock so
+        that ``report_and_wait`` can attribute subsequent lock events to
+        the correct scheduling step (see ``_last_scheduled_path_id``).
         """
         with self._engine_lock:
             runnable = self.execution.runnable_threads()
             if not runnable:
+                self._last_scheduled_path_id = None
                 return None
 
             scheduled = self.engine.schedule(self.execution)
+            # Snapshot path position under engine_lock. On free-threaded
+            # Python, another thread may call schedule() concurrently
+            # after we release the lock, advancing path.pos.  The saved
+            # position ensures _sync_reporter attributes lock events to
+            # the correct step.
+            _pp = getattr(self.engine, "path_position", None)
+            self._last_scheduled_path_id = _pp - 1 if _pp is not None else None
             if scheduled is not None and scheduled in self._row_lock_blocked:
                 holder = self._row_lock_blocked[scheduled]
                 if holder not in self._threads_done:
@@ -547,6 +563,14 @@ class DporScheduler:
                             self._capture_step_event(_switch_frame, thread_id, _pre_opcode_stack)
                         # It's our turn. After executing one opcode, schedule next.
                         next_thread = self._schedule_next()
+                        # _schedule_next saves the path position in
+                        # self._last_scheduled_path_id (under engine_lock).
+                        # Copy it to TLS so _sync_reporter can attribute lock
+                        # events to this thread's scheduling step, not a later
+                        # step advanced by another thread on free-threaded Python.
+                        _pp = self._last_scheduled_path_id
+                        if _pp is not None:
+                            _dpor_tls._last_path_id = _pp
                         # Record switch point if thread changes and collector is active
                         if (
                             self._switch_point_collector is not None
@@ -843,7 +867,9 @@ class _ReplayEngine:
     def report_io_access(self, execution: Any, thread_id: int, object_id: int, kind: str) -> None:
         return None
 
-    def report_sync(self, execution: Any, thread_id: int, event_type: str, sync_id: int) -> None:
+    def report_sync(
+        self, execution: Any, thread_id: int, event_type: str, sync_id: int, path_id: int | None = None
+    ) -> None:
         return None
 
 
@@ -2443,7 +2469,8 @@ class DporBytecodeRunner:
                         if waiter_set is not None and thread_id in waiter_set:
                             waiter_set.discard(thread_id)
                             execution.unblock_thread(thread_id)
-                        engine.report_sync(execution, thread_id, "lock_acquire", stable_lock_id)
+                        _saved_path_id = getattr(_dpor_tls, "_last_path_id", None)
+                        engine.report_sync(execution, thread_id, "lock_acquire", stable_lock_id, _saved_path_id)
                         _trace_len_acq = (
                             len(execution.schedule_trace) if scheduler._lock_event_collector is not None else 0
                         )
@@ -2478,7 +2505,8 @@ class DporBytecodeRunner:
                         waiters = scheduler._lock_waiters.pop(stable_lock_id, set())
                         for waiter in waiters:
                             execution.unblock_thread(waiter)
-                        engine.report_sync(execution, thread_id, "lock_release", stable_lock_id)
+                        _saved_path_id = getattr(_dpor_tls, "_last_path_id", None)
+                        engine.report_sync(execution, thread_id, "lock_release", stable_lock_id, _saved_path_id)
                         _trace_len_rel = (
                             len(execution.schedule_trace) if scheduler._lock_event_collector is not None else 0
                         )
@@ -2512,7 +2540,8 @@ class DporBytecodeRunner:
                         scheduler._condition.notify_all()
                     return
                 with engine_lock:
-                    engine.report_sync(execution, thread_id, event, stable_lock_id)
+                    _saved_path_id = getattr(_dpor_tls, "_last_path_id", None)
+                    engine.report_sync(execution, thread_id, event, stable_lock_id, _saved_path_id)
             finally:
                 _scheduler_tls._in_dpor_machinery = False
 
@@ -2522,6 +2551,7 @@ class DporBytecodeRunner:
         _dpor_tls.thread_id = thread_id
         _dpor_tls.engine = engine
         _dpor_tls.execution = execution
+        _dpor_tls._last_path_id = None  # set by report_and_wait after schedule()
 
         # IO detection: defer I/O reports while this thread is inside locks.
         # If another thread later reaches a real I/O boundary, it will flush
