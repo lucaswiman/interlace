@@ -42,10 +42,14 @@ pub struct Execution {
 
 impl Execution {
     pub fn new(num_threads: usize) -> Self {
+        Self::new_with_initial(num_threads, 0)
+    }
+
+    pub fn new_with_initial(num_threads: usize, initial_thread: usize) -> Self {
         Self {
             threads: (0..num_threads).map(|i| Thread::new(i, num_threads)).collect(),
             objects: HashMap::new(),
-            active_thread: 0,
+            active_thread: initial_thread,
             lock_release_vv: HashMap::new(),
             aborted: false,
             schedule_trace: Vec::new(),
@@ -86,6 +90,22 @@ pub struct DporEngine {
     /// during execution and processed at maximal executions where the full
     /// trace is available for computing notdep sequences.
     pending_races: Vec<PendingRace>,
+    /// The thread ID used as the starting thread for the current exploration
+    /// round.  After the exploration tree for one initial thread is exhausted,
+    /// the engine resets the path and starts a fresh round with the next
+    /// initial thread.  This ensures DPOR explores interleavings where each
+    /// thread can go first, even when initial events are independent (e.g.,
+    /// dining philosophers acquiring different locks).
+    current_initial_thread: usize,
+    preemption_bound: Option<u32>,
+    /// Number of executions completed in the first round (initial thread 0).
+    /// If only 1 execution was needed (no races detected), we skip rotation
+    /// since all threads are independent and reordering doesn't matter.
+    first_round_executions: u64,
+    /// Set of threads that have already appeared as the first-scheduled thread
+    /// at position 0 (via race-driven wakeup tree exploration).  We skip
+    /// rotation for these since their exploration was already covered.
+    explored_initial_threads: Vec<bool>,
 }
 
 impl DporEngine {
@@ -107,11 +127,15 @@ impl DporEngine {
             executions_completed: 0,
             max_branches,
             pending_races: Vec::new(),
+            current_initial_thread: 0,
+            preemption_bound,
+            first_round_executions: 0,
+            explored_initial_threads: vec![false; num_threads],
         }
     }
 
     pub fn begin_execution(&self) -> Execution {
-        Execution::new(self.num_threads)
+        Execution::new_with_initial(self.num_threads, self.current_initial_thread)
     }
 
     pub fn schedule(&mut self, execution: &mut Execution) -> Option<usize> {
@@ -124,7 +148,13 @@ impl DporEngine {
             execution.aborted = true;
             return None;
         }
+        let pos = self.path.current_position();
         let chosen = self.path.schedule(&runnable, execution.active_thread, self.num_threads)?;
+        // Track which thread was first-scheduled at position 0.
+        // Used to skip redundant initial thread rotation.
+        if pos == 0 {
+            self.explored_initial_threads[chosen] = true;
+        }
         execution.threads[chosen].dpor_vv.increment(chosen);
         execution.threads[chosen].io_vv.increment(chosen);
         execution.active_thread = chosen;
@@ -376,7 +406,37 @@ impl DporEngine {
         // trees are populated with the correct sequences.
         let races = std::mem::take(&mut self.pending_races);
         self.path.process_deferred_races(&races);
-        self.path.step()
+
+        if self.path.step() {
+            return true;
+        }
+
+        // Exploration tree for the current initial thread is exhausted.
+        if self.current_initial_thread == 0 {
+            self.first_round_executions = self.executions_completed;
+        }
+
+        // Only rotate initial threads if the first round explored more than
+        // one interleaving (meaning races exist).  When threads are fully
+        // independent (no conflicts), one execution suffices and rotation
+        // would just add N-1 redundant executions.
+        if self.first_round_executions <= 1 {
+            return false;
+        }
+
+        // Start a fresh exploration round with the next initial thread,
+        // skipping threads that were already explored at position 0 by
+        // race-driven wakeup tree exploration in a previous round.
+        loop {
+            self.current_initial_thread += 1;
+            if self.current_initial_thread >= self.num_threads {
+                return false;
+            }
+            if !self.explored_initial_threads[self.current_initial_thread] {
+                self.path = Path::new(self.preemption_bound);
+                return true;
+            }
+        }
     }
 
     pub fn executions_completed(&self) -> u64 {
