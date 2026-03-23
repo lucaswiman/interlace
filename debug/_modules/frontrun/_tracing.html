@@ -409,6 +409,35 @@
 <span class="sd">    Does NOT match ``&lt;frozen ...&gt;`` (already excluded by ``should_trace_file``).</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">return</span> <span class="n">filename</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;&lt;&quot;</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_is_cmdline_mode</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return True if the current process was started with ``python -c``.&quot;&quot;&quot;</span>
+    <span class="n">main</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;__main__&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">main</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">main</span><span class="p">,</span> <span class="s2">&quot;__file__&quot;</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">is_cmdline_user_code</span><span class="p">(</span><span class="n">filename</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">f_globals</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Check whether *filename* is user code from a ``python -c`` invocation.</span>
+
+<span class="sd">    When Python is started with ``-c``, user-defined functions have</span>
+<span class="sd">    ``co_filename == &quot;&lt;string&gt;&quot;`` and their ``f_globals`` (or</span>
+<span class="sd">    ``__globals__``) is ``__main__.__dict__``.  This function returns</span>
+<span class="sd">    ``True`` for exactly that combination, allowing the trace callbacks</span>
+<span class="sd">    to treat such code as user code rather than library-exec&#39;d code.</span>
+
+<span class="sd">    Returns ``False`` for non-``&lt;string&gt;`` filenames, for ``&lt;string&gt;``</span>
+<span class="sd">    code whose globals don&#39;t belong to ``__main__``, or when the process</span>
+<span class="sd">    was started as a normal script (``__main__`` has a ``__file__``).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">filename</span> <span class="o">!=</span> <span class="s2">&quot;&lt;string&gt;&quot;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">_is_cmdline_mode</span><span class="p">():</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="n">main</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;__main__&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">main</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="k">return</span> <span class="n">f_globals</span> <span class="ow">is</span> <span class="n">main</span><span class="o">.</span><span class="vm">__dict__</span>
 </pre></div>
         </article>
       </div>

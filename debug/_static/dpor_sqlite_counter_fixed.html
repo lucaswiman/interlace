@@ -30,7 +30,7 @@ body {
 </head>
 <body>
 
-<script type="application/json" id="dpor-data">{"version":1,"num_threads":2,"thread_names":["Thread 0","Thread 1"],"executions":[{"index":0,"schedule_trace":[0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1],"switch_points":[],"invariant_held":true,"was_deadlock":false,"race_info":[{"prev_step":6,"current_step":18,"thread_id":1,"object":"object 9294158197472654862"},{"prev_step":6,"current_step":18,"thread_id":1,"object":"object 9294158197472654862"},{"prev_step":10,"current_step":20,"thread_id":1,"object":"TracedConnection.__cmethods__"},{"prev_step":10,"current_step":22,"thread_id":1,"object":"TracedConnection.__cmethods__"}],"step_events":{"10":{"thread_id":0,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":67,"function_name":"atomic_increment","opcode":"CALL","source_line":"conn.close()","access_type":"read","attr_name":"close","obj_type_name":"TracedConnection"},"20":{"thread_id":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":66,"function_name":"atomic_increment","opcode":"CALL","source_line":"conn.commit()","access_type":"read","attr_name":"commit","obj_type_name":"TracedConnection"},"22":{"thread_id":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":67,"function_name":"atomic_increment","opcode":"CALL","source_line":"conn.close()","access_type":"read","attr_name":"close","obj_type_name":"TracedConnection"}},"lock_events":[]},{"index":1,"schedule_trace":[0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0],"switch_points":[{"schedule_index":10,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":67,"function_name":"atomic_increment","opcode":"LOAD_ATTR","source_line":"conn.close()","shadow_stack_top5":["None","<built-in method close of TracedConnection object at 0x7f81c1daba50>"],"access_type":"read","attr_name":"close","obj_type_name":"TracedConnection"}],"invariant_held":true,"was_deadlock":false,"race_info":[{"prev_step":6,"current_step":16,"thread_id":1,"object":"object 9294158197472654862"},{"prev_step":6,"current_step":16,"thread_id":1,"object":"object 9294158197472654862"}],"step_events":{},"lock_events":[]},{"index":2,"schedule_trace":[0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0],"switch_points":[{"schedule_index":6,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":65,"function_name":"atomic_increment","opcode":"CALL","source_line":"conn.execute(\"UPDATE counter SET value = value + 1\")","shadow_stack_top5":["None"],"access_type":"read","attr_name":"execute","obj_type_name":"TracedConnection"}],"invariant_held":true,"was_deadlock":false,"race_info":[{"prev_step":12,"current_step":12,"thread_id":1,"object":"object 9294158197472654862"},{"prev_step":12,"current_step":18,"thread_id":0,"object":"object 9294158197472654862"}],"step_events":{},"lock_events":[]}],"source_files":{"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py":["\"\"\"SQLite counter: application-level lost update with a real database.","","Two threads each read a counter from SQLite, increment it in Python, then","write it back.  Because neither thread uses an atomic ``UPDATE counter = counter + 1``","the second writer silently overwrites the first \u2014 a classic lost update.","","DPOR intercepts the SQL operations via its built-in SQL cursor patching,","detects the read/write conflict on the ``counter`` table, and explores all","meaningful interleavings.","","The fixed variant uses a single atomic SQL statement instead of a","read-modify-write round-trip; DPOR finds no violations.","","Usage::","","    python examples/dpor_sqlite_counter.py [report.html]          # racy","    python examples/dpor_sqlite_counter.py [report.html] fixed    # corrected","\"\"\"","","from __future__ import annotations","","import os","import sqlite3","import sys","import tempfile","","","def _make_db(path: str) -> None:","    \"\"\"Create (or reset) the counter table at *path*.\"\"\"","    conn = sqlite3.connect(path)","    conn.execute(\"DROP TABLE IF EXISTS counter\")","    conn.execute(\"CREATE TABLE counter (value INTEGER NOT NULL)\")","    conn.execute(\"INSERT INTO counter VALUES (0)\")","    conn.commit()","    conn.close()","","","# ---------------------------------------------------------------------------","# Racy version: read-modify-write in Python","# ---------------------------------------------------------------------------","","class State:","    \"\"\"Per-execution shared state: a fresh SQLite file reset for every run.\"\"\"","","    def __init__(self, db_path: str) -> None:","        self.db_path = db_path","        _make_db(db_path)","","","def racy_increment(state: State) -> None:","    \"\"\"Read the counter, increment in Python, write back \u2014 not atomic.\"\"\"","    conn = sqlite3.connect(state.db_path, check_same_thread=False)","    cur = conn.cursor()","    cur.execute(\"SELECT value FROM counter\")","    value = cur.fetchone()[0]","    value += 1","    cur.execute(\"UPDATE counter SET value = ?\", (value,))","    conn.commit()","    conn.close()","","","def atomic_increment(state: State) -> None:","    \"\"\"Increment the counter with a single atomic SQL statement.\"\"\"","    conn = sqlite3.connect(state.db_path, check_same_thread=False)","    conn.execute(\"UPDATE counter SET value = value + 1\")","    conn.commit()","    conn.close()","","","def _read_counter(db_path: str) -> int:","    conn = sqlite3.connect(db_path, check_same_thread=False)","    value = conn.execute(\"SELECT value FROM counter\").fetchone()[0]","    conn.close()","    return value","","","# ---------------------------------------------------------------------------","# Exploration entry points","# ---------------------------------------------------------------------------","","def run_exploration(report_path: str | None = None) -> None:","    \"\"\"Racy read-modify-write: DPOR should find an invariant violation.\"\"\"","    import frontrun._report","    from frontrun.dpor import explore_dpor","","    with tempfile.NamedTemporaryFile(suffix=\".db\", delete=False) as f:","        db_path = f.name","","    try:","        frontrun._report._global_report_path = report_path","        try:","            result = explore_dpor(","                setup=lambda: State(db_path),","                threads=[racy_increment, racy_increment],","                invariant=lambda s: _read_counter(db_path) == 2,","                detect_io=True,","                preemption_bound=2,","                stop_on_first=False,","                deadlock_timeout=5.0,","            )","            print(result.explanation)","        finally:","            frontrun._report._global_report_path = None","    finally:","        os.unlink(db_path)","","","def run_exploration_fixed(report_path: str | None = None) -> None:","    \"\"\"Atomic SQL update: DPOR should find no violations.\"\"\"","    import frontrun._report","    from frontrun.dpor import explore_dpor","","    with tempfile.NamedTemporaryFile(suffix=\".db\", delete=False) as f:","        db_path = f.name","","    try:","        frontrun._report._global_report_path = report_path","        try:","            result = explore_dpor(","                setup=lambda: State(db_path),","                threads=[atomic_increment, atomic_increment],","                invariant=lambda s: _read_counter(db_path) == 2,","                detect_io=True,","                preemption_bound=2,","                stop_on_first=False,","                deadlock_timeout=5.0,","            )","            print(result.explanation)","        finally:","            frontrun._report._global_report_path = None","    finally:","        os.unlink(db_path)","","","if __name__ == \"__main__\":","    report_path = sys.argv[1] if len(sys.argv) > 1 else None","    mode = sys.argv[2] if len(sys.argv) > 2 else \"racy\"","    if mode == \"fixed\":","        run_exploration_fixed(report_path)","    else:","        run_exploration(report_path)"]}}</script>
+<script type="application/json" id="dpor-data">{"version":1,"num_threads":2,"thread_names":["Thread 0","Thread 1"],"executions":[{"index":0,"schedule_trace":[0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1],"switch_points":[],"invariant_held":true,"was_deadlock":false,"race_info":[{"prev_step":6,"current_step":18,"thread_id":1,"object":"object 4837740578943842755"},{"prev_step":6,"current_step":18,"thread_id":1,"object":"object 4837740578943842755"},{"prev_step":10,"current_step":20,"thread_id":1,"object":"TracedConnection.__cmethods__"},{"prev_step":10,"current_step":22,"thread_id":1,"object":"TracedConnection.__cmethods__"}],"step_events":{"10":{"thread_id":0,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":67,"function_name":"atomic_increment","opcode":"CALL","source_line":"conn.close()","access_type":"read","attr_name":"close","obj_type_name":"TracedConnection"},"20":{"thread_id":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":66,"function_name":"atomic_increment","opcode":"CALL","source_line":"conn.commit()","access_type":"read","attr_name":"commit","obj_type_name":"TracedConnection"},"22":{"thread_id":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":67,"function_name":"atomic_increment","opcode":"CALL","source_line":"conn.close()","access_type":"read","attr_name":"close","obj_type_name":"TracedConnection"}},"lock_events":[]},{"index":1,"schedule_trace":[0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0],"switch_points":[{"schedule_index":10,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":67,"function_name":"atomic_increment","opcode":"LOAD_ATTR","source_line":"conn.close()","shadow_stack_top5":["None","<built-in method close of TracedConnection object at 0x7f368cd6fc50>"],"access_type":"read","attr_name":"close","obj_type_name":"TracedConnection"}],"invariant_held":true,"was_deadlock":false,"race_info":[{"prev_step":6,"current_step":16,"thread_id":1,"object":"object 4837740578943842755"},{"prev_step":6,"current_step":16,"thread_id":1,"object":"object 4837740578943842755"}],"step_events":{},"lock_events":[]},{"index":2,"schedule_trace":[0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0],"switch_points":[{"schedule_index":6,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":65,"function_name":"atomic_increment","opcode":"CALL","source_line":"conn.execute(\"UPDATE counter SET value = value + 1\")","shadow_stack_top5":["None"],"access_type":"read","attr_name":"execute","obj_type_name":"TracedConnection"}],"invariant_held":true,"was_deadlock":false,"race_info":[{"prev_step":12,"current_step":12,"thread_id":1,"object":"object 4837740578943842755"},{"prev_step":12,"current_step":12,"thread_id":1,"object":"object 4837740578943842755"}],"step_events":{},"lock_events":[]}],"source_files":{"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py":["\"\"\"SQLite counter: application-level lost update with a real database.","","Two threads each read a counter from SQLite, increment it in Python, then","write it back.  Because neither thread uses an atomic ``UPDATE counter = counter + 1``","the second writer silently overwrites the first \u2014 a classic lost update.","","DPOR intercepts the SQL operations via its built-in SQL cursor patching,","detects the read/write conflict on the ``counter`` table, and explores all","meaningful interleavings.","","The fixed variant uses a single atomic SQL statement instead of a","read-modify-write round-trip; DPOR finds no violations.","","Usage::","","    python examples/dpor_sqlite_counter.py [report.html]          # racy","    python examples/dpor_sqlite_counter.py [report.html] fixed    # corrected","\"\"\"","","from __future__ import annotations","","import os","import sqlite3","import sys","import tempfile","","","def _make_db(path: str) -> None:","    \"\"\"Create (or reset) the counter table at *path*.\"\"\"","    conn = sqlite3.connect(path)","    conn.execute(\"DROP TABLE IF EXISTS counter\")","    conn.execute(\"CREATE TABLE counter (value INTEGER NOT NULL)\")","    conn.execute(\"INSERT INTO counter VALUES (0)\")","    conn.commit()","    conn.close()","","","# ---------------------------------------------------------------------------","# Racy version: read-modify-write in Python","# ---------------------------------------------------------------------------","","class State:","    \"\"\"Per-execution shared state: a fresh SQLite file reset for every run.\"\"\"","","    def __init__(self, db_path: str) -> None:","        self.db_path = db_path","        _make_db(db_path)","","","def racy_increment(state: State) -> None:","    \"\"\"Read the counter, increment in Python, write back \u2014 not atomic.\"\"\"","    conn = sqlite3.connect(state.db_path, check_same_thread=False)","    cur = conn.cursor()","    cur.execute(\"SELECT value FROM counter\")","    value = cur.fetchone()[0]","    value += 1","    cur.execute(\"UPDATE counter SET value = ?\", (value,))","    conn.commit()","    conn.close()","","","def atomic_increment(state: State) -> None:","    \"\"\"Increment the counter with a single atomic SQL statement.\"\"\"","    conn = sqlite3.connect(state.db_path, check_same_thread=False)","    conn.execute(\"UPDATE counter SET value = value + 1\")","    conn.commit()","    conn.close()","","","def _read_counter(db_path: str) -> int:","    conn = sqlite3.connect(db_path, check_same_thread=False)","    value = conn.execute(\"SELECT value FROM counter\").fetchone()[0]","    conn.close()","    return value","","","# ---------------------------------------------------------------------------","# Exploration entry points","# ---------------------------------------------------------------------------","","def run_exploration(report_path: str | None = None) -> None:","    \"\"\"Racy read-modify-write: DPOR should find an invariant violation.\"\"\"","    import frontrun._report","    from frontrun.dpor import explore_dpor","","    with tempfile.NamedTemporaryFile(suffix=\".db\", delete=False) as f:","        db_path = f.name","","    try:","        frontrun._report._global_report_path = report_path","        try:","            result = explore_dpor(","                setup=lambda: State(db_path),","                threads=[racy_increment, racy_increment],","                invariant=lambda s: _read_counter(db_path) == 2,","                detect_io=True,","                preemption_bound=2,","                stop_on_first=False,","                deadlock_timeout=5.0,","            )","            print(result.explanation)","        finally:","            frontrun._report._global_report_path = None","    finally:","        os.unlink(db_path)","","","def run_exploration_fixed(report_path: str | None = None) -> None:","    \"\"\"Atomic SQL update: DPOR should find no violations.\"\"\"","    import frontrun._report","    from frontrun.dpor import explore_dpor","","    with tempfile.NamedTemporaryFile(suffix=\".db\", delete=False) as f:","        db_path = f.name","","    try:","        frontrun._report._global_report_path = report_path","        try:","            result = explore_dpor(","                setup=lambda: State(db_path),","                threads=[atomic_increment, atomic_increment],","                invariant=lambda s: _read_counter(db_path) == 2,","                detect_io=True,","                preemption_bound=2,","                stop_on_first=False,","                deadlock_timeout=5.0,","            )","            print(result.explanation)","        finally:","            frontrun._report._global_report_path = None","    finally:","        os.unlink(db_path)","","","if __name__ == \"__main__\":","    report_path = sys.argv[1] if len(sys.argv) > 1 else None","    mode = sys.argv[2] if len(sys.argv) > 2 else \"racy\"","    if mode == \"fixed\":","        run_exploration_fixed(report_path)","    else:","        run_exploration(report_path)"]}}</script>
 
 <dpor-report></dpor-report>
 
@@ -216,9 +216,8 @@ class DporTimeline extends HTMLElement {
     const switches = exec.switch_points.filter(sp => sp.schedule_index < trace.length);
     const numThreads = DATA.num_threads;
 
-    // Layout constants — narrower columns on small screens
-    const isMobile = window.innerWidth < 600;
-    const colWidth = isMobile ? Math.max(80, Math.floor((window.innerWidth - 80) / numThreads)) : 200;
+    // Layout constants
+    const colWidth = 200;
     // Adaptive step height: taller when fewer steps for readability
     const baseStepHeight = trace.length < 30 ? 16 : trace.length < 100 ? 8 : 4;
     const stepHeight = baseStepHeight;
@@ -525,9 +524,7 @@ class DporTimeline extends HTMLElement {
       lockMarks += `</g>`;
     }
 
-    // Render the synthesized deadlock-trigger wait event as a regular lock event
-    // so it appears in the lock event navigation (e.g. "6 of 6")
-    const syntheticLeIdx = syntheticDeadlockWait ? (exec.lock_events || []).length : -1;
+    // Render the synthesized deadlock-trigger wait event (dispatches select-deadlock on click)
     if (syntheticDeadlockWait) {
       const le = syntheticDeadlockWait;
       const row = findRowForLockEvent(le);
@@ -538,37 +535,31 @@ class DporTimeline extends HTMLElement {
         const offsetIdx = lockOffsets.get(offsetKey) || 0;
         lockOffsets.set(offsetKey, offsetIdx + 1);
         const ty = baseY + offsetIdx * 10;
-        const color = '#f38ba8'; // red to indicate deadlock-triggering wait
+        const color = '#f9e2af';
         const lockLabel = lockIdToLabel.get(le.lock_id) || '?';
         const label = lockLabel + ' ⊙';
         const tooltip = `Wait on lock ${lockLabel} (deadlock)`;
         const tickX1 = tx - 30;
         const tickX2 = tx + 5;
-        lockMarks += `<g class="lock-event" data-le-index="${syntheticLeIdx}" data-tooltip="${tooltip}" style="cursor:pointer">`;
+        lockMarks += `<g class="deadlock-marker" data-tooltip="${tooltip}" style="cursor:pointer">`;
         lockMarks += `<rect x="${tickX1 - 48}" y="${ty - 7}" width="83" height="14" fill="transparent"/>`;
         lockMarks += `<line x1="${tickX1}" y1="${ty}" x2="${tickX2}" y2="${ty}" stroke="${color}" stroke-width="1"/>`;
         lockMarks += `<circle cx="${tickX1}" cy="${ty}" r="2.5" fill="${color}"/>`;
         lockMarks += `<text x="${tickX1 - 3}" y="${ty + 3}" fill="${color}" font-size="9" text-anchor="end" style="pointer-events:none">${label}</text>`;
         lockMarks += `</g>`;
       }
-      // Include the synthetic event's state snapshot
-      lockStateAtEvent.push({ heldBy: new Map(_heldBy), waiting: new Map([..._waiting].map(([k, v]) => [k, new Set(v)])) });
     }
 
-    // Deadlock: compute position for HTML overlay button (more reliable touch than SVG)
-    let deadlockBtnHtml = '';
+    // Deadlock: draw a single clickable "DEADLOCK" marker below the last rendered row
+    let deadlockMarkers = '';
     if (exec.was_deadlock && expandedRows.length > 0) {
       const lastRow = expandedRows[expandedRows.length - 1];
       const dlY = headerHeight + lastRow.y * stepHeight + stepHeight + 10;
       const dlX = svgWidth / 2;
-      deadlockBtnHtml = `<button class="deadlock-btn" style="
-        position:absolute;left:${dlX - 55}px;top:${dlY - 12}px;
-        width:110px;height:28px;
-        background:rgba(243,139,168,0.15);border:1px solid var(--red);
-        border-radius:3px;color:var(--red);
-        font-family:var(--mono);font-size:11px;font-weight:bold;
-        cursor:pointer;z-index:5;
-      ">⚠ DEADLOCK</button>`;
+      deadlockMarkers = `<g class="deadlock-marker" style="cursor:pointer">` +
+        `<rect x="${dlX - 50}" y="${dlY - 10}" width="100" height="20" rx="3" fill="rgba(243,139,168,0.15)" stroke="var(--red)" stroke-width="1"/>` +
+        `<text x="${dlX}" y="${dlY + 4}" text-anchor="middle" fill="var(--red)" font-size="11" font-weight="bold">⚠ DEADLOCK</text>` +
+        `</g>`;
     }
 
     // Thread column headers
@@ -600,7 +591,7 @@ class DporTimeline extends HTMLElement {
 
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display: block; padding: 16px; overflow: auto; -webkit-overflow-scrolling: touch; }
+        :host { display: block; padding: 16px; overflow: auto; }
         .exec-header {
           margin-bottom: 12px;
           padding: 8px 12px;
@@ -622,13 +613,7 @@ class DporTimeline extends HTMLElement {
         .legend-item svg { vertical-align: middle; }
         svg { display: block; margin: 0 auto; }
         .switch-point:hover { r: 7; }
-        .deadlock-btn:hover, .deadlock-btn:active { background: rgba(243,139,168,0.3) !important; }
-        @media (max-width: 600px) {
-          :host { padding: 8px; }
-          .exec-header { padding: 6px 8px; }
-          .exec-title { font-size: 12px; }
-          .legend { font-size: 10px; gap: 8px; }
-        }
+        .deadlock-marker:hover rect { fill: rgba(243,139,168,0.25); }
         .svg-tooltip {
           position: absolute; pointer-events: none;
           background: var(--bg-surface); color: var(--text); border: 1px solid var(--border);
@@ -655,82 +640,68 @@ class DporTimeline extends HTMLElement {
           ` : ''}
         </div>
       </div>
-      <div class="svg-container" style="position:relative;display:inline-block;overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%;touch-action:pan-x pan-y">
+      <div class="svg-container" style="position:relative;display:inline-block">
         <svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg">
           ${headers}
           <path d="${mainPathD}" fill="none" stroke="var(--blue)" stroke-width="2"/>
           ${transitionLines}
           ${lockMarks}
+          ${deadlockMarkers}
           ${threadStartMarkers}
           ${threadEndMarkers}
           ${switchCircles}
           ${collapseMarks}
         </svg>
-        ${deadlockBtnHtml}
         <div class="svg-tooltip"></div>
       </div>
     `;
 
-    // Click/touch handlers for switch points
+    // Click handlers for switch points
     this.shadowRoot.querySelectorAll('.switch-point').forEach(circle => {
-      const handler = (e) => {
+      circle.addEventListener('click', (e) => {
         e.stopPropagation();
-        e.preventDefault();
         const spIdx = parseInt(circle.dataset.spIndex);
         this.dispatchEvent(new CustomEvent('select-switch', {
           detail: { executionIndex: execIdx, switchIndex: spIdx },
           bubbles: true, composed: true
         }));
-      };
-      circle.addEventListener('click', handler);
-      circle.addEventListener('touchend', handler);
+      });
     });
 
-    // HTML deadlock button handler (more reliable on touch than SVG elements)
-    const dlBtn = this.shadowRoot.querySelector('.deadlock-btn');
-    if (dlBtn) {
-      dlBtn.addEventListener('click', (e) => {
+    // Click handlers for deadlock markers (the DEADLOCK badge + synthetic trigger wait tick)
+    this.shadowRoot.querySelectorAll('.deadlock-marker').forEach(dlMarker => {
+      dlMarker.addEventListener('click', (e) => {
         e.stopPropagation();
         this.dispatchEvent(new CustomEvent('select-deadlock', {
           detail: { executionIndex: execIdx },
           bubbles: true, composed: true
         }));
       });
-    }
-
-    // Click/touch handlers for lock events
-    // Pass pre-computed lockStateAtEvent so the modal doesn't need to recompute.
-    // Include the synthetic deadlock-triggering wait event in the events list
-    // so the modal can navigate to it (e.g. "6 of 6").
-    const augmentedLockEvents = [...(exec.lock_events || [])];
-    if (syntheticDeadlockWait) augmentedLockEvents.push(syntheticDeadlockWait);
-    this.shadowRoot.querySelectorAll('.lock-event').forEach(g => {
-      const handler = (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        const leIdx = parseInt(g.dataset.leIndex);
-        this.dispatchEvent(new CustomEvent('select-lock', {
-          detail: { executionIndex: execIdx, lockEventIndex: leIdx, lockStateAtEvent, augmentedLockEvents },
-          bubbles: true, composed: true
-        }));
-      };
-      g.addEventListener('click', handler);
-      g.addEventListener('touchend', handler);
     });
 
-    // Click/touch handlers for race items in the header
-    this.shadowRoot.querySelectorAll('.race-item').forEach(item => {
-      const handler = (e) => {
+    // Click handlers for lock events
+    // Pass pre-computed lockStateAtEvent so the modal doesn't need to recompute
+    this.shadowRoot.querySelectorAll('.lock-event').forEach(g => {
+      g.addEventListener('click', (e) => {
         e.stopPropagation();
-        e.preventDefault();
+        const leIdx = parseInt(g.dataset.leIndex);
+        this.dispatchEvent(new CustomEvent('select-lock', {
+          detail: { executionIndex: execIdx, lockEventIndex: leIdx, lockStateAtEvent },
+          bubbles: true, composed: true
+        }));
+      });
+    });
+
+    // Click handlers for race items in the header
+    this.shadowRoot.querySelectorAll('.race-item').forEach(item => {
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
         const raceIdx = parseInt(item.dataset.raceIndex);
         this.dispatchEvent(new CustomEvent('select-race', {
           detail: { executionIndex: execIdx, raceIndex: raceIdx },
           bubbles: true, composed: true
         }));
-      };
-      item.addEventListener('click', handler);
-      item.addEventListener('touchend', handler);
+      });
     });
 
     // Hover tooltips for lock events and deadlock markers
@@ -763,7 +734,6 @@ class DporModal extends HTMLElement {
     this._raceIdx = 0;
     this._leIdx = 0;
     this._lockStateAtEvent = [];
-    this._augmentedLockEvents = null; // includes synthetic deadlock wait if present
     this.render();
   }
 
@@ -783,13 +753,12 @@ class DporModal extends HTMLElement {
     this.render();
   }
 
-  showLock(execIdx, leIdx, lockStateAtEvent, augmentedLockEvents) {
+  showLock(execIdx, leIdx, lockStateAtEvent) {
     this._visible = true;
     this._mode = 'lock';
     this._execIdx = execIdx;
     this._leIdx = leIdx;
     this._lockStateAtEvent = lockStateAtEvent || [];
-    this._augmentedLockEvents = augmentedLockEvents || null;
     this.render();
   }
 
@@ -812,7 +781,7 @@ class DporModal extends HTMLElement {
       const next = this._raceIdx + dir;
       if (next >= 0 && next < races.length) { this._raceIdx = next; this.render(); }
     } else if (this._mode === 'lock') {
-      const events = this._augmentedLockEvents || DATA.executions[this._execIdx].lock_events || [];
+      const events = DATA.executions[this._execIdx].lock_events || [];
       const next = this._leIdx + dir;
       if (next >= 0 && next < events.length) { this._leIdx = next; this.render(); }
     } else {
@@ -1160,7 +1129,7 @@ class DporModal extends HTMLElement {
 
   _renderLock() {
     const exec = DATA.executions[this._execIdx];
-    const events = this._augmentedLockEvents || exec.lock_events || [];
+    const events = exec.lock_events || [];
     const le = events[this._leIdx];
     if (!le) { this.hide(); return; }
 
@@ -1188,9 +1157,8 @@ class DporModal extends HTMLElement {
 
     const lockLabel = lockIdToLabel.get(le.lock_id) || '?';
     const threadName = DATA.thread_names[le.thread_id] || `Thread ${le.thread_id}`;
-    const isSyntheticDeadlock = this._leIdx === events.length - 1 && this._leIdx >= (DATA.executions[this._execIdx].lock_events || []).length;
-    const eventVerb = isSyntheticDeadlock ? 'waiting for (deadlock trigger)' : (le.event_type === 'acquire' ? 'acquired' : le.event_type === 'release' ? 'released' : 'waiting for');
-    const eventColor = isSyntheticDeadlock ? 'var(--red)' : (le.event_type === 'acquire' ? 'var(--green)' : le.event_type === 'release' ? 'var(--text-dim)' : 'var(--yellow)');
+    const eventVerb = le.event_type === 'acquire' ? 'acquired' : le.event_type === 'release' ? 'released' : 'waiting for';
+    const eventColor = le.event_type === 'acquire' ? 'var(--green)' : le.event_type === 'release' ? 'var(--text-dim)' : 'var(--yellow)';
 
     // This lock's state before the event
     const holder = stateSnap.heldBy.get(le.lock_id);
@@ -1391,7 +1359,7 @@ class DporReport extends HTMLElement {
 
     this.addEventListener('select-lock', (e) => {
       const modal = this.shadowRoot.querySelector('dpor-modal');
-      if (modal) modal.showLock(e.detail.executionIndex, e.detail.lockEventIndex, e.detail.lockStateAtEvent, e.detail.augmentedLockEvents);
+      if (modal) modal.showLock(e.detail.executionIndex, e.detail.lockEventIndex, e.detail.lockStateAtEvent);
     });
 
     this.addEventListener('select-deadlock', (e) => {
@@ -1423,27 +1391,14 @@ class DporReport extends HTMLElement {
       }
     });
 
-    // Touch swipe navigation — only on nav bar, not on scrollable SVG area
+    // Touch swipe navigation
     let touchStartX = 0;
-    let touchStartY = 0;
-    let touchStartedInTimeline = false;
     document.addEventListener('touchstart', (e) => {
       touchStartX = e.touches[0].clientX;
-      touchStartY = e.touches[0].clientY;
-      // Check if touch started inside a dpor-timeline's svg-container (scrollable area)
-      touchStartedInTimeline = !!e.target.closest?.('dpor-timeline') ||
-        e.composedPath().some(el => el.tagName === 'DPOR-TIMELINE');
     }, { passive: true });
     document.addEventListener('touchend', (e) => {
       const dx = e.changedTouches[0].clientX - touchStartX;
-      const dy = e.changedTouches[0].clientY - touchStartY;
-      // Don't trigger trace navigation if:
-      // - swipe was too short (tap)
-      // - touch started in the scrollable timeline area (let it scroll)
-      // - swipe was more vertical than horizontal (scrolling content)
-      if (Math.abs(dx) < 50) return;
-      if (touchStartedInTimeline) return;
-      if (Math.abs(dy) > Math.abs(dx)) return;
+      if (Math.abs(dx) < 50) return; // too short
       const dir = dx < 0 ? 1 : -1; // swipe left = next, right = prev
       const modal = this.shadowRoot.querySelector('dpor-modal');
       const modalVisible = modal && modal._visible;

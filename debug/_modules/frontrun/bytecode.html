@@ -299,6 +299,7 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._sql_insert_tracker</span><span class="w"> </span><span class="kn">import</span> <span class="n">check_uncaptured_inserts</span><span class="p">,</span> <span class="n">clear_insert_tracker</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._trace_format</span><span class="w"> </span><span class="kn">import</span> <span class="n">TraceRecorder</span><span class="p">,</span> <span class="n">build_call_chain</span><span class="p">,</span> <span class="n">format_trace</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">TraceFilter</span> <span class="k">as</span> <span class="n">_TraceFilter</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">is_cmdline_user_code</span> <span class="k">as</span> <span class="n">_is_cmdline_user_code</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">is_dynamic_code</span> <span class="k">as</span> <span class="n">_is_dynamic_code</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_active_trace_filter</span> <span class="k">as</span> <span class="n">_set_active_trace_filter</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">should_trace_file</span> <span class="k">as</span> <span class="n">_should_trace_file</span>
@@ -504,7 +505,9 @@
                     <span class="c1"># if its caller is user code.  Libraries like SQLAlchemy</span>
                     <span class="c1"># and dataclasses use exec/compile internally, creating</span>
                     <span class="c1"># thousands of scheduling points in non-user code.</span>
-                    <span class="k">if</span> <span class="n">_is_dynamic_code</span><span class="p">(</span><span class="n">filename</span><span class="p">):</span>
+                    <span class="c1"># Exception: in python -c mode, functions defined in</span>
+                    <span class="c1"># the -c string ARE user code.</span>
+                    <span class="k">if</span> <span class="n">_is_dynamic_code</span><span class="p">(</span><span class="n">filename</span><span class="p">)</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">_is_cmdline_user_code</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_globals</span><span class="p">):</span>
                         <span class="n">caller</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_back</span>
                         <span class="k">if</span> <span class="n">caller</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">_should_trace_file</span><span class="p">(</span><span class="n">caller</span><span class="o">.</span><span class="n">f_code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">):</span>
                             <span class="k">return</span> <span class="kc">None</span>
@@ -558,12 +561,15 @@
                 <span class="k">return</span> <span class="kc">None</span>
             <span class="c1"># Skip dynamically generated code (&lt;string&gt;, etc.) unless its</span>
             <span class="c1"># caller is user code.  Libraries use exec/compile internally</span>
-            <span class="c1"># and those shouldn&#39;t create scheduling points.</span>
+            <span class="c1"># and those shouldn&#39;t create scheduling points.  Exception:</span>
+            <span class="c1"># in python -c mode, functions defined in the -c string</span>
+            <span class="c1"># ARE user code.</span>
             <span class="k">if</span> <span class="n">_is_dynamic_code</span><span class="p">(</span><span class="n">code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">):</span>
                 <span class="n">frame</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">_getframe</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
-                <span class="n">caller</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_back</span>
-                <span class="k">if</span> <span class="n">caller</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">_should_trace_file</span><span class="p">(</span><span class="n">caller</span><span class="o">.</span><span class="n">f_code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">):</span>
-                    <span class="k">return</span> <span class="kc">None</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="n">_is_cmdline_user_code</span><span class="p">(</span><span class="n">code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">,</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_globals</span><span class="p">):</span>
+                    <span class="n">caller</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_back</span>
+                    <span class="k">if</span> <span class="n">caller</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">_should_trace_file</span><span class="p">(</span><span class="n">caller</span><span class="o">.</span><span class="n">f_code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">):</span>
+                        <span class="k">return</span> <span class="kc">None</span>
 
             <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._cooperative</span><span class="w"> </span><span class="kn">import</span> <span class="n">_scheduler_tls</span>
 

@@ -315,6 +315,7 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._sql_insert_tracker</span><span class="w"> </span><span class="kn">import</span> <span class="n">check_uncaptured_inserts</span><span class="p">,</span> <span class="n">clear_insert_tracker</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._trace_format</span><span class="w"> </span><span class="kn">import</span> <span class="n">TraceRecorder</span><span class="p">,</span> <span class="n">build_call_chain</span><span class="p">,</span> <span class="n">format_trace</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">TraceFilter</span> <span class="k">as</span> <span class="n">_TraceFilter</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">is_cmdline_user_code</span> <span class="k">as</span> <span class="n">_is_cmdline_user_code</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">is_dynamic_code</span> <span class="k">as</span> <span class="n">_is_dynamic_code</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_active_trace_filter</span> <span class="k">as</span> <span class="n">_set_active_trace_filter</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">should_trace_file</span> <span class="k">as</span> <span class="n">_should_trace_file</span>
@@ -614,6 +615,10 @@
         <span class="c1"># indefinitely between a blocked thread and its holder.</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_row_lock_blocked</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
 
+        <span class="c1"># Last path_id snapshot from _schedule_next, used to attribute</span>
+        <span class="c1"># lock events to the correct scheduling step on free-threaded Python.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_last_scheduled_path_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+
         <span class="c1"># Request the first scheduling decision</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_schedule_next</span><span class="p">()</span>
 
@@ -624,13 +629,25 @@
 <span class="sd">        override the decision and schedule the lock holder instead.  This</span>
 <span class="sd">        prevents the scheduler from cycling between a blocked thread and</span>
 <span class="sd">        its holder (defect #6).</span>
+
+<span class="sd">        Also snapshots ``engine.path_position`` under the engine lock so</span>
+<span class="sd">        that ``report_and_wait`` can attribute subsequent lock events to</span>
+<span class="sd">        the correct scheduling step (see ``_last_scheduled_path_id``).</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine_lock</span><span class="p">:</span>
             <span class="n">runnable</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">execution</span><span class="o">.</span><span class="n">runnable_threads</span><span class="p">()</span>
             <span class="k">if</span> <span class="ow">not</span> <span class="n">runnable</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_last_scheduled_path_id</span> <span class="o">=</span> <span class="kc">None</span>
                 <span class="k">return</span> <span class="kc">None</span>
 
             <span class="n">scheduled</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">engine</span><span class="o">.</span><span class="n">schedule</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">execution</span><span class="p">)</span>
+            <span class="c1"># Snapshot path position under engine_lock. On free-threaded</span>
+            <span class="c1"># Python, another thread may call schedule() concurrently</span>
+            <span class="c1"># after we release the lock, advancing path.pos.  The saved</span>
+            <span class="c1"># position ensures _sync_reporter attributes lock events to</span>
+            <span class="c1"># the correct step.</span>
+            <span class="n">_pp</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">engine</span><span class="p">,</span> <span class="s2">&quot;path_position&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_last_scheduled_path_id</span> <span class="o">=</span> <span class="n">_pp</span> <span class="o">-</span> <span class="mi">1</span> <span class="k">if</span> <span class="n">_pp</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
             <span class="k">if</span> <span class="n">scheduled</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">scheduled</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_row_lock_blocked</span><span class="p">:</span>
                 <span class="n">holder</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_row_lock_blocked</span><span class="p">[</span><span class="n">scheduled</span><span class="p">]</span>
                 <span class="k">if</span> <span class="n">holder</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">:</span>
@@ -786,6 +803,14 @@
                             <span class="bp">self</span><span class="o">.</span><span class="n">_capture_step_event</span><span class="p">(</span><span class="n">_switch_frame</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">_pre_opcode_stack</span><span class="p">)</span>
                         <span class="c1"># It&#39;s our turn. After executing one opcode, schedule next.</span>
                         <span class="n">next_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_schedule_next</span><span class="p">()</span>
+                        <span class="c1"># _schedule_next saves the path position in</span>
+                        <span class="c1"># self._last_scheduled_path_id (under engine_lock).</span>
+                        <span class="c1"># Copy it to TLS so _sync_reporter can attribute lock</span>
+                        <span class="c1"># events to this thread&#39;s scheduling step, not a later</span>
+                        <span class="c1"># step advanced by another thread on free-threaded Python.</span>
+                        <span class="n">_pp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_last_scheduled_path_id</span>
+                        <span class="k">if</span> <span class="n">_pp</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                            <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">_last_path_id</span> <span class="o">=</span> <span class="n">_pp</span>
                         <span class="c1"># Record switch point if thread changes and collector is active</span>
                         <span class="k">if</span> <span class="p">(</span>
                             <span class="bp">self</span><span class="o">.</span><span class="n">_switch_point_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
@@ -1082,7 +1107,9 @@
     <span class="k">def</span><span class="w"> </span><span class="nf">report_io_access</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">execution</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">object_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">kind</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">return</span> <span class="kc">None</span>
 
-    <span class="k">def</span><span class="w"> </span><span class="nf">report_sync</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">execution</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">event_type</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">sync_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">report_sync</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">execution</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">event_type</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">sync_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">path_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">return</span> <span class="kc">None</span>
 
 
@@ -1562,6 +1589,7 @@
         <span class="s2">&quot;STORE_ATTR&quot;</span><span class="p">,</span>
         <span class="s2">&quot;DELETE_ATTR&quot;</span><span class="p">,</span>
         <span class="s2">&quot;LOAD_METHOD&quot;</span><span class="p">,</span>  <span class="c1"># 3.10 only</span>
+        <span class="s2">&quot;LOAD_SPECIAL&quot;</span><span class="p">,</span>  <span class="c1"># 3.14+ context manager __enter__/__exit__</span>
         <span class="c1"># Global / name access</span>
         <span class="s2">&quot;LOAD_GLOBAL&quot;</span><span class="p">,</span>
         <span class="s2">&quot;STORE_GLOBAL&quot;</span><span class="p">,</span>
@@ -1900,6 +1928,25 @@
         <span class="n">_report_write</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">instr</span><span class="o">.</span><span class="n">argval</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
         <span class="k">if</span> <span class="n">recorder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">recorder</span><span class="o">.</span><span class="n">record</span><span class="p">(</span><span class="n">thread_id</span><span class="p">,</span> <span class="n">frame</span><span class="p">,</span> <span class="n">opcode</span><span class="o">=</span><span class="n">op</span><span class="p">,</span> <span class="n">access_type</span><span class="o">=</span><span class="s2">&quot;write&quot;</span><span class="p">,</span> <span class="n">attr_name</span><span class="o">=</span><span class="n">instr</span><span class="o">.</span><span class="n">argval</span><span class="p">,</span> <span class="n">obj</span><span class="o">=</span><span class="n">obj</span><span class="p">)</span>
+
+    <span class="k">elif</span> <span class="n">op</span> <span class="o">==</span> <span class="s2">&quot;LOAD_SPECIAL&quot;</span><span class="p">:</span>
+        <span class="c1"># New in 3.14: replaces LOAD_ATTR for ``__enter__`` / ``__exit__``</span>
+        <span class="c1"># in ``with`` statements.  Pops owner, pushes (attr, self_or_null).</span>
+        <span class="c1"># Stack effect = +1 (−1 pop + 2 push).</span>
+        <span class="n">_special_names</span> <span class="o">=</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;__enter__&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;__exit__&quot;</span><span class="p">}</span>
+        <span class="n">_arg</span> <span class="o">=</span> <span class="n">instr</span><span class="o">.</span><span class="n">arg</span> <span class="k">if</span> <span class="n">instr</span><span class="o">.</span><span class="n">arg</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="o">-</span><span class="mi">1</span>
+        <span class="n">attr</span> <span class="o">=</span> <span class="n">_special_names</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">_arg</span><span class="p">,</span> <span class="sa">f</span><span class="s2">&quot;__special_</span><span class="si">{</span><span class="n">_arg</span><span class="si">}</span><span class="s2">__&quot;</span><span class="p">)</span>
+        <span class="n">obj</span> <span class="o">=</span> <span class="n">shadow</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span>
+        <span class="n">_report_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">val</span> <span class="o">=</span> <span class="n">_safe_getattr</span><span class="p">(</span><span class="n">obj</span><span class="p">,</span> <span class="n">attr</span><span class="p">)</span>
+                <span class="n">shadow</span><span class="o">.</span><span class="n">push</span><span class="p">(</span><span class="n">val</span><span class="p">)</span>
+            <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+                <span class="n">shadow</span><span class="o">.</span><span class="n">push</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">shadow</span><span class="o">.</span><span class="n">push</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
+        <span class="n">shadow</span><span class="o">.</span><span class="n">push</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>  <span class="c1"># self_or_null slot</span>
 
     <span class="c1"># === Subscript access (dict/list operations) ===</span>
 
@@ -2369,8 +2416,10 @@
                 <span class="k">if</span> <span class="n">_should_trace_file</span><span class="p">(</span><span class="n">filename</span><span class="p">):</span>
                     <span class="c1"># Skip dynamically generated code (&lt;string&gt;, etc.)</span>
                     <span class="c1"># unless its caller is user code.  In I/O mode, skip</span>
-                    <span class="c1"># all dynamic code unconditionally.</span>
-                    <span class="k">if</span> <span class="n">_is_dynamic_code</span><span class="p">(</span><span class="n">filename</span><span class="p">):</span>
+                    <span class="c1"># all dynamic code unconditionally.  Exception: in</span>
+                    <span class="c1"># python -c mode, functions defined in the -c string</span>
+                    <span class="c1"># have filename &quot;&lt;string&gt;&quot; but ARE user code.</span>
+                    <span class="k">if</span> <span class="n">_is_dynamic_code</span><span class="p">(</span><span class="n">filename</span><span class="p">)</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">_is_cmdline_user_code</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_globals</span><span class="p">):</span>
                         <span class="k">if</span> <span class="n">_detect_io</span><span class="p">:</span>
                             <span class="k">return</span> <span class="kc">None</span>
                         <span class="n">caller</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_back</span>
@@ -2496,14 +2545,16 @@
             <span class="c1"># caller is user code.  Libraries use exec/compile internally</span>
             <span class="c1"># (dataclass __init__, SQLAlchemy methods) creating thousands</span>
             <span class="c1"># of scheduling points in non-user code.  In I/O mode, skip</span>
-            <span class="c1"># all dynamic code unconditionally.</span>
+            <span class="c1"># all dynamic code unconditionally.  Exception: in python -c</span>
+            <span class="c1"># mode, functions defined in the -c string ARE user code.</span>
             <span class="k">if</span> <span class="n">_is_dynamic_code</span><span class="p">(</span><span class="n">code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">):</span>
-                <span class="k">if</span> <span class="n">_detect_io</span><span class="p">:</span>
-                    <span class="k">return</span> <span class="kc">None</span>
                 <span class="n">frame</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">_getframe</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
-                <span class="n">caller</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_back</span>
-                <span class="k">if</span> <span class="n">caller</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">_should_trace_file</span><span class="p">(</span><span class="n">caller</span><span class="o">.</span><span class="n">f_code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">):</span>
-                    <span class="k">return</span> <span class="kc">None</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="n">_is_cmdline_user_code</span><span class="p">(</span><span class="n">code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">,</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_globals</span><span class="p">):</span>
+                    <span class="k">if</span> <span class="n">_detect_io</span><span class="p">:</span>
+                        <span class="k">return</span> <span class="kc">None</span>
+                    <span class="n">caller</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_back</span>
+                    <span class="k">if</span> <span class="n">caller</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">_should_trace_file</span><span class="p">(</span><span class="n">caller</span><span class="o">.</span><span class="n">f_code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">):</span>
+                        <span class="k">return</span> <span class="kc">None</span>
 
             <span class="n">thread_id</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;thread_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
             <span class="k">if</span> <span class="n">thread_id</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
@@ -2658,7 +2709,8 @@
                         <span class="k">if</span> <span class="n">waiter_set</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">thread_id</span> <span class="ow">in</span> <span class="n">waiter_set</span><span class="p">:</span>
                             <span class="n">waiter_set</span><span class="o">.</span><span class="n">discard</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
                             <span class="n">execution</span><span class="o">.</span><span class="n">unblock_thread</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
-                        <span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="s2">&quot;lock_acquire&quot;</span><span class="p">,</span> <span class="n">stable_lock_id</span><span class="p">)</span>
+                        <span class="n">_saved_path_id</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;_last_path_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                        <span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="s2">&quot;lock_acquire&quot;</span><span class="p">,</span> <span class="n">stable_lock_id</span><span class="p">,</span> <span class="n">_saved_path_id</span><span class="p">)</span>
                         <span class="n">_trace_len_acq</span> <span class="o">=</span> <span class="p">(</span>
                             <span class="nb">len</span><span class="p">(</span><span class="n">execution</span><span class="o">.</span><span class="n">schedule_trace</span><span class="p">)</span> <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
                         <span class="p">)</span>
@@ -2693,7 +2745,8 @@
                         <span class="n">waiters</span> <span class="o">=</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_waiters</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">stable_lock_id</span><span class="p">,</span> <span class="nb">set</span><span class="p">())</span>
                         <span class="k">for</span> <span class="n">waiter</span> <span class="ow">in</span> <span class="n">waiters</span><span class="p">:</span>
                             <span class="n">execution</span><span class="o">.</span><span class="n">unblock_thread</span><span class="p">(</span><span class="n">waiter</span><span class="p">)</span>
-                        <span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="s2">&quot;lock_release&quot;</span><span class="p">,</span> <span class="n">stable_lock_id</span><span class="p">)</span>
+                        <span class="n">_saved_path_id</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;_last_path_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                        <span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="s2">&quot;lock_release&quot;</span><span class="p">,</span> <span class="n">stable_lock_id</span><span class="p">,</span> <span class="n">_saved_path_id</span><span class="p">)</span>
                         <span class="n">_trace_len_rel</span> <span class="o">=</span> <span class="p">(</span>
                             <span class="nb">len</span><span class="p">(</span><span class="n">execution</span><span class="o">.</span><span class="n">schedule_trace</span><span class="p">)</span> <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
                         <span class="p">)</span>
@@ -2727,7 +2780,8 @@
                         <span class="n">scheduler</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
                     <span class="k">return</span>
                 <span class="k">with</span> <span class="n">engine_lock</span><span class="p">:</span>
-                    <span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">event</span><span class="p">,</span> <span class="n">stable_lock_id</span><span class="p">)</span>
+                    <span class="n">_saved_path_id</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;_last_path_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                    <span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">event</span><span class="p">,</span> <span class="n">stable_lock_id</span><span class="p">,</span> <span class="n">_saved_path_id</span><span class="p">)</span>
             <span class="k">finally</span><span class="p">:</span>
                 <span class="n">_scheduler_tls</span><span class="o">.</span><span class="n">_in_dpor_machinery</span> <span class="o">=</span> <span class="kc">False</span>
 
@@ -2737,6 +2791,7 @@
         <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">thread_id</span> <span class="o">=</span> <span class="n">thread_id</span>
         <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">engine</span> <span class="o">=</span> <span class="n">engine</span>
         <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">execution</span> <span class="o">=</span> <span class="n">execution</span>
+        <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">_last_path_id</span> <span class="o">=</span> <span class="kc">None</span>  <span class="c1"># set by report_and_wait after schedule()</span>
 
         <span class="c1"># IO detection: defer I/O reports while this thread is inside locks.</span>
         <span class="c1"># If another thread later reaches a real I/O boundary, it will flush</span>
