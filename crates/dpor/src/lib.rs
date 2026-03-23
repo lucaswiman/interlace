@@ -114,12 +114,15 @@ impl PyDporEngine {
     /// Report a synchronization event.
     /// event_type: "lock_acquire", "lock_release", "thread_join", "thread_spawn"
     /// sync_id: identifier for the sync primitive or thread
+    /// path_id: optional path position for lock events (free-threaded fix)
+    #[pyo3(signature = (execution, thread_id, event_type, sync_id, path_id=None))]
     fn report_sync(
         &mut self,
         execution: &mut PyExecution,
         thread_id: usize,
         event_type: &str,
         sync_id: u64,
+        path_id: Option<usize>,
     ) -> PyResult<()> {
         let event = match event_type {
             "lock_acquire" => SyncEvent::LockAcquire { lock_id: sync_id },
@@ -136,7 +139,7 @@ impl PyDporEngine {
                 ))
             }
         };
-        self.inner.process_sync(&mut execution.inner, thread_id, event);
+        self.inner.process_sync(&mut execution.inner, thread_id, event, path_id);
         Ok(())
     }
 
@@ -153,6 +156,13 @@ impl PyDporEngine {
     #[getter]
     fn tree_depth(&self) -> usize {
         self.inner.tree_depth()
+    }
+
+    /// Return the current path position (number of scheduling steps so far).
+    /// Used by Python to snapshot the position for sync event attribution.
+    #[getter]
+    fn path_position(&self) -> usize {
+        self.inner.path.current_position()
     }
 
     #[getter]

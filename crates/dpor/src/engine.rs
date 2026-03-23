@@ -76,7 +76,7 @@ impl Execution {
 /// at maximal executions (in `next_execution()`), where the full trace is
 /// available for computing notdep sequences.
 pub struct DporEngine {
-    path: Path,
+    pub path: Path,
     num_threads: usize,
     max_executions: Option<u64>,
     executions_completed: u64,
@@ -235,6 +235,22 @@ impl DporEngine {
         kind: AccessKind,
     ) {
         let current_path_id = self.path.current_position().saturating_sub(1);
+        self.process_io_access_at(execution, thread_id, object_id, kind, current_path_id);
+    }
+
+    /// Like [`process_io_access`] but uses a specific `path_id` instead of
+    /// the current path position.  Used by [`process_sync`] for lock events
+    /// which must be attributed to the thread's last scheduling point, not
+    /// the live path position (which may have been advanced by another
+    /// thread on free-threaded Python).
+    fn process_io_access_at(
+        &mut self,
+        execution: &mut Execution,
+        thread_id: usize,
+        object_id: ObjectId,
+        kind: AccessKind,
+        current_path_id: usize,
+    ) {
         let current_io_vv = execution.threads[thread_id].io_vv.clone();
 
         let object_state = execution.objects.entry(object_id).or_insert_with(ObjectState::new);
@@ -270,63 +286,55 @@ impl DporEngine {
     /// omits lock HB edges, making lock operations always appear concurrent
     /// for wakeup tree insertion. This is conservative (may over-explore)
     /// but catches multi-lock races that pure HB-based tracking would miss.
+    /// Process a synchronization event with an explicit `path_id` for lock events.
+    ///
+    /// The `path_id` parameter pins lock-related I/O accesses to a specific
+    /// scheduling step.  On free-threaded Python, the thread reporting a lock
+    /// event may no longer be the active thread — another thread may have
+    /// advanced `path.pos` via `schedule()` concurrently.  Passing the saved
+    /// `path_id` from the thread's last scheduling point ensures lock events
+    /// land at the correct position regardless of concurrent `pos` advances.
+    ///
+    /// When `path_id` is `None`, the current `path.current_position()` is used
+    /// (the original behavior, correct on GIL-protected Python).
     pub fn process_sync(
         &mut self,
         execution: &mut Execution,
         thread_id: usize,
         event: SyncEvent,
+        path_id: Option<usize>,
     ) {
         match event {
             SyncEvent::LockAcquire { lock_id } => {
-                // Join with the releasing thread's vector clock to establish
-                // happens-before: release(L) →_E acquire(L).
-                // Paper: Def 3.2 property 4 (JACM'17 p.12) — linearizations
-                // must preserve happens-before and reach the same state.
                 if let Some(release_vv) = execution.lock_release_vv.get(&lock_id) {
                     let release_vv = release_vv.clone();
                     execution.threads[thread_id].causality.join(&release_vv);
                     execution.threads[thread_id].dpor_vv.join(&release_vv);
                 }
-                // Report lock acquire as an I/O access (Write to virtual lock
-                // object).  This uses io_vv (no lock-based HB) so that lock
-                // operations on the same lock by different threads always
-                // appear concurrent — creating wakeup tree entries at lock
-                // boundaries.  First-access semantics ensure the insertion
-                // targets the earliest lock position, which is critical for
-                // multi-lock race detection: it lets DPOR explore orderings
-                // where thread B runs between thread A's two critical sections
-                // on different locks.
                 let lock_obj_id = lock_id ^ Self::LOCK_OBJECT_XOR;
-                self.process_io_access(
-                    execution,
-                    thread_id,
-                    lock_obj_id,
-                    AccessKind::Write,
-                );
+                if let Some(pid) = path_id {
+                    self.process_io_access_at(
+                        execution, thread_id, lock_obj_id, AccessKind::Write, pid,
+                    );
+                } else {
+                    self.process_io_access(
+                        execution, thread_id, lock_obj_id, AccessKind::Write,
+                    );
+                }
             }
             SyncEvent::LockRelease { lock_id } => {
-                // Store dpor_vv (not causality) so that lock-based
-                // happens-before edges carry meaningful scheduling
-                // information.  The acquiring thread's dpor_vv will be
-                // joined with this, ordering data accesses inside the
-                // same critical section correctly.
                 let vv = execution.threads[thread_id].dpor_vv.clone();
                 execution.lock_release_vv.insert(lock_id, vv);
-                // Report lock release as an I/O access to a SEPARATE
-                // virtual object (distinct from the acquire object).
-                // This creates wakeup tree entries at lock release positions,
-                // which is critical for multi-lock races: the "gap"
-                // between two critical sections starts at the release.
-                // Using a different XOR constant ensures the release
-                // object doesn't alias with the acquire object, so
-                // first-access semantics track them independently.
                 let lock_rel_obj_id = lock_id ^ Self::LOCK_RELEASE_XOR;
-                self.process_io_access(
-                    execution,
-                    thread_id,
-                    lock_rel_obj_id,
-                    AccessKind::Write,
-                );
+                if let Some(pid) = path_id {
+                    self.process_io_access_at(
+                        execution, thread_id, lock_rel_obj_id, AccessKind::Write, pid,
+                    );
+                } else {
+                    self.process_io_access(
+                        execution, thread_id, lock_rel_obj_id, AccessKind::Write,
+                    );
+                }
             }
             SyncEvent::ThreadJoin { joined_thread } => {
                 let joined_causality = execution.threads[joined_thread].causality.clone();
@@ -658,6 +666,7 @@ mod tests {
                         engine.process_sync(
                             &mut execution, chosen,
                             SyncEvent::LockAcquire { lock_id: *lock_id },
+                            None,
                         );
                     }
                     Op::Access(obj_id, kind) => {
@@ -676,6 +685,7 @@ mod tests {
                         engine.process_sync(
                             &mut execution, chosen,
                             SyncEvent::LockRelease { lock_id: *lock_id },
+                            None,
                         );
                         // Unblock any thread waiting for this lock
                         for tid in 0..2 {
