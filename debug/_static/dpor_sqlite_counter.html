@@ -30,7 +30,7 @@ body {
 </head>
 <body>
 
-<script type="application/json" id="dpor-data">{"version":1,"num_threads":2,"thread_names":["Thread 0","Thread 1"],"executions":[{"index":0,"schedule_trace":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"switch_points":[],"invariant_held":true,"was_deadlock":false,"race_info":[{"prev_step":14,"current_step":28,"thread_id":1,"object":"object 1663090668531113662"},{"prev_step":10,"current_step":30,"thread_id":1,"object":"TracedCursor.__cmethods__"},{"prev_step":14,"current_step":34,"thread_id":1,"object":"object 1663090668531113662"},{"prev_step":8,"current_step":34,"thread_id":1,"object":"object 1663090668531113662"},{"prev_step":14,"current_step":34,"thread_id":1,"object":"object 1663090668531113662"},{"prev_step":18,"current_step":36,"thread_id":1,"object":"TracedConnection.__cmethods__"},{"prev_step":18,"current_step":38,"thread_id":1,"object":"TracedConnection.__cmethods__"}],"step_events":{"10":{"thread_id":0,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":55,"function_name":"racy_increment","opcode":"CALL","source_line":"value = cur.fetchone()[0]","access_type":"read","attr_name":"fetchone","obj_type_name":"TracedCursor"},"18":{"thread_id":0,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":59,"function_name":"racy_increment","opcode":"CALL","source_line":"conn.close()","access_type":"read","attr_name":"close","obj_type_name":"TracedConnection"},"30":{"thread_id":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":55,"function_name":"racy_increment","opcode":"CALL","source_line":"value = cur.fetchone()[0]","access_type":"read","attr_name":"fetchone","obj_type_name":"TracedCursor"},"36":{"thread_id":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":58,"function_name":"racy_increment","opcode":"CALL","source_line":"conn.commit()","access_type":"read","attr_name":"commit","obj_type_name":"TracedConnection"},"38":{"thread_id":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":59,"function_name":"racy_increment","opcode":"CALL","source_line":"conn.close()","access_type":"read","attr_name":"close","obj_type_name":"TracedConnection"}},"lock_events":[]},{"index":1,"schedule_trace":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0],"switch_points":[{"schedule_index":18,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":59,"function_name":"racy_increment","opcode":"LOAD_ATTR","source_line":"conn.close()","shadow_stack_top5":["None","<built-in method close of TracedConnection object at 0x7ff803cc7950>"],"access_type":"read","attr_name":"close","obj_type_name":"TracedConnection"}],"invariant_held":true,"was_deadlock":false,"race_info":[{"prev_step":14,"current_step":26,"thread_id":1,"object":"object 1663090668531113662"},{"prev_step":14,"current_step":32,"thread_id":1,"object":"object 1663090668531113662"},{"prev_step":8,"current_step":32,"thread_id":1,"object":"object 1663090668531113662"},{"prev_step":14,"current_step":32,"thread_id":1,"object":"object 1663090668531113662"}],"step_events":{},"lock_events":[]},{"index":2,"schedule_trace":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0],"switch_points":[{"schedule_index":14,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":57,"function_name":"racy_increment","opcode":"CALL","source_line":"cur.execute(\"UPDATE counter SET value = ?\", (value,))","shadow_stack_top5":["None"],"access_type":"read","attr_name":"execute","obj_type_name":"TracedCursor"}],"invariant_held":false,"was_deadlock":false,"race_info":[{"prev_step":22,"current_step":22,"thread_id":1,"object":"object 1663090668531113662"},{"prev_step":22,"current_step":28,"thread_id":1,"object":"object 1663090668531113662"},{"prev_step":8,"current_step":28,"thread_id":1,"object":"object 1663090668531113662"},{"prev_step":22,"current_step":28,"thread_id":1,"object":"object 1663090668531113662"}],"step_events":{},"lock_events":[]},{"index":3,"schedule_trace":[0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0],"switch_points":[{"schedule_index":10,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":55,"function_name":"racy_increment","opcode":"LOAD_ATTR","source_line":"value = cur.fetchone()[0]","shadow_stack_top5":["None","<built-in method fetchone of TracedCursor object at 0x7ff803b74950>"],"access_type":"read","attr_name":"fetchone","obj_type_name":"TracedCursor"}],"invariant_held":false,"was_deadlock":false,"race_info":[{"prev_step":8,"current_step":24,"thread_id":1,"object":"object 1663090668531113662"},{"prev_step":24,"current_step":28,"thread_id":0,"object":"object 1663090668531113662"},{"prev_step":18,"current_step":28,"thread_id":0,"object":"object 1663090668531113662"},{"prev_step":24,"current_step":28,"thread_id":0,"object":"object 1663090668531113662"}],"step_events":{},"lock_events":[]},{"index":4,"schedule_trace":[0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0],"switch_points":[{"schedule_index":8,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":54,"function_name":"racy_increment","opcode":"CALL","source_line":"cur.execute(\"SELECT value FROM counter\")","shadow_stack_top5":["None"],"access_type":"read","attr_name":"execute","obj_type_name":"TracedCursor"}],"invariant_held":true,"was_deadlock":false,"race_info":[{"prev_step":16,"current_step":22,"thread_id":1,"object":"object 1663090668531113662"},{"prev_step":22,"current_step":34,"thread_id":0,"object":"object 1663090668531113662"},{"prev_step":16,"current_step":34,"thread_id":0,"object":"object 1663090668531113662"},{"prev_step":22,"current_step":34,"thread_id":0,"object":"object 1663090668531113662"}],"step_events":{},"lock_events":[]},{"index":5,"schedule_trace":[0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1],"switch_points":[{"schedule_index":8,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":54,"function_name":"racy_increment","opcode":"CALL","source_line":"cur.execute(\"SELECT value FROM counter\")","shadow_stack_top5":["None"],"access_type":"read","attr_name":"execute","obj_type_name":"TracedCursor"},{"schedule_index":22,"from_thread":1,"to_thread":0,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":57,"function_name":"racy_increment","opcode":"CALL","source_line":"cur.execute(\"UPDATE counter SET value = ?\", (value,))","shadow_stack_top5":["None"],"access_type":"read","attr_name":"execute","obj_type_name":"TracedCursor"}],"invariant_held":false,"was_deadlock":false,"race_info":[{"prev_step":16,"current_step":28,"thread_id":1,"object":"object 1663090668531113662"},{"prev_step":28,"current_step":28,"thread_id":0,"object":"object 1663090668531113662"},{"prev_step":16,"current_step":28,"thread_id":0,"object":"object 1663090668531113662"},{"prev_step":28,"current_step":28,"thread_id":0,"object":"object 1663090668531113662"}],"step_events":{},"lock_events":[]}],"source_files":{"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py":["\"\"\"SQLite counter: application-level lost update with a real database.","","Two threads each read a counter from SQLite, increment it in Python, then","write it back.  Because neither thread uses an atomic ``UPDATE counter = counter + 1``","the second writer silently overwrites the first \u2014 a classic lost update.","","DPOR intercepts the SQL operations via its built-in SQL cursor patching,","detects the read/write conflict on the ``counter`` table, and explores all","meaningful interleavings.","","The fixed variant uses a single atomic SQL statement instead of a","read-modify-write round-trip; DPOR finds no violations.","","Usage::","","    python examples/dpor_sqlite_counter.py [report.html]          # racy","    python examples/dpor_sqlite_counter.py [report.html] fixed    # corrected","\"\"\"","","from __future__ import annotations","","import os","import sqlite3","import sys","import tempfile","","","def _make_db(path: str) -> None:","    \"\"\"Create (or reset) the counter table at *path*.\"\"\"","    conn = sqlite3.connect(path)","    conn.execute(\"DROP TABLE IF EXISTS counter\")","    conn.execute(\"CREATE TABLE counter (value INTEGER NOT NULL)\")","    conn.execute(\"INSERT INTO counter VALUES (0)\")","    conn.commit()","    conn.close()","","","# ---------------------------------------------------------------------------","# Racy version: read-modify-write in Python","# ---------------------------------------------------------------------------","","class State:","    \"\"\"Per-execution shared state: a fresh SQLite file reset for every run.\"\"\"","","    def __init__(self, db_path: str) -> None:","        self.db_path = db_path","        _make_db(db_path)","","","def racy_increment(state: State) -> None:","    \"\"\"Read the counter, increment in Python, write back \u2014 not atomic.\"\"\"","    conn = sqlite3.connect(state.db_path, check_same_thread=False)","    cur = conn.cursor()","    cur.execute(\"SELECT value FROM counter\")","    value = cur.fetchone()[0]","    value += 1","    cur.execute(\"UPDATE counter SET value = ?\", (value,))","    conn.commit()","    conn.close()","","","def atomic_increment(state: State) -> None:","    \"\"\"Increment the counter with a single atomic SQL statement.\"\"\"","    conn = sqlite3.connect(state.db_path, check_same_thread=False)","    conn.execute(\"UPDATE counter SET value = value + 1\")","    conn.commit()","    conn.close()","","","def _read_counter(db_path: str) -> int:","    conn = sqlite3.connect(db_path, check_same_thread=False)","    value = conn.execute(\"SELECT value FROM counter\").fetchone()[0]","    conn.close()","    return value","","","# ---------------------------------------------------------------------------","# Exploration entry points","# ---------------------------------------------------------------------------","","def run_exploration(report_path: str | None = None) -> None:","    \"\"\"Racy read-modify-write: DPOR should find an invariant violation.\"\"\"","    import frontrun._report","    from frontrun.dpor import explore_dpor","","    with tempfile.NamedTemporaryFile(suffix=\".db\", delete=False) as f:","        db_path = f.name","","    try:","        frontrun._report._global_report_path = report_path","        try:","            result = explore_dpor(","                setup=lambda: State(db_path),","                threads=[racy_increment, racy_increment],","                invariant=lambda s: _read_counter(db_path) == 2,","                detect_io=True,","                preemption_bound=2,","                stop_on_first=False,","                deadlock_timeout=5.0,","            )","            print(result.explanation)","        finally:","            frontrun._report._global_report_path = None","    finally:","        os.unlink(db_path)","","","def run_exploration_fixed(report_path: str | None = None) -> None:","    \"\"\"Atomic SQL update: DPOR should find no violations.\"\"\"","    import frontrun._report","    from frontrun.dpor import explore_dpor","","    with tempfile.NamedTemporaryFile(suffix=\".db\", delete=False) as f:","        db_path = f.name","","    try:","        frontrun._report._global_report_path = report_path","        try:","            result = explore_dpor(","                setup=lambda: State(db_path),","                threads=[atomic_increment, atomic_increment],","                invariant=lambda s: _read_counter(db_path) == 2,","                detect_io=True,","                preemption_bound=2,","                stop_on_first=False,","                deadlock_timeout=5.0,","            )","            print(result.explanation)","        finally:","            frontrun._report._global_report_path = None","    finally:","        os.unlink(db_path)","","","if __name__ == \"__main__\":","    report_path = sys.argv[1] if len(sys.argv) > 1 else None","    mode = sys.argv[2] if len(sys.argv) > 2 else \"racy\"","    if mode == \"fixed\":","        run_exploration_fixed(report_path)","    else:","        run_exploration(report_path)"]}}</script>
+<script type="application/json" id="dpor-data">{"version":1,"num_threads":2,"thread_names":["Thread 0","Thread 1"],"executions":[{"index":0,"schedule_trace":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"switch_points":[],"invariant_held":true,"was_deadlock":false,"race_info":[{"prev_step":14,"current_step":28,"thread_id":1,"object":"object 4071424423318276998"},{"prev_step":10,"current_step":30,"thread_id":1,"object":"TracedCursor.__cmethods__"},{"prev_step":14,"current_step":34,"thread_id":1,"object":"object 4071424423318276998"},{"prev_step":8,"current_step":34,"thread_id":1,"object":"object 4071424423318276998"},{"prev_step":14,"current_step":34,"thread_id":1,"object":"object 4071424423318276998"},{"prev_step":18,"current_step":36,"thread_id":1,"object":"TracedConnection.__cmethods__"},{"prev_step":18,"current_step":38,"thread_id":1,"object":"TracedConnection.__cmethods__"}],"step_events":{"10":{"thread_id":0,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":55,"function_name":"racy_increment","opcode":"CALL","source_line":"value = cur.fetchone()[0]","access_type":"read","attr_name":"fetchone","obj_type_name":"TracedCursor"},"18":{"thread_id":0,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":59,"function_name":"racy_increment","opcode":"CALL","source_line":"conn.close()","access_type":"read","attr_name":"close","obj_type_name":"TracedConnection"},"30":{"thread_id":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":55,"function_name":"racy_increment","opcode":"CALL","source_line":"value = cur.fetchone()[0]","access_type":"read","attr_name":"fetchone","obj_type_name":"TracedCursor"},"36":{"thread_id":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":58,"function_name":"racy_increment","opcode":"CALL","source_line":"conn.commit()","access_type":"read","attr_name":"commit","obj_type_name":"TracedConnection"},"38":{"thread_id":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":59,"function_name":"racy_increment","opcode":"CALL","source_line":"conn.close()","access_type":"read","attr_name":"close","obj_type_name":"TracedConnection"}},"lock_events":[]},{"index":1,"schedule_trace":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0],"switch_points":[{"schedule_index":18,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":59,"function_name":"racy_increment","opcode":"LOAD_ATTR","source_line":"conn.close()","shadow_stack_top5":["None","<built-in method close of TracedConnection object at 0x7f7399f6f950>"],"access_type":"read","attr_name":"close","obj_type_name":"TracedConnection"}],"invariant_held":true,"was_deadlock":false,"race_info":[{"prev_step":14,"current_step":26,"thread_id":1,"object":"object 4071424423318276998"},{"prev_step":14,"current_step":32,"thread_id":1,"object":"object 4071424423318276998"},{"prev_step":8,"current_step":32,"thread_id":1,"object":"object 4071424423318276998"},{"prev_step":14,"current_step":32,"thread_id":1,"object":"object 4071424423318276998"}],"step_events":{},"lock_events":[]},{"index":2,"schedule_trace":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0],"switch_points":[{"schedule_index":14,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":57,"function_name":"racy_increment","opcode":"CALL","source_line":"cur.execute(\"UPDATE counter SET value = ?\", (value,))","shadow_stack_top5":["None"],"access_type":"read","attr_name":"execute","obj_type_name":"TracedCursor"}],"invariant_held":false,"was_deadlock":false,"race_info":[{"prev_step":22,"current_step":22,"thread_id":1,"object":"object 4071424423318276998"},{"prev_step":22,"current_step":28,"thread_id":1,"object":"object 4071424423318276998"},{"prev_step":8,"current_step":28,"thread_id":1,"object":"object 4071424423318276998"},{"prev_step":22,"current_step":28,"thread_id":1,"object":"object 4071424423318276998"}],"step_events":{},"lock_events":[]},{"index":3,"schedule_trace":[0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0],"switch_points":[{"schedule_index":10,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":55,"function_name":"racy_increment","opcode":"LOAD_ATTR","source_line":"value = cur.fetchone()[0]","shadow_stack_top5":["None","<built-in method fetchone of TracedCursor object at 0x7f7399e18950>"],"access_type":"read","attr_name":"fetchone","obj_type_name":"TracedCursor"}],"invariant_held":false,"was_deadlock":false,"race_info":[{"prev_step":8,"current_step":24,"thread_id":1,"object":"object 4071424423318276998"},{"prev_step":24,"current_step":28,"thread_id":0,"object":"object 4071424423318276998"},{"prev_step":18,"current_step":28,"thread_id":0,"object":"object 4071424423318276998"},{"prev_step":24,"current_step":28,"thread_id":0,"object":"object 4071424423318276998"}],"step_events":{},"lock_events":[]},{"index":4,"schedule_trace":[0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0],"switch_points":[{"schedule_index":8,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":54,"function_name":"racy_increment","opcode":"CALL","source_line":"cur.execute(\"SELECT value FROM counter\")","shadow_stack_top5":["None"],"access_type":"read","attr_name":"execute","obj_type_name":"TracedCursor"}],"invariant_held":true,"was_deadlock":false,"race_info":[{"prev_step":16,"current_step":22,"thread_id":1,"object":"object 4071424423318276998"},{"prev_step":22,"current_step":34,"thread_id":0,"object":"object 4071424423318276998"},{"prev_step":16,"current_step":34,"thread_id":0,"object":"object 4071424423318276998"},{"prev_step":22,"current_step":34,"thread_id":0,"object":"object 4071424423318276998"}],"step_events":{},"lock_events":[]},{"index":5,"schedule_trace":[0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1],"switch_points":[{"schedule_index":8,"from_thread":0,"to_thread":1,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":54,"function_name":"racy_increment","opcode":"CALL","source_line":"cur.execute(\"SELECT value FROM counter\")","shadow_stack_top5":["None"],"access_type":"read","attr_name":"execute","obj_type_name":"TracedCursor"},{"schedule_index":22,"from_thread":1,"to_thread":0,"filename":"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py","lineno":57,"function_name":"racy_increment","opcode":"CALL","source_line":"cur.execute(\"UPDATE counter SET value = ?\", (value,))","shadow_stack_top5":["None"],"access_type":"read","attr_name":"execute","obj_type_name":"TracedCursor"}],"invariant_held":false,"was_deadlock":false,"race_info":[{"prev_step":16,"current_step":28,"thread_id":1,"object":"object 4071424423318276998"},{"prev_step":28,"current_step":28,"thread_id":0,"object":"object 4071424423318276998"},{"prev_step":16,"current_step":28,"thread_id":0,"object":"object 4071424423318276998"},{"prev_step":28,"current_step":28,"thread_id":0,"object":"object 4071424423318276998"}],"step_events":{},"lock_events":[]}],"source_files":{"/home/runner/work/frontrun/frontrun/examples/dpor_sqlite_counter.py":["\"\"\"SQLite counter: application-level lost update with a real database.","","Two threads each read a counter from SQLite, increment it in Python, then","write it back.  Because neither thread uses an atomic ``UPDATE counter = counter + 1``","the second writer silently overwrites the first \u2014 a classic lost update.","","DPOR intercepts the SQL operations via its built-in SQL cursor patching,","detects the read/write conflict on the ``counter`` table, and explores all","meaningful interleavings.","","The fixed variant uses a single atomic SQL statement instead of a","read-modify-write round-trip; DPOR finds no violations.","","Usage::","","    python examples/dpor_sqlite_counter.py [report.html]          # racy","    python examples/dpor_sqlite_counter.py [report.html] fixed    # corrected","\"\"\"","","from __future__ import annotations","","import os","import sqlite3","import sys","import tempfile","","","def _make_db(path: str) -> None:","    \"\"\"Create (or reset) the counter table at *path*.\"\"\"","    conn = sqlite3.connect(path)","    conn.execute(\"DROP TABLE IF EXISTS counter\")","    conn.execute(\"CREATE TABLE counter (value INTEGER NOT NULL)\")","    conn.execute(\"INSERT INTO counter VALUES (0)\")","    conn.commit()","    conn.close()","","","# ---------------------------------------------------------------------------","# Racy version: read-modify-write in Python","# ---------------------------------------------------------------------------","","class State:","    \"\"\"Per-execution shared state: a fresh SQLite file reset for every run.\"\"\"","","    def __init__(self, db_path: str) -> None:","        self.db_path = db_path","        _make_db(db_path)","","","def racy_increment(state: State) -> None:","    \"\"\"Read the counter, increment in Python, write back \u2014 not atomic.\"\"\"","    conn = sqlite3.connect(state.db_path, check_same_thread=False)","    cur = conn.cursor()","    cur.execute(\"SELECT value FROM counter\")","    value = cur.fetchone()[0]","    value += 1","    cur.execute(\"UPDATE counter SET value = ?\", (value,))","    conn.commit()","    conn.close()","","","def atomic_increment(state: State) -> None:","    \"\"\"Increment the counter with a single atomic SQL statement.\"\"\"","    conn = sqlite3.connect(state.db_path, check_same_thread=False)","    conn.execute(\"UPDATE counter SET value = value + 1\")","    conn.commit()","    conn.close()","","","def _read_counter(db_path: str) -> int:","    conn = sqlite3.connect(db_path, check_same_thread=False)","    value = conn.execute(\"SELECT value FROM counter\").fetchone()[0]","    conn.close()","    return value","","","# ---------------------------------------------------------------------------","# Exploration entry points","# ---------------------------------------------------------------------------","","def run_exploration(report_path: str | None = None) -> None:","    \"\"\"Racy read-modify-write: DPOR should find an invariant violation.\"\"\"","    import frontrun._report","    from frontrun.dpor import explore_dpor","","    with tempfile.NamedTemporaryFile(suffix=\".db\", delete=False) as f:","        db_path = f.name","","    try:","        frontrun._report._global_report_path = report_path","        try:","            result = explore_dpor(","                setup=lambda: State(db_path),","                threads=[racy_increment, racy_increment],","                invariant=lambda s: _read_counter(db_path) == 2,","                detect_io=True,","                preemption_bound=2,","                stop_on_first=False,","                deadlock_timeout=5.0,","            )","            print(result.explanation)","        finally:","            frontrun._report._global_report_path = None","    finally:","        os.unlink(db_path)","","","def run_exploration_fixed(report_path: str | None = None) -> None:","    \"\"\"Atomic SQL update: DPOR should find no violations.\"\"\"","    import frontrun._report","    from frontrun.dpor import explore_dpor","","    with tempfile.NamedTemporaryFile(suffix=\".db\", delete=False) as f:","        db_path = f.name","","    try:","        frontrun._report._global_report_path = report_path","        try:","            result = explore_dpor(","                setup=lambda: State(db_path),","                threads=[atomic_increment, atomic_increment],","                invariant=lambda s: _read_counter(db_path) == 2,","                detect_io=True,","                preemption_bound=2,","                stop_on_first=False,","                deadlock_timeout=5.0,","            )","            print(result.explanation)","        finally:","            frontrun._report._global_report_path = None","    finally:","        os.unlink(db_path)","","","if __name__ == \"__main__\":","    report_path = sys.argv[1] if len(sys.argv) > 1 else None","    mode = sys.argv[2] if len(sys.argv) > 2 else \"racy\"","    if mode == \"fixed\":","        run_exploration_fixed(report_path)","    else:","        run_exploration(report_path)"]}}</script>
 
 <dpor-report></dpor-report>
 
@@ -216,8 +216,9 @@ class DporTimeline extends HTMLElement {
     const switches = exec.switch_points.filter(sp => sp.schedule_index < trace.length);
     const numThreads = DATA.num_threads;
 
-    // Layout constants
-    const colWidth = 200;
+    // Layout constants — narrower columns on small screens
+    const isMobile = window.innerWidth < 600;
+    const colWidth = isMobile ? Math.max(80, Math.floor((window.innerWidth - 80) / numThreads)) : 200;
     // Adaptive step height: taller when fewer steps for readability
     const baseStepHeight = trace.length < 30 ? 16 : trace.length < 100 ? 8 : 4;
     const stepHeight = baseStepHeight;
@@ -591,7 +592,7 @@ class DporTimeline extends HTMLElement {
 
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display: block; padding: 16px; overflow: auto; }
+        :host { display: block; padding: 16px; overflow: auto; -webkit-overflow-scrolling: touch; }
         .exec-header {
           margin-bottom: 12px;
           padding: 8px 12px;
@@ -613,7 +614,13 @@ class DporTimeline extends HTMLElement {
         .legend-item svg { vertical-align: middle; }
         svg { display: block; margin: 0 auto; }
         .switch-point:hover { r: 7; }
-        .deadlock-marker:hover rect { fill: rgba(243,139,168,0.25); }
+        .deadlock-marker:hover rect, .deadlock-marker:active rect { fill: rgba(243,139,168,0.25); }
+        @media (max-width: 600px) {
+          :host { padding: 8px; }
+          .exec-header { padding: 6px 8px; }
+          .exec-title { font-size: 12px; }
+          .legend { font-size: 10px; gap: 8px; }
+        }
         .svg-tooltip {
           position: absolute; pointer-events: none;
           background: var(--bg-surface); color: var(--text); border: 1px solid var(--border);
@@ -640,7 +647,7 @@ class DporTimeline extends HTMLElement {
           ` : ''}
         </div>
       </div>
-      <div class="svg-container" style="position:relative;display:inline-block">
+      <div class="svg-container" style="position:relative;display:inline-block;overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%;touch-action:pan-x pan-y">
         <svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg">
           ${headers}
           <path d="${mainPathD}" fill="none" stroke="var(--blue)" stroke-width="2"/>
@@ -656,52 +663,67 @@ class DporTimeline extends HTMLElement {
       </div>
     `;
 
-    // Click handlers for switch points
+    // Click/touch handlers for switch points
     this.shadowRoot.querySelectorAll('.switch-point').forEach(circle => {
-      circle.addEventListener('click', (e) => {
+      const handler = (e) => {
         e.stopPropagation();
+        e.preventDefault();
         const spIdx = parseInt(circle.dataset.spIndex);
         this.dispatchEvent(new CustomEvent('select-switch', {
           detail: { executionIndex: execIdx, switchIndex: spIdx },
           bubbles: true, composed: true
         }));
-      });
+      };
+      circle.addEventListener('click', handler);
+      circle.addEventListener('touchend', handler);
     });
 
-    // Click handlers for deadlock markers (the DEADLOCK badge + synthetic trigger wait tick)
+    // Click/touch handlers for deadlock markers (the DEADLOCK badge + synthetic trigger wait tick)
     this.shadowRoot.querySelectorAll('.deadlock-marker').forEach(dlMarker => {
-      dlMarker.addEventListener('click', (e) => {
+      const handler = (e) => {
         e.stopPropagation();
+        e.preventDefault();
         this.dispatchEvent(new CustomEvent('select-deadlock', {
           detail: { executionIndex: execIdx },
           bubbles: true, composed: true
         }));
+      };
+      dlMarker.addEventListener('click', handler);
+      dlMarker.addEventListener('touchend', (e) => {
+        // Only treat as tap if touch didn't move much
+        handler(e);
       });
     });
 
-    // Click handlers for lock events
+    // Click/touch handlers for lock events
     // Pass pre-computed lockStateAtEvent so the modal doesn't need to recompute
     this.shadowRoot.querySelectorAll('.lock-event').forEach(g => {
-      g.addEventListener('click', (e) => {
+      const handler = (e) => {
         e.stopPropagation();
+        e.preventDefault();
         const leIdx = parseInt(g.dataset.leIndex);
         this.dispatchEvent(new CustomEvent('select-lock', {
           detail: { executionIndex: execIdx, lockEventIndex: leIdx, lockStateAtEvent },
           bubbles: true, composed: true
         }));
-      });
+      };
+      g.addEventListener('click', handler);
+      g.addEventListener('touchend', handler);
     });
 
-    // Click handlers for race items in the header
+    // Click/touch handlers for race items in the header
     this.shadowRoot.querySelectorAll('.race-item').forEach(item => {
-      item.addEventListener('click', (e) => {
+      const handler = (e) => {
         e.stopPropagation();
+        e.preventDefault();
         const raceIdx = parseInt(item.dataset.raceIndex);
         this.dispatchEvent(new CustomEvent('select-race', {
           detail: { executionIndex: execIdx, raceIndex: raceIdx },
           bubbles: true, composed: true
         }));
-      });
+      };
+      item.addEventListener('click', handler);
+      item.addEventListener('touchend', handler);
     });
 
     // Hover tooltips for lock events and deadlock markers
@@ -1391,14 +1413,27 @@ class DporReport extends HTMLElement {
       }
     });
 
-    // Touch swipe navigation
+    // Touch swipe navigation — only on nav bar, not on scrollable SVG area
     let touchStartX = 0;
+    let touchStartY = 0;
+    let touchStartedInTimeline = false;
     document.addEventListener('touchstart', (e) => {
       touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      // Check if touch started inside a dpor-timeline's svg-container (scrollable area)
+      touchStartedInTimeline = !!e.target.closest?.('dpor-timeline') ||
+        e.composedPath().some(el => el.tagName === 'DPOR-TIMELINE');
     }, { passive: true });
     document.addEventListener('touchend', (e) => {
       const dx = e.changedTouches[0].clientX - touchStartX;
-      if (Math.abs(dx) < 50) return; // too short
+      const dy = e.changedTouches[0].clientY - touchStartY;
+      // Don't trigger trace navigation if:
+      // - swipe was too short (tap)
+      // - touch started in the scrollable timeline area (let it scroll)
+      // - swipe was more vertical than horizontal (scrolling content)
+      if (Math.abs(dx) < 50) return;
+      if (touchStartedInTimeline) return;
+      if (Math.abs(dy) > Math.abs(dx)) return;
       const dir = dx < 0 ? 1 : -1; // swipe left = next, right = prev
       const modal = this.shadowRoot.querySelector('dpor-modal');
       const modalVisible = modal && modal._visible;

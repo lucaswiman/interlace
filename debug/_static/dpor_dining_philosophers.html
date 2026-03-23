@@ -216,8 +216,9 @@ class DporTimeline extends HTMLElement {
     const switches = exec.switch_points.filter(sp => sp.schedule_index < trace.length);
     const numThreads = DATA.num_threads;
 
-    // Layout constants
-    const colWidth = 200;
+    // Layout constants — narrower columns on small screens
+    const isMobile = window.innerWidth < 600;
+    const colWidth = isMobile ? Math.max(80, Math.floor((window.innerWidth - 80) / numThreads)) : 200;
     // Adaptive step height: taller when fewer steps for readability
     const baseStepHeight = trace.length < 30 ? 16 : trace.length < 100 ? 8 : 4;
     const stepHeight = baseStepHeight;
@@ -591,7 +592,7 @@ class DporTimeline extends HTMLElement {
 
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display: block; padding: 16px; overflow: auto; }
+        :host { display: block; padding: 16px; overflow: auto; -webkit-overflow-scrolling: touch; }
         .exec-header {
           margin-bottom: 12px;
           padding: 8px 12px;
@@ -613,7 +614,13 @@ class DporTimeline extends HTMLElement {
         .legend-item svg { vertical-align: middle; }
         svg { display: block; margin: 0 auto; }
         .switch-point:hover { r: 7; }
-        .deadlock-marker:hover rect { fill: rgba(243,139,168,0.25); }
+        .deadlock-marker:hover rect, .deadlock-marker:active rect { fill: rgba(243,139,168,0.25); }
+        @media (max-width: 600px) {
+          :host { padding: 8px; }
+          .exec-header { padding: 6px 8px; }
+          .exec-title { font-size: 12px; }
+          .legend { font-size: 10px; gap: 8px; }
+        }
         .svg-tooltip {
           position: absolute; pointer-events: none;
           background: var(--bg-surface); color: var(--text); border: 1px solid var(--border);
@@ -640,7 +647,7 @@ class DporTimeline extends HTMLElement {
           ` : ''}
         </div>
       </div>
-      <div class="svg-container" style="position:relative;display:inline-block">
+      <div class="svg-container" style="position:relative;display:inline-block;overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%;touch-action:pan-x pan-y">
         <svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg">
           ${headers}
           <path d="${mainPathD}" fill="none" stroke="var(--blue)" stroke-width="2"/>
@@ -656,52 +663,67 @@ class DporTimeline extends HTMLElement {
       </div>
     `;
 
-    // Click handlers for switch points
+    // Click/touch handlers for switch points
     this.shadowRoot.querySelectorAll('.switch-point').forEach(circle => {
-      circle.addEventListener('click', (e) => {
+      const handler = (e) => {
         e.stopPropagation();
+        e.preventDefault();
         const spIdx = parseInt(circle.dataset.spIndex);
         this.dispatchEvent(new CustomEvent('select-switch', {
           detail: { executionIndex: execIdx, switchIndex: spIdx },
           bubbles: true, composed: true
         }));
-      });
+      };
+      circle.addEventListener('click', handler);
+      circle.addEventListener('touchend', handler);
     });
 
-    // Click handlers for deadlock markers (the DEADLOCK badge + synthetic trigger wait tick)
+    // Click/touch handlers for deadlock markers (the DEADLOCK badge + synthetic trigger wait tick)
     this.shadowRoot.querySelectorAll('.deadlock-marker').forEach(dlMarker => {
-      dlMarker.addEventListener('click', (e) => {
+      const handler = (e) => {
         e.stopPropagation();
+        e.preventDefault();
         this.dispatchEvent(new CustomEvent('select-deadlock', {
           detail: { executionIndex: execIdx },
           bubbles: true, composed: true
         }));
+      };
+      dlMarker.addEventListener('click', handler);
+      dlMarker.addEventListener('touchend', (e) => {
+        // Only treat as tap if touch didn't move much
+        handler(e);
       });
     });
 
-    // Click handlers for lock events
+    // Click/touch handlers for lock events
     // Pass pre-computed lockStateAtEvent so the modal doesn't need to recompute
     this.shadowRoot.querySelectorAll('.lock-event').forEach(g => {
-      g.addEventListener('click', (e) => {
+      const handler = (e) => {
         e.stopPropagation();
+        e.preventDefault();
         const leIdx = parseInt(g.dataset.leIndex);
         this.dispatchEvent(new CustomEvent('select-lock', {
           detail: { executionIndex: execIdx, lockEventIndex: leIdx, lockStateAtEvent },
           bubbles: true, composed: true
         }));
-      });
+      };
+      g.addEventListener('click', handler);
+      g.addEventListener('touchend', handler);
     });
 
-    // Click handlers for race items in the header
+    // Click/touch handlers for race items in the header
     this.shadowRoot.querySelectorAll('.race-item').forEach(item => {
-      item.addEventListener('click', (e) => {
+      const handler = (e) => {
         e.stopPropagation();
+        e.preventDefault();
         const raceIdx = parseInt(item.dataset.raceIndex);
         this.dispatchEvent(new CustomEvent('select-race', {
           detail: { executionIndex: execIdx, raceIndex: raceIdx },
           bubbles: true, composed: true
         }));
-      });
+      };
+      item.addEventListener('click', handler);
+      item.addEventListener('touchend', handler);
     });
 
     // Hover tooltips for lock events and deadlock markers
@@ -1391,14 +1413,27 @@ class DporReport extends HTMLElement {
       }
     });
 
-    // Touch swipe navigation
+    // Touch swipe navigation — only on nav bar, not on scrollable SVG area
     let touchStartX = 0;
+    let touchStartY = 0;
+    let touchStartedInTimeline = false;
     document.addEventListener('touchstart', (e) => {
       touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      // Check if touch started inside a dpor-timeline's svg-container (scrollable area)
+      touchStartedInTimeline = !!e.target.closest?.('dpor-timeline') ||
+        e.composedPath().some(el => el.tagName === 'DPOR-TIMELINE');
     }, { passive: true });
     document.addEventListener('touchend', (e) => {
       const dx = e.changedTouches[0].clientX - touchStartX;
-      if (Math.abs(dx) < 50) return; // too short
+      const dy = e.changedTouches[0].clientY - touchStartY;
+      // Don't trigger trace navigation if:
+      // - swipe was too short (tap)
+      // - touch started in the scrollable timeline area (let it scroll)
+      // - swipe was more vertical than horizontal (scrolling content)
+      if (Math.abs(dx) < 50) return;
+      if (touchStartedInTimeline) return;
+      if (Math.abs(dy) > Math.abs(dx)) return;
       const dir = dx < 0 ? 1 : -1; // swipe left = next, right = prev
       const modal = this.shadowRoot.querySelector('dpor-modal');
       const modalVisible = modal && modal._visible;
