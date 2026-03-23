@@ -291,16 +291,16 @@ making it easy to pinpoint exactly which access caused the conflict.
 
 **Example reports** (generated at documentation build time):
 
-- `Bank transfer — racy <_static/dpor_bank_transfer.html>`_: 10 interleavings, 6 failing.
+- `Bank transfer — racy <_static/dpor_bank_transfer.html>`_:
   Both threads share account B without a lock.
-- `Bank transfer — locked <_static/dpor_bank_transfer_locked.html>`_: 3 interleavings, all passing.
+- `Bank transfer — locked <_static/dpor_bank_transfer_locked.html>`_:
   A single ``threading.Lock`` makes each transfer atomic; DPOR verifies safety with far fewer paths.
-- `SQLite counter — racy <_static/dpor_sqlite_counter.html>`_: 4 interleavings, 2 failing.
+- `SQLite counter — racy <_static/dpor_sqlite_counter.html>`_:
   Two threads each read-modify-write a SQLite counter; DPOR detects the SQL-level conflict.
-- `SQLite counter — fixed <_static/dpor_sqlite_counter_fixed.html>`_: 2 interleavings, all passing.
+- `SQLite counter — fixed <_static/dpor_sqlite_counter_fixed.html>`_:
   A single ``UPDATE counter SET value = value + 1`` eliminates the race.
-- `Dining philosophers (3) <_static/dpor_dining_philosophers.html>`_: 1000 interleavings explored,
-  148 deadlocking.  Three philosophers always grab the left fork first, creating a circular wait.
+- `Dining philosophers (3) <_static/dpor_dining_philosophers.html>`_:
+  Three philosophers always grab the left fork first, creating a circular wait.
 
 Run any example directly to regenerate its report::
 
@@ -317,8 +317,8 @@ Locking and path reduction
 The locked bank transfer illustrates an important property of DPOR: when
 operations are protected by a lock, DPOR explores far fewer interleavings
 because the only meaningful ordering question is *which thread acquires the
-lock first*.  Compare the 10-path racy report against the 3-path locked
-report to see this directly.
+lock first*.  Compare the racy report against the locked report to see this
+directly.
 
 The ``stop_on_first=False`` parameter (used in all the examples above) tells
 DPOR to continue exploring after the first failure.  The default

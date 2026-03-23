@@ -511,16 +511,16 @@ panel shows the source line and opcode where the scheduler switched threads,
 making it easy to pinpoint exactly which access caused the conflict.</p>
 <p><strong>Example reports</strong> (generated at documentation build time):</p>
 <ul class="simple">
-<li><p><a class="reference external" href="_static/dpor_bank_transfer.html">Bank transfer — racy</a>: 10 interleavings, 6 failing.
+<li><p><a class="reference external" href="_static/dpor_bank_transfer.html">Bank transfer — racy</a>:
 Both threads share account B without a lock.</p></li>
-<li><p><a class="reference external" href="_static/dpor_bank_transfer_locked.html">Bank transfer — locked</a>: 3 interleavings, all passing.
+<li><p><a class="reference external" href="_static/dpor_bank_transfer_locked.html">Bank transfer — locked</a>:
 A single <code class="docutils literal notranslate"><span class="pre">threading.Lock</span></code> makes each transfer atomic; DPOR verifies safety with far fewer paths.</p></li>
-<li><p><a class="reference external" href="_static/dpor_sqlite_counter.html">SQLite counter — racy</a>: 4 interleavings, 2 failing.
+<li><p><a class="reference external" href="_static/dpor_sqlite_counter.html">SQLite counter — racy</a>:
 Two threads each read-modify-write a SQLite counter; DPOR detects the SQL-level conflict.</p></li>
-<li><p><a class="reference external" href="_static/dpor_sqlite_counter_fixed.html">SQLite counter — fixed</a>: 2 interleavings, all passing.
+<li><p><a class="reference external" href="_static/dpor_sqlite_counter_fixed.html">SQLite counter — fixed</a>:
 A single <code class="docutils literal notranslate"><span class="pre">UPDATE</span> <span class="pre">counter</span> <span class="pre">SET</span> <span class="pre">value</span> <span class="pre">=</span> <span class="pre">value</span> <span class="pre">+</span> <span class="pre">1</span></code> eliminates the race.</p></li>
-<li><p><a class="reference external" href="_static/dpor_dining_philosophers.html">Dining philosophers (3)</a>: 1000 interleavings explored,
-148 deadlocking.  Three philosophers always grab the left fork first, creating a circular wait.</p></li>
+<li><p><a class="reference external" href="_static/dpor_dining_philosophers.html">Dining philosophers (3)</a>:
+Three philosophers always grab the left fork first, creating a circular wait.</p></li>
 </ul>
 <p>Run any example directly to regenerate its report:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">python</span> <span class="n">examples</span><span class="o">/</span><span class="n">dpor_bank_transfer</span><span class="o">.</span><span class="n">py</span> <span class="n">my_report</span><span class="o">.</span><span class="n">html</span>
@@ -535,8 +535,8 @@ A single <code class="docutils literal notranslate"><span class="pre">UPDATE</sp
 <p>The locked bank transfer illustrates an important property of DPOR: when
 operations are protected by a lock, DPOR explores far fewer interleavings
 because the only meaningful ordering question is <em>which thread acquires the
-lock first</em>.  Compare the 10-path racy report against the 3-path locked
-report to see this directly.</p>
+lock first</em>.  Compare the racy report against the locked report to see this
+directly.</p>
 <p>The <code class="docutils literal notranslate"><span class="pre">stop_on_first=False</span></code> parameter (used in all the examples above) tells
 DPOR to continue exploring after the first failure.  The default
 <code class="docutils literal notranslate"><span class="pre">stop_on_first=True</span></code> stops as soon as a violation is found, which is usually

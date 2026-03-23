@@ -511,10 +511,12 @@ class DporTimeline extends HTMLElement {
       const isWait = le.event_type === 'wait';
       const color = isAcquire ? '#a6e3a1' : isWait ? '#f9e2af' : '#8888aa';
       const symbol = isAcquire ? ' ⊕' : isWait ? ' ⊙' : ' ⊖';
-      const label = (lockIdToLabel.get(le.lock_id) || '?') + symbol;
+      const lockLabel = lockIdToLabel.get(le.lock_id) || '?';
+      const label = lockLabel + symbol;
+      const tooltip = isAcquire ? `Lock ${lockLabel}` : isWait ? `Wait on lock ${lockLabel}` : `Release lock ${lockLabel}`;
       const tickX1 = tx - 30;
       const tickX2 = tx + 5;
-      lockMarks += `<g class="lock-event" data-le-index="${leIdx}" style="cursor:pointer">`;
+      lockMarks += `<g class="lock-event" data-le-index="${leIdx}" data-tooltip="${tooltip}" style="cursor:pointer">`;
       lockMarks += `<rect x="${tickX1 - 48}" y="${ty - 7}" width="83" height="14" fill="transparent"/>`;
       lockMarks += `<line x1="${tickX1}" y1="${ty}" x2="${tickX2}" y2="${ty}" stroke="${color}" stroke-width="1"/>`;
       lockMarks += `<circle cx="${tickX1}" cy="${ty}" r="2.5" fill="${color}"/>`;
@@ -534,10 +536,12 @@ class DporTimeline extends HTMLElement {
         lockOffsets.set(offsetKey, offsetIdx + 1);
         const ty = baseY + offsetIdx * 10;
         const color = '#f9e2af';
-        const label = (lockIdToLabel.get(le.lock_id) || '?') + ' ⊙';
+        const lockLabel = lockIdToLabel.get(le.lock_id) || '?';
+        const label = lockLabel + ' ⊙';
+        const tooltip = `Wait on lock ${lockLabel} (deadlock)`;
         const tickX1 = tx - 30;
         const tickX2 = tx + 5;
-        lockMarks += `<g class="deadlock-marker" style="cursor:pointer">`;
+        lockMarks += `<g class="deadlock-marker" data-tooltip="${tooltip}" style="cursor:pointer">`;
         lockMarks += `<rect x="${tickX1 - 48}" y="${ty - 7}" width="83" height="14" fill="transparent"/>`;
         lockMarks += `<line x1="${tickX1}" y1="${ty}" x2="${tickX2}" y2="${ty}" stroke="${color}" stroke-width="1"/>`;
         lockMarks += `<circle cx="${tickX1}" cy="${ty}" r="2.5" fill="${color}"/>`;
@@ -604,9 +608,20 @@ class DporTimeline extends HTMLElement {
           cursor: pointer; border-radius: 3px; margin-top: 2px;
         }
         .race-item:hover { background: var(--bg-hover); }
+        .legend { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--text-dim); }
+        .legend-item { display: inline-flex; align-items: center; gap: 4px; }
+        .legend-item svg { vertical-align: middle; }
         svg { display: block; margin: 0 auto; }
         .switch-point:hover { r: 7; }
         .deadlock-marker:hover rect { fill: rgba(243,139,168,0.25); }
+        .svg-tooltip {
+          position: absolute; pointer-events: none;
+          background: var(--bg-surface); color: var(--text); border: 1px solid var(--border);
+          padding: 3px 7px; border-radius: 4px; font-size: 11px; white-space: nowrap;
+          box-shadow: 0 2px 6px rgba(0,0,0,0.3); z-index: 10;
+          transition: opacity 0.1s; opacity: 0;
+        }
+        .svg-tooltip.visible { opacity: 1; }
       </style>
       <div class="exec-header">
         <div class="exec-title">
@@ -615,18 +630,30 @@ class DporTimeline extends HTMLElement {
           <span style="color:var(--text-dim)">  |  ${trace.length} steps  |  ${switches.length} switches</span>
         </div>
         ${racesListHtml}
+        <div class="legend">
+          <span class="legend-item"><svg width="12" height="12"><line x1="0" y1="6" x2="12" y2="6" stroke="var(--blue)" stroke-width="2"/></svg> Execution trace</span>
+          <span class="legend-item"><svg width="12" height="12"><circle cx="6" cy="6" r="5" fill="var(--blue)"/></svg> Context switch</span>
+          ${lockIdToLabel.size > 0 ? `
+          <span class="legend-item"><svg width="12" height="12"><circle cx="4" cy="6" r="2.5" fill="#a6e3a1"/><line x1="4" y1="6" x2="12" y2="6" stroke="#a6e3a1" stroke-width="1"/></svg> Lock acquire</span>
+          <span class="legend-item"><svg width="12" height="12"><circle cx="4" cy="6" r="2.5" fill="#f9e2af"/><line x1="4" y1="6" x2="12" y2="6" stroke="#f9e2af" stroke-width="1"/></svg> Lock wait</span>
+          <span class="legend-item"><svg width="12" height="12"><circle cx="4" cy="6" r="2.5" fill="#8888aa"/><line x1="4" y1="6" x2="12" y2="6" stroke="#8888aa" stroke-width="1"/></svg> Lock release</span>
+          ` : ''}
+        </div>
       </div>
-      <svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg">
-        ${headers}
-        <path d="${mainPathD}" fill="none" stroke="var(--blue)" stroke-width="2"/>
-        ${transitionLines}
-        ${lockMarks}
-        ${deadlockMarkers}
-        ${threadStartMarkers}
-        ${threadEndMarkers}
-        ${switchCircles}
-        ${collapseMarks}
-      </svg>
+      <div class="svg-container" style="position:relative;display:inline-block">
+        <svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg">
+          ${headers}
+          <path d="${mainPathD}" fill="none" stroke="var(--blue)" stroke-width="2"/>
+          ${transitionLines}
+          ${lockMarks}
+          ${deadlockMarkers}
+          ${threadStartMarkers}
+          ${threadEndMarkers}
+          ${switchCircles}
+          ${collapseMarks}
+        </svg>
+        <div class="svg-tooltip"></div>
+      </div>
     `;
 
     // Click handlers for switch points
@@ -674,6 +701,22 @@ class DporTimeline extends HTMLElement {
           detail: { executionIndex: execIdx, raceIndex: raceIdx },
           bubbles: true, composed: true
         }));
+      });
+    });
+
+    // Hover tooltips for lock events and deadlock markers
+    const tooltipEl = this.shadowRoot.querySelector('.svg-tooltip');
+    this.shadowRoot.querySelectorAll('[data-tooltip]').forEach(g => {
+      g.addEventListener('mouseenter', (e) => {
+        tooltipEl.textContent = g.dataset.tooltip;
+        const rect = g.getBoundingClientRect();
+        const container = g.closest('svg').parentElement.getBoundingClientRect();
+        tooltipEl.style.left = (rect.left - container.left + rect.width / 2) + 'px';
+        tooltipEl.style.top = (rect.top - container.top - 24) + 'px';
+        tooltipEl.classList.add('visible');
+      });
+      g.addEventListener('mouseleave', () => {
+        tooltipEl.classList.remove('visible');
       });
     });
   }
