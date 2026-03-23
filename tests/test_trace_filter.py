@@ -12,6 +12,8 @@ from frontrun._tracing import (
     TraceFilter,
     _filename_to_module,
     get_active_trace_filter,
+    is_cmdline_user_code,
+    is_dynamic_code,
     set_active_trace_filter,
     should_trace_file,
 )
@@ -193,3 +195,56 @@ class TestActiveFilter:
             set_active_trace_filter(None)
 
         assert results == [True], "Worker thread should see the active trace filter"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for is_cmdline_user_code (python -c tracing)
+# ---------------------------------------------------------------------------
+
+
+class TestCmdlineUserCode:
+    """Test that python -c code is identified as user code for tracing."""
+
+    def test_is_dynamic_code_for_string(self) -> None:
+        assert is_dynamic_code("<string>") is True
+
+    def test_cmdline_user_code_in_cmdline_mode(self) -> None:
+        """When __main__ has no __file__ (python -c), <string> code with __main__ globals is user code."""
+        import sys
+
+        main = sys.modules["__main__"]
+        had_file = hasattr(main, "__file__")
+        saved_file = getattr(main, "__file__", None)
+        # Simulate python -c mode by removing __file__
+        if had_file:
+            delattr(main, "__file__")
+        try:
+            # Code defined in the -c string has f_globals pointing to __main__.__dict__
+            assert is_cmdline_user_code("<string>", main.__dict__) is True
+            # But exec'd with custom globals should not match
+            assert is_cmdline_user_code("<string>", {"__name__": "some_lib"}) is False
+            # Non-<string> filenames should not match
+            assert is_cmdline_user_code("myfile.py", main.__dict__) is False
+            # <frozen ...> should not match
+            assert is_cmdline_user_code("<frozen importlib>", main.__dict__) is False
+        finally:
+            if had_file:
+                main.__file__ = saved_file  # type: ignore[attr-defined]
+
+    def test_cmdline_user_code_in_script_mode(self) -> None:
+        """When __main__ has __file__ (normal script), <string> is NOT cmdline user code."""
+        import sys
+
+        main = sys.modules["__main__"]
+        had_file = hasattr(main, "__file__")
+        saved_file = getattr(main, "__file__", None)
+        # Ensure __main__ has __file__ (normal script mode)
+        if not had_file:
+            main.__file__ = "/some/test.py"  # type: ignore[attr-defined]
+        try:
+            assert is_cmdline_user_code("<string>", main.__dict__) is False
+        finally:
+            if had_file:
+                main.__file__ = saved_file  # type: ignore[attr-defined]
+            else:
+                delattr(main, "__file__")

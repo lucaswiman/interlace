@@ -59,6 +59,7 @@ from frontrun._sql_cursor import patch_sql, unpatch_sql
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
 from frontrun._tracing import TraceFilter as _TraceFilter
+from frontrun._tracing import is_cmdline_user_code as _is_cmdline_user_code
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
@@ -264,7 +265,9 @@ class BytecodeShuffler:
                     # if its caller is user code.  Libraries like SQLAlchemy
                     # and dataclasses use exec/compile internally, creating
                     # thousands of scheduling points in non-user code.
-                    if _is_dynamic_code(filename):
+                    # Exception: in python -c mode, functions defined in
+                    # the -c string ARE user code.
+                    if _is_dynamic_code(filename) and not _is_cmdline_user_code(filename, frame.f_globals):
                         caller = frame.f_back
                         if caller is None or not _should_trace_file(caller.f_code.co_filename):
                             return None
@@ -318,12 +321,15 @@ class BytecodeShuffler:
                 return None
             # Skip dynamically generated code (<string>, etc.) unless its
             # caller is user code.  Libraries use exec/compile internally
-            # and those shouldn't create scheduling points.
+            # and those shouldn't create scheduling points.  Exception:
+            # in python -c mode, functions defined in the -c string
+            # ARE user code.
             if _is_dynamic_code(code.co_filename):
                 frame = sys._getframe(1)
-                caller = frame.f_back
-                if caller is None or not _should_trace_file(caller.f_code.co_filename):
-                    return None
+                if not _is_cmdline_user_code(code.co_filename, frame.f_globals):
+                    caller = frame.f_back
+                    if caller is None or not _should_trace_file(caller.f_code.co_filename):
+                        return None
 
             from frontrun._cooperative import _scheduler_tls
 

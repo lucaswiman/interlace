@@ -163,3 +163,32 @@ def is_dynamic_code(filename: str) -> bool:
     Does NOT match ``<frozen ...>`` (already excluded by ``should_trace_file``).
     """
     return filename.startswith("<")
+
+
+def _is_cmdline_mode() -> bool:
+    """Return True if the current process was started with ``python -c``."""
+    main = sys.modules.get("__main__")
+    return main is not None and not hasattr(main, "__file__")
+
+
+def is_cmdline_user_code(filename: str, f_globals: dict[str, object]) -> bool:
+    """Check whether *filename* is user code from a ``python -c`` invocation.
+
+    When Python is started with ``-c``, user-defined functions have
+    ``co_filename == "<string>"`` and their ``f_globals`` (or
+    ``__globals__``) is ``__main__.__dict__``.  This function returns
+    ``True`` for exactly that combination, allowing the trace callbacks
+    to treat such code as user code rather than library-exec'd code.
+
+    Returns ``False`` for non-``<string>`` filenames, for ``<string>``
+    code whose globals don't belong to ``__main__``, or when the process
+    was started as a normal script (``__main__`` has a ``__file__``).
+    """
+    if filename != "<string>":
+        return False
+    if not _is_cmdline_mode():
+        return False
+    main = sys.modules.get("__main__")
+    if main is None:
+        return False
+    return f_globals is main.__dict__

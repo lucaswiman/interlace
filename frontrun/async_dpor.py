@@ -54,6 +54,7 @@ from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
 from frontrun._sql_cursor import clear_sql_metadata, get_lock_timeout, set_lock_timeout
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._tracing import TraceFilter as _TraceFilter
+from frontrun._tracing import is_cmdline_user_code as _is_cmdline_user_code
 from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
@@ -723,7 +724,7 @@ class AsyncDporScheduler(InterleavedLoop):
             if event == "call":
                 filename = frame.f_code.co_filename
                 if _should_trace_file(filename):
-                    if _is_dynamic_code(filename):
+                    if _is_dynamic_code(filename) and not _is_cmdline_user_code(filename, frame.f_globals):
                         caller = frame.f_back
                         if caller is None or not _should_trace_file(caller.f_code.co_filename):
                             return None
@@ -775,7 +776,7 @@ class AsyncDporScheduler(InterleavedLoop):
                 return None
 
             frame = sys._getframe(1)
-            if _is_dynamic_code(code.co_filename):
+            if _is_dynamic_code(code.co_filename) and not _is_cmdline_user_code(code.co_filename, frame.f_globals):
                 caller = frame.f_back
                 if caller is None or not _should_trace_file(caller.f_code.co_filename):
                     return None
