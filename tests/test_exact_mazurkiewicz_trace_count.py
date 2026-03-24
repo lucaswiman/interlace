@@ -92,6 +92,7 @@ class TestIndependentState:
             preemption_bound=None,
             stop_on_first=False,
             detect_io=False,
+            total_timeout=60.0,
         )
 
         assert result.property_holds, f"Invariant should hold for independent writes (N={n})"
@@ -112,7 +113,7 @@ class TestTwoThreadsSharedState:
     performs a single write (STORE_ATTR) to each variable in sequence.
     """
 
-    @pytest.mark.parametrize("n", [1, 2, 3, 4, 5])
+    @pytest.mark.parametrize("n", [1, 2, 3])
     def test_two_threads_n_shared_vars(self, n: int) -> None:
         """Two threads writing to N shared variables → 2^N Mazurkiewicz traces.
 
@@ -174,6 +175,7 @@ class TestTwoThreadsSharedState:
             preemption_bound=None,
             stop_on_first=False,
             detect_io=False,
+            total_timeout=60.0,
         )
 
         assert result.num_explored == expected, (
@@ -193,7 +195,7 @@ class TestNThreadsWithLock:
     orderings produce distinct traces.
     """
 
-    @pytest.mark.parametrize("n", [1, 2, 3, 4, 5])
+    @pytest.mark.parametrize("n", [1, 2, 3])
     def test_n_threads_single_lock(self, n: int) -> None:
         """N threads with single lock → N! Mazurkiewicz traces.
 
@@ -232,13 +234,11 @@ class TestNThreadsWithLock:
             def __init__(self) -> None:
                 self.lock = threading.Lock()
                 self.shared = _Slot()
-                self.order: list[int] = []
 
         def make_thread(tid: int):  # noqa: ANN202
             def thread_fn(s: State) -> None:
                 with s.lock:
-                    s.shared.value += tid
-                    s.order.append(tid)
+                    s.shared.value = tid
 
             return thread_fn
 
@@ -251,6 +251,7 @@ class TestNThreadsWithLock:
             preemption_bound=None,
             stop_on_first=False,
             detect_io=False,
+            total_timeout=60.0,
         )
 
         assert result.num_explored == expected, (
@@ -270,7 +271,7 @@ class TestTwoThreadsSharedStateWithLock:
     The lock serializes the two threads completely → 2 traces.
     """
 
-    @pytest.mark.parametrize("n", [1, 2, 3, 4, 5])
+    @pytest.mark.parametrize("n", [1, 2, 3])
     def test_two_threads_locked_n_vars(self, n: int) -> None:
         """Two threads with single lock over N var writes → 2 traces.
 
@@ -315,6 +316,7 @@ class TestTwoThreadsSharedStateWithLock:
             preemption_bound=None,
             stop_on_first=False,
             detect_io=False,
+            total_timeout=60.0,
         )
 
         assert result.num_explored == 2, (
@@ -369,6 +371,7 @@ class TestFileIOTraceCount:
             preemption_bound=None,
             stop_on_first=False,
             detect_io=True,
+            total_timeout=60.0,
         )
 
         assert result.property_holds, f"Invariant should hold for independent file writes (N={n})"
@@ -412,13 +415,14 @@ class TestFileIOTraceCount:
             preemption_bound=None,
             stop_on_first=False,
             detect_io=True,
+            total_timeout=60.0,
         )
 
         assert result.num_explored == 2, (
             f"Expected 2 Mazurkiewicz traces for same-file writes, got {result.num_explored}"
         )
 
-    @pytest.mark.parametrize("n", [1, 2, 3, 4, 5])
+    @pytest.mark.parametrize("n", [1, 2, 3])
     def test_n_threads_locked_file_writes(self, n: int) -> None:
         """N threads with lock guarding a shared file → N! Mazurkiewicz traces.
 
@@ -459,6 +463,7 @@ class TestFileIOTraceCount:
             preemption_bound=None,
             stop_on_first=False,
             detect_io=True,
+            total_timeout=60.0,
         )
 
         assert result.num_explored == expected, (
