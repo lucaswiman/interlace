@@ -24,11 +24,9 @@ Unreleased
   (3.14t) which lead to an explosion of spurious conflict points, where the scheduler
   was depending on GIL-synchronization to avoid writing an incorrect conflict index.
 
-* **Bugfixes**:
+* **Missed traces** — Fixed bug where all traces had to start with the first thread as the first operation.
+  All distinct Mazurkiewicz traces should now be explored.
 
-  * Fixed combinatorial explosion of DPOR traces on free-threaded python.
-  * Fixed bug where all traces had to start with the first thread as the first operation.
-    All distinct Michalewicz traces should now be explored.
 
 0.2.0 (2026-03-20)
 -------------------
