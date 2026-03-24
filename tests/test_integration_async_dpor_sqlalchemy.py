@@ -33,8 +33,11 @@ except ImportError:
 from frontrun.async_dpor import await_point, explore_async_dpor
 
 _DB_NAME = os.environ.get("FRONTRUN_TEST_DB", "frontrun_test")
-_ASYNC_DB_URL = f"postgresql+asyncpg:///{_DB_NAME}"
-_SYNC_DSN = f"postgresql:///{_DB_NAME}"
+_SYNC_DSN = os.environ.get("DATABASE_URL", f"postgresql:///{_DB_NAME}")
+# asyncpg needs the +asyncpg scheme; derive from the sync DSN
+_ASYNC_DB_URL = (
+    _SYNC_DSN.replace("postgresql://", "postgresql+asyncpg://", 1) if "asyncpg" not in _SYNC_DSN else _SYNC_DSN
+)
 
 
 # ---------------------------------------------------------------------------
@@ -65,9 +68,9 @@ def _pg_available():
     try:
         import psycopg2
 
-        conn = psycopg2.connect(f"dbname={_DB_NAME}")
+        conn = psycopg2.connect(_SYNC_DSN)
     except Exception:
-        pytest.skip(f"Postgres not available at {_DB_NAME}")
+        pytest.skip(f"Postgres not available at {_SYNC_DSN}")
 
     conn.autocommit = True
     with conn.cursor() as cur:
@@ -84,7 +87,7 @@ def _pg_available():
     yield
 
     try:
-        conn = psycopg2.connect(f"dbname={_DB_NAME}")
+        conn = psycopg2.connect(_SYNC_DSN)
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS async_sa_counter")
