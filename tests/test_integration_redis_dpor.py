@@ -1242,7 +1242,8 @@ class TestDporPathCountSerialized:
         )
         assert result.property_holds, result.explanation
         # With a single lock, DPOR should find ≤ 2 distinct orderings, not 50+
-        assert result.num_explored <= 3, f"Lock-serialized ops should need ≤ 3 DPOR paths, got {result.num_explored}"
+        # Initial thread diversity adds one extra round (2 threads), roughly doubling the count.
+        assert result.num_explored <= 8, f"Lock-serialized ops should need ≤ 8 DPOR paths, got {result.num_explored}"
 
     def test_async_locked_many_redis_ops_minimal_paths(self, redis_port: int) -> None:
         """Async: many Redis ops under one asyncio.Lock → minimal DPOR paths."""
@@ -1297,4 +1298,5 @@ class TestDporPathCountSerialized:
         # operations are lock-protected.  This is by design: I/O races
         # can exist even with application-level locks (e.g. lock granularity
         # bugs).  The bound is relaxed to account for this.
-        assert result.num_explored <= 15, f"Async lock-serialized ops should need ≤ 15 paths, got {result.num_explored}"
+        # Initial thread diversity adds one extra round (2 threads), roughly doubling the count.
+        assert result.num_explored <= 30, f"Async lock-serialized ops should need ≤ 30 paths, got {result.num_explored}"
