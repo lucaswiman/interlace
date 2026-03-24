@@ -7,14 +7,15 @@ reveal that the DPOR implementation explores more traces than the theoretical
 minimum for several test families. After removing initial thread rotation (which
 was redundant — see "Resolved" section), the remaining overcounting is:
 
-| Test | Expected | Actual | Factor |
-|------|----------|--------|--------|
-| 2 threads, 1 shared var (loop `for v in s.vars`) | 2 | 3 | 1.5× |
-| 2 threads, 2 shared vars (loop) | 4 | 9 | 2.25× |
-| 2 threads, 3 shared vars (loop) | 8 | 27 | 3.375× |
-| 2 threads, lock, N=2 | 2 | 3 | 1.5× |
-| 2 threads, lock over 1 var | 2 | 3 | 1.5× |
-| N=3 threads, lock | 6 | ? | >2× |
+| Test | Expected | Baseline | After Fixes 3+4+5+6 | Factor |
+|------|----------|----------|---------------------|--------|
+| 2 threads, 1 shared var (loop `for v in s.vars`) | 2 | 3 | **2** ✅ | 1.0× |
+| 2 threads, 2 shared vars (loop) | 4 | 9 | 6 | 1.5× |
+| 2 threads, 3 shared vars (loop) | 8 | 27 | 18 | 2.25× |
+| 2 threads, lock, N=2 | 2 | 3 | 3 | 1.5× |
+| 2 threads, lock over 1 var | 2 | 3 | 3 | 1.5× |
+| N=2 threads, lock | 2 | 3 | 3 | 1.5× |
+| N=3 threads, lock | 6 | 17 | 17 | 2.83× |
 
 This document analyzes the root causes and proposes fixes.
 
@@ -106,168 +107,187 @@ Combined with the multiple pre-lock scheduling points, this produces:
 - N=2: 3 traces (expected 2) — 1.5× overcounting
 - N=3: much larger (combinatorial explosion)
 
-## Proposed Fixes
+## Root Cause 3: Trace Cache Merge Escalation (FIXED — Fix 6)
 
-### Fix 2: Collapse Lock Acquire/Release Into Single Race Point (Medium, Medium Impact)
+When computing the trace cache (`prev_thread_all_accesses` in `step()`), the engine
+merges a thread's accesses across all scheduling points. **Previously**, any mismatch
+in AccessKind was naively upgraded to Write:
 
-**Idea**: Instead of creating two independent race objects for lock acquire and lock
-release, create only ONE virtual race object per lock. The lock acquire and release from
-the same thread both write to the same virtual object. This way, the release doesn't
-create an additional independent race dimension.
+```rust
+// BEFORE (buggy):
+if *existing != *kind {
+    *existing = AccessKind::Write;
+}
+```
 
-**Current behavior**:
-- `lock_acquire` → WRITE(`lock_id ^ LOCK_OBJECT_XOR`)
-- `lock_release` → WRITE(`lock_id ^ LOCK_RELEASE_XOR`)
+This caused Read + WeakRead (which commonly occurs when LOAD_ATTR emits WeakRead on
+`__cmethods__` and GET_ITER/FOR_ITER emit Read on the same object) to be stored as
+Write. The sleeping thread then appeared to *write* to the container object, causing
+it to be falsely woken from the sleep set whenever another thread merely *read* the
+same container. Each false wakeup opened a wakeup tree insertion site → extra execution.
 
-These are different objects, so each creates an independent set of races.
+**Fix 6** added `AccessKind::merge()` which correctly handles Read + WeakRead → Read
+(Read's conflict set `{Write, WeakWrite}` is a superset of WeakRead's `{Write}`):
 
-**Proposed behavior**:
-- `lock_acquire` → WRITE(`lock_id ^ LOCK_OBJECT_XOR`)
-- `lock_release` → no virtual write (or write to the same object as acquire)
+```rust
+// AFTER (correct):
+*existing = existing.merge(*kind);
+```
 
-Since the acquire already creates the necessary races for exploring different lock
-orderings, the release write is redundant. The happens-before edge from release to the
-next acquire is still established via `dpor_vv` / `lock_release_vv`.
+**Important**: This fix applies ONLY to the trace cache merge in `step()`. The
+per-branch `record_access()` merge must remain conservative (upgrade to Write),
+because the per-branch merge affects `active_accesses` which participates in
+`propagate_sleep()` independence checks during the same execution. Making that
+less conservative caused a regression in `test_independent_file_writes[2]` — the
+exact mechanism needs further investigation.
 
-**Impact**: Removes one independent race dimension per lock. Halves the lock-related
-overcounting.
+**Impact**: Fixed the simplest overcounting case (2 threads, 1 shared var via loop)
+from 3 to the theoretical minimum of 2. Reduced 2-var from 9 to 6 and 3-var from 27
+to 18.
 
-**Risk**: Removing the release race point might miss some TOCTOU patterns where the
-timing of release matters independently of acquire. Need to analyze whether any real
-bugs require exploring different release orderings that can't be reached through
-different acquire orderings.
+## Implemented Fixes
 
-### Fix 3: Eliminate Weak Read on LOAD_ATTR (Easy, Low-Medium Impact)
+### Fix 3: Restrict LOAD_ATTR Weak Read to Container Types (Implemented)
 
-**Idea**: When `LOAD_ATTR` loads an attribute value that is a mutable object, it
-currently reports a `weak_read` on `(returned_obj, "__cmethods__")`. For the common
-pattern `s.slot.value = tid`, this creates a spurious `weak_read` on the `_Slot` object
-that is about to be written to.
+Restricted the LOAD_ATTR `weak_read` on `__cmethods__` to only fire when the loaded
+value is `isinstance(val, (list, dict, set))`. Previously fired for all non-immutable
+types, creating spurious weak reads on user-defined objects like `_Slot`.
 
-While weak reads don't conflict with weak writes, they DO conflict with strong writes
-(AccessKind::Write). So if another thread writes to `(_Slot, "__cmethods__")` (which
-doesn't happen in these tests, but could happen with container methods), the weak read
-would create a race.
+**Impact on trace counts**: Zero — weak_read-weak_read pairs are non-conflicting.
+This is a correct optimization that reduces per-execution overhead.
 
-More importantly, the weak read adds an access to the DPOR state that participates in
-sleep set propagation and trace caching, potentially preventing sleep set optimizations
-from pruning equivalent executions.
+### Fix 4+5: First-Access Semantics for Iterator Reads (Implemented)
 
-**Proposed change**: Only emit the weak_read when the loaded value is a container type
-(list, dict, set) that could have C-level method mutations. Skip it for simple objects
-with only Python-level attribute access.
+Changed GET_ITER and FOR_ITER from `_report_read` to `_report_first_read`, pinning
+repeated reads of `__cmethods__` and per-element keys to the first scheduling point.
 
-**Impact**: Removes ~1 spurious access per LOAD_ATTR. Small but compounds with other
-fixes.
+**Impact on trace counts**: Zero — read-read pairs don't generate wakeup insertions.
+Correct optimization that reduces unnecessary work in the DPOR engine.
 
-### Fix 4: Batch Iterator Operations (Medium, Medium Impact)
+### Fix 6: Trace Cache Merge Fix (Implemented)
 
-**Idea**: The `GET_ITER` → `FOR_ITER` → `FOR_ITER(exhausted)` sequence for iterating a
-list creates 3+ scheduling points for what is conceptually "iterate over the list."
-Since these are all reads (no writes), they could be collapsed into a single scheduling
-point.
+See Root Cause 3 above. The only fix that actually reduced trace counts.
 
-**Implementation**: When `GET_ITER` detects iteration over a mutable container, report
-the container-level read once, then skip `FOR_ITER` yields until the iteration is
-complete or a write occurs inside the loop body.
+## Proposed Fixes (Not Yet Implemented)
 
-**Impact**: Reduces scheduling points per loop from 2+N (GET_ITER + N×FOR_ITER) to 1
-(for the read) + body scheduling points. For `for v in s.vars: v.value = tid`, this
-would reduce from ~5 scheduling points per variable to ~2.
+### Fix 2: Collapse Lock Acquire/Release Into Single Race Point
 
-**Caveat — pure-read loops**: When the loop body has no writes (no scheduling points
-inside the body), batching removes ALL mid-iteration scheduling points. If another
-thread writes to the iterated container between iterations, the interleaving where
-some elements are read before the write and others after is not explored. However,
-this interleaving is a distinct Mazurkiewicz class only for the elements whose read
-ordering relative to the write differs — and the `__cmethods__` race at GET_ITER
-still distinguishes "all reads before write" from "write before all reads." In
-practice, the test cases always have writes in the loop body (STORE_ATTR), which
-preserves mid-iteration scheduling points.
+**Status**: Previously attempted and abandoned — removing the lock release race broke
+`test_prometheus_summary_observe_pattern` and `test_transfer_between_two_locked_accounts`
+(multi-lock tests in `test_defect11_multi_lock_races.py`). The lock release race is
+needed to create scheduling opportunities between consecutive critical sections using
+DIFFERENT locks.
 
-### Fix 5: Collate Repeated Reads of the Same Key (Medium, High Impact)
+**Possible sound approach**: Only collapse acquire/release for the SAME lock within the
+same thread's contiguous critical section. When a thread does `lock_A.acquire();
+lock_A.release(); lock_B.acquire()`, the release of lock_A is needed to create a
+scheduling point between the two critical sections. But when a thread does a simple
+`with lock: body`, the release of the same lock doesn't add a new race dimension
+beyond what the acquire already covers.
 
-**Idea**: When consecutive scheduling points by the same thread include reads of the
-exact same object_id (same Python object + same key), record all of them at the
-**first** read's path position rather than creating separate wakeup insertion sites
-for each. Different keys remain at their own scheduling points.
+**Implementation idea**: Track whether the lock being released is the same lock most
+recently acquired by this thread (no intervening acquire of a different lock). If so,
+skip the release race. If a different lock was acquired in between, emit the release
+race as before.
 
-**Motivation — cascade elimination**: When an object key is involved in a conflict,
-DPOR inserts wakeups at each scheduling point where it's read. With N reads of the
-same key, `process_access` cascades backward — the write races with the last read,
-triggering re-exploration, where it races with the next-to-last, etc. This cascade
-produces up to N+1 executions. Collation reduces this to 2 (write before all reads,
-or after all reads).
+**Risk**: Medium. The heuristic might miss edge cases.
 
-**Target pattern**: The `__cmethods__` key on container objects is read at LOAD_ATTR
-(as WKREAD), GET_ITER, every FOR_ITER, and FOR_ITER(exhausted). For 1 variable, that's
-4 reads of `(list, "__cmethods__")` across 4 scheduling points. Collation merges them
-to 1. The per-element reads `(list, "0")`, `(list, "1")` are different keys and stay
-at their own positions.
+### Fix 7: Improve AccessKind Merge for WeakWrite + WeakRead
 
-**Soundness**: Collating reads of the same key is **unsound in general** — it misses
-the Mazurkiewicz class where a write interposes between two reads:
+**Idea**: Extend `AccessKind::merge()` to handle additional combinations:
 
-| Class | Ordering | Thread A observes |
-|-------|----------|-------------------|
-| 1 | WRITE, READ₁, READ₂ | new, new |
-| 2 | READ₁, WRITE, READ₂ | old, new (missed!) |
-| 3 | READ₁, READ₂, WRITE | old, old |
+```rust
+// WeakWrite conflicts with {Read, Write}
+// WeakRead conflicts with {Write}
+// WeakWrite ⊇ WeakRead in conflict sets → merge to WeakWrite
+(WeakWrite, WeakRead) | (WeakRead, WeakWrite) => WeakWrite,
+```
 
-Collation keeps classes 1 and 3 but eliminates class 2.
+Currently these merge to Write (which conflicts with everything). Merging to
+WeakWrite instead prevents false wakeups when another thread does only WeakWrite
+or WeakRead on the same object.
 
-**Can we scope collation to be sound?** The TOCTOU scenario requires user code that
-reads the same (object, key) at two scheduling points — e.g., `x = s.obj; y = s.obj`.
-However, the intervening STORE_FAST creates a scheduling point gap. If "adjacent" is
-defined strictly as "no intervening scheduling point (even a non-reporting one)," then
-user-code double-reads are never collated. The repeated `__cmethods__` reads across
-GET_ITER → FOR_ITER ARE truly adjacent (no intervening opcode), so they would be
-collated.
+**Impact**: Low — only applies when both WeakWrite and WeakRead occur on the
+same object across different scheduling points of the same thread.
 
-But this adjacency definition is fragile — it depends on CPython bytecode details and
-could break across Python versions. A more robust approach:
+### Fix 8: Per-Branch Merge Investigation
 
-**Scope to instrumentation-generated reads only**: Only collate `__cmethods__` reads
-that are generated by the iterator instrumentation (GET_ITER, FOR_ITER handlers), not
-arbitrary same-key reads. This is a whitelist approach: the trace handler knows which
-reads are instrumentation artifacts vs user-visible operations. Since `__cmethods__`
-is a synthetic key that never appears in user code, any read of it is by definition
-an instrumentation artifact.
+**Idea**: Apply `AccessKind::merge()` to the per-branch `record_access()` as well,
+not just the trace cache. This would fix `active_accesses` at the scheduling-point
+level, preventing the Read + WeakRead → Write escalation within a single scheduling
+point from propagating through sleep set checks.
 
-This makes collation **sound for all user-observable behavior**: the missed TOCTOU
-class (2 above) can only occur on `__cmethods__`, which is invisible to user code.
-The program cannot branch on whether a `__cmethods__` read sees old or new, because
-the program never reads `__cmethods__` directly.
+**Status**: Attempted and caused a regression in `test_independent_file_writes[2]`
+(independent writes got 2 instead of 1). The root cause of the regression needs
+investigation — it may be that per-branch merge interacts with I/O access tracking
+(`process_io_access` uses the same `record_access` path).
 
-**Alternative — just use Fix 4**: Fix 4 (batch iterators) already eliminates the
-FOR_ITER scheduling points, which are the main source of repeated `__cmethods__`
-reads. The remaining reads (LOAD_ATTR + GET_ITER) are only 2 scheduling points,
-making the cascade depth 3 instead of N+1. This avoids the soundness question
-entirely, at the cost of a slightly larger (but constant) cascade.
+**Potential approach**: Only apply the improved merge for non-I/O accesses. Or
+investigate whether the regression is actually caused by a pre-existing bug that
+the conservative Write merge was masking.
 
-**Implementation**: In the Python trace handler, track the last-reported (object, key)
-per thread. When the next opcode reports a read on the same (object, key), use
-`process_first_access` (which already exists — `engine.rs:194`) to pin the read to the
-first position rather than creating a new scheduling point. Alternatively, simply skip
-the `report_and_wait` for the duplicate read entirely, since the first read already
-provides the wakeup insertion site.
+### Fix 9: Reduce Scheduling Points for Non-Conflicting Opcodes
 
-**Impact**: For the iterator pattern, reduces the cascade from O(N) scheduling points
-on `__cmethods__` to O(1). Combined with Fix 4 (batch FOR_ITER yields), the
-`for v in s.vars: v.value = tid` pattern drops from ~5 scheduling points per variable
-to ~2 (one for the collated container read, one for STORE_ATTR).
+**Idea**: Skip the scheduling point (don't call `report_and_wait`) for opcodes
+whose accesses are provably non-conflicting with any other thread's possible
+accesses. For example, LOAD_ATTR on a read-only shared object where no thread
+ever writes to it could be executed without a scheduling point.
+
+**Implementation**: This requires static analysis or dynamic tracking of which
+objects are written by any thread. The DPOR engine could maintain a
+"potentially-written objects" set, and the Python trace handler could check
+whether an opcode's target object is in this set before calling report_and_wait.
+
+**Soundness**: Safe if the "potentially-written" set is conservative (includes all
+objects that could be written). The challenge is building this set without running
+the full execution first.
+
+**Alternative**: A simpler version: skip scheduling points for opcodes on objects
+that are known immutable (e.g., reading attributes of a module or class that is
+never modified during the test). This is already partially done by the
+`_IMMUTABLE_TYPES` check.
 
 ## Priority Ordering
 
-1. **Fix 2** (collapse lock races): medium impact for lock tests specifically.
-2. **Fix 5** (collate same-key reads): high impact on cascade depth; unsound in
-   general (misses same-key TOCTOU). Consider combining with Fix 4 instead.
-3. **Fix 4** (batch iterators): medium impact for loop-heavy code.
-4. **Fix 3** (eliminate weak reads): lowest priority, small incremental improvement.
+1. **Fix 2 (sound variant)**: Collapse lock release race for same-lock critical
+   sections. Addresses all lock-related overcounting (3→2 for 2 threads).
+2. **Fix 8**: Investigate per-branch merge regression. If fixable, addresses
+   remaining overcounting in shared-vars tests.
+3. **Fix 7**: Extend merge function for WeakWrite + WeakRead. Small incremental.
+4. **Fix 9**: Reduce scheduling points. Larger effort, potentially high impact.
+
+## Analysis: Why Fixes 3+4+5 Had Zero Impact
+
+Fixes 3, 4, and 5 reduce the number and kind of access reports, but they had
+zero effect on trace counts because:
+
+1. **Read-read pairs don't generate wakeup insertions.** The only actual conflict
+   in the shared-vars tests is the Write-Write race on `_Slot.value`. The iterator
+   reads on `list.__cmethods__` are all Read (or WeakRead), which never conflict
+   with each other. No matter how many reads are reported, they never trigger
+   `insert_wakeup()`.
+
+2. **The overcounting came from the trace cache, not from access reports.** Fix 6
+   (trace cache merge) was the actual fix because it corrected a bug where the
+   SLEEP SET was incorrectly waking threads. The trace cache merged Read + WeakRead
+   into Write, making the engine think a sleeping thread *writes* to the container.
+   This caused false wakeups → false wakeup insertions → extra executions.
+
+3. **Fixes 3+4+5 are still worthwhile** as optimizations: they reduce the volume
+   of accesses the DPOR engine processes per execution, which speeds up each
+   execution even if the number of executions doesn't change.
 
 ## Implementation Notes
 
-Fixes 2–5 all reduce scheduling points or wakeup insertion sites on objects that
-genuinely participate in conflicts. This is where overcounting comes from: each
-scheduling point on a conflicting object is a potential wakeup insertion site, and each
-wakeup means another full execution.
+The remaining overcounting falls into two categories:
+
+1. **Lock-related**: 3 instead of 2 for all lock tests. Root cause is the
+   separate lock release race dimension (Root Cause 2). Fix 2 (sound variant)
+   would address this.
+
+2. **Multi-variable iterator**: 6 instead of 4 for 2 vars, 18 instead of 8
+   for 3 vars. Root cause is likely residual trace cache imprecision or
+   per-branch merge escalation (Fix 8). The pattern 9/3=3, 6/2=3 → the
+   N=1 case is fixed but N>1 still has an overcounting factor that grows.
+   For N=2, 6/4=1.5×; for N=3, 18/8=2.25×. This matches the baseline
+   pattern 9/4=2.25 → the fix reduced the factor but didn't eliminate it.
