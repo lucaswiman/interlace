@@ -19,8 +19,10 @@ try:
 except ImportError:
     pytest.skip("sqlalchemy not installed", allow_module_level=True)
 
+pytestmark = pytest.mark.integration
+
 _DB_NAME = os.environ.get("FRONTRUN_TEST_DB", "frontrun_test")
-_DB_URL = f"postgresql:///{_DB_NAME}"
+_DB_URL = os.environ.get("DATABASE_URL", f"postgresql:///{_DB_NAME}")
 
 
 @pytest.fixture(scope="module")
@@ -29,7 +31,7 @@ def _pg_available():
     try:
         import psycopg2
 
-        conn = psycopg2.connect(f"dbname={_DB_NAME}")
+        conn = psycopg2.connect(_DB_URL)
     except Exception:
         pytest.skip(f"Postgres not available at {_DB_NAME}")
 

@@ -37,6 +37,8 @@ except ImportError:
     pytest.skip("sqlalchemy not installed", allow_module_level=True)
 
 from frontrun.bytecode import explore_interleavings
+
+pytestmark = pytest.mark.integration
 from frontrun.common import Schedule, Step
 from frontrun.dpor import explore_dpor
 from frontrun.trace_markers import TraceExecutor

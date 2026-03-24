@@ -476,7 +476,7 @@ class TestFileIOTraceCount:
 # ---------------------------------------------------------------------------
 
 _DB_NAME = os.environ.get("FRONTRUN_TEST_DB", "frontrun_test")
-_DB_URL = f"postgresql:///{_DB_NAME}"
+_DB_URL = os.environ.get("DATABASE_URL", f"postgresql:///{_DB_NAME}")
 
 
 @pytest.fixture(scope="module")
@@ -488,9 +488,9 @@ def _pg_available():
         pytest.skip("psycopg2 not installed")
 
     try:
-        conn = psycopg2.connect(f"dbname={_DB_NAME}")
+        conn = psycopg2.connect(_DB_URL)
     except Exception:
-        pytest.skip(f"Postgres not available at {_DB_NAME}")
+        pytest.skip(f"Postgres not available at {_DB_URL}")
 
     from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
@@ -521,6 +521,7 @@ def pg_engine(_pg_available):
     eng.dispose()
 
 
+@pytest.mark.integration
 class TestPostgreSQLTraceCount:
     """PostgreSQL integration tests for Mazurkiewicz trace counting.
 

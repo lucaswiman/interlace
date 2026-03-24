@@ -41,6 +41,10 @@ def pytest_configure(config):
         "markers",
         "intentionally_leaves_dangling_threads: mark test as intentionally leaving threads alive (e.g., deadlock tests that cannot be cleaned up)",
     )
+    config.addinivalue_line(
+        "markers",
+        "integration: mark test as requiring external services (Redis or Postgres)",
+    )
 
 
 def _global_patch_active() -> bool:
