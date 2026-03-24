@@ -1,9 +1,15 @@
-"""Exact Mazurkiewicz trace counts for simple concurrent programs.
+"""Mazurkiewicz trace counts for simple concurrent programs.
 
 Verifies that DPOR explores exactly the theoretically predicted number of
 Mazurkiewicz traces for several families of concurrent programs.  Each test
 includes a proof that the predicted trace count is tight (both a lower and
 upper bound).
+
+Important: those proofs are stated against the **intended logical event
+model** of each program, not necessarily the full Python opcode-level event
+alphabet that the current implementation explores.  Where we know a case is
+exact even under the current Python event alphabet, the test says so
+explicitly.
 
 Categories:
 1. N threads mutating independent state  → 1 trace
@@ -117,7 +123,20 @@ class TestTwoThreadsSharedState:
     def test_two_threads_n_shared_vars(self, n: int) -> None:
         """Two threads writing to N shared variables → 2^N Mazurkiewicz traces.
 
-        Proof of tightness:
+        The proof below is for the intended logical event model where each
+        ``v.value = tid`` is treated as one write event on slot ``v``.
+
+        For ``n == 1``, this bound is also exact under the current Python
+        event alphabet: after the trace-cache merge fix, the only cross-thread
+        dependent pair is the two ``STORE_ATTR value`` writes to the shared
+        ``_Slot`` object, so the exact count is still 2.
+
+        For ``n > 1``, the current implementation still explores a finer
+        opcode-level alphabet than the proof below assumes, so the asserted
+        bound should be read as the semantic target rather than a proven bound
+        for the current instrumentation.
+
+        Proof of tightness for the logical event model:
 
         Let a_i denote thread A's write to variable v_i and b_i denote
         thread B's write to v_i, for i = 1, …, N.
@@ -152,7 +171,7 @@ class TestTwoThreadsSharedState:
             Two linearizations with different σ are inequivalent because
             they differ on the ordering of a dependent pair.
 
-        Exact count: 2^N.
+        Exact count in the logical event model: 2^N.
         """
 
         class State:
