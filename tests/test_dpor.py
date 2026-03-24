@@ -250,13 +250,9 @@ class TestWakeupTreeEngine:
     def test_independent_pairs_optimal(self) -> None:
         """Two independent pairs (T0/T1 on X, T2/T3 on Y).
 
-        The Mazurkiewicz-optimal count is 2*2=4 orderings.  Initial thread
-        diversity adds one extra round starting with T2 (since T2/T3 are
-        on a different object from T0/T1, T2 never appears as the first
-        scheduled thread in round 1).  Round 2 (T2-first) produces 5
-        additional executions for a total of 9.  This is a known trade-off:
-        initial thread diversity can cause redundant exploration when initial
-        actions are independent.
+        The Mazurkiewicz-optimal count is 2*2=4 orderings.  Since T0/T1
+        conflict on object 1 and T2/T3 conflict on object 2, but there
+        are no cross-pair conflicts, DPOR explores exactly 4 interleavings.
         """
         engine = PyDporEngine(4)
         thread_objects = [1, 1, 2, 2]
@@ -279,8 +275,7 @@ class TestWakeupTreeEngine:
             if not engine.next_execution():
                 break
 
-        # 4 from round 1 (T0/T1 initial) + 5 from round 2 (T2 initial)
-        assert exec_count == 9, f"Expected 9 orderings (4 + 5 from initial thread diversity), got {exec_count}"
+        assert exec_count == 4, f"Expected 4 orderings (2*2 for independent pairs), got {exec_count}"
 
     def test_read_read_no_backtrack(self) -> None:
         """Two threads reading the same object should produce exactly 1 execution."""
@@ -1207,12 +1202,13 @@ class TestDeadlockAsInvariantViolation:
         assert result.counterexample is not None
         assert result.counterexample[0] == 1, f"Counterexample should start with thread 1, got: {result.counterexample}"
 
-    def test_dining_philosophers_three_first_thread_diversity(self) -> None:
-        """Three dining philosophers — DPOR must explore all initial thread orderings.
+    def test_dining_philosophers_three_deadlock_without_diversity(self) -> None:
+        """Three dining philosophers — DPOR finds deadlock via race detection alone.
 
-        With initial thread diversity seeding, DPOR should find deadlocks
-        starting with each thread, not just thread 0.  Uses N=3 to keep
-        exploration tractable (~50 interleavings).
+        Standard DPOR race detection discovers the deadlock without needing
+        to artificially rotate the initial thread.  The initial lock acquires
+        are on different objects (independent), but later acquire attempts
+        create conflicts that DPOR explores.
         """
 
         num_philosophers = 3
@@ -1245,18 +1241,6 @@ class TestDeadlockAsInvariantViolation:
         assert not result.property_holds, "Dining philosophers deadlock should be found"
         assert result.explanation is not None
         assert "deadlock" in result.explanation.lower()
-
-        # DPOR should explore orderings where each thread starts first.
-        # Without initial thread diversity seeding, all traces start with
-        # thread 0 because the initial lock acquires on different locks
-        # are independent (no race detected at position 0).
-        first_threads = {schedule[0] for _, schedule in result.failures if schedule}
-        for tid in range(num_philosophers):
-            assert tid in first_threads, (
-                f"Thread {tid} never started first in any explored deadlock trace. "
-                f"First threads seen: {sorted(first_threads)}. "
-                f"DPOR should explore interleavings where each thread can go first."
-            )
 
     def test_dining_philosophers_three_with_shared_write(self) -> None:
         """Three dining philosophers with a shared write inside the critical section.
