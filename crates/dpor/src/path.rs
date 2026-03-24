@@ -523,9 +523,7 @@ impl Path {
                 entry
                     .entry(*obj_id)
                     .and_modify(|existing| {
-                        if *existing != *kind {
-                            *existing = AccessKind::Write;
-                        }
+                        *existing = existing.merge(*kind);
                     })
                     .or_insert(*kind);
             }

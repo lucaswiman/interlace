@@ -29,6 +29,32 @@ pub enum AccessKind {
     WeakRead,
 }
 
+impl AccessKind {
+    /// Merge two access kinds into a single kind whose conflict set is a
+    /// superset of both inputs' conflict sets.  Used by trace caching and
+    /// per-branch access recording when the same object is accessed with
+    /// different kinds.
+    ///
+    /// The key improvement over the naive "if different, upgrade to Write"
+    /// is that `Read` subsumes `WeakRead`: Read conflicts with {Write,
+    /// WeakWrite}, WeakRead conflicts with {Write} — so Read already
+    /// covers WeakRead's conflicts.  Upgrading Read+WeakRead to Write
+    /// would make the thread appear to *write* the object, causing
+    /// spurious sleep-set wakeups when another thread reads it.
+    pub fn merge(self, other: Self) -> Self {
+        if self == other {
+            return self;
+        }
+        match (self, other) {
+            // Read subsumes WeakRead (Read ⊇ WeakRead in conflict sets)
+            (AccessKind::Read, AccessKind::WeakRead)
+            | (AccessKind::WeakRead, AccessKind::Read) => AccessKind::Read,
+            // Write subsumes everything
+            _ => AccessKind::Write,
+        }
+    }
+}
+
 /// Records an access to a shared object for DPOR dependency detection.
 /// The `path_id` identifies the scheduling point (position in the execution
 /// sequence E), used to determine where to insert into wakeup trees.
