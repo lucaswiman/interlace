@@ -6,6 +6,9 @@ All releases: https://github.com/lucaswiman/frontrun/releases
 Unreleased
 ----------
 
+0.3.0 (2026-03-23)
+-------------------
+
 * **Interactive HTML report** — ``--frontrun-report=path.html`` pytest flag
   generates a self-contained HTML file visualising the full DPOR exploration:
   SVG timelines, clickable switch points, side-by-side race views with source
@@ -16,6 +19,16 @@ Unreleased
   doubled wakeup tree insertions for every attribute race with negligible
   benefit (only catches the rare ``self.x`` vs ``self.__dict__['x']`` cross-path).
   Pass ``track_dunder_dict_accesses=True`` to restore the old behaviour.
+
+* **Improved Free-threading support** — There were some bugs on freethreaded python
+  (3.14t) which lead to an explosion of spurious conflict points, where the scheduler
+  was depending on GIL-synchronization to avoid writing an incorrect conflict index.
+
+* **Bugfixes**:
+
+  * Fixed combinatorial explosion of DPOR traces on free-threaded python.
+  * Fixed bug where all traces had to start with the first thread as the first operation.
+    All distinct Michalewicz traces should now be explored.
 
 0.2.0 (2026-03-20)
 -------------------
