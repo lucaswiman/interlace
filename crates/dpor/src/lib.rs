@@ -170,12 +170,6 @@ impl PyDporEngine {
         self.inner.num_threads()
     }
 
-    /// Mark all initial threads except 0 as explored, preventing rotation.
-    /// Use when all threads are symmetric (same code).
-    fn skip_rotation(&mut self) {
-        self.inner.skip_rotation();
-    }
-
     /// Return pending races detected during the current execution.
     /// Each race is (prev_path_id, current_path_id, thread_id, race_object).
     /// Call before next_execution() which consumes them.

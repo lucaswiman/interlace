@@ -2869,7 +2869,6 @@ def explore_dpor(
     lock_timeout: int | None = None,
     trace_packages: list[str] | None = None,
     track_dunder_dict_accesses: bool = False,
-    symmetric_threads: bool = False,
 ) -> InterleavingResult:
     """Systematically explore interleavings using DPOR.
 
@@ -2926,12 +2925,6 @@ def explore_dpor(
             uses ``self.__dict__['x'] = v``, but doubles wakeup tree
             insertions and can cause combinatorial explosion.  Default
             False.
-        symmetric_threads: If True, skip initial thread rotation.  Use
-            when all threads execute the same code on the same shared
-            objects (differing only in closed-over identity values like
-            thread IDs).  Rotation is redundant for symmetric threads
-            since swapping thread labels produces the same Mazurkiewicz
-            traces.  Default False.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample found.
@@ -2955,14 +2948,6 @@ def explore_dpor(
         max_branches=max_branches,
         max_executions=me,
     )
-
-    # Skip initial thread rotation when threads are declared symmetric.
-    # Symmetric threads execute the same code on the same shared objects
-    # (differing only in closed-over identity values like thread IDs).
-    # Rotation would duplicate exploration since swapping thread labels
-    # produces the same Mazurkiewicz traces.
-    if symmetric_threads:
-        engine.skip_rotation()
 
     result = InterleavingResult(property_holds=True)
     stable_ids = StableObjectIds()

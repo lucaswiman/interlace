@@ -388,15 +388,6 @@ impl DporEngine {
         self.path.depth()
     }
 
-    /// Mark all initial threads except thread 0 as already explored,
-    /// preventing initial thread rotation.  Use when all threads are
-    /// symmetric (execute the same code), making rotation redundant.
-    pub fn skip_rotation(&mut self) {
-        for i in 1..self.explored_initial_threads.len() {
-            self.explored_initial_threads[i] = true;
-        }
-    }
-
     pub fn num_threads(&self) -> usize {
         self.num_threads
     }

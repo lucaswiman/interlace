@@ -3,19 +3,33 @@
 ## Problem Statement
 
 The exact Mazurkiewicz trace count tests (`test_exact_mazurkiewicz_trace_count.py`)
-reveal that the DPOR implementation explores significantly more traces than the
-theoretical minimum for several test families:
+reveal that the DPOR implementation explores more traces than the theoretical
+minimum for several test families. After removing initial thread rotation (which
+was redundant — see "Resolved" section), the remaining overcounting is:
 
 | Test | Expected | Actual | Factor |
 |------|----------|--------|--------|
-| 2 threads, 1 shared var (direct `s.slot.value = tid`) | 2 | 4 | 2× |
-| 2 threads, 1 shared var (loop `for v in s.vars`) | 2 | 6 | 3× |
-| 2 threads, 2 shared vars (loop) | 4 | 18 | 4.5× |
-| 2 threads, 3 shared vars (loop) | 8 | 54 | 6.75× |
-| 2 threads, lock, N=2 | 2 | 6 | 3× |
-| 2 threads, lock over 1 var | 2 | ? | >2× |
+| 2 threads, 1 shared var (loop `for v in s.vars`) | 2 | 3 | 1.5× |
+| 2 threads, 2 shared vars (loop) | 4 | 9 | 2.25× |
+| 2 threads, 3 shared vars (loop) | 8 | 27 | 3.375× |
+| 2 threads, lock, N=2 | 2 | 3 | 1.5× |
+| 2 threads, lock over 1 var | 2 | 3 | 1.5× |
+| N=3 threads, lock | 6 | ? | >2× |
 
 This document analyzes the root causes and proposes fixes.
+
+## Resolved: Initial Thread Rotation (removed in #149)
+
+The DPOR engine previously used **initial thread rotation**: after exhausting the
+exploration tree starting with thread 0, it re-explored starting with thread 1,
+then thread 2, etc. This was a workaround for a bug where DPOR only explored traces
+starting with thread 0. The fix went too far — it added N−1 extra exploration rounds,
+roughly multiplying the total executions by N.
+
+This was removed entirely in commit 3fcb62c (#149). Standard DPOR race detection
+already handles all cases: when initial operations conflict, DPOR detects the race
+at position 0 and inserts the alternative thread into the wakeup tree. When initial
+operations are independent, swapping them produces a Mazurkiewicz-equivalent trace.
 
 ## Root Cause 1: Multi-Opcode Decomposition of "Single" Operations
 
@@ -76,34 +90,7 @@ That's **4 scheduling points** before the lock is even acquired (LOAD_ATTR, LOAD
 STORE_ATTR). Lock release via `CALL __exit__` adds 1 more. Total: **~7 scheduling
 points** per thread for a single lock-protected write.
 
-## Root Cause 2: Initial Thread Rotation
-
-The DPOR engine uses **initial thread rotation**: after exhausting the exploration tree
-starting with thread 0, it re-explores starting with thread 1, then thread 2, etc.
-This is needed when thread identity matters (different threads run different code).
-
-However, when all threads execute identical code, rotation produces duplicate
-Mazurkiewicz traces. For the simple `slot.value = tid` case:
-
-- Round 1 (T0 first): explores "T0 then T1" and "T1's write before T0's write" → 2 traces
-- Round 2 (T1 first): explores "T1 then T0" and "T0's write before T1's write" → 2 traces
-
-Executions from round 1 and round 2 are pairwise equivalent as Mazurkiewicz traces.
-
-The rotation skip logic (`explored_initial_threads`) only prunes T1 if T1 was actually
-scheduled at **position 0** during round 1. But when T0 has multiple opcodes before its
-first write, the write-write race inserts T1 at T0's write position (e.g., position 1),
-not at position 0. So T1 is never seen at position 0 in round 1, and the rotation
-proceeds.
-
-### Quantification
-
-For 2 threads, rotation always doubles the count (2× factor).
-
-For N threads, rotation multiplies by up to N× (one round per initial thread that
-wasn't already explored at position 0).
-
-## Root Cause 3: Lock Release/Acquire Races via `io_vv`
+## Root Cause 2: Lock Release/Acquire Races via `io_vv`
 
 Lock operations use `io_vv` (which excludes lock-based happens-before edges) to detect
 races. This is intentional: it ensures TOCTOU races across lock boundaries are caught.
@@ -114,32 +101,14 @@ However, it creates **two independent race dimensions** for each lock:
 
 Both use different virtual object IDs (XOR with `LOCK_OBJECT_XOR` and
 `LOCK_RELEASE_XOR` respectively). Each creates a write-write race between threads.
-Combined with the multiple pre-lock scheduling points and rotation, this produces:
+Combined with the multiple pre-lock scheduling points, this produces:
 
-- N=2: 6 traces (expected 2) — 3× overcounting
-- N=3: would be much larger (combinatorial explosion)
+- N=2: 3 traces (expected 2) — 1.5× overcounting
+- N=3: much larger (combinatorial explosion)
 
 ## Proposed Fixes
 
-### Fix 1: Smarter Initial Thread Rotation (Easy, High Impact)
-
-**Idea**: Skip rotation when all threads execute the same function. If `threads` is a
-list of closures over the same function (only differing in closed-over `tid`), the
-threads are symmetric and rotation is redundant.
-
-**Implementation**: In `explore_dpor()`, detect when all thread callables share the
-same `__code__` object. If so, skip rotation entirely by either:
-- Setting `max_initial_thread = 0` in the engine
-- Or marking all threads except 0 as pre-explored
-
-**Impact**: Eliminates the 2× factor for symmetric programs. Would fix the
-`TwoThreads_direct` test from 4 → 2.
-
-**Caveat**: Does not help when threads run different code but the rotation is still
-redundant (e.g., thread behavior depends on closed-over data, but the trace structure
-is identical up to relabeling).
-
-### Fix 2: Coalesce Non-Conflicting Opcodes Into Atomic Groups (Medium, High Impact)
+### Fix 1: Coalesce Non-Conflicting Opcodes Into Atomic Groups (Medium, High Impact)
 
 **Idea**: When consecutive opcodes from the same thread access different objects and
 none of those accesses conflict with operations from other threads, treat them as a
@@ -170,7 +139,7 @@ operations from other threads at that point. A read can only be skipped if no ot
 thread has written to the same object. Since we're checking at execution time (not
 statically), this is a dynamic optimization that preserves correctness.
 
-### Fix 3: Collapse Lock Acquire/Release Into Single Race Point (Medium, Medium Impact)
+### Fix 2: Collapse Lock Acquire/Release Into Single Race Point (Medium, Medium Impact)
 
 **Idea**: Instead of creating two independent race objects for lock acquire and lock
 release, create only ONE virtual race object per lock. The lock acquire and release from
@@ -199,7 +168,7 @@ timing of release matters independently of acquire. Need to analyze whether any 
 bugs require exploring different release orderings that can't be reached through
 different acquire orderings.
 
-### Fix 4: Eliminate Weak Read on LOAD_ATTR (Easy, Low-Medium Impact)
+### Fix 3: Eliminate Weak Read on LOAD_ATTR (Easy, Low-Medium Impact)
 
 **Idea**: When `LOAD_ATTR` loads an attribute value that is a mutable object, it
 currently reports a `weak_read` on `(returned_obj, "__cmethods__")`. For the common
@@ -222,7 +191,7 @@ with only Python-level attribute access.
 **Impact**: Removes ~1 spurious access per LOAD_ATTR. Small but compounds with other
 fixes.
 
-### Fix 5: Batch Iterator Operations (Medium, Medium Impact)
+### Fix 4: Batch Iterator Operations (Medium, Medium Impact)
 
 **Idea**: The `GET_ITER` → `FOR_ITER` → `FOR_ITER(exhausted)` sequence for iterating a
 list creates 3+ scheduling points for what is conceptually "iterate over the list."
@@ -239,17 +208,15 @@ would reduce from ~5 scheduling points per variable to ~2.
 
 ## Priority Ordering
 
-1. **Fix 2** (coalesce non-conflicting opcodes): highest impact, addresses all test
+1. **Fix 1** (coalesce non-conflicting opcodes): highest impact, addresses all test
    families. Medium complexity but conceptually clean.
-2. **Fix 1** (smarter rotation): easy to implement, immediate 2× improvement for
-   symmetric programs.
-3. **Fix 3** (collapse lock races): medium impact for lock tests specifically.
-4. **Fix 5** (batch iterators): medium impact for loop-heavy code.
-5. **Fix 4** (eliminate weak reads): lowest priority, small incremental improvement.
+2. **Fix 2** (collapse lock races): medium impact for lock tests specifically.
+3. **Fix 4** (batch iterators): medium impact for loop-heavy code.
+4. **Fix 3** (eliminate weak reads): lowest priority, small incremental improvement.
 
 ## Implementation Notes
 
-Fix 2 deserves more detail since it's the most impactful. The key insight is that an
+Fix 1 deserves more detail since it's the most impactful. The key insight is that an
 opcode that performs only reads on objects that no other thread has written to is
 *guaranteed* to commute with all concurrent operations. At that point in the execution,
 the DPOR engine has already checked for races (via `process_access`) and found none.
@@ -264,39 +231,3 @@ Note: even if the read doesn't create a race in THIS execution, DPOR might need 
 scheduling point in future executions when different thread interleavings are explored.
 The correct approach is to check whether the read could POSSIBLY conflict with any
 concurrent operation — which is exactly what `process_access` already does.
-
-## Implemented: `symmetric_threads` Parameter
-
-Added a `symmetric_threads: bool = False` parameter to `explore_dpor()` and a
-`skip_rotation()` method on the Rust `DporEngine`. When enabled, the engine marks
-all initial threads except thread 0 as already explored, preventing redundant
-rotation.
-
-This is an opt-in parameter rather than automatic detection because closures with
-the same `__code__` can access different objects (e.g., dining philosophers where
-each philosopher accesses different fork pairs). The caller must assert that threads
-are truly symmetric — they execute the same code on the same shared objects,
-differing only in closed-over identity values like thread IDs.
-
-**Changes:**
-- `crates/dpor/src/engine.rs`: Added `DporEngine::skip_rotation()` method
-- `crates/dpor/src/lib.rs`: Exposed `skip_rotation()` to Python via PyO3
-- `frontrun/dpor.py`: Added `symmetric_threads` parameter to `explore_dpor()`
-- `tests/test_exact_mazurkiewicz_trace_count.py`: Added `symmetric_threads=True`
-  to test families 2, 3, 4, and 5 (same-file, locked-file)
-
-**Results:**
-
-| Test | Expected | Before | After |
-|------|----------|--------|-------|
-| 2 threads, 1 shared var (loop) | 2 | 6 | 3 |
-| 2 threads, 2 shared vars (loop) | 4 | 18 | 9 |
-| 2 threads, 3 shared vars (loop) | 8 | 54 | 27 |
-| 2 threads, lock N=1 | 1 | 1 | 1 |
-| 2 threads, lock N=2 | 2 | 6 | 3 |
-| 2 threads, lock over 1 var | 2 | ? | 3 |
-| 2 threads, same file | 2 | 2 | 2 |
-| 2 threads, locked file N=1 | 1 | 1 | 1 |
-
-The fix eliminates the N× rotation factor for symmetric programs. The remaining
-overcounting is due to multi-opcode decomposition (Root Causes 1 and 3).
