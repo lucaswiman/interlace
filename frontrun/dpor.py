@@ -474,7 +474,7 @@ class DporScheduler:
                     current_pending = self._pending_io_by_thread.get(thread_id)
                     if not current_pending:
                         return
-                    for other_thread_id, pending_io in self._pending_io_by_thread.items():
+                    for other_thread_id, pending_io in list(self._pending_io_by_thread.items()):
                         if other_thread_id == thread_id or not pending_io:
                             continue
                         # Another thread reached a real I/O boundary, so any
