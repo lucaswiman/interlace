@@ -201,8 +201,10 @@ class TestSchedulingCoarsening:
         assert not result.property_holds, "Deadlock should be found"
         # The exploration should complete well under the 2000 cap.
         # On both 3.12 and 3.14, this produces exactly 21 interleavings.
-        assert result.num_explored <= 50, (
-            f"Expected <=50 interleavings for 3-philosopher pure lock example, "
+        # Initial thread diversity adds two extra rounds (3 threads), roughly
+        # tripling the count from ~21 to ~63.
+        assert result.num_explored <= 100, (
+            f"Expected <=100 interleavings for 3-philosopher pure lock example, "
             f"got {result.num_explored}. Likely a scheduling regression "
             f"(e.g. unhandled opcode inflating the DPOR search tree)."
         )
