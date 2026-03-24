@@ -176,6 +176,7 @@ class TestTwoThreadsSharedState:
             stop_on_first=False,
             detect_io=False,
             total_timeout=60.0,
+            symmetric_threads=True,
         )
 
         assert result.num_explored == expected, (
@@ -252,6 +253,7 @@ class TestNThreadsWithLock:
             stop_on_first=False,
             detect_io=False,
             total_timeout=60.0,
+            symmetric_threads=True,
         )
 
         assert result.num_explored == expected, (
@@ -317,6 +319,7 @@ class TestTwoThreadsSharedStateWithLock:
             stop_on_first=False,
             detect_io=False,
             total_timeout=60.0,
+            symmetric_threads=True,
         )
 
         assert result.num_explored == 2, (
@@ -416,6 +419,7 @@ class TestFileIOTraceCount:
             stop_on_first=False,
             detect_io=True,
             total_timeout=60.0,
+            symmetric_threads=True,
         )
 
         assert result.num_explored == 2, (
@@ -464,6 +468,7 @@ class TestFileIOTraceCount:
             stop_on_first=False,
             detect_io=True,
             total_timeout=60.0,
+            symmetric_threads=True,
         )
 
         assert result.num_explored == expected, (
@@ -587,6 +592,7 @@ class TestPostgreSQLTraceCount:
             preemption_bound=None,
             stop_on_first=False,
             warn_nondeterministic_sql=False,
+            symmetric_threads=True,
         )
 
         assert result.num_explored == 2, (
@@ -650,6 +656,7 @@ class TestPostgreSQLTraceCount:
             preemption_bound=None,
             stop_on_first=False,
             warn_nondeterministic_sql=False,
+            symmetric_threads=True,
         )
 
         assert result.num_explored == expected, (
@@ -775,6 +782,7 @@ class TestPostgreSQLTraceCount:
             preemption_bound=None,
             stop_on_first=False,
             warn_nondeterministic_sql=False,
+            symmetric_threads=True,
         )
 
         assert result.num_explored == expected, (
