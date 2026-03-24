@@ -589,8 +589,7 @@ class TestPostgreSQLTraceCount:
         )
 
         assert result.num_explored == 2, (
-            f"Expected 2 Mazurkiewicz traces for SELECT FOR UPDATE on same row, "
-            f"got {result.num_explored}"
+            f"Expected 2 Mazurkiewicz traces for SELECT FOR UPDATE on same row, got {result.num_explored}"
         )
 
     @pytest.mark.parametrize("n", [2, 3, 4])
