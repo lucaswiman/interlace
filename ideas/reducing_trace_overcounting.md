@@ -108,51 +108,6 @@ Combined with the multiple pre-lock scheduling points, this produces:
 
 ## Proposed Fixes
 
-### Fix 1: Skip Scheduling Points on Non-Conflicting Reads — UNSOUND in General
-
-**Original idea**: After executing a non-conflicting opcode (pure read that creates no
-races with prior accesses), skip the scheduler yield and continue executing the same
-thread. Only yield when an opcode actually creates or could create a conflict.
-
-**Why this is unsound**: A read that has no conflict with *prior* accesses in the current
-execution may still race with a *later* write from another thread. DPOR detects such
-races when the later write's `process_access` finds the earlier read — but only if the
-read was recorded as a scheduling point. If the read was skipped, the write has no
-dependent prior access to race against, and the interleaving where the write precedes the
-read is never explored.
-
-Concrete example:
-```python
-def thread1():
-    shared.x = 1
-    _ = shared.y         # READ(y) — no prior write to y
-
-def thread2():
-    if shared.x == 0:
-        shared.y = 99    # WRITE(y) — conditional on interleaving
-```
-In a T1-first execution, `shared.y` is never written. But DPOR discovers the race on `x`
-and explores T2-first, where T2 *does* write `y`. In that execution, T1's READ(y) follows
-T2's WRITE(y), so it has a prior write and yields normally — the race on `y` is detected.
-So far so good. But DPOR then needs to explore the interleaving where T1 READ(y) happens
-*before* T2 WRITE(y). It inserts a wakeup at T1 READ(y)'s position. In the re-exploration
-of that prefix, T2's WRITE(y) hasn't happened yet, so READ(y) again sees no prior write.
-Under Fix 1, it would be skipped — making the wakeup impossible to honor.
-
-**Sound variant — never-written objects**: Skipping scheduling points on reads of objects
-that have never been written in *any* explored execution is technically sound: if no
-WRITE(Y) exists in any trace, READ(Y) can never race with anything, so DPOR would never
-insert a wakeup at that position anyway. The scheduling point is dead weight.
-
-However, this optimization **does not reduce overcounting** — precisely because DPOR
-never inserts wakeups at those points, they don't generate additional traces. The overhead
-is limited to the per-access cost of `process_access` + yield (which immediately returns
-the same thread), negligible compared to the cost of full execution replays.
-
-**Conclusion**: Fix 1 as originally proposed is unsound. The sound variant (never-written
-objects) is correct but doesn't address overcounting. The real overcounting comes from
-excess scheduling points on objects that *do* have conflicts — addressed by Fixes 2–4.
-
 ### Fix 2: Collapse Lock Acquire/Release Into Single Race Point (Medium, Medium Impact)
 
 **Idea**: Instead of creating two independent race objects for lock acquire and lock
@@ -220,17 +175,99 @@ complete or a write occurs inside the loop body.
 (for the read) + body scheduling points. For `for v in s.vars: v.value = tid`, this
 would reduce from ~5 scheduling points per variable to ~2.
 
+**Caveat — pure-read loops**: When the loop body has no writes (no scheduling points
+inside the body), batching removes ALL mid-iteration scheduling points. If another
+thread writes to the iterated container between iterations, the interleaving where
+some elements are read before the write and others after is not explored. However,
+this interleaving is a distinct Mazurkiewicz class only for the elements whose read
+ordering relative to the write differs — and the `__cmethods__` race at GET_ITER
+still distinguishes "all reads before write" from "write before all reads." In
+practice, the test cases always have writes in the loop body (STORE_ATTR), which
+preserves mid-iteration scheduling points.
+
+### Fix 5: Collate Repeated Reads of the Same Key (Medium, High Impact)
+
+**Idea**: When consecutive scheduling points by the same thread include reads of the
+exact same object_id (same Python object + same key), record all of them at the
+**first** read's path position rather than creating separate wakeup insertion sites
+for each. Different keys remain at their own scheduling points.
+
+**Motivation — cascade elimination**: When an object key is involved in a conflict,
+DPOR inserts wakeups at each scheduling point where it's read. With N reads of the
+same key, `process_access` cascades backward — the write races with the last read,
+triggering re-exploration, where it races with the next-to-last, etc. This cascade
+produces up to N+1 executions. Collation reduces this to 2 (write before all reads,
+or after all reads).
+
+**Target pattern**: The `__cmethods__` key on container objects is read at LOAD_ATTR
+(as WKREAD), GET_ITER, every FOR_ITER, and FOR_ITER(exhausted). For 1 variable, that's
+4 reads of `(list, "__cmethods__")` across 4 scheduling points. Collation merges them
+to 1. The per-element reads `(list, "0")`, `(list, "1")` are different keys and stay
+at their own positions.
+
+**Soundness**: Collating reads of the same key is **unsound in general** — it misses
+the Mazurkiewicz class where a write interposes between two reads:
+
+| Class | Ordering | Thread A observes |
+|-------|----------|-------------------|
+| 1 | WRITE, READ₁, READ₂ | new, new |
+| 2 | READ₁, WRITE, READ₂ | old, new (missed!) |
+| 3 | READ₁, READ₂, WRITE | old, old |
+
+Collation keeps classes 1 and 3 but eliminates class 2.
+
+**Can we scope collation to be sound?** The TOCTOU scenario requires user code that
+reads the same (object, key) at two scheduling points — e.g., `x = s.obj; y = s.obj`.
+However, the intervening STORE_FAST creates a scheduling point gap. If "adjacent" is
+defined strictly as "no intervening scheduling point (even a non-reporting one)," then
+user-code double-reads are never collated. The repeated `__cmethods__` reads across
+GET_ITER → FOR_ITER ARE truly adjacent (no intervening opcode), so they would be
+collated.
+
+But this adjacency definition is fragile — it depends on CPython bytecode details and
+could break across Python versions. A more robust approach:
+
+**Scope to instrumentation-generated reads only**: Only collate `__cmethods__` reads
+that are generated by the iterator instrumentation (GET_ITER, FOR_ITER handlers), not
+arbitrary same-key reads. This is a whitelist approach: the trace handler knows which
+reads are instrumentation artifacts vs user-visible operations. Since `__cmethods__`
+is a synthetic key that never appears in user code, any read of it is by definition
+an instrumentation artifact.
+
+This makes collation **sound for all user-observable behavior**: the missed TOCTOU
+class (2 above) can only occur on `__cmethods__`, which is invisible to user code.
+The program cannot branch on whether a `__cmethods__` read sees old or new, because
+the program never reads `__cmethods__` directly.
+
+**Alternative — just use Fix 4**: Fix 4 (batch iterators) already eliminates the
+FOR_ITER scheduling points, which are the main source of repeated `__cmethods__`
+reads. The remaining reads (LOAD_ATTR + GET_ITER) are only 2 scheduling points,
+making the cascade depth 3 instead of N+1. This avoids the soundness question
+entirely, at the cost of a slightly larger (but constant) cascade.
+
+**Implementation**: In the Python trace handler, track the last-reported (object, key)
+per thread. When the next opcode reports a read on the same (object, key), use
+`process_first_access` (which already exists — `engine.rs:194`) to pin the read to the
+first position rather than creating a new scheduling point. Alternatively, simply skip
+the `report_and_wait` for the duplicate read entirely, since the first read already
+provides the wakeup insertion site.
+
+**Impact**: For the iterator pattern, reduces the cascade from O(N) scheduling points
+on `__cmethods__` to O(1). Combined with Fix 4 (batch FOR_ITER yields), the
+`for v in s.vars: v.value = tid` pattern drops from ~5 scheduling points per variable
+to ~2 (one for the collated container read, one for STORE_ATTR).
+
 ## Priority Ordering
 
 1. **Fix 2** (collapse lock races): medium impact for lock tests specifically.
-2. **Fix 4** (batch iterators): medium impact for loop-heavy code.
-3. **Fix 3** (eliminate weak reads): lowest priority, small incremental improvement.
-4. ~~**Fix 1**~~: unsound in general; sound variant doesn't reduce overcounting. See above.
+2. **Fix 5** (collate same-key reads): high impact on cascade depth; unsound in
+   general (misses same-key TOCTOU). Consider combining with Fix 4 instead.
+3. **Fix 4** (batch iterators): medium impact for loop-heavy code.
+4. **Fix 3** (eliminate weak reads): lowest priority, small incremental improvement.
 
 ## Implementation Notes
 
-The remaining fixes (2–4) all reduce scheduling points on objects that genuinely
-participate in conflicts. This is where overcounting comes from: each scheduling point on
-a conflicting object is a potential wakeup insertion site, and each wakeup means another
-full execution. Non-conflicting reads (Fix 1's target) never receive wakeups regardless,
-so they don't multiply the execution count — only the per-execution cost.
+Fixes 2–5 all reduce scheduling points or wakeup insertion sites on objects that
+genuinely participate in conflicts. This is where overcounting comes from: each
+scheduling point on a conflicting object is a potential wakeup insertion site, and each
+wakeup means another full execution.
