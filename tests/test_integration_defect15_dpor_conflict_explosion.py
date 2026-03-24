@@ -19,6 +19,8 @@ except ImportError:
     pytest.skip("psycopg2 not installed", allow_module_level=True)
 
 from frontrun.cli import require_active
+
+pytestmark = pytest.mark.integration
 from frontrun.dpor import explore_dpor
 
 _DB_NAME = os.environ.get("FRONTRUN_TEST_DB", "frontrun_test")

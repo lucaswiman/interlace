@@ -39,6 +39,8 @@ except ImportError:
 
 from frontrun.dpor import explore_dpor
 
+pytestmark = pytest.mark.integration
+
 # Use a non-default port to avoid colliding with a user's Redis.
 _REDIS_PORT = int(os.environ.get("REDIS_PORT", "16399"))
 

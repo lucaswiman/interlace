@@ -19,6 +19,8 @@ try:
 except ImportError:
     pytest.skip("sqlalchemy not installed", allow_module_level=True)
 
+pytestmark = pytest.mark.integration
+
 _DB_NAME = os.environ.get("FRONTRUN_TEST_DB", "frontrun_test")
 _DB_URL = f"postgresql:///{_DB_NAME}"
 

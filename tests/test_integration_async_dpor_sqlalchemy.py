@@ -23,6 +23,8 @@ try:
 except ImportError:
     pytest.skip("sqlalchemy[asyncio] not installed", allow_module_level=True)
 
+pytestmark = pytest.mark.integration
+
 try:
     import asyncpg  # noqa: F401
 except ImportError:

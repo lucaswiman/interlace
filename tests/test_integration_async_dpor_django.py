@@ -24,6 +24,8 @@ try:
 except ImportError:
     pytest.skip("django not installed", allow_module_level=True)
 
+pytestmark = pytest.mark.integration
+
 try:
     import psycopg2  # noqa: F401
 except ImportError:

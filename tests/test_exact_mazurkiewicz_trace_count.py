@@ -521,6 +521,7 @@ def pg_engine(_pg_available):
     eng.dispose()
 
 
+@pytest.mark.integration
 class TestPostgreSQLTraceCount:
     """PostgreSQL integration tests for Mazurkiewicz trace counting.
 

@@ -42,6 +42,8 @@ except ImportError:
 
 from frontrun.dpor import explore_dpor
 
+pytestmark = pytest.mark.integration
+
 _DB_NAME = os.environ.get("FRONTRUN_TEST_DB", "frontrun_test")
 _DSN = f"dbname={_DB_NAME}"
 

@@ -23,6 +23,8 @@ except ImportError:
 
 from frontrun.async_dpor import await_point, explore_async_dpor
 
+pytestmark = pytest.mark.integration
+
 _DB_NAME = os.environ.get("FRONTRUN_TEST_DB", "frontrun_test")
 _DSN = os.environ.get("DATABASE_URL", f"postgresql:///{_DB_NAME}")
 
