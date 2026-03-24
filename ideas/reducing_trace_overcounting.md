@@ -108,36 +108,50 @@ Combined with the multiple pre-lock scheduling points, this produces:
 
 ## Proposed Fixes
 
-### Fix 1: Coalesce Non-Conflicting Opcodes Into Atomic Groups (Medium, High Impact)
+### Fix 1: Skip Scheduling Points on Non-Conflicting Reads — UNSOUND in General
 
-**Idea**: When consecutive opcodes from the same thread access different objects and
-none of those accesses conflict with operations from other threads, treat them as a
-single atomic scheduling point.
+**Original idea**: After executing a non-conflicting opcode (pure read that creates no
+races with prior accesses), skip the scheduler yield and continue executing the same
+thread. Only yield when an opcode actually creates or could create a conflict.
 
-**Concrete approach**: Identify "read-only preamble" patterns:
-- `LOAD_ATTR` → `STORE_ATTR`: The LOAD_ATTR reads object X, STORE_ATTR writes object
-  Y. If X ≠ Y (always true for `s.slot.value = v`), the LOAD_ATTR commutes with
-  everything the STORE_ATTR conflicts with. So the pair can be a single scheduling point.
-- `LOAD_ATTR` → `LOAD_SPECIAL` → `LOAD_SPECIAL` → `CALL` (lock acquire pattern):
-  The three pre-acquire reads don't conflict with anything. They could be a single
-  scheduling point with the CALL.
+**Why this is unsound**: A read that has no conflict with *prior* accesses in the current
+execution may still race with a *later* write from another thread. DPOR detects such
+races when the later write's `process_access` finds the earlier read — but only if the
+read was recorded as a scheduling point. If the read was skipped, the write has no
+dependent prior access to race against, and the interleaving where the write precedes the
+read is never explored.
 
-**Implementation**: After executing a non-conflicting opcode (pure read that creates no
-races), skip the scheduler yield and continue executing the same thread. Only yield when
-an opcode actually creates or could create a conflict.
+Concrete example:
+```python
+def thread1():
+    shared.x = 1
+    _ = shared.y         # READ(y) — no prior write to y
 
-Specifically, modify `_process_opcode` to return a flag indicating whether the access
-was potentially conflicting. If not, the scheduler can skip the yield and continue the
-current thread without creating a new scheduling point.
+def thread2():
+    if shared.x == 0:
+        shared.y = 99    # WRITE(y) — conditional on interleaving
+```
+In a T1-first execution, `shared.y` is never written. But DPOR discovers the race on `x`
+and explores T2-first, where T2 *does* write `y`. In that execution, T1's READ(y) follows
+T2's WRITE(y), so it has a prior write and yields normally — the race on `y` is detected.
+So far so good. But DPOR then needs to explore the interleaving where T1 READ(y) happens
+*before* T2 WRITE(y). It inserts a wakeup at T1 READ(y)'s position. In the re-exploration
+of that prefix, T2's WRITE(y) hasn't happened yet, so READ(y) again sees no prior write.
+Under Fix 1, it would be skipped — making the wakeup impossible to honor.
 
-**Impact**: Would dramatically reduce scheduling points. For `s.slot.value = tid`:
-from 2 scheduling points to 1. For `with s.lock: s.shared.value = tid`: from ~7 to ~3
-(ACQ, WRITE, REL).
+**Sound variant — never-written objects**: Skipping scheduling points on reads of objects
+that have never been written in *any* explored execution is technically sound: if no
+WRITE(Y) exists in any trace, READ(Y) can never race with anything, so DPOR would never
+insert a wakeup at that position anyway. The scheduling point is dead weight.
 
-**Risk**: This is sound only if the skipped opcodes truly commute with all possible
-operations from other threads at that point. A read can only be skipped if no other
-thread has written to the same object. Since we're checking at execution time (not
-statically), this is a dynamic optimization that preserves correctness.
+However, this optimization **does not reduce overcounting** — precisely because DPOR
+never inserts wakeups at those points, they don't generate additional traces. The overhead
+is limited to the per-access cost of `process_access` + yield (which immediately returns
+the same thread), negligible compared to the cost of full execution replays.
+
+**Conclusion**: Fix 1 as originally proposed is unsound. The sound variant (never-written
+objects) is correct but doesn't address overcounting. The real overcounting comes from
+excess scheduling points on objects that *do* have conflicts — addressed by Fixes 2–4.
 
 ### Fix 2: Collapse Lock Acquire/Release Into Single Race Point (Medium, Medium Impact)
 
@@ -208,26 +222,15 @@ would reduce from ~5 scheduling points per variable to ~2.
 
 ## Priority Ordering
 
-1. **Fix 1** (coalesce non-conflicting opcodes): highest impact, addresses all test
-   families. Medium complexity but conceptually clean.
-2. **Fix 2** (collapse lock races): medium impact for lock tests specifically.
-3. **Fix 4** (batch iterators): medium impact for loop-heavy code.
-4. **Fix 3** (eliminate weak reads): lowest priority, small incremental improvement.
+1. **Fix 2** (collapse lock races): medium impact for lock tests specifically.
+2. **Fix 4** (batch iterators): medium impact for loop-heavy code.
+3. **Fix 3** (eliminate weak reads): lowest priority, small incremental improvement.
+4. ~~**Fix 1**~~: unsound in general; sound variant doesn't reduce overcounting. See above.
 
 ## Implementation Notes
 
-Fix 1 deserves more detail since it's the most impactful. The key insight is that an
-opcode that performs only reads on objects that no other thread has written to is
-*guaranteed* to commute with all concurrent operations. At that point in the execution,
-the DPOR engine has already checked for races (via `process_access`) and found none.
-Therefore, no wakeup tree insertion occurred, and the scheduler can safely continue the
-current thread without creating a new scheduling point.
-
-The implementation would add a return value to `process_access` (and similar functions)
-indicating whether any race was detected. The Python scheduler would check this flag
-and, if no race was found and the access was a read, skip the yield.
-
-Note: even if the read doesn't create a race in THIS execution, DPOR might need the
-scheduling point in future executions when different thread interleavings are explored.
-The correct approach is to check whether the read could POSSIBLY conflict with any
-concurrent operation — which is exactly what `process_access` already does.
+The remaining fixes (2–4) all reduce scheduling points on objects that genuinely
+participate in conflicts. This is where overcounting comes from: each scheduling point on
+a conflicting object is a potential wakeup insertion site, and each wakeup means another
+full execution. Non-conflicting reads (Fix 1's target) never receive wakeups regardless,
+so they don't multiply the execution count — only the per-execution cost.
