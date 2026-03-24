@@ -28,7 +28,7 @@ Unreleased
 
   * Fixed combinatorial explosion of DPOR traces on free-threaded python.
   * Fixed bug where all traces had to start with the first thread as the first operation.
-    All distinct Michalewicz traces should now be explored.
+    All distinct Mazurkiewicz traces should now be explored.
 
 0.2.0 (2026-03-20)
 -------------------
