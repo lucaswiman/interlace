@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="SQLAlchemy Lost-Update Race Condition" href="orm_race.html"><link rel="prev" title="DPOR: Dynamic Partial Order Reduction" href="dpor.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>Examples - Frontrun 0.2.0 documentation</title>
+        <title>Examples - Frontrun 0.3.0 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">Frontrun 0.2.0 documentation</div></a>
+      <a href="index.html"><div class="brand">Frontrun 0.3.0 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">Frontrun 0.2.0 documentation</span>
+  <span class="sidebar-brand-text">Frontrun 0.3.0 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -457,6 +457,92 @@ state in C extensions), but the error traces are less interpretable:</p>
 </pre></div>
 </div>
 </section>
+<section id="interactive-html-exploration-reports">
+<h2>Interactive HTML Exploration Reports<a class="headerlink" href="#interactive-html-exploration-reports" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">explore_dpor()</span></code> can write a self-contained interactive HTML report that
+lets you step through every explored execution, inspect thread switch-points,
+and see the conflicting attribute accesses that caused each reordering.</p>
+<p><strong>Generating a report from pytest</strong> — pass <code class="docutils literal notranslate"><span class="pre">--frontrun-report</span> <span class="pre">PATH</span></code> to the
+<code class="docutils literal notranslate"><span class="pre">frontrun</span></code> test runner:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>frontrun<span class="w"> </span>pytest<span class="w"> </span>tests/<span class="w"> </span>--frontrun-report<span class="w"> </span>dpor_report.html
+</pre></div>
+</div>
+<p><strong>Generating a report from a script</strong> — set <code class="docutils literal notranslate"><span class="pre">_global_report_path</span></code> before
+calling <code class="docutils literal notranslate"><span class="pre">explore_dpor()</span></code>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">frontrun._report</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.dpor</span><span class="w"> </span><span class="kn">import</span> <span class="n">explore_dpor</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">Accounts</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">a</span> <span class="o">=</span> <span class="mi">100</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">b</span> <span class="o">=</span> <span class="mi">100</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">c</span> <span class="o">=</span> <span class="mi">100</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">transfer_a_to_b</span><span class="p">(</span><span class="n">accounts</span><span class="p">:</span> <span class="n">Accounts</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">accounts</span><span class="o">.</span><span class="n">a</span> <span class="o">&gt;=</span> <span class="mi">60</span><span class="p">:</span>
+        <span class="n">accounts</span><span class="o">.</span><span class="n">a</span> <span class="o">-=</span> <span class="mi">60</span>
+        <span class="n">accounts</span><span class="o">.</span><span class="n">b</span> <span class="o">+=</span> <span class="mi">60</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">transfer_b_to_c</span><span class="p">(</span><span class="n">accounts</span><span class="p">:</span> <span class="n">Accounts</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">accounts</span><span class="o">.</span><span class="n">b</span> <span class="o">&gt;=</span> <span class="mi">80</span><span class="p">:</span>
+        <span class="n">accounts</span><span class="o">.</span><span class="n">b</span> <span class="o">-=</span> <span class="mi">80</span>
+        <span class="n">accounts</span><span class="o">.</span><span class="n">c</span> <span class="o">+=</span> <span class="mi">80</span>
+
+<span class="n">frontrun</span><span class="o">.</span><span class="n">_report</span><span class="o">.</span><span class="n">_global_report_path</span> <span class="o">=</span> <span class="s2">&quot;dpor_report.html&quot;</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">explore_dpor</span><span class="p">(</span>
+        <span class="n">setup</span><span class="o">=</span><span class="n">Accounts</span><span class="p">,</span>
+        <span class="n">threads</span><span class="o">=</span><span class="p">[</span><span class="n">transfer_a_to_b</span><span class="p">,</span> <span class="n">transfer_b_to_c</span><span class="p">],</span>
+        <span class="n">invariant</span><span class="o">=</span><span class="k">lambda</span> <span class="n">accs</span><span class="p">:</span> <span class="n">accs</span><span class="o">.</span><span class="n">a</span> <span class="o">+</span> <span class="n">accs</span><span class="o">.</span><span class="n">b</span> <span class="o">+</span> <span class="n">accs</span><span class="o">.</span><span class="n">c</span> <span class="o">==</span> <span class="mi">300</span><span class="p">,</span>
+        <span class="n">preemption_bound</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">explanation</span><span class="p">)</span>
+<span class="k">finally</span><span class="p">:</span>
+    <span class="n">frontrun</span><span class="o">.</span><span class="n">_report</span><span class="o">.</span><span class="n">_global_report_path</span> <span class="o">=</span> <span class="kc">None</span>
+</pre></div>
+</div>
+<p>The race here is a classic <strong>lost update on account B</strong>: both threads
+read-modify-write <code class="docutils literal notranslate"><span class="pre">accounts.b</span></code> without any lock.  When one thread’s write
+overwrites the other’s, the total balance drifts away from 300.</p>
+<p>The report shows every explored interleaving as a timeline.  Executions where
+the invariant holds are shown in green; failing ones in red.  Click any
+execution button or use the arrow keys to step through them.  Each switch-point
+panel shows the source line and opcode where the scheduler switched threads,
+making it easy to pinpoint exactly which access caused the conflict.</p>
+<p><strong>Example reports</strong> (generated at documentation build time):</p>
+<ul class="simple">
+<li><p><a class="reference external" href="_static/dpor_bank_transfer.html">Bank transfer — racy</a>:
+Both threads share account B without a lock.</p></li>
+<li><p><a class="reference external" href="_static/dpor_bank_transfer_locked.html">Bank transfer — locked</a>:
+A single <code class="docutils literal notranslate"><span class="pre">threading.Lock</span></code> makes each transfer atomic; DPOR verifies safety with far fewer paths.</p></li>
+<li><p><a class="reference external" href="_static/dpor_sqlite_counter.html">SQLite counter — racy</a>:
+Two threads each read-modify-write a SQLite counter; DPOR detects the SQL-level conflict.</p></li>
+<li><p><a class="reference external" href="_static/dpor_sqlite_counter_fixed.html">SQLite counter — fixed</a>:
+A single <code class="docutils literal notranslate"><span class="pre">UPDATE</span> <span class="pre">counter</span> <span class="pre">SET</span> <span class="pre">value</span> <span class="pre">=</span> <span class="pre">value</span> <span class="pre">+</span> <span class="pre">1</span></code> eliminates the race.</p></li>
+<li><p><a class="reference external" href="_static/dpor_dining_philosophers.html">Dining philosophers (3)</a>:
+Three philosophers always grab the left fork first, creating a circular wait.</p></li>
+</ul>
+<p>Run any example directly to regenerate its report:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">python</span> <span class="n">examples</span><span class="o">/</span><span class="n">dpor_bank_transfer</span><span class="o">.</span><span class="n">py</span> <span class="n">my_report</span><span class="o">.</span><span class="n">html</span>
+<span class="n">python</span> <span class="n">examples</span><span class="o">/</span><span class="n">dpor_bank_transfer_locked</span><span class="o">.</span><span class="n">py</span> <span class="n">my_report</span><span class="o">.</span><span class="n">html</span>
+<span class="n">python</span> <span class="n">examples</span><span class="o">/</span><span class="n">dpor_sqlite_counter</span><span class="o">.</span><span class="n">py</span> <span class="n">my_report</span><span class="o">.</span><span class="n">html</span>
+<span class="n">python</span> <span class="n">examples</span><span class="o">/</span><span class="n">dpor_sqlite_counter</span><span class="o">.</span><span class="n">py</span> <span class="n">my_report</span><span class="o">.</span><span class="n">html</span> <span class="n">fixed</span>
+<span class="n">python</span> <span class="n">examples</span><span class="o">/</span><span class="n">dpor_dining_philosophers</span><span class="o">.</span><span class="n">py</span> <span class="n">my_report</span><span class="o">.</span><span class="n">html</span>
+</pre></div>
+</div>
+<section id="locking-and-path-reduction">
+<h3>Locking and path reduction<a class="headerlink" href="#locking-and-path-reduction" title="Link to this heading">¶</a></h3>
+<p>The locked bank transfer illustrates an important property of DPOR: when
+operations are protected by a lock, DPOR explores far fewer interleavings
+because the only meaningful ordering question is <em>which thread acquires the
+lock first</em>.  Compare the racy report against the locked report to see this
+directly.</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">stop_on_first=False</span></code> parameter (used in all the examples above) tells
+DPOR to continue exploring after the first failure.  The default
+<code class="docutils literal notranslate"><span class="pre">stop_on_first=True</span></code> stops as soon as a violation is found, which is usually
+what you want in a test suite.</p>
+</section>
+</section>
 <section id="real-world-case-study-sqlalchemy-orm">
 <h2>Real-World Case Study: SQLAlchemy ORM<a class="headerlink" href="#real-world-case-study-sqlalchemy-orm" title="Link to this heading">¶</a></h2>
 <p>For a walkthrough of a real lost-update race in SQLAlchemy ORM code running
@@ -527,6 +613,10 @@ interception via <code class="docutils literal notranslate"><span class="pre">LD
 <li><a class="reference internal" href="#automatic-race-finding-with-dpor">Automatic Race Finding with DPOR</a></li>
 <li><a class="reference internal" href="#automatic-race-finding-with-bytecode-exploration">Automatic Race Finding with Bytecode Exploration</a></li>
 <li><a class="reference internal" href="#async-concurrency-control">Async Concurrency Control</a></li>
+<li><a class="reference internal" href="#interactive-html-exploration-reports">Interactive HTML Exploration Reports</a><ul>
+<li><a class="reference internal" href="#locking-and-path-reduction">Locking and path reduction</a></li>
+</ul>
+</li>
 <li><a class="reference internal" href="#real-world-case-study-sqlalchemy-orm">Real-World Case Study: SQLAlchemy ORM</a></li>
 </ul>
 </li>
@@ -539,7 +629,7 @@ interception via <code class="docutils literal notranslate"><span class="pre">LD
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=938c9ccc"></script>
+</div><script src="_static/documentation_options.js?v=e259d695"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>

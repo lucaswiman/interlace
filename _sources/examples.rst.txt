@@ -229,6 +229,103 @@ Async trace markers let you control interleaving at ``await`` boundaries:
    assert account.balance == 150  # one transfer lost
 
 
+Interactive HTML Exploration Reports
+--------------------------------------
+
+``explore_dpor()`` can write a self-contained interactive HTML report that
+lets you step through every explored execution, inspect thread switch-points,
+and see the conflicting attribute accesses that caused each reordering.
+
+**Generating a report from pytest** --- pass ``--frontrun-report PATH`` to the
+``frontrun`` test runner:
+
+.. code-block:: bash
+
+   frontrun pytest tests/ --frontrun-report dpor_report.html
+
+**Generating a report from a script** --- set ``_global_report_path`` before
+calling ``explore_dpor()``:
+
+.. code-block:: python
+
+   import frontrun._report
+   from frontrun.dpor import explore_dpor
+
+   class Accounts:
+       def __init__(self) -> None:
+           self.a = 100
+           self.b = 100
+           self.c = 100
+
+   def transfer_a_to_b(accounts: Accounts) -> None:
+       if accounts.a >= 60:
+           accounts.a -= 60
+           accounts.b += 60
+
+   def transfer_b_to_c(accounts: Accounts) -> None:
+       if accounts.b >= 80:
+           accounts.b -= 80
+           accounts.c += 80
+
+   frontrun._report._global_report_path = "dpor_report.html"
+   try:
+       result = explore_dpor(
+           setup=Accounts,
+           threads=[transfer_a_to_b, transfer_b_to_c],
+           invariant=lambda accs: accs.a + accs.b + accs.c == 300,
+           preemption_bound=2,
+       )
+       print(result.explanation)
+   finally:
+       frontrun._report._global_report_path = None
+
+The race here is a classic **lost update on account B**: both threads
+read-modify-write ``accounts.b`` without any lock.  When one thread's write
+overwrites the other's, the total balance drifts away from 300.
+
+The report shows every explored interleaving as a timeline.  Executions where
+the invariant holds are shown in green; failing ones in red.  Click any
+execution button or use the arrow keys to step through them.  Each switch-point
+panel shows the source line and opcode where the scheduler switched threads,
+making it easy to pinpoint exactly which access caused the conflict.
+
+**Example reports** (generated at documentation build time):
+
+- `Bank transfer — racy <_static/dpor_bank_transfer.html>`_:
+  Both threads share account B without a lock.
+- `Bank transfer — locked <_static/dpor_bank_transfer_locked.html>`_:
+  A single ``threading.Lock`` makes each transfer atomic; DPOR verifies safety with far fewer paths.
+- `SQLite counter — racy <_static/dpor_sqlite_counter.html>`_:
+  Two threads each read-modify-write a SQLite counter; DPOR detects the SQL-level conflict.
+- `SQLite counter — fixed <_static/dpor_sqlite_counter_fixed.html>`_:
+  A single ``UPDATE counter SET value = value + 1`` eliminates the race.
+- `Dining philosophers (3) <_static/dpor_dining_philosophers.html>`_:
+  Three philosophers always grab the left fork first, creating a circular wait.
+
+Run any example directly to regenerate its report::
+
+    python examples/dpor_bank_transfer.py my_report.html
+    python examples/dpor_bank_transfer_locked.py my_report.html
+    python examples/dpor_sqlite_counter.py my_report.html
+    python examples/dpor_sqlite_counter.py my_report.html fixed
+    python examples/dpor_dining_philosophers.py my_report.html
+
+
+Locking and path reduction
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The locked bank transfer illustrates an important property of DPOR: when
+operations are protected by a lock, DPOR explores far fewer interleavings
+because the only meaningful ordering question is *which thread acquires the
+lock first*.  Compare the racy report against the locked report to see this
+directly.
+
+The ``stop_on_first=False`` parameter (used in all the examples above) tells
+DPOR to continue exploring after the first failure.  The default
+``stop_on_first=True`` stops as soon as a violation is found, which is usually
+what you want in a test suite.
+
+
 Real-World Case Study: SQLAlchemy ORM
 ---------------------------------------
 

@@ -5,7 +5,7 @@
     <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../genindex.html"><link rel="search" title="Search" href="../../search.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>frontrun.dpor - Frontrun 0.2.0 documentation</title>
+        <title>frontrun.dpor - Frontrun 0.3.0 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -161,7 +161,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="../../index.html"><div class="brand">Frontrun 0.2.0 documentation</div></a>
+      <a href="../../index.html"><div class="brand">Frontrun 0.3.0 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -182,7 +182,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="../../index.html">
   
-  <span class="sidebar-brand-text">Frontrun 0.2.0 documentation</span>
+  <span class="sidebar-brand-text">Frontrun 0.3.0 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="../../search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -246,7 +246,7 @@
 
 <span class="sd">The approach:</span>
 <span class="sd">1. A Rust DPOR engine (frontrun._dpor) manages the exploration tree,</span>
-<span class="sd">   vector clocks, and backtrack set computation.</span>
+<span class="sd">   vector clocks, and wakeup tree exploration.</span>
 <span class="sd">2. Python drives execution: runs threads under sys.settrace opcode</span>
 <span class="sd">   tracing, uses a shadow stack to detect shared-memory accesses,</span>
 <span class="sd">   and feeds access/sync events to the Rust engine.</span>
@@ -276,6 +276,7 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
 
 <span class="kn">import</span><span class="w"> </span><span class="nn">dis</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">linecache</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">threading</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">time</span>
@@ -314,6 +315,7 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._sql_insert_tracker</span><span class="w"> </span><span class="kn">import</span> <span class="n">check_uncaptured_inserts</span><span class="p">,</span> <span class="n">clear_insert_tracker</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._trace_format</span><span class="w"> </span><span class="kn">import</span> <span class="n">TraceRecorder</span><span class="p">,</span> <span class="n">build_call_chain</span><span class="p">,</span> <span class="n">format_trace</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">TraceFilter</span> <span class="k">as</span> <span class="n">_TraceFilter</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">is_cmdline_user_code</span> <span class="k">as</span> <span class="n">_is_cmdline_user_code</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">is_dynamic_code</span> <span class="k">as</span> <span class="n">_is_dynamic_code</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">set_active_trace_filter</span> <span class="k">as</span> <span class="n">_set_active_trace_filter</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._tracing</span><span class="w"> </span><span class="kn">import</span> <span class="n">should_trace_file</span> <span class="k">as</span> <span class="n">_should_trace_file</span>
@@ -485,8 +487,8 @@
             <span class="c1"># &quot;write&quot;, only the LAST write per thread would be tracked,</span>
             <span class="c1"># and early access positions (e.g. a SELECT recv) would be</span>
             <span class="c1"># overwritten by later ones (e.g. a COMMIT recv).  With</span>
-            <span class="c1"># read/write distinction, DPOR iteratively backtracks through</span>
-            <span class="c1"># the send/recv pairs to reach the critical interleaving.</span>
+            <span class="c1"># read/write distinction, DPOR iteratively explores wakeup tree</span>
+            <span class="c1"># branches through the send/recv pairs to reach the critical interleaving.</span>
             <span class="n">kind</span> <span class="o">=</span> <span class="s2">&quot;write&quot;</span> <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">kind</span> <span class="o">==</span> <span class="s2">&quot;write&quot;</span> <span class="k">else</span> <span class="s2">&quot;read&quot;</span>
             <span class="n">obj_key</span> <span class="o">=</span> <span class="n">_make_object_key</span><span class="p">(</span><span class="nb">hash</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">resource_id</span><span class="p">),</span> <span class="n">event</span><span class="o">.</span><span class="n">resource_id</span><span class="p">)</span>
             <span class="n">detail</span><span class="p">,</span> <span class="n">call_chain</span> <span class="o">=</span> <span class="n">get_active_sql_io_context</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">tid</span><span class="p">)</span>
@@ -516,6 +518,9 @@
 <span class="c1"># ---------------------------------------------------------------------------</span>
 
 
+<span class="n">_SENTINEL</span> <span class="o">=</span> <span class="nb">object</span><span class="p">()</span>
+
+
 <span class="k">class</span><span class="w"> </span><span class="nc">DporScheduler</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Controls thread execution at opcode granularity, driven by the DPOR engine.</span>
 
@@ -537,6 +542,8 @@
         <span class="n">preload_bridge</span><span class="p">:</span> <span class="n">_PreloadBridge</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">detect_io</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
         <span class="n">stable_ids</span><span class="p">:</span> <span class="n">StableObjectIds</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">switch_point_collector</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">track_dunder_dict_accesses</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">engine</span> <span class="o">=</span> <span class="n">engine</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">execution</span> <span class="o">=</span> <span class="n">execution</span>
@@ -546,6 +553,13 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_preload_bridge</span> <span class="o">=</span> <span class="n">preload_bridge</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_detect_io</span> <span class="o">=</span> <span class="n">detect_io</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_stable_ids</span> <span class="o">=</span> <span class="n">stable_ids</span> <span class="k">if</span> <span class="n">stable_ids</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">StableObjectIds</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_switch_point_collector</span> <span class="o">=</span> <span class="n">switch_point_collector</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_track_dunder_dict_accesses</span> <span class="o">=</span> <span class="n">track_dunder_dict_accesses</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_step_event_collector</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="p">{}</span> <span class="k">if</span> <span class="n">switch_point_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lock_event_collector</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="p">[]</span> <span class="k">if</span> <span class="n">switch_point_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
+        <span class="c1"># Captured at the moment the first error fires (schedule_trace length then).</span>
+        <span class="c1"># Steps at/after this index are teardown artifacts and should not be rendered.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_deadlock_at</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="c1"># On free-threaded Python, PyO3 &amp;mut self borrows are non-blocking</span>
         <span class="c1"># (try-or-panic).  A single engine_lock serialises ALL calls to the</span>
         <span class="c1"># engine and execution objects across worker threads, the sync</span>
@@ -567,6 +581,13 @@
         <span class="c1"># Used to block threads in the DPOR execution when they&#39;re spinning</span>
         <span class="c1"># on a cooperative lock, and unblock them when the lock is released.</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_lock_waiters</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">set</span><span class="p">[</span><span class="nb">int</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="c1"># Per-thread deferred I/O buffers. Lists are shared with thread-local</span>
+        <span class="c1"># storage so other threads can flush deferred I/O when they reach a</span>
+        <span class="c1"># real competing I/O boundary.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="c1"># Per-thread lock nesting depth mirrored from TLS for cross-thread</span>
+        <span class="c1"># deferred-I/O flush decisions.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
 
         <span class="c1"># Maps iterator id → original container object. When GET_ITER creates</span>
         <span class="c1"># an iterator from a mutable container, we record the mapping so that</span>
@@ -594,6 +615,10 @@
         <span class="c1"># indefinitely between a blocked thread and its holder.</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_row_lock_blocked</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
 
+        <span class="c1"># Last path_id snapshot from _schedule_next, used to attribute</span>
+        <span class="c1"># lock events to the correct scheduling step on free-threaded Python.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_last_scheduled_path_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+
         <span class="c1"># Request the first scheduling decision</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_schedule_next</span><span class="p">()</span>
 
@@ -604,13 +629,25 @@
 <span class="sd">        override the decision and schedule the lock holder instead.  This</span>
 <span class="sd">        prevents the scheduler from cycling between a blocked thread and</span>
 <span class="sd">        its holder (defect #6).</span>
+
+<span class="sd">        Also snapshots ``engine.path_position`` under the engine lock so</span>
+<span class="sd">        that ``report_and_wait`` can attribute subsequent lock events to</span>
+<span class="sd">        the correct scheduling step (see ``_last_scheduled_path_id``).</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine_lock</span><span class="p">:</span>
             <span class="n">runnable</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">execution</span><span class="o">.</span><span class="n">runnable_threads</span><span class="p">()</span>
             <span class="k">if</span> <span class="ow">not</span> <span class="n">runnable</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_last_scheduled_path_id</span> <span class="o">=</span> <span class="kc">None</span>
                 <span class="k">return</span> <span class="kc">None</span>
 
             <span class="n">scheduled</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">engine</span><span class="o">.</span><span class="n">schedule</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">execution</span><span class="p">)</span>
+            <span class="c1"># Snapshot path position under engine_lock. On free-threaded</span>
+            <span class="c1"># Python, another thread may call schedule() concurrently</span>
+            <span class="c1"># after we release the lock, advancing path.pos.  The saved</span>
+            <span class="c1"># position ensures _sync_reporter attributes lock events to</span>
+            <span class="c1"># the correct step.</span>
+            <span class="n">_pp</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">engine</span><span class="p">,</span> <span class="s2">&quot;path_position&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_last_scheduled_path_id</span> <span class="o">=</span> <span class="n">_pp</span> <span class="o">-</span> <span class="mi">1</span> <span class="k">if</span> <span class="n">_pp</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
             <span class="k">if</span> <span class="n">scheduled</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">scheduled</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_row_lock_blocked</span><span class="p">:</span>
                 <span class="n">holder</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_row_lock_blocked</span><span class="p">[</span><span class="n">scheduled</span><span class="p">]</span>
                 <span class="k">if</span> <span class="n">holder</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">:</span>
@@ -624,6 +661,20 @@
     <span class="k">def</span><span class="w"> </span><span class="nf">wait_for_turn</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Block until it&#39;s this thread&#39;s turn. Returns False when done.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_report_and_wait</span><span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_all_other_live_threads_blocked_by_current</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._deadlock</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_wait_for_graph</span>
+
+        <span class="n">graph</span> <span class="o">=</span> <span class="n">get_wait_for_graph</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">graph</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">False</span>
+        <span class="n">live_other_threads</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="n">tid</span> <span class="k">for</span> <span class="n">tid</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">num_threads</span><span class="p">)</span> <span class="k">if</span> <span class="n">tid</span> <span class="o">!=</span> <span class="n">thread_id</span> <span class="ow">and</span> <span class="n">tid</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span>
+        <span class="p">}</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">live_other_threads</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">True</span>
+        <span class="n">blocked_threads</span> <span class="o">=</span> <span class="n">graph</span><span class="o">.</span><span class="n">reverse_reachable_threads_from</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">live_other_threads</span><span class="o">.</span><span class="n">issubset</span><span class="p">(</span><span class="n">blocked_threads</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">report_and_wait</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">frame</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Report accesses for an opcode and wait for this thread&#39;s turn.</span>
@@ -646,15 +697,30 @@
             <span class="n">_scheduler_tls</span><span class="o">.</span><span class="n">_in_dpor_machinery</span> <span class="o">=</span> <span class="kc">True</span>
             <span class="k">try</span><span class="p">:</span>
 
-                <span class="k">def</span><span class="w"> </span><span class="nf">_flush_pending_io</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-                    <span class="n">pending_io</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;pending_io&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-                    <span class="k">if</span> <span class="n">pending_io</span> <span class="ow">and</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;lock_depth&quot;</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
-                        <span class="n">engine</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">engine</span>
-                        <span class="n">execution</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">execution</span>
-                        <span class="k">for</span> <span class="n">obj_key</span><span class="p">,</span> <span class="n">io_kind</span> <span class="ow">in</span> <span class="n">pending_io</span><span class="p">:</span>
-                            <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine_lock</span><span class="p">:</span>
-                                <span class="n">engine</span><span class="o">.</span><span class="n">report_io_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">obj_key</span><span class="p">,</span> <span class="n">io_kind</span><span class="p">)</span>
-                        <span class="n">pending_io</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+                <span class="k">def</span><span class="w"> </span><span class="nf">_flush_pending_io_for</span><span class="p">(</span><span class="n">flush_thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">allow_inside_lock</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="n">pending_io</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">flush_thread_id</span><span class="p">)</span>
+                    <span class="k">if</span> <span class="ow">not</span> <span class="n">pending_io</span><span class="p">:</span>
+                        <span class="k">return</span>
+                    <span class="k">if</span> <span class="ow">not</span> <span class="n">allow_inside_lock</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">flush_thread_id</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+                        <span class="k">return</span>
+                    <span class="n">engine</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">engine</span>
+                    <span class="n">execution</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">execution</span>
+                    <span class="k">for</span> <span class="n">obj_key</span><span class="p">,</span> <span class="n">io_kind</span> <span class="ow">in</span> <span class="n">pending_io</span><span class="p">:</span>
+                        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine_lock</span><span class="p">:</span>
+                            <span class="n">engine</span><span class="o">.</span><span class="n">report_io_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">flush_thread_id</span><span class="p">,</span> <span class="n">obj_key</span><span class="p">,</span> <span class="n">io_kind</span><span class="p">)</span>
+                    <span class="n">pending_io</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+
+                <span class="k">def</span><span class="w"> </span><span class="nf">_flush_other_pending_io_for_current_io</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="n">current_pending</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+                    <span class="k">if</span> <span class="ow">not</span> <span class="n">current_pending</span><span class="p">:</span>
+                        <span class="k">return</span>
+                    <span class="k">for</span> <span class="n">other_thread_id</span><span class="p">,</span> <span class="n">pending_io</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+                        <span class="k">if</span> <span class="n">other_thread_id</span> <span class="o">==</span> <span class="n">thread_id</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">pending_io</span><span class="p">:</span>
+                            <span class="k">continue</span>
+                        <span class="c1"># Another thread reached a real I/O boundary, so any</span>
+                        <span class="c1"># deferred I/O from this thread is now part of a real</span>
+                        <span class="c1"># race window and must become visible to the engine.</span>
+                        <span class="n">_flush_pending_io_for</span><span class="p">(</span><span class="n">other_thread_id</span><span class="p">,</span> <span class="n">allow_inside_lock</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
 
                 <span class="c1"># Merge LD_PRELOAD I/O events (C-level send/recv from e.g.</span>
                 <span class="c1"># psycopg2) into the thread&#39;s pending_io list.  The preload</span>
@@ -694,24 +760,65 @@
                     <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error</span><span class="p">:</span>
                         <span class="k">return</span> <span class="kc">False</span>
                     <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">:</span>
+                        <span class="n">current_pending</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+                        <span class="k">if</span> <span class="p">(</span>
+                            <span class="n">frame</span> <span class="ow">is</span> <span class="kc">None</span>
+                            <span class="ow">and</span> <span class="n">current_pending</span>
+                            <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">thread_id</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span>
+                            <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_all_other_live_threads_blocked_by_current</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+                        <span class="p">):</span>
+                            <span class="k">return</span> <span class="kc">True</span>
+                        <span class="n">_flush_other_pending_io_for_current_io</span><span class="p">()</span>
                         <span class="c1"># Flush deferred I/O only once this thread actually owns</span>
                         <span class="c1"># the current DPOR step. On free-threaded Python a thread</span>
                         <span class="c1"># can reach report_and_wait while another thread still owns</span>
                         <span class="c1"># the step; flushing earlier stamps the access onto the</span>
-                        <span class="c1"># wrong path_id and can hide the backtrack point.</span>
-                        <span class="n">_flush_pending_io</span><span class="p">()</span>
+                        <span class="c1"># wrong path_id and can hide the wakeup tree insertion point.</span>
+                        <span class="n">_flush_pending_io_for</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
                         <span class="c1"># Process opcode accesses only when it&#39;s our turn.</span>
                         <span class="c1"># Deferring this until the thread is scheduled ensures</span>
                         <span class="c1"># that accesses are recorded at the correct path_id</span>
                         <span class="c1"># (after any intervening operations by other threads).</span>
                         <span class="c1"># Without this, a preempted thread&#39;s accesses land at the</span>
                         <span class="c1"># preemption branch where the other thread is Active,</span>
-                        <span class="c1"># making backtracks at that position impossible.</span>
+                        <span class="c1"># making wakeup tree insertions at that position impossible.</span>
+                        <span class="c1"># Save frame info before _process_opcode clears it,</span>
+                        <span class="c1"># in case we need to record a switch/step point.</span>
+                        <span class="n">_switch_frame</span> <span class="o">=</span> <span class="n">frame</span>
+                        <span class="c1"># Snapshot shadow stack before _process_opcode pops values.</span>
+                        <span class="c1"># For STORE_ATTR: stack is [..., value, obj] — we want value (TOS1).</span>
+                        <span class="c1"># For LOAD_ATTR: stack is [..., obj] — value will be on TOS after.</span>
+                        <span class="n">_pre_opcode_stack</span> <span class="o">=</span> <span class="kc">None</span>
+                        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_step_event_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">frame</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                            <span class="n">_pre_stacks</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;_shadow_stacks&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                            <span class="k">if</span> <span class="n">_pre_stacks</span><span class="p">:</span>
+                                <span class="n">_pre_shadow</span> <span class="o">=</span> <span class="n">_pre_stacks</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="nb">id</span><span class="p">(</span><span class="n">frame</span><span class="p">))</span>
+                                <span class="k">if</span> <span class="n">_pre_shadow</span> <span class="ow">and</span> <span class="n">_pre_shadow</span><span class="o">.</span><span class="n">stack</span><span class="p">:</span>
+                                    <span class="n">_pre_opcode_stack</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">_pre_shadow</span><span class="o">.</span><span class="n">stack</span><span class="p">[</span><span class="o">-</span><span class="mi">3</span><span class="p">:])</span>  <span class="c1"># last 3 elements</span>
                         <span class="k">if</span> <span class="n">frame</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
                             <span class="n">_process_opcode</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span> <span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">)</span>
                             <span class="n">frame</span> <span class="o">=</span> <span class="kc">None</span>  <span class="c1"># only process once</span>
+                        <span class="c1"># Record step event for the report</span>
+                        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_switch_point_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">_switch_frame</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_capture_step_event</span><span class="p">(</span><span class="n">_switch_frame</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">_pre_opcode_stack</span><span class="p">)</span>
                         <span class="c1"># It&#39;s our turn. After executing one opcode, schedule next.</span>
                         <span class="n">next_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_schedule_next</span><span class="p">()</span>
+                        <span class="c1"># _schedule_next saves the path position in</span>
+                        <span class="c1"># self._last_scheduled_path_id (under engine_lock).</span>
+                        <span class="c1"># Copy it to TLS so _sync_reporter can attribute lock</span>
+                        <span class="c1"># events to this thread&#39;s scheduling step, not a later</span>
+                        <span class="c1"># step advanced by another thread on free-threaded Python.</span>
+                        <span class="n">_pp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_last_scheduled_path_id</span>
+                        <span class="k">if</span> <span class="n">_pp</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                            <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">_last_path_id</span> <span class="o">=</span> <span class="n">_pp</span>
+                        <span class="c1"># Record switch point if thread changes and collector is active</span>
+                        <span class="k">if</span> <span class="p">(</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_switch_point_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+                            <span class="ow">and</span> <span class="n">next_thread</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+                            <span class="ow">and</span> <span class="n">next_thread</span> <span class="o">!=</span> <span class="n">thread_id</span>
+                            <span class="ow">and</span> <span class="n">_switch_frame</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+                        <span class="p">):</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_capture_switch_point</span><span class="p">(</span><span class="n">_switch_frame</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">next_thread</span><span class="p">)</span>
                         <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="n">next_thread</span>
                         <span class="k">if</span> <span class="n">next_thread</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
                             <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="o">=</span> <span class="kc">True</span>
@@ -759,6 +866,124 @@
             <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
                 <span class="bp">self</span><span class="o">.</span><span class="n">_error</span> <span class="o">=</span> <span class="n">error</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_capture_switch_point</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">frame</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">from_thread</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">to_thread</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Capture a SwitchPoint when the scheduler switches threads.&quot;&quot;&quot;</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._report</span><span class="w"> </span><span class="kn">import</span> <span class="n">SwitchPoint</span><span class="p">,</span> <span class="n">_safe_repr</span>
+
+        <span class="n">code</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_code</span>
+        <span class="n">lineno</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_lineno</span>
+        <span class="n">instr</span> <span class="o">=</span> <span class="n">_get_instructions</span><span class="p">(</span><span class="n">code</span><span class="p">)</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">frame</span><span class="o">.</span><span class="n">f_lasti</span><span class="p">)</span>
+        <span class="n">opcode</span> <span class="o">=</span> <span class="n">instr</span><span class="o">.</span><span class="n">opname</span> <span class="k">if</span> <span class="n">instr</span> <span class="k">else</span> <span class="s2">&quot;&quot;</span>
+        <span class="n">source_line</span> <span class="o">=</span> <span class="n">linecache</span><span class="o">.</span><span class="n">getline</span><span class="p">(</span><span class="n">code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">,</span> <span class="n">lineno</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+
+        <span class="c1"># Snapshot shadow stack top 5</span>
+        <span class="n">shadow_top5</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">stacks</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;_shadow_stacks&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">stacks</span><span class="p">:</span>
+            <span class="n">shadow</span> <span class="o">=</span> <span class="n">stacks</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="nb">id</span><span class="p">(</span><span class="n">frame</span><span class="p">))</span>
+            <span class="k">if</span> <span class="n">shadow</span> <span class="ow">and</span> <span class="n">shadow</span><span class="o">.</span><span class="n">stack</span><span class="p">:</span>
+                <span class="n">shadow_top5</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">_safe_repr</span><span class="p">(</span><span class="n">shadow</span><span class="o">.</span><span class="n">stack</span><span class="p">[</span><span class="o">-</span><span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)])</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">min</span><span class="p">(</span><span class="mi">5</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">shadow</span><span class="o">.</span><span class="n">stack</span><span class="p">))))</span>
+
+        <span class="c1"># Get access info from the most recent trace event</span>
+        <span class="n">access_type</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="n">attr_name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="n">obj_type_name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">trace_recorder</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">trace_recorder</span><span class="o">.</span><span class="n">events</span><span class="p">:</span>
+            <span class="n">last_ev</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">trace_recorder</span><span class="o">.</span><span class="n">events</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+            <span class="k">if</span> <span class="n">last_ev</span><span class="o">.</span><span class="n">thread_id</span> <span class="o">==</span> <span class="n">from_thread</span><span class="p">:</span>
+                <span class="n">access_type</span> <span class="o">=</span> <span class="n">last_ev</span><span class="o">.</span><span class="n">access_type</span>
+                <span class="n">attr_name</span> <span class="o">=</span> <span class="n">last_ev</span><span class="o">.</span><span class="n">attr_name</span>
+                <span class="n">obj_type_name</span> <span class="o">=</span> <span class="n">last_ev</span><span class="o">.</span><span class="n">obj_type_name</span>
+
+        <span class="c1"># schedule_trace length gives current position (after schedule() appended)</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine_lock</span><span class="p">:</span>
+            <span class="n">schedule_len</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">execution</span><span class="o">.</span><span class="n">schedule_trace</span><span class="p">)</span>
+        <span class="n">schedule_index</span> <span class="o">=</span> <span class="n">schedule_len</span> <span class="o">-</span> <span class="mi">1</span>  <span class="c1"># index of the just-scheduled step</span>
+
+        <span class="n">sp</span> <span class="o">=</span> <span class="n">SwitchPoint</span><span class="p">(</span>
+            <span class="n">schedule_index</span><span class="o">=</span><span class="n">schedule_index</span><span class="p">,</span>
+            <span class="n">from_thread</span><span class="o">=</span><span class="n">from_thread</span><span class="p">,</span>
+            <span class="n">to_thread</span><span class="o">=</span><span class="n">to_thread</span><span class="p">,</span>
+            <span class="n">filename</span><span class="o">=</span><span class="n">code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">,</span>
+            <span class="n">lineno</span><span class="o">=</span><span class="n">lineno</span><span class="p">,</span>
+            <span class="n">function_name</span><span class="o">=</span><span class="n">code</span><span class="o">.</span><span class="n">co_name</span><span class="p">,</span>
+            <span class="n">opcode</span><span class="o">=</span><span class="n">opcode</span><span class="p">,</span>
+            <span class="n">source_line</span><span class="o">=</span><span class="n">source_line</span><span class="p">,</span>
+            <span class="n">shadow_stack_top5</span><span class="o">=</span><span class="n">shadow_top5</span><span class="p">,</span>
+            <span class="n">access_type</span><span class="o">=</span><span class="n">access_type</span><span class="p">,</span>
+            <span class="n">attr_name</span><span class="o">=</span><span class="n">attr_name</span><span class="p">,</span>
+            <span class="n">obj_type_name</span><span class="o">=</span><span class="n">obj_type_name</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_switch_point_collector</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">sp</span><span class="p">)</span>  <span class="c1"># type: ignore[union-attr]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_capture_step_event</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">frame</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">pre_opcode_stack</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Capture a StepEvent keyed by schedule index (path_id).&quot;&quot;&quot;</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._report</span><span class="w"> </span><span class="kn">import</span> <span class="n">StepEvent</span><span class="p">,</span> <span class="n">_safe_repr</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_step_event_collector</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span>
+        <span class="n">code</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_code</span>
+        <span class="n">lineno</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_lineno</span>
+        <span class="n">instr</span> <span class="o">=</span> <span class="n">_get_instructions</span><span class="p">(</span><span class="n">code</span><span class="p">)</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">frame</span><span class="o">.</span><span class="n">f_lasti</span><span class="p">)</span>
+        <span class="n">opcode</span> <span class="o">=</span> <span class="n">instr</span><span class="o">.</span><span class="n">opname</span> <span class="k">if</span> <span class="n">instr</span> <span class="k">else</span> <span class="s2">&quot;&quot;</span>
+        <span class="n">source_line</span> <span class="o">=</span> <span class="n">linecache</span><span class="o">.</span><span class="n">getline</span><span class="p">(</span><span class="n">code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">,</span> <span class="n">lineno</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+
+        <span class="c1"># Get access info from the most recent trace event</span>
+        <span class="n">access_type</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="n">attr_name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="n">obj_type_name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">trace_recorder</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">trace_recorder</span><span class="o">.</span><span class="n">events</span><span class="p">:</span>
+            <span class="n">last_ev</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">trace_recorder</span><span class="o">.</span><span class="n">events</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+            <span class="k">if</span> <span class="n">last_ev</span><span class="o">.</span><span class="n">thread_id</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">:</span>
+                <span class="n">access_type</span> <span class="o">=</span> <span class="n">last_ev</span><span class="o">.</span><span class="n">access_type</span>
+                <span class="n">attr_name</span> <span class="o">=</span> <span class="n">last_ev</span><span class="o">.</span><span class="n">attr_name</span>
+                <span class="n">obj_type_name</span> <span class="o">=</span> <span class="n">last_ev</span><span class="o">.</span><span class="n">obj_type_name</span>
+
+        <span class="c1"># Capture the value involved in the access.</span>
+        <span class="c1"># The trace callback fires *before* the instruction executes, so for</span>
+        <span class="c1"># LOAD_ATTR we read the attribute that&#39;s about to be loaded, and for</span>
+        <span class="c1"># STORE_ATTR we show the current (pre-store) value.</span>
+        <span class="c1"># We read from the actual Python objects rather than the shadow stack,</span>
+        <span class="c1"># which only tracks object identity (its elements are often None).</span>
+        <span class="n">value_repr</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">attr_name</span> <span class="ow">and</span> <span class="n">obj_type_name</span> <span class="ow">and</span> <span class="n">opcode</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;LOAD_ATTR&quot;</span><span class="p">,</span> <span class="s2">&quot;STORE_ATTR&quot;</span><span class="p">)</span> <span class="ow">and</span> <span class="n">instr</span><span class="p">:</span>
+                <span class="n">attr</span> <span class="o">=</span> <span class="n">instr</span><span class="o">.</span><span class="n">argval</span>
+                <span class="k">if</span> <span class="n">attr</span><span class="p">:</span>
+                    <span class="c1"># Find the object in frame locals — look for instances of the right type</span>
+                    <span class="k">for</span> <span class="n">local_val</span> <span class="ow">in</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_locals</span><span class="o">.</span><span class="n">values</span><span class="p">():</span>
+                        <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="n">local_val</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span> <span class="o">==</span> <span class="n">obj_type_name</span><span class="p">:</span>
+                            <span class="n">val</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">local_val</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">_SENTINEL</span><span class="p">)</span>
+                            <span class="k">if</span> <span class="n">val</span> <span class="ow">is</span> <span class="ow">not</span> <span class="n">_SENTINEL</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">callable</span><span class="p">(</span><span class="n">val</span><span class="p">):</span>
+                                <span class="n">value_repr</span> <span class="o">=</span> <span class="n">_safe_repr</span><span class="p">(</span><span class="n">val</span><span class="p">)</span>
+                                <span class="k">break</span>
+            <span class="k">elif</span> <span class="n">opcode</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;LOAD_GLOBAL&quot;</span><span class="p">,</span> <span class="s2">&quot;STORE_GLOBAL&quot;</span><span class="p">)</span> <span class="ow">and</span> <span class="n">instr</span><span class="p">:</span>
+                <span class="n">name</span> <span class="o">=</span> <span class="n">instr</span><span class="o">.</span><span class="n">argval</span>
+                <span class="k">if</span> <span class="n">name</span> <span class="ow">and</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_globals</span><span class="p">:</span>
+                    <span class="n">val</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_globals</span><span class="p">[</span><span class="n">name</span><span class="p">]</span>
+                    <span class="k">if</span> <span class="ow">not</span> <span class="nb">callable</span><span class="p">(</span><span class="n">val</span><span class="p">):</span>
+                        <span class="n">value_repr</span> <span class="o">=</span> <span class="n">_safe_repr</span><span class="p">(</span><span class="n">val</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+            <span class="k">pass</span>
+
+        <span class="c1"># Key by schedule index (= len(schedule_trace) - 1, the most recently</span>
+        <span class="c1"># scheduled step). This aligns with path_id used in race detection.</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine_lock</span><span class="p">:</span>
+            <span class="n">schedule_idx</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">execution</span><span class="o">.</span><span class="n">schedule_trace</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_step_event_collector</span><span class="p">[</span><span class="n">schedule_idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">StepEvent</span><span class="p">(</span>
+            <span class="n">thread_id</span><span class="o">=</span><span class="n">thread_id</span><span class="p">,</span>
+            <span class="n">filename</span><span class="o">=</span><span class="n">code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">,</span>
+            <span class="n">lineno</span><span class="o">=</span><span class="n">lineno</span><span class="p">,</span>
+            <span class="n">function_name</span><span class="o">=</span><span class="n">code</span><span class="o">.</span><span class="n">co_name</span><span class="p">,</span>
+            <span class="n">opcode</span><span class="o">=</span><span class="n">opcode</span><span class="p">,</span>
+            <span class="n">source_line</span><span class="o">=</span><span class="n">source_line</span><span class="p">,</span>
+            <span class="n">access_type</span><span class="o">=</span><span class="n">access_type</span><span class="p">,</span>
+            <span class="n">attr_name</span><span class="o">=</span><span class="n">attr_name</span><span class="p">,</span>
+            <span class="n">obj_type_name</span><span class="o">=</span><span class="n">obj_type_name</span><span class="p">,</span>
+            <span class="n">value_repr</span><span class="o">=</span><span class="n">value_repr</span><span class="p">,</span>
+        <span class="p">)</span>
 
     <span class="nd">@staticmethod</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">get_shadow_stack</span><span class="p">(</span><span class="n">frame_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ShadowStack</span><span class="p">:</span>
@@ -882,7 +1107,9 @@
     <span class="k">def</span><span class="w"> </span><span class="nf">report_io_access</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">execution</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">object_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">kind</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">return</span> <span class="kc">None</span>
 
-    <span class="k">def</span><span class="w"> </span><span class="nf">report_sync</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">execution</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">event_type</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">sync_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">report_sync</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span> <span class="n">execution</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">event_type</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">sync_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">path_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">return</span> <span class="kc">None</span>
 
 
@@ -1141,6 +1368,11 @@
     <span class="k">return</span> <span class="nb">hash</span><span class="p">((</span><span class="n">obj_id</span><span class="p">,</span> <span class="n">name</span><span class="p">))</span> <span class="o">&amp;</span> <span class="mh">0xFFFFFFFFFFFFFFFF</span>
 
 
+<span class="c1"># Module-level reverse map: object_key -&gt; human-readable description.</span>
+<span class="c1"># Set to a dict when report collection is active, None otherwise.</span>
+<span class="n">_object_key_reverse_map</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+
+
 <span class="k">class</span><span class="w"> </span><span class="nc">StableObjectIds</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Assign monotonically increasing stable IDs to Python objects.</span>
 
@@ -1183,6 +1415,15 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">_next_id</span> <span class="o">=</span> <span class="mi">0</span>
 
 
+<span class="k">def</span><span class="w"> </span><span class="nf">_register_object_key</span><span class="p">(</span><span class="n">key</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">obj</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Register a human-readable description for an object key in the reverse map.&quot;&quot;&quot;</span>
+    <span class="n">rmap</span> <span class="o">=</span> <span class="n">_object_key_reverse_map</span>
+    <span class="k">if</span> <span class="n">rmap</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">rmap</span><span class="p">:</span>
+        <span class="n">type_name</span> <span class="o">=</span> <span class="nb">type</span><span class="p">(</span><span class="n">obj</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span>
+        <span class="n">name_str</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">name</span><span class="p">)</span> <span class="k">if</span> <span class="n">name</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="s2">&quot;&quot;</span>
+        <span class="n">rmap</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">type_name</span><span class="si">}</span><span class="s2">.</span><span class="si">{</span><span class="n">name_str</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">if</span> <span class="n">name_str</span> <span class="k">else</span> <span class="n">type_name</span>
+
+
 <span class="k">def</span><span class="w"> </span><span class="nf">_report_read</span><span class="p">(</span>
     <span class="n">engine</span><span class="p">:</span> <span class="n">PyDporEngine</span><span class="p">,</span>
     <span class="n">execution</span><span class="p">:</span> <span class="n">PyExecution</span><span class="p">,</span>
@@ -1193,8 +1434,10 @@
     <span class="n">stable_ids</span><span class="p">:</span> <span class="n">StableObjectIds</span><span class="p">,</span>
 <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
     <span class="k">if</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="n">_make_object_key</span><span class="p">(</span><span class="n">stable_ids</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">obj</span><span class="p">),</span> <span class="n">name</span><span class="p">)</span>
+        <span class="n">_register_object_key</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
         <span class="k">with</span> <span class="n">lock</span><span class="p">:</span>
-            <span class="n">engine</span><span class="o">.</span><span class="n">report_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">_make_object_key</span><span class="p">(</span><span class="n">stable_ids</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">obj</span><span class="p">),</span> <span class="n">name</span><span class="p">),</span> <span class="s2">&quot;read&quot;</span><span class="p">)</span>
+            <span class="n">engine</span><span class="o">.</span><span class="n">report_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="s2">&quot;read&quot;</span><span class="p">)</span>
 
 
 <span class="k">def</span><span class="w"> </span><span class="nf">_report_first_read</span><span class="p">(</span>
@@ -1214,8 +1457,10 @@
 <span class="sd">    detecting TOCTOU patterns.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">if</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="n">_make_object_key</span><span class="p">(</span><span class="n">stable_ids</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">obj</span><span class="p">),</span> <span class="n">name</span><span class="p">)</span>
+        <span class="n">_register_object_key</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
         <span class="k">with</span> <span class="n">lock</span><span class="p">:</span>
-            <span class="n">engine</span><span class="o">.</span><span class="n">report_first_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">_make_object_key</span><span class="p">(</span><span class="n">stable_ids</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">obj</span><span class="p">),</span> <span class="n">name</span><span class="p">),</span> <span class="s2">&quot;read&quot;</span><span class="p">)</span>
+            <span class="n">engine</span><span class="o">.</span><span class="n">report_first_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="s2">&quot;read&quot;</span><span class="p">)</span>
 
 
 <span class="k">def</span><span class="w"> </span><span class="nf">_report_write</span><span class="p">(</span>
@@ -1228,8 +1473,10 @@
     <span class="n">stable_ids</span><span class="p">:</span> <span class="n">StableObjectIds</span><span class="p">,</span>
 <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
     <span class="k">if</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="n">_make_object_key</span><span class="p">(</span><span class="n">stable_ids</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">obj</span><span class="p">),</span> <span class="n">name</span><span class="p">)</span>
+        <span class="n">_register_object_key</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
         <span class="k">with</span> <span class="n">lock</span><span class="p">:</span>
-            <span class="n">engine</span><span class="o">.</span><span class="n">report_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">_make_object_key</span><span class="p">(</span><span class="n">stable_ids</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">obj</span><span class="p">),</span> <span class="n">name</span><span class="p">),</span> <span class="s2">&quot;write&quot;</span><span class="p">)</span>
+            <span class="n">engine</span><span class="o">.</span><span class="n">report_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">)</span>
 
 
 <span class="k">def</span><span class="w"> </span><span class="nf">_report_weak_read</span><span class="p">(</span>
@@ -1250,8 +1497,10 @@
 <span class="sd">    conflicting with C-method writes (append, clear, etc.).</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">if</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="n">_make_object_key</span><span class="p">(</span><span class="n">stable_ids</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">obj</span><span class="p">),</span> <span class="n">name</span><span class="p">)</span>
+        <span class="n">_register_object_key</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
         <span class="k">with</span> <span class="n">lock</span><span class="p">:</span>
-            <span class="n">engine</span><span class="o">.</span><span class="n">report_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">_make_object_key</span><span class="p">(</span><span class="n">stable_ids</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">obj</span><span class="p">),</span> <span class="n">name</span><span class="p">),</span> <span class="s2">&quot;weak_read&quot;</span><span class="p">)</span>
+            <span class="n">engine</span><span class="o">.</span><span class="n">report_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="s2">&quot;weak_read&quot;</span><span class="p">)</span>
 
 
 <span class="k">def</span><span class="w"> </span><span class="nf">_report_weak_write</span><span class="p">(</span>
@@ -1271,8 +1520,10 @@
 <span class="sd">    while still conflicting with C-method reads (iteration, ``len()``, etc.).</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">if</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="n">_make_object_key</span><span class="p">(</span><span class="n">stable_ids</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">obj</span><span class="p">),</span> <span class="n">name</span><span class="p">)</span>
+        <span class="n">_register_object_key</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
         <span class="k">with</span> <span class="n">lock</span><span class="p">:</span>
-            <span class="n">engine</span><span class="o">.</span><span class="n">report_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">_make_object_key</span><span class="p">(</span><span class="n">stable_ids</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">obj</span><span class="p">),</span> <span class="n">name</span><span class="p">),</span> <span class="s2">&quot;weak_write&quot;</span><span class="p">)</span>
+            <span class="n">engine</span><span class="o">.</span><span class="n">report_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="s2">&quot;weak_write&quot;</span><span class="p">)</span>
 
 
 <span class="k">def</span><span class="w"> </span><span class="nf">_subscript_key_name</span><span class="p">(</span><span class="n">key</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
@@ -1338,6 +1589,7 @@
         <span class="s2">&quot;STORE_ATTR&quot;</span><span class="p">,</span>
         <span class="s2">&quot;DELETE_ATTR&quot;</span><span class="p">,</span>
         <span class="s2">&quot;LOAD_METHOD&quot;</span><span class="p">,</span>  <span class="c1"># 3.10 only</span>
+        <span class="s2">&quot;LOAD_SPECIAL&quot;</span><span class="p">,</span>  <span class="c1"># 3.14+ context manager __enter__/__exit__</span>
         <span class="c1"># Global / name access</span>
         <span class="s2">&quot;LOAD_GLOBAL&quot;</span><span class="p">,</span>
         <span class="s2">&quot;STORE_GLOBAL&quot;</span><span class="p">,</span>
@@ -1512,7 +1764,7 @@
         <span class="c1"># Without this, LOAD_GLOBAL/STORE_GLOBAL races are invisible to DPOR.</span>
         <span class="c1"># Uses first-access semantics so ``global += 1`` (LOAD_GLOBAL + STORE_GLOBAL)</span>
         <span class="c1"># doesn&#39;t overwrite the position of an earlier read, enabling DPOR to</span>
-        <span class="c1"># backtrack between the read and a subsequent write.</span>
+        <span class="c1"># insert into the wakeup tree between the read and a subsequent write.</span>
         <span class="n">_report_first_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_globals</span><span class="p">,</span> <span class="n">instr</span><span class="o">.</span><span class="n">argval</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
 
     <span class="k">elif</span> <span class="n">op</span> <span class="o">==</span> <span class="s2">&quot;LOAD_NAME&quot;</span><span class="p">:</span>
@@ -1598,7 +1850,8 @@
         <span class="n">_report_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
         <span class="c1"># Also report on obj.__dict__ so LOAD_ATTR conflicts with</span>
         <span class="c1"># STORE_SUBSCR on the same __dict__ (cross-path detection).</span>
-        <span class="k">if</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="c1"># Off by default: doubles wakeup tree insertions for rare benefit.</span>
+        <span class="k">if</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">scheduler</span><span class="p">,</span> <span class="s2">&quot;_track_dunder_dict_accesses&quot;</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span> <span class="ow">and</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">try</span><span class="p">:</span>
                 <span class="n">_obj_dict</span> <span class="o">=</span> <span class="nb">object</span><span class="o">.</span><span class="fm">__getattribute__</span><span class="p">(</span><span class="n">obj</span><span class="p">,</span> <span class="s2">&quot;__dict__&quot;</span><span class="p">)</span>
                 <span class="n">_report_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">_obj_dict</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
@@ -1642,7 +1895,8 @@
         <span class="n">_report_write</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">instr</span><span class="o">.</span><span class="n">argval</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
         <span class="c1"># Also report on obj.__dict__ so STORE_ATTR conflicts with</span>
         <span class="c1"># STORE_SUBSCR on the same __dict__ (cross-path detection).</span>
-        <span class="k">if</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="c1"># Off by default: doubles wakeup tree insertions for rare benefit.</span>
+        <span class="k">if</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">scheduler</span><span class="p">,</span> <span class="s2">&quot;_track_dunder_dict_accesses&quot;</span><span class="p">,</span> <span class="kc">False</span><span class="p">)</span> <span class="ow">and</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">try</span><span class="p">:</span>
                 <span class="n">_obj_dict</span> <span class="o">=</span> <span class="nb">object</span><span class="o">.</span><span class="fm">__getattribute__</span><span class="p">(</span><span class="n">obj</span><span class="p">,</span> <span class="s2">&quot;__dict__&quot;</span><span class="p">)</span>
                 <span class="n">_report_write</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">_obj_dict</span><span class="p">,</span> <span class="n">instr</span><span class="o">.</span><span class="n">argval</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
@@ -1674,6 +1928,25 @@
         <span class="n">_report_write</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">instr</span><span class="o">.</span><span class="n">argval</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
         <span class="k">if</span> <span class="n">recorder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">recorder</span><span class="o">.</span><span class="n">record</span><span class="p">(</span><span class="n">thread_id</span><span class="p">,</span> <span class="n">frame</span><span class="p">,</span> <span class="n">opcode</span><span class="o">=</span><span class="n">op</span><span class="p">,</span> <span class="n">access_type</span><span class="o">=</span><span class="s2">&quot;write&quot;</span><span class="p">,</span> <span class="n">attr_name</span><span class="o">=</span><span class="n">instr</span><span class="o">.</span><span class="n">argval</span><span class="p">,</span> <span class="n">obj</span><span class="o">=</span><span class="n">obj</span><span class="p">)</span>
+
+    <span class="k">elif</span> <span class="n">op</span> <span class="o">==</span> <span class="s2">&quot;LOAD_SPECIAL&quot;</span><span class="p">:</span>
+        <span class="c1"># New in 3.14: replaces LOAD_ATTR for ``__enter__`` / ``__exit__``</span>
+        <span class="c1"># in ``with`` statements.  Pops owner, pushes (attr, self_or_null).</span>
+        <span class="c1"># Stack effect = +1 (−1 pop + 2 push).</span>
+        <span class="n">_special_names</span> <span class="o">=</span> <span class="p">{</span><span class="mi">0</span><span class="p">:</span> <span class="s2">&quot;__enter__&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;__exit__&quot;</span><span class="p">}</span>
+        <span class="n">_arg</span> <span class="o">=</span> <span class="n">instr</span><span class="o">.</span><span class="n">arg</span> <span class="k">if</span> <span class="n">instr</span><span class="o">.</span><span class="n">arg</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="o">-</span><span class="mi">1</span>
+        <span class="n">attr</span> <span class="o">=</span> <span class="n">_special_names</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">_arg</span><span class="p">,</span> <span class="sa">f</span><span class="s2">&quot;__special_</span><span class="si">{</span><span class="n">_arg</span><span class="si">}</span><span class="s2">__&quot;</span><span class="p">)</span>
+        <span class="n">obj</span> <span class="o">=</span> <span class="n">shadow</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span>
+        <span class="n">_report_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">val</span> <span class="o">=</span> <span class="n">_safe_getattr</span><span class="p">(</span><span class="n">obj</span><span class="p">,</span> <span class="n">attr</span><span class="p">)</span>
+                <span class="n">shadow</span><span class="o">.</span><span class="n">push</span><span class="p">(</span><span class="n">val</span><span class="p">)</span>
+            <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+                <span class="n">shadow</span><span class="o">.</span><span class="n">push</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">shadow</span><span class="o">.</span><span class="n">push</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
+        <span class="n">shadow</span><span class="o">.</span><span class="n">push</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>  <span class="c1"># self_or_null slot</span>
 
     <span class="c1"># === Subscript access (dict/list operations) ===</span>
 
@@ -1891,7 +2164,7 @@
                 <span class="c1"># Coarse-grained read for conflict with C-method writes (append,</span>
                 <span class="c1"># insert, etc.) and other container-level operations.  Uses regular</span>
                 <span class="c1"># (last-access) semantics: each iteration overwrites the previous read</span>
-                <span class="c1"># position.  This means backtracks target the LAST iteration, which</span>
+                <span class="c1"># position.  This means wakeup tree entries target the LAST iteration, which</span>
                 <span class="c1"># allows the other thread to interleave after some elements have</span>
                 <span class="c1"># already been read — catching mid-iteration mutation races.</span>
                 <span class="n">_report_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">_iter_container</span><span class="p">,</span> <span class="s2">&quot;__cmethods__&quot;</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
@@ -2143,8 +2416,10 @@
                 <span class="k">if</span> <span class="n">_should_trace_file</span><span class="p">(</span><span class="n">filename</span><span class="p">):</span>
                     <span class="c1"># Skip dynamically generated code (&lt;string&gt;, etc.)</span>
                     <span class="c1"># unless its caller is user code.  In I/O mode, skip</span>
-                    <span class="c1"># all dynamic code unconditionally.</span>
-                    <span class="k">if</span> <span class="n">_is_dynamic_code</span><span class="p">(</span><span class="n">filename</span><span class="p">):</span>
+                    <span class="c1"># all dynamic code unconditionally.  Exception: in</span>
+                    <span class="c1"># python -c mode, functions defined in the -c string</span>
+                    <span class="c1"># have filename &quot;&lt;string&gt;&quot; but ARE user code.</span>
+                    <span class="k">if</span> <span class="n">_is_dynamic_code</span><span class="p">(</span><span class="n">filename</span><span class="p">)</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">_is_cmdline_user_code</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_globals</span><span class="p">):</span>
                         <span class="k">if</span> <span class="n">_detect_io</span><span class="p">:</span>
                             <span class="k">return</span> <span class="kc">None</span>
                         <span class="n">caller</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_back</span>
@@ -2246,7 +2521,7 @@
             <span class="c1"># In I/O-detection mode, skip dynamically generated code</span>
             <span class="c1"># (e.g. dataclass __init__ from exec/compile in libraries).</span>
             <span class="c1"># These create thousands of extra scheduling points that</span>
-            <span class="c1"># drown out I/O-based backtrack points.  Safe to DISABLE</span>
+            <span class="c1"># drown out I/O-based wakeup tree entries.  Safe to DISABLE</span>
             <span class="c1"># because each exec() creates a fresh code object.</span>
             <span class="k">if</span> <span class="n">_detect_io</span> <span class="ow">and</span> <span class="n">code</span><span class="o">.</span><span class="n">co_filename</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;&lt;&quot;</span><span class="p">):</span>
                 <span class="k">return</span> <span class="n">mon</span><span class="o">.</span><span class="n">DISABLE</span>  <span class="c1"># type: ignore[attr-defined]</span>
@@ -2270,14 +2545,16 @@
             <span class="c1"># caller is user code.  Libraries use exec/compile internally</span>
             <span class="c1"># (dataclass __init__, SQLAlchemy methods) creating thousands</span>
             <span class="c1"># of scheduling points in non-user code.  In I/O mode, skip</span>
-            <span class="c1"># all dynamic code unconditionally.</span>
+            <span class="c1"># all dynamic code unconditionally.  Exception: in python -c</span>
+            <span class="c1"># mode, functions defined in the -c string ARE user code.</span>
             <span class="k">if</span> <span class="n">_is_dynamic_code</span><span class="p">(</span><span class="n">code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">):</span>
-                <span class="k">if</span> <span class="n">_detect_io</span><span class="p">:</span>
-                    <span class="k">return</span> <span class="kc">None</span>
                 <span class="n">frame</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">_getframe</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
-                <span class="n">caller</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_back</span>
-                <span class="k">if</span> <span class="n">caller</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">_should_trace_file</span><span class="p">(</span><span class="n">caller</span><span class="o">.</span><span class="n">f_code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">):</span>
-                    <span class="k">return</span> <span class="kc">None</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="n">_is_cmdline_user_code</span><span class="p">(</span><span class="n">code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">,</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_globals</span><span class="p">):</span>
+                    <span class="k">if</span> <span class="n">_detect_io</span><span class="p">:</span>
+                        <span class="k">return</span> <span class="kc">None</span>
+                    <span class="n">caller</span> <span class="o">=</span> <span class="n">frame</span><span class="o">.</span><span class="n">f_back</span>
+                    <span class="k">if</span> <span class="n">caller</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">_should_trace_file</span><span class="p">(</span><span class="n">caller</span><span class="o">.</span><span class="n">f_code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">):</span>
+                        <span class="k">return</span> <span class="kc">None</span>
 
             <span class="n">thread_id</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;thread_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
             <span class="k">if</span> <span class="n">thread_id</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
@@ -2306,12 +2583,11 @@
                 <span class="c1"># I/O events arrive from C-level LD_PRELOAD interception.</span>
                 <span class="n">instrs</span> <span class="o">=</span> <span class="n">_get_instructions</span><span class="p">(</span><span class="n">code</span><span class="p">)</span>
                 <span class="n">instr</span> <span class="o">=</span> <span class="n">instrs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">instruction_offset</span><span class="p">)</span>
+                <span class="n">frame</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">_getframe</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
                 <span class="k">if</span> <span class="n">instr</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">instr</span><span class="o">.</span><span class="n">opname</span> <span class="ow">in</span> <span class="n">_CALL_OPCODES</span><span class="p">:</span>
                     <span class="k">if</span> <span class="n">_detect_io</span><span class="p">:</span>
-                        <span class="n">frame</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">_getframe</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
                         <span class="n">scheduler</span><span class="o">.</span><span class="n">report_and_wait</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">)</span>
                         <span class="k">return</span> <span class="kc">None</span>
-                    <span class="n">frame</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">_getframe</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
                     <span class="n">shadow</span> <span class="o">=</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">get_shadow_stack</span><span class="p">(</span><span class="nb">id</span><span class="p">(</span><span class="n">frame</span><span class="p">))</span>
                     <span class="n">argc</span> <span class="o">=</span> <span class="n">instr</span><span class="o">.</span><span class="n">arg</span> <span class="ow">or</span> <span class="mi">0</span>
                     <span class="k">if</span> <span class="n">_call_might_report_access</span><span class="p">(</span><span class="n">shadow</span><span class="p">,</span> <span class="n">argc</span><span class="p">):</span>
@@ -2320,7 +2596,6 @@
                     <span class="c1"># No C-method detected; process shadow stack without yield</span>
                     <span class="n">_process_opcode</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span> <span class="n">scheduler</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">)</span>
                     <span class="k">return</span> <span class="kc">None</span>
-                <span class="n">frame</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">_getframe</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
                 <span class="n">_process_opcode</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span> <span class="n">scheduler</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">)</span>
                 <span class="k">return</span> <span class="kc">None</span>
 
@@ -2367,8 +2642,32 @@
         <span class="c1">#   &quot;lock_wait&quot;    → execution.block_thread  (DPOR skips this thread)</span>
         <span class="c1">#   &quot;lock_acquire&quot; → execution.unblock_thread (DPOR can schedule again)</span>
         <span class="c1">#   &quot;lock_release&quot; → unblock all waiters for this lock</span>
-        <span class="k">def</span><span class="w"> </span><span class="nf">_sync_reporter</span><span class="p">(</span><span class="n">event</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">obj_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="c1"># XOR masks matching Rust DporEngine constants for virtual lock objects.</span>
+        <span class="n">lock_object_xor</span> <span class="o">=</span> <span class="mh">0x4C4F_434B_4C4F_434B</span>  <span class="c1"># &quot;LOCKLOCK&quot;</span>
+        <span class="n">lock_release_xor</span> <span class="o">=</span> <span class="mh">0x524C_5345_524C_5345</span>  <span class="c1"># &quot;RLSERLSE&quot;</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">_register_lock_in_reverse_map</span><span class="p">(</span><span class="n">stable_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">lock_obj</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">            </span><span class="sd">&quot;&quot;&quot;Register virtual lock objects in the reverse map for human-readable race info.&quot;&quot;&quot;</span>
+            <span class="n">rmap</span> <span class="o">=</span> <span class="n">_object_key_reverse_map</span>
+            <span class="k">if</span> <span class="n">rmap</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">return</span>
+            <span class="n">type_name</span> <span class="o">=</span> <span class="nb">type</span><span class="p">(</span><span class="n">lock_obj</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span>
+            <span class="n">acq_key</span> <span class="o">=</span> <span class="n">stable_id</span> <span class="o">^</span> <span class="n">lock_object_xor</span>
+            <span class="n">rel_key</span> <span class="o">=</span> <span class="n">stable_id</span> <span class="o">^</span> <span class="n">lock_release_xor</span>
+            <span class="k">if</span> <span class="n">acq_key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">rmap</span><span class="p">:</span>
+                <span class="n">rmap</span><span class="p">[</span><span class="n">acq_key</span><span class="p">]</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">type_name</span><span class="si">}</span><span class="s2">(id=</span><span class="si">{</span><span class="n">stable_id</span><span class="si">}</span><span class="s2">).acquire&quot;</span>
+            <span class="k">if</span> <span class="n">rel_key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">rmap</span><span class="p">:</span>
+                <span class="n">rmap</span><span class="p">[</span><span class="n">rel_key</span><span class="p">]</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">type_name</span><span class="si">}</span><span class="s2">(id=</span><span class="si">{</span><span class="n">stable_id</span><span class="si">}</span><span class="s2">).release&quot;</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">_sync_reporter</span><span class="p">(</span><span class="n">event</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">obj_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">lock_obj</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
             <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._cooperative</span><span class="w"> </span><span class="kn">import</span> <span class="n">_scheduler_tls</span>
+
+            <span class="c1"># Use stable IDs so that lock identifiers are consistent across</span>
+            <span class="c1"># DPOR executions (each execution creates fresh state via setup(),</span>
+            <span class="c1"># so raw id() values change).  This is the same mechanism used for</span>
+            <span class="c1"># shared-object access tracking.</span>
+            <span class="n">stable_lock_id</span> <span class="o">=</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_stable_ids</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">lock_obj</span><span class="p">)</span>
+            <span class="n">_register_lock_in_reverse_map</span><span class="p">(</span><span class="n">stable_lock_id</span><span class="p">,</span> <span class="n">lock_obj</span><span class="p">)</span>
 
             <span class="c1"># Set reentrancy guard so that GC-triggered __del__ chains</span>
             <span class="c1"># (e.g., redis.Redis.__del__) that acquire cooperative locks</span>
@@ -2378,31 +2677,111 @@
             <span class="k">try</span><span class="p">:</span>
                 <span class="k">if</span> <span class="n">event</span> <span class="o">==</span> <span class="s2">&quot;lock_wait&quot;</span><span class="p">:</span>
                     <span class="k">with</span> <span class="n">engine_lock</span><span class="p">:</span>
-                        <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_waiters</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">obj_id</span><span class="p">,</span> <span class="nb">set</span><span class="p">())</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+                        <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_waiters</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">stable_lock_id</span><span class="p">,</span> <span class="nb">set</span><span class="p">())</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
                         <span class="n">execution</span><span class="o">.</span><span class="n">block_thread</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+                        <span class="n">_trace_len_wait</span> <span class="o">=</span> <span class="p">(</span>
+                            <span class="nb">len</span><span class="p">(</span><span class="n">execution</span><span class="o">.</span><span class="n">schedule_trace</span><span class="p">)</span> <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                        <span class="p">)</span>
+                        <span class="n">_trace_snap_wait</span> <span class="o">=</span> <span class="p">(</span>
+                            <span class="nb">list</span><span class="p">(</span><span class="n">execution</span><span class="o">.</span><span class="n">schedule_trace</span><span class="p">)</span> <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
+                        <span class="p">)</span>
+                    <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="c1"># Capture teardown boundary once, then suppress all further events.</span>
+                        <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_deadlock_at</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                            <span class="n">scheduler</span><span class="o">.</span><span class="n">_deadlock_at</span> <span class="o">=</span> <span class="n">_trace_len_wait</span>
+                        <span class="k">return</span>
+                    <span class="k">if</span> <span class="n">_trace_snap_wait</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._report</span><span class="w"> </span><span class="kn">import</span> <span class="n">LockEvent</span> <span class="k">as</span> <span class="n">_LockEvent</span>
+
+                        <span class="n">_wait_idx</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span>
+                            <span class="p">(</span><span class="n">i</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">_trace_snap_wait</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">if</span> <span class="n">_trace_snap_wait</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">),</span>
+                            <span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">_trace_snap_wait</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">),</span>
+                        <span class="p">)</span>
+                        <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>  <span class="c1"># type: ignore[union-attr]</span>
+                            <span class="n">_LockEvent</span><span class="p">(</span>
+                                <span class="n">schedule_index</span><span class="o">=</span><span class="n">_wait_idx</span><span class="p">,</span> <span class="n">thread_id</span><span class="o">=</span><span class="n">thread_id</span><span class="p">,</span> <span class="n">event_type</span><span class="o">=</span><span class="s2">&quot;wait&quot;</span><span class="p">,</span> <span class="n">lock_id</span><span class="o">=</span><span class="n">stable_lock_id</span>
+                            <span class="p">)</span>
+                        <span class="p">)</span>
                     <span class="k">return</span>
                 <span class="k">if</span> <span class="n">event</span> <span class="o">==</span> <span class="s2">&quot;lock_acquire&quot;</span><span class="p">:</span>
                     <span class="k">with</span> <span class="n">engine_lock</span><span class="p">:</span>
-                        <span class="n">waiter_set</span> <span class="o">=</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_waiters</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">obj_id</span><span class="p">)</span>
+                        <span class="n">waiter_set</span> <span class="o">=</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_waiters</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">stable_lock_id</span><span class="p">)</span>
                         <span class="k">if</span> <span class="n">waiter_set</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">thread_id</span> <span class="ow">in</span> <span class="n">waiter_set</span><span class="p">:</span>
                             <span class="n">waiter_set</span><span class="o">.</span><span class="n">discard</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
                             <span class="n">execution</span><span class="o">.</span><span class="n">unblock_thread</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
-                        <span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="s2">&quot;lock_acquire&quot;</span><span class="p">,</span> <span class="n">obj_id</span><span class="p">)</span>
-                    <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">lock_depth</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;lock_depth&quot;</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span>
+                        <span class="n">_saved_path_id</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;_last_path_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                        <span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="s2">&quot;lock_acquire&quot;</span><span class="p">,</span> <span class="n">stable_lock_id</span><span class="p">,</span> <span class="n">_saved_path_id</span><span class="p">)</span>
+                        <span class="n">_trace_len_acq</span> <span class="o">=</span> <span class="p">(</span>
+                            <span class="nb">len</span><span class="p">(</span><span class="n">execution</span><span class="o">.</span><span class="n">schedule_trace</span><span class="p">)</span> <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                        <span class="p">)</span>
+                        <span class="n">_trace_snap_acq</span> <span class="o">=</span> <span class="p">(</span>
+                            <span class="nb">list</span><span class="p">(</span><span class="n">execution</span><span class="o">.</span><span class="n">schedule_trace</span><span class="p">)</span> <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
+                        <span class="p">)</span>
+                    <span class="n">new_depth</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;lock_depth&quot;</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span>
+                    <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">lock_depth</span> <span class="o">=</span> <span class="n">new_depth</span>
+                    <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="p">[</span><span class="n">thread_id</span><span class="p">]</span> <span class="o">=</span> <span class="n">new_depth</span>
+                    <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_deadlock_at</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                            <span class="n">scheduler</span><span class="o">.</span><span class="n">_deadlock_at</span> <span class="o">=</span> <span class="n">_trace_len_acq</span>
+                        <span class="k">return</span>
+                    <span class="k">if</span> <span class="n">_trace_snap_acq</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._report</span><span class="w"> </span><span class="kn">import</span> <span class="n">LockEvent</span> <span class="k">as</span> <span class="n">_LockEvent</span>
+
+                        <span class="n">_acq_idx</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span>
+                            <span class="p">(</span><span class="n">i</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">_trace_snap_acq</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">if</span> <span class="n">_trace_snap_acq</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">),</span>
+                            <span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">_trace_snap_acq</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">),</span>
+                        <span class="p">)</span>
+                        <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>  <span class="c1"># type: ignore[union-attr]</span>
+                            <span class="n">_LockEvent</span><span class="p">(</span>
+                                <span class="n">schedule_index</span><span class="o">=</span><span class="n">_acq_idx</span><span class="p">,</span>
+                                <span class="n">thread_id</span><span class="o">=</span><span class="n">thread_id</span><span class="p">,</span>
+                                <span class="n">event_type</span><span class="o">=</span><span class="s2">&quot;acquire&quot;</span><span class="p">,</span>
+                                <span class="n">lock_id</span><span class="o">=</span><span class="n">stable_lock_id</span><span class="p">,</span>
+                            <span class="p">)</span>
+                        <span class="p">)</span>
                     <span class="k">return</span>
                 <span class="k">if</span> <span class="n">event</span> <span class="o">==</span> <span class="s2">&quot;lock_release&quot;</span><span class="p">:</span>
                     <span class="k">with</span> <span class="n">engine_lock</span><span class="p">:</span>
-                        <span class="n">waiters</span> <span class="o">=</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_waiters</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">obj_id</span><span class="p">,</span> <span class="nb">set</span><span class="p">())</span>
+                        <span class="n">waiters</span> <span class="o">=</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_waiters</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">stable_lock_id</span><span class="p">,</span> <span class="nb">set</span><span class="p">())</span>
                         <span class="k">for</span> <span class="n">waiter</span> <span class="ow">in</span> <span class="n">waiters</span><span class="p">:</span>
                             <span class="n">execution</span><span class="o">.</span><span class="n">unblock_thread</span><span class="p">(</span><span class="n">waiter</span><span class="p">)</span>
-                        <span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="s2">&quot;lock_release&quot;</span><span class="p">,</span> <span class="n">obj_id</span><span class="p">)</span>
-                    <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">lock_depth</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;lock_depth&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>
+                        <span class="n">_saved_path_id</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;_last_path_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                        <span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="s2">&quot;lock_release&quot;</span><span class="p">,</span> <span class="n">stable_lock_id</span><span class="p">,</span> <span class="n">_saved_path_id</span><span class="p">)</span>
+                        <span class="n">_trace_len_rel</span> <span class="o">=</span> <span class="p">(</span>
+                            <span class="nb">len</span><span class="p">(</span><span class="n">execution</span><span class="o">.</span><span class="n">schedule_trace</span><span class="p">)</span> <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                        <span class="p">)</span>
+                        <span class="n">_trace_snap_rel</span> <span class="o">=</span> <span class="p">(</span>
+                            <span class="nb">list</span><span class="p">(</span><span class="n">execution</span><span class="o">.</span><span class="n">schedule_trace</span><span class="p">)</span> <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
+                        <span class="p">)</span>
+                    <span class="n">new_depth</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;lock_depth&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>
+                    <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">lock_depth</span> <span class="o">=</span> <span class="n">new_depth</span>
+                    <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="p">[</span><span class="n">thread_id</span><span class="p">]</span> <span class="o">=</span> <span class="n">new_depth</span>
+                    <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_error</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_deadlock_at</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                            <span class="n">scheduler</span><span class="o">.</span><span class="n">_deadlock_at</span> <span class="o">=</span> <span class="n">_trace_len_rel</span>
+                        <span class="k">return</span>
+                    <span class="k">if</span> <span class="n">_trace_snap_rel</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._report</span><span class="w"> </span><span class="kn">import</span> <span class="n">LockEvent</span> <span class="k">as</span> <span class="n">_LockEvent</span>
+
+                        <span class="n">_rel_idx</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span>
+                            <span class="p">(</span><span class="n">i</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">_trace_snap_rel</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">if</span> <span class="n">_trace_snap_rel</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">),</span>
+                            <span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">_trace_snap_rel</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">),</span>
+                        <span class="p">)</span>
+                        <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>  <span class="c1"># type: ignore[union-attr]</span>
+                            <span class="n">_LockEvent</span><span class="p">(</span>
+                                <span class="n">schedule_index</span><span class="o">=</span><span class="n">_rel_idx</span><span class="p">,</span>
+                                <span class="n">thread_id</span><span class="o">=</span><span class="n">thread_id</span><span class="p">,</span>
+                                <span class="n">event_type</span><span class="o">=</span><span class="s2">&quot;release&quot;</span><span class="p">,</span>
+                                <span class="n">lock_id</span><span class="o">=</span><span class="n">stable_lock_id</span><span class="p">,</span>
+                            <span class="p">)</span>
+                        <span class="p">)</span>
                     <span class="c1"># Wake threads that may now be schedulable</span>
                     <span class="k">with</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_condition</span><span class="p">:</span>
                         <span class="n">scheduler</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
                     <span class="k">return</span>
                 <span class="k">with</span> <span class="n">engine_lock</span><span class="p">:</span>
-                    <span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">event</span><span class="p">,</span> <span class="n">obj_id</span><span class="p">)</span>
+                    <span class="n">_saved_path_id</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;_last_path_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                    <span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">event</span><span class="p">,</span> <span class="n">stable_lock_id</span><span class="p">,</span> <span class="n">_saved_path_id</span><span class="p">)</span>
             <span class="k">finally</span><span class="p">:</span>
                 <span class="n">_scheduler_tls</span><span class="o">.</span><span class="n">_in_dpor_machinery</span> <span class="o">=</span> <span class="kc">False</span>
 
@@ -2412,12 +2791,18 @@
         <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">thread_id</span> <span class="o">=</span> <span class="n">thread_id</span>
         <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">engine</span> <span class="o">=</span> <span class="n">engine</span>
         <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">execution</span> <span class="o">=</span> <span class="n">execution</span>
+        <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">_last_path_id</span> <span class="o">=</span> <span class="kc">None</span>  <span class="c1"># set by report_and_wait after schedule()</span>
 
-        <span class="c1"># IO detection: defer I/O reports until the thread exits all locks</span>
-        <span class="c1"># so that the DPOR backtrack point lands at a scheduling point where</span>
-        <span class="c1"># the other thread can actually run (not blocked on the lock).</span>
+        <span class="c1"># IO detection: defer I/O reports while this thread is inside locks.</span>
+        <span class="c1"># If another thread later reaches a real I/O boundary, it will flush</span>
+        <span class="c1"># these deferred accesses before reporting its own I/O so the race</span>
+        <span class="c1"># window is preserved without adding spurious paths for threads that</span>
+        <span class="c1"># only block on the same lock.</span>
         <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">lock_depth</span> <span class="o">=</span> <span class="mi">0</span>
-        <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">pending_io</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="p">[</span><span class="n">thread_id</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="n">pending_io</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">pending_io</span> <span class="o">=</span> <span class="n">pending_io</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="p">[</span><span class="n">thread_id</span><span class="p">]</span> <span class="o">=</span> <span class="n">pending_io</span>
 
         <span class="c1"># Register OS TID → DPOR thread ID mapping for LD_PRELOAD events.</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_preload_bridge</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
@@ -2456,6 +2841,7 @@
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_teardown_dpor_tls</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Clean up both shared and DPOR-specific TLS.&quot;&quot;&quot;</span>
+        <span class="n">_tid</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;thread_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_preload_bridge</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_preload_bridge</span><span class="o">.</span><span class="n">unregister_thread</span><span class="p">(</span><span class="n">threading</span><span class="o">.</span><span class="n">get_native_id</span><span class="p">())</span>
 
@@ -2492,6 +2878,9 @@
         <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">execution</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">lock_depth</span> <span class="o">=</span> <span class="mi">0</span>
         <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">pending_io</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">if</span> <span class="n">_tid</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">_tid</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">_tid</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_run_thread_settrace</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
@@ -2721,6 +3110,7 @@
     <span class="n">warn_nondeterministic_sql</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
     <span class="n">lock_timeout</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="n">trace_packages</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">track_dunder_dict_accesses</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
 <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">InterleavingResult</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Systematically explore interleavings using DPOR.</span>
 
@@ -2771,6 +3161,12 @@
 <span class="sd">            trace in addition to user code.  By default, code in</span>
 <span class="sd">            site-packages is skipped.  Use this to include specific</span>
 <span class="sd">            installed packages, e.g. ``[&quot;django_*&quot;, &quot;mylib.*&quot;]``.</span>
+<span class="sd">        track_dunder_dict_accesses: If True, report accesses on ``obj.__dict__``</span>
+<span class="sd">            in addition to direct attribute accesses.  This catches the</span>
+<span class="sd">            rare case where one thread uses ``self.x = v`` and another</span>
+<span class="sd">            uses ``self.__dict__[&#39;x&#39;] = v``, but doubles wakeup tree</span>
+<span class="sd">            insertions and can cause combinatorial explosion.  Default</span>
+<span class="sd">            False.</span>
 
 <span class="sd">    Returns:</span>
 <span class="sd">        InterleavingResult with exploration statistics and any counterexample found.</span>
@@ -2824,12 +3220,71 @@
 
     <span class="n">clear_sql_metadata</span><span class="p">()</span>
 
+    <span class="c1"># Warm SQL parsers (sqlglot) BEFORE the first _patch_locks() call.</span>
+    <span class="c1"># sqlglot creates a module-level _import_lock = threading.RLock() on</span>
+    <span class="c1"># first import.  If that import happens after _patch_locks() replaces</span>
+    <span class="c1"># threading.RLock with CooperativeRLock, the lock becomes cooperative.</span>
+    <span class="c1"># If a worker thread is then killed while holding it (e.g. timeout),</span>
+    <span class="c1"># the underlying real lock stays locked forever, causing deadlocks in</span>
+    <span class="c1"># later phases (_reproduce_dpor_counterexample).  Warming here ensures</span>
+    <span class="c1"># the lock is a real RLock.</span>
+    <span class="k">if</span> <span class="n">detect_io</span><span class="p">:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._sql_cursor</span><span class="w"> </span><span class="kn">import</span> <span class="n">_warm_sql_parsers</span>
+
+        <span class="n">_warm_sql_parsers</span><span class="p">()</span>
+
     <span class="c1"># Inject SET lock_timeout on new PG connections (defect #6 workaround).</span>
     <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._sql_cursor</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_lock_timeout</span><span class="p">,</span> <span class="n">set_lock_timeout</span>
 
     <span class="n">prev_lock_timeout</span> <span class="o">=</span> <span class="n">get_lock_timeout</span><span class="p">()</span>
     <span class="k">if</span> <span class="n">lock_timeout</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
         <span class="n">set_lock_timeout</span><span class="p">(</span><span class="n">lock_timeout</span><span class="p">)</span>
+
+    <span class="c1"># Set up report collection if --frontrun-report is active</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._report</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+        <span class="n">_MAX_RECORDED_EXECUTIONS</span><span class="p">,</span>
+        <span class="n">ExecutionRecord</span><span class="p">,</span>
+        <span class="n">ExplorationReport</span><span class="p">,</span>
+        <span class="n">_global_report_path</span><span class="p">,</span>
+        <span class="n">generate_html_report</span><span class="p">,</span>
+    <span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_build_race_info</span><span class="p">(</span><span class="n">raw_races</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">,</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span><span class="p">]])</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">raw_races</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>
+        <span class="n">rmap</span> <span class="o">=</span> <span class="n">_object_key_reverse_map</span> <span class="ow">or</span> <span class="p">{}</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="c1"># Track (prev_step, current_step, thread_id) to deduplicate dict.__dict__</span>
+        <span class="c1"># shadows of real attribute accesses</span>
+        <span class="n">seen_steps</span><span class="p">:</span> <span class="nb">set</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">]]</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
+        <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">raw_races</span><span class="p">:</span>
+            <span class="n">obj_name</span> <span class="o">=</span> <span class="n">rmap</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">r</span><span class="p">[</span><span class="mi">3</span><span class="p">],</span> <span class="sa">f</span><span class="s2">&quot;object </span><span class="si">{</span><span class="n">r</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span> <span class="k">if</span> <span class="n">r</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
+            <span class="n">key</span> <span class="o">=</span> <span class="p">(</span><span class="n">r</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">r</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">r</span><span class="p">[</span><span class="mi">2</span><span class="p">])</span>
+            <span class="c1"># Skip dict.X entries when we already have a Type.X entry for the same steps</span>
+            <span class="k">if</span> <span class="n">obj_name</span> <span class="ow">and</span> <span class="n">obj_name</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;dict.&quot;</span><span class="p">):</span>
+                <span class="k">if</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">seen_steps</span><span class="p">:</span>
+                    <span class="k">continue</span>
+            <span class="n">seen_steps</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+            <span class="n">result</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+                <span class="p">{</span>
+                    <span class="s2">&quot;prev_step&quot;</span><span class="p">:</span> <span class="n">r</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span>
+                    <span class="s2">&quot;current_step&quot;</span><span class="p">:</span> <span class="n">r</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span>
+                    <span class="s2">&quot;thread_id&quot;</span><span class="p">:</span> <span class="n">r</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span>
+                    <span class="s2">&quot;object&quot;</span><span class="p">:</span> <span class="n">obj_name</span><span class="p">,</span>
+                <span class="p">}</span>
+            <span class="p">)</span>
+        <span class="k">return</span> <span class="n">result</span> <span class="ow">or</span> <span class="kc">None</span>
+
+    <span class="k">global</span> <span class="n">_object_key_reverse_map</span>
+
+    <span class="n">report_path</span> <span class="o">=</span> <span class="n">_global_report_path</span>
+    <span class="n">report</span><span class="p">:</span> <span class="n">ExplorationReport</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">if</span> <span class="n">report_path</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">report</span> <span class="o">=</span> <span class="n">ExplorationReport</span><span class="p">(</span>
+            <span class="n">num_threads</span><span class="o">=</span><span class="n">num_threads</span><span class="p">,</span>
+            <span class="n">thread_names</span><span class="o">=</span><span class="p">[</span><span class="sa">f</span><span class="s2">&quot;Thread </span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num_threads</span><span class="p">)],</span>
+        <span class="p">)</span>
+        <span class="n">_object_key_reverse_map</span> <span class="o">=</span> <span class="p">{}</span>
 
     <span class="k">try</span><span class="p">:</span>
         <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
@@ -2843,6 +3298,9 @@
             <span class="c1"># Clear bridge state for this new execution.</span>
             <span class="k">if</span> <span class="n">preload_bridge</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
                 <span class="n">preload_bridge</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+            <span class="c1"># Set up switch point collection for the report</span>
+            <span class="n">_collecting_report</span> <span class="o">=</span> <span class="n">report</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">report</span><span class="o">.</span><span class="n">executions</span><span class="p">)</span> <span class="o">&lt;</span> <span class="n">_MAX_RECORDED_EXECUTIONS</span>
+            <span class="n">switch_points</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span> <span class="k">if</span> <span class="n">_collecting_report</span> <span class="k">else</span> <span class="p">[]</span>
             <span class="n">scheduler</span> <span class="o">=</span> <span class="n">DporScheduler</span><span class="p">(</span>
                 <span class="n">engine</span><span class="p">,</span>
                 <span class="n">execution</span><span class="p">,</span>
@@ -2853,6 +3311,8 @@
                 <span class="n">preload_bridge</span><span class="o">=</span><span class="n">preload_bridge</span><span class="p">,</span>
                 <span class="n">detect_io</span><span class="o">=</span><span class="n">detect_io</span><span class="p">,</span>
                 <span class="n">stable_ids</span><span class="o">=</span><span class="n">stable_ids</span><span class="p">,</span>
+                <span class="n">switch_point_collector</span><span class="o">=</span><span class="n">switch_points</span> <span class="k">if</span> <span class="n">_collecting_report</span> <span class="k">else</span> <span class="kc">None</span><span class="p">,</span>
+                <span class="n">track_dunder_dict_accesses</span><span class="o">=</span><span class="n">track_dunder_dict_accesses</span><span class="p">,</span>
             <span class="p">)</span>
             <span class="n">runner</span> <span class="o">=</span> <span class="n">DporBytecodeRunner</span><span class="p">(</span><span class="n">scheduler</span><span class="p">,</span> <span class="n">detect_io</span><span class="o">=</span><span class="n">detect_io</span><span class="p">,</span> <span class="n">preload_bridge</span><span class="o">=</span><span class="n">preload_bridge</span><span class="p">)</span>
 
@@ -2919,6 +3379,28 @@
                 <span class="k">if</span> <span class="n">stop_on_first</span><span class="p">:</span>
                     <span class="k">with</span> <span class="n">_INSTR_CACHE_LOCK</span><span class="p">:</span>
                         <span class="n">_INSTR_CACHE</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+                    <span class="k">if</span> <span class="n">report</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">report_path</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="c1"># Record the failing execution before generating report</span>
+                        <span class="k">if</span> <span class="n">_collecting_report</span><span class="p">:</span>
+                            <span class="k">with</span> <span class="n">engine_lock</span><span class="p">:</span>
+                                <span class="n">schedule_trace_r</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">execution</span><span class="o">.</span><span class="n">schedule_trace</span><span class="p">)</span>
+                                <span class="n">raw_races</span> <span class="o">=</span> <span class="n">engine</span><span class="o">.</span><span class="n">pending_races</span><span class="p">()</span>
+                            <span class="n">race_info</span> <span class="o">=</span> <span class="n">_build_race_info</span><span class="p">(</span><span class="n">raw_races</span><span class="p">)</span>
+                            <span class="n">report</span><span class="o">.</span><span class="n">executions</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+                                <span class="n">ExecutionRecord</span><span class="p">(</span>
+                                    <span class="n">index</span><span class="o">=</span><span class="nb">len</span><span class="p">(</span><span class="n">report</span><span class="o">.</span><span class="n">executions</span><span class="p">),</span>
+                                    <span class="n">schedule_trace</span><span class="o">=</span><span class="n">schedule_trace_r</span><span class="p">,</span>
+                                    <span class="n">switch_points</span><span class="o">=</span><span class="n">switch_points</span><span class="p">,</span>
+                                    <span class="n">invariant_held</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+                                    <span class="n">was_deadlock</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+                                    <span class="n">race_info</span><span class="o">=</span><span class="n">race_info</span><span class="p">,</span>
+                                    <span class="n">step_events</span><span class="o">=</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_step_event_collector</span> <span class="ow">or</span> <span class="p">{},</span>
+                                    <span class="n">lock_events</span><span class="o">=</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span> <span class="ow">or</span> <span class="p">[],</span>
+                                    <span class="n">deadlock_at</span><span class="o">=</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_deadlock_at</span><span class="p">,</span>
+                                    <span class="n">deadlock_cycle_description</span><span class="o">=</span><span class="nb">getattr</span><span class="p">(</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_error</span><span class="p">,</span> <span class="s2">&quot;cycle_description&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">),</span>
+                                <span class="p">)</span>
+                            <span class="p">)</span>
+                        <span class="n">generate_html_report</span><span class="p">(</span><span class="n">report</span><span class="p">,</span> <span class="n">report_path</span><span class="p">)</span>
                     <span class="k">return</span> <span class="n">result</span>
 
             <span class="k">if</span> <span class="n">warn_nondeterministic_sql</span><span class="p">:</span>
@@ -2969,11 +3451,59 @@
                     <span class="c1"># Clear cache before returning</span>
                     <span class="k">with</span> <span class="n">_INSTR_CACHE_LOCK</span><span class="p">:</span>
                         <span class="n">_INSTR_CACHE</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+                    <span class="k">if</span> <span class="n">report</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">report_path</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="k">if</span> <span class="n">_collecting_report</span><span class="p">:</span>
+                            <span class="k">with</span> <span class="n">engine_lock</span><span class="p">:</span>
+                                <span class="n">schedule_trace_r2</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">execution</span><span class="o">.</span><span class="n">schedule_trace</span><span class="p">)</span>
+                                <span class="n">raw_races2</span> <span class="o">=</span> <span class="n">engine</span><span class="o">.</span><span class="n">pending_races</span><span class="p">()</span>
+                            <span class="n">race_info2</span> <span class="o">=</span> <span class="n">_build_race_info</span><span class="p">(</span><span class="n">raw_races2</span><span class="p">)</span>
+                            <span class="n">report</span><span class="o">.</span><span class="n">executions</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+                                <span class="n">ExecutionRecord</span><span class="p">(</span>
+                                    <span class="n">index</span><span class="o">=</span><span class="nb">len</span><span class="p">(</span><span class="n">report</span><span class="o">.</span><span class="n">executions</span><span class="p">),</span>
+                                    <span class="n">schedule_trace</span><span class="o">=</span><span class="n">schedule_trace_r2</span><span class="p">,</span>
+                                    <span class="n">switch_points</span><span class="o">=</span><span class="n">switch_points</span><span class="p">,</span>
+                                    <span class="n">invariant_held</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+                                    <span class="n">was_deadlock</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+                                    <span class="n">race_info</span><span class="o">=</span><span class="n">race_info2</span><span class="p">,</span>
+                                    <span class="n">step_events</span><span class="o">=</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_step_event_collector</span> <span class="ow">or</span> <span class="p">{},</span>
+                                    <span class="n">lock_events</span><span class="o">=</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span> <span class="ow">or</span> <span class="p">[],</span>
+                                    <span class="n">deadlock_at</span><span class="o">=</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_deadlock_at</span><span class="p">,</span>
+                                <span class="p">)</span>
+                            <span class="p">)</span>
+                        <span class="n">generate_html_report</span><span class="p">(</span><span class="n">report</span><span class="p">,</span> <span class="n">report_path</span><span class="p">)</span>
                     <span class="k">return</span> <span class="n">result</span>
 
             <span class="c1"># Clear instruction cache between executions to avoid stale code ids</span>
             <span class="k">with</span> <span class="n">_INSTR_CACHE_LOCK</span><span class="p">:</span>
                 <span class="n">_INSTR_CACHE</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+
+            <span class="c1"># Collect report data before next_execution() consumes pending races</span>
+            <span class="k">if</span> <span class="n">_collecting_report</span> <span class="ow">and</span> <span class="n">report</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">with</span> <span class="n">engine_lock</span><span class="p">:</span>
+                    <span class="n">schedule_trace</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">execution</span><span class="o">.</span><span class="n">schedule_trace</span><span class="p">)</span>
+                    <span class="n">raw_races</span> <span class="o">=</span> <span class="n">engine</span><span class="o">.</span><span class="n">pending_races</span><span class="p">()</span>
+                <span class="n">race_info</span> <span class="o">=</span> <span class="n">_build_race_info</span><span class="p">(</span><span class="n">raw_races</span><span class="p">)</span>
+                <span class="n">was_deadlock</span> <span class="o">=</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_error</span><span class="p">,</span> <span class="n">DeadlockError</span><span class="p">)</span>
+                <span class="c1"># Check if this specific execution failed: it was appended to failures</span>
+                <span class="c1"># with the current num_explored as its execution number</span>
+                <span class="n">this_exec_failed</span> <span class="o">=</span> <span class="nb">any</span><span class="p">(</span><span class="n">n</span> <span class="o">==</span> <span class="n">result</span><span class="o">.</span><span class="n">num_explored</span> <span class="k">for</span> <span class="n">n</span><span class="p">,</span> <span class="n">_</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">failures</span><span class="p">)</span>
+                <span class="n">invariant_held</span> <span class="o">=</span> <span class="ow">not</span> <span class="n">was_deadlock</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">this_exec_failed</span>
+                <span class="n">report</span><span class="o">.</span><span class="n">executions</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+                    <span class="n">ExecutionRecord</span><span class="p">(</span>
+                        <span class="n">index</span><span class="o">=</span><span class="nb">len</span><span class="p">(</span><span class="n">report</span><span class="o">.</span><span class="n">executions</span><span class="p">),</span>
+                        <span class="n">schedule_trace</span><span class="o">=</span><span class="n">schedule_trace</span><span class="p">,</span>
+                        <span class="n">switch_points</span><span class="o">=</span><span class="n">switch_points</span><span class="p">,</span>
+                        <span class="n">invariant_held</span><span class="o">=</span><span class="n">invariant_held</span><span class="p">,</span>
+                        <span class="n">was_deadlock</span><span class="o">=</span><span class="n">was_deadlock</span><span class="p">,</span>
+                        <span class="n">race_info</span><span class="o">=</span><span class="n">race_info</span><span class="p">,</span>
+                        <span class="n">step_events</span><span class="o">=</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_step_event_collector</span> <span class="ow">or</span> <span class="p">{},</span>
+                        <span class="n">lock_events</span><span class="o">=</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span> <span class="ow">or</span> <span class="p">[],</span>
+                        <span class="n">deadlock_at</span><span class="o">=</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_deadlock_at</span><span class="p">,</span>
+                        <span class="n">deadlock_cycle_description</span><span class="o">=</span><span class="nb">getattr</span><span class="p">(</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_error</span><span class="p">,</span> <span class="s2">&quot;cycle_description&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                        <span class="k">if</span> <span class="n">was_deadlock</span>
+                        <span class="k">else</span> <span class="kc">None</span><span class="p">,</span>
+                    <span class="p">)</span>
+                <span class="p">)</span>
 
             <span class="k">with</span> <span class="n">engine_lock</span><span class="p">:</span>
                 <span class="k">if</span> <span class="ow">not</span> <span class="n">engine</span><span class="o">.</span><span class="n">next_execution</span><span class="p">():</span>
@@ -2983,6 +3513,11 @@
         <span class="n">set_lock_timeout</span><span class="p">(</span><span class="n">prev_lock_timeout</span><span class="p">)</span>
         <span class="k">if</span> <span class="n">preload_dispatcher</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">preload_dispatcher</span><span class="o">.</span><span class="n">stop</span><span class="p">()</span>
+
+    <span class="c1"># Generate HTML report if requested</span>
+    <span class="k">if</span> <span class="n">report</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">report_path</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">generate_html_report</span><span class="p">(</span><span class="n">report</span><span class="p">,</span> <span class="n">report_path</span><span class="p">)</span>
+    <span class="n">_object_key_reverse_map</span> <span class="o">=</span> <span class="kc">None</span>
 
     <span class="k">return</span> <span class="n">result</span></div>
 
@@ -3018,7 +3553,7 @@
       
     </aside>
   </div>
-</div><script src="../../_static/documentation_options.js?v=938c9ccc"></script>
+</div><script src="../../_static/documentation_options.js?v=e259d695"></script>
     <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../../_static/scripts/furo.js?v=46bd48cc"></script>

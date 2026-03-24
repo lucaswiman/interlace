@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Frontrun Case Studies: Concurrency Bug Detection" href="CASE_STUDIES.html"><link rel="prev" title="How It Works Under the Hood" href="internals.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>API Reference - Frontrun 0.2.0 documentation</title>
+        <title>API Reference - Frontrun 0.3.0 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">Frontrun 0.2.0 documentation</div></a>
+      <a href="index.html"><div class="brand">Frontrun 0.3.0 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">Frontrun 0.2.0 documentation</span>
+  <span class="sidebar-brand-text">Frontrun 0.3.0 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -526,7 +526,7 @@ completely separate from the existing bytecode.py random exploration.</p>
 <p>The approach:
 1. A Rust DPOR engine (frontrun._dpor) manages the exploration tree,</p>
 <blockquote>
-<div><p>vector clocks, and backtrack set computation.</p>
+<div><p>vector clocks, and wakeup tree exploration.</p>
 </div></blockquote>
 <ol class="arabic simple" start="2">
 <li><p>Python drives execution: runs threads under sys.settrace opcode
@@ -556,7 +556,7 @@ events for happens-before tracking.</p></li>
 </div>
 <dl class="py function">
 <dt class="sig sig-object py" id="frontrun.dpor.explore_dpor">
-<span class="sig-prename descclassname"><span class="pre">frontrun.dpor.</span></span><span class="sig-name descname"><span class="pre">explore_dpor</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">setup</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">threads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">invariant</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_executions</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">preemption_bound</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_branches</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">100000</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout_per_run</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stop_on_first</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">detect_io</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">deadlock_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reproduce_on_failure</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">total_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">warn_nondeterministic_sql</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lock_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trace_packages</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/frontrun/dpor.html#explore_dpor"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#frontrun.dpor.explore_dpor" title="Link to this definition">¶</a></dt>
+<span class="sig-prename descclassname"><span class="pre">frontrun.dpor.</span></span><span class="sig-name descname"><span class="pre">explore_dpor</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">setup</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">threads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">invariant</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_executions</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">preemption_bound</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_branches</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">100000</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout_per_run</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stop_on_first</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">detect_io</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">deadlock_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reproduce_on_failure</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">total_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">warn_nondeterministic_sql</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lock_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trace_packages</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">track_dunder_dict_accesses</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/frontrun/dpor.html#explore_dpor"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#frontrun.dpor.explore_dpor" title="Link to this definition">¶</a></dt>
 <dd><p>Systematically explore interleavings using DPOR.</p>
 <p>This is the DPOR replacement for <code class="docutils literal notranslate"><span class="pre">explore_interleavings()</span></code>. Instead of
 random sampling, it uses the DPOR algorithm to explore only distinct
@@ -606,6 +606,12 @@ milliseconds; 2000 (2 seconds) is a good default.</p></li>
 trace in addition to user code.  By default, code in
 site-packages is skipped.  Use this to include specific
 installed packages, e.g. <code class="docutils literal notranslate"><span class="pre">[&quot;django_*&quot;,</span> <span class="pre">&quot;mylib.*&quot;]</span></code>.</p></li>
+<li><p><strong>track_dunder_dict_accesses</strong> (<em>bool</em>) – If True, report accesses on <code class="docutils literal notranslate"><span class="pre">obj.__dict__</span></code>
+in addition to direct attribute accesses.  This catches the
+rare case where one thread uses <code class="docutils literal notranslate"><span class="pre">self.x</span> <span class="pre">=</span> <span class="pre">v</span></code> and another
+uses <code class="docutils literal notranslate"><span class="pre">self.__dict__['x']</span> <span class="pre">=</span> <span class="pre">v</span></code>, but doubles wakeup tree
+insertions and can cause combinatorial explosion.  Default
+False.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -2456,7 +2462,7 @@ The async form returns an awaitable.</p>
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=938c9ccc"></script>
+</div><script src="_static/documentation_options.js?v=e259d695"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>
