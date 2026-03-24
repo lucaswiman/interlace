@@ -1636,7 +1636,7 @@ def _process_opcode(
                 #
                 # We skip bound methods (loading .append is not a container
                 # read) and immutable types (no mutation possible).
-                if val is not None and type(val) is not _BUILTIN_METHOD_TYPE and not isinstance(val, _IMMUTABLE_TYPES):
+                if val is not None and type(val) is not _BUILTIN_METHOD_TYPE and isinstance(val, (list, dict, set)):
                     _report_weak_read(engine, execution, thread_id, val, "__cmethods__", elock, sids)
             except Exception:
                 shadow.push(None)
