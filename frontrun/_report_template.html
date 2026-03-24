@@ -1,0 +1,1428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trace Exploration</title>
+<style>
+:root {
+  --bg: #1e1e2e;
+  --bg-surface: #282840;
+  --bg-hover: #363654;
+  --text: #cdd6f4;
+  --text-dim: #8888aa;
+  --blue: #89b4fa;
+  --red: #f38ba8;
+  --green: #a6e3a1;
+  --yellow: #f9e2af;
+  --border: #45475a;
+  --mono: 'SF Mono', 'Menlo', 'Consolas', monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: var(--mono);
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+</style>
+</head>
+<body>
+
+<script type="application/json" id="dpor-data">/* __DPOR_REPORT_DATA__ */</script>
+
+<dpor-report></dpor-report>
+
+<script>
+// Parse embedded data
+const DATA = JSON.parse(document.getElementById('dpor-data').textContent);
+
+// ---- <dpor-nav> ----
+class DporNav extends HTMLElement {
+  connectedCallback() {
+    this.attachShadow({ mode: 'open' });
+    this._page = 0;
+    this._showFailed = false;
+    this.render();
+  }
+
+  static get observedAttributes() { return ['current']; }
+  attributeChangedCallback() { if (this.shadowRoot) this._syncPageToCurrent(); }
+
+  _isFail(ex) { return !ex.invariant_held || ex.was_deadlock; }
+
+  _syncPageToCurrent() {
+    const execs = DATA.executions;
+    const current = parseInt(this.getAttribute('current') || '0');
+    const filtered = this._showFailed ? execs.map((ex, i) => ({ex, i})).filter(({ex}) => this._isFail(ex)) : execs.map((ex, i) => ({ex, i}));
+    const pos = filtered.findIndex(({i}) => i === current);
+    if (pos >= 0) {
+      const pageSize = this._pageSize();
+      const targetPage = Math.floor(pos / pageSize);
+      if (targetPage !== this._page) { this._page = targetPage; }
+    }
+    this.render();
+  }
+
+  _pageSize() {
+    const w = (this.shadowRoot.host.offsetWidth || window.innerWidth) - 380;
+    return Math.max(10, Math.floor(w / 38));
+  }
+
+  render() {
+    const execs = DATA.executions;
+    const current = parseInt(this.getAttribute('current') || '0');
+    const failCount = execs.filter(ex => this._isFail(ex)).length;
+    const filtered = this._showFailed
+      ? execs.map((ex, i) => ({ex, i})).filter(({ex}) => this._isFail(ex))
+      : execs.map((ex, i) => ({ex, i}));
+    const pageSize = this._pageSize();
+    const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    if (this._page >= totalPages) this._page = totalPages - 1;
+    const page = this._page;
+    const pageItems = filtered.slice(page * pageSize, (page + 1) * pageSize);
+
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host {
+          display: block;
+          background: var(--bg-surface);
+          border-bottom: 1px solid var(--border);
+          padding: 8px 16px;
+          position: sticky;
+          top: 0;
+          z-index: 100;
+        }
+        .nav-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; overflow: hidden; }
+        .title { font-size: 14px; font-weight: bold; color: var(--blue); white-space: nowrap; }
+        .exec-buttons { display: flex; gap: 2px; flex-shrink: 1; min-width: 0; }
+        .exec-btn {
+          padding: 2px 8px;
+          border: 1px solid var(--border);
+          background: transparent;
+          color: var(--text);
+          cursor: pointer;
+          font-family: var(--mono);
+          font-size: 12px;
+          border-radius: 3px;
+          flex-shrink: 0;
+        }
+        .exec-btn:hover { background: var(--bg-hover); }
+        .exec-btn.active { background: var(--blue); color: var(--bg); }
+        .exec-btn.fail { border-color: var(--red); }
+        .exec-btn.fail.active { background: var(--red); }
+        .ctrl-btn {
+          padding: 2px 8px;
+          border: 1px solid var(--border);
+          background: transparent;
+          color: var(--text-dim);
+          cursor: pointer;
+          font-family: var(--mono);
+          font-size: 12px;
+          border-radius: 3px;
+          white-space: nowrap;
+          flex-shrink: 0;
+        }
+        .ctrl-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+        .ctrl-btn:disabled { opacity: 0.3; cursor: default; }
+        .ctrl-btn.active-filter { border-color: var(--red); color: var(--red); }
+        .page-info { color: var(--text-dim); font-size: 12px; white-space: nowrap; flex-shrink: 0; }
+        .stats { color: var(--text-dim); font-size: 12px; white-space: nowrap; flex-shrink: 0; }
+        @media (max-width: 600px) {
+          :host { padding: 6px 8px; }
+          .nav-row { gap: 4px; }
+          .title { font-size: 12px; }
+          .exec-buttons { flex-wrap: wrap; }
+          .exec-btn { padding: 4px 6px; font-size: 11px; min-width: 28px; }
+          .ctrl-btn { padding: 4px 6px; font-size: 11px; }
+        }
+      </style>
+      <div class="nav-row">
+        <span class="title">Trace Exploration</span>
+        <button class="ctrl-btn ${this._showFailed ? 'active-filter' : ''}" id="toggle-failed">
+          ${this._showFailed ? `All (${execs.length})` : `Failed (${failCount})`}
+        </button>
+        <button class="ctrl-btn" id="prev-page" ${page === 0 ? 'disabled' : ''}>&lt;</button>
+        <div class="exec-buttons">
+          ${pageItems.map(({ex, i}) => {
+            const cls = ['exec-btn', i === current ? 'active' : '', this._isFail(ex) ? 'fail' : ''].filter(Boolean).join(' ');
+            return `<button class="${cls}" data-index="${i}">${i}</button>`;
+          }).join('')}
+        </div>
+        <button class="ctrl-btn" id="next-page" ${page >= totalPages - 1 ? 'disabled' : ''}>&gt;</button>
+        <span class="page-info">${page + 1}/${totalPages}</span>
+        <span class="stats">${filtered.length}${this._showFailed ? '' : '/' + execs.length} explored</span>
+      </div>
+    `;
+
+    this.shadowRoot.getElementById('toggle-failed').addEventListener('click', () => {
+      this._showFailed = !this._showFailed;
+      this._page = 0;
+      this.render();
+      // Notify parent that filter changed so keyboard/swipe respects it
+      this.dispatchEvent(new CustomEvent('filter-changed', {
+        detail: { showFailed: this._showFailed },
+        bubbles: true, composed: true
+      }));
+      // If current execution isn't in filtered list, select first filtered one
+      const current = parseInt(this.getAttribute('current') || '0');
+      const execs = DATA.executions;
+      if (this._showFailed && !this._isFail(execs[current])) {
+        const firstFailed = execs.findIndex(ex => this._isFail(ex));
+        if (firstFailed >= 0) {
+          this.dispatchEvent(new CustomEvent('select-execution', {
+            detail: { index: firstFailed },
+            bubbles: true, composed: true
+          }));
+        }
+      }
+    });
+    const prevBtn = this.shadowRoot.getElementById('prev-page');
+    if (prevBtn && !prevBtn.disabled) prevBtn.addEventListener('click', () => { this._page--; this.render(); });
+    const nextBtn = this.shadowRoot.getElementById('next-page');
+    if (nextBtn && !nextBtn.disabled) nextBtn.addEventListener('click', () => { this._page++; this.render(); });
+
+    this.shadowRoot.querySelectorAll('.exec-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this.dispatchEvent(new CustomEvent('select-execution', {
+          detail: { index: parseInt(btn.dataset.index) },
+          bubbles: true, composed: true
+        }));
+      });
+    });
+  }
+}
+customElements.define('dpor-nav', DporNav);
+
+// ---- <dpor-timeline> ----
+class DporTimeline extends HTMLElement {
+  connectedCallback() {
+    this.attachShadow({ mode: 'open' });
+    this.render();
+  }
+
+  static get observedAttributes() { return ['execution']; }
+  attributeChangedCallback() { if (this.shadowRoot) this.render(); }
+
+  render() {
+    const execIdx = parseInt(this.getAttribute('execution') || '0');
+    const exec = DATA.executions[execIdx];
+    if (!exec) return;
+
+    // Truncate teardown steps that happen after the deadlock is detected.
+    const deadlockAt = exec.deadlock_at ?? null;
+    const trace = deadlockAt !== null ? exec.schedule_trace.slice(0, deadlockAt) : exec.schedule_trace;
+    const switches = exec.switch_points.filter(sp => sp.schedule_index < trace.length);
+    const numThreads = DATA.num_threads;
+
+    // Layout constants
+    const colWidth = 200;
+    // Adaptive step height: taller when fewer steps for readability
+    const baseStepHeight = trace.length < 30 ? 16 : trace.length < 100 ? 8 : 4;
+    const stepHeight = baseStepHeight;
+    const padding = 60;
+    const svgWidth = padding + colWidth * numThreads + padding;
+    const headerHeight = 45;
+
+    // Collapse long same-thread runs
+    const segments = [];
+    let i = 0;
+    while (i < trace.length) {
+      const tid = trace[i];
+      let end = i + 1;
+      while (end < trace.length && trace[end] === tid) end++;
+      const len = end - i;
+      // Find any switch points in this segment
+      const segSwitches = switches.filter(sp => sp.schedule_index >= i && sp.schedule_index < end);
+      segments.push({ startIdx: i, endIdx: end, threadId: tid, length: len, switches: segSwitches });
+      i = end;
+    }
+
+    // Compute visual positions with collapsing
+    const MAX_VISIBLE_PER_RUN = 20;
+    let visualRows = [];
+    let yPos = 0;
+    for (const seg of segments) {
+      const collapsed = seg.length > MAX_VISIBLE_PER_RUN;
+      const visibleLen = collapsed ? MAX_VISIBLE_PER_RUN : seg.length;
+      const segStart = yPos;
+
+      for (let j = 0; j < visibleLen; j++) {
+        const realIdx = seg.startIdx + (collapsed && j >= MAX_VISIBLE_PER_RUN / 2
+          ? seg.length - (MAX_VISIBLE_PER_RUN - j)
+          : j);
+        const isCollapseMark = collapsed && j === Math.floor(MAX_VISIBLE_PER_RUN / 2);
+        visualRows.push({
+          y: yPos,
+          threadId: seg.threadId,
+          realIdx,
+          isCollapseMark,
+          collapsedCount: collapsed ? seg.length - MAX_VISIBLE_PER_RUN : 0,
+        });
+        yPos++;
+      }
+    }
+
+    // Insert extra visual rows for diagonal transitions between threads.
+    // Each transition gets `transitionRows` rows of y-space so the diagonal
+    // goes downward at a visible angle.
+    // Transition gap: more rows for diagonal when steps are short
+    const transitionRows = trace.length < 30 ? 4 : 3;
+    const expandedRows = [];
+    let yExtra = 0;
+    for (let r = 0; r < visualRows.length; r++) {
+      const row = visualRows[r];
+      const isSwitch = r > 0 && visualRows[r - 1].threadId !== row.threadId;
+      if (isSwitch) {
+        // Add gap rows, then place the new thread's first row at the bottom
+        // transitionStartY = where the previous segment ended (before the gap)
+        const transitionStartY = yExtra;
+        yExtra += transitionRows;  // gap for the diagonal
+        expandedRows.push({ ...row, y: yExtra, isTransitionEnd: true, transitionStartY });
+        yExtra++;
+      } else {
+        expandedRows.push({ ...row, y: yExtra, isTransitionEnd: false });
+        yExtra++;
+      }
+    }
+
+    const svgHeight = headerHeight + yExtra * stepHeight + 40;
+    const threadX = (tid) => padding + colWidth * tid + colWidth / 2;
+
+    // Find the first/last step index for each thread
+    const firstStepForThread = new Map();
+    const lastStepForThread = new Map();
+    for (let s = 0; s < trace.length; s++) {
+      if (!firstStepForThread.has(trace[s])) firstStepForThread.set(trace[s], s);
+      lastStepForThread.set(trace[s], s);
+    }
+
+    // Threads involved in the deadlock cycle should not get a "done" marker —
+    // they didn't finish normally; they were stuck waiting.
+    const deadlockedThreads = new Set();
+    if (exec.was_deadlock && exec.deadlock_cycle_description) {
+      for (const part of exec.deadlock_cycle_description.split(' -> ')) {
+        if (part.startsWith('thread ')) deadlockedThreads.add(parseInt(part.slice(7)));
+      }
+    }
+
+    // Build SVG elements
+    let mainPathSegments = [];  // blue vertical segments (same-thread runs)
+    let transitionLines = '';   // diagonal transition lines (different color)
+    let switchCircles = '';
+    let threadStartMarkers = '';
+    let threadEndMarkers = '';
+    let collapseMarks = '';
+
+    const switchSet = new Map();
+    for (const sp of switches) {
+      switchSet.set(sp.schedule_index, sp);
+    }
+
+    // Track current segment start for building path segments
+    let segStartX = null, segStartY = null;
+
+    for (let r = 0; r < expandedRows.length; r++) {
+      const row = expandedRows[r];
+      const x = threadX(row.threadId);
+      const y = headerHeight + row.y * stepHeight;
+
+      if (row.isTransitionEnd) {
+        // End previous segment at the transition start (top of the gap)
+        const gapTopY = headerHeight + row.transitionStartY * stepHeight;
+        if (segStartX !== null) {
+          mainPathSegments.push({ startX: segStartX, startY: segStartY, endX: segStartX, endY: gapTopY });
+        }
+
+        // Draw diagonal transition line from gap top to current row
+        const prevRow = expandedRows[r - 1];
+        const fromX = threadX(prevRow.threadId);
+        const fromY = gapTopY;
+        const toX = x;
+        const toY = y;
+        const midX = (fromX + toX) / 2;
+        const midY = (fromY + toY) / 2;
+
+        // Compute arrow direction
+        const dx = toX - fromX;
+        const dy = toY - fromY;
+        const len = Math.sqrt(dx*dx + dy*dy);
+        const ux = dx / len, uy = dy / len;
+        const arrowSize = 5;
+        // Perpendicular
+        const px = -uy, py = ux;
+
+        const failColor = (!exec.invariant_held || exec.was_deadlock);
+        const transColor = failColor ? '#f38ba8' : '#f9e2af';
+
+        transitionLines += `<line x1="${fromX}" y1="${fromY}" x2="${toX}" y2="${toY}" stroke="${transColor}" stroke-width="2" stroke-dasharray="4,3"/>`;
+        // Arrow head at midpoint
+        transitionLines += `<polygon points="${midX + ux*arrowSize},${midY + uy*arrowSize} ${midX - ux*arrowSize + px*arrowSize},${midY - uy*arrowSize + py*arrowSize} ${midX - ux*arrowSize - px*arrowSize},${midY - uy*arrowSize - py*arrowSize}" fill="${transColor}"/>`;
+
+        // Start new segment from this point
+        segStartX = x;
+        segStartY = y;
+      } else {
+        if (segStartX === null) {
+          segStartX = x;
+          segStartY = y;
+        }
+      }
+
+      // Switch point circles (preemptions) — at the departure point
+      const sp = switchSet.get(row.realIdx);
+      if (sp) {
+        const color = (!exec.invariant_held || exec.was_deadlock) ? 'var(--red)' : 'var(--blue)';
+        // Place circle at the departure end of the transition (top of gap)
+        const spY = row.isTransitionEnd
+          ? headerHeight + row.transitionStartY * stepHeight
+          : y;
+        const spX = row.isTransitionEnd ? threadX(expandedRows[r-1].threadId) : x;
+        const spIdx = switches.indexOf(sp);
+        switchCircles += `<circle cx="${spX}" cy="${spY}" r="5" fill="${color}" class="switch-point" data-sp-index="${spIdx}" style="cursor:pointer"/>`;
+        switchCircles += `<text x="${spX + 8}" y="${spY - 6}" fill="var(--text-dim)" font-size="9" text-anchor="start" style="pointer-events:none">${sp.schedule_index}</text>`;
+      }
+
+      // Thread start marker (downward triangle)
+      if (row.realIdx === firstStepForThread.get(row.threadId)) {
+        threadStartMarkers += `<polygon points="${x},${y} ${x - 5},${y - 10} ${x + 5},${y - 10}" fill="var(--blue)"/>`;
+        threadStartMarkers += `<text x="${x}" y="${y - 13}" text-anchor="middle" fill="var(--text-dim)" font-size="9">start</text>`;
+      }
+
+      // Thread completion marker — omit for threads caught in a deadlock cycle
+      if (row.realIdx === lastStepForThread.get(row.threadId) && !deadlockedThreads.has(row.threadId)) {
+        const color = 'var(--green)';
+        threadEndMarkers += `<rect x="${x - 5}" y="${y - 2}" width="10" height="4" fill="${color}" rx="1"/>`;
+        threadEndMarkers += `<text x="${x}" y="${y + 14}" text-anchor="middle" fill="var(--text-dim)" font-size="9">done</text>`;
+      }
+
+      // Collapse marks
+      if (row.isCollapseMark && row.collapsedCount > 0) {
+        collapseMarks += `<text x="${x + 15}" y="${y + 3}" fill="var(--text-dim)" font-size="10">... ${row.collapsedCount} more steps</text>`;
+      }
+    }
+
+    // Close the last segment
+    if (segStartX !== null && expandedRows.length > 0) {
+      const lastRow = expandedRows[expandedRows.length - 1];
+      const lastY = headerHeight + lastRow.y * stepHeight;
+      mainPathSegments.push({ startX: segStartX, startY: segStartY, endX: threadX(lastRow.threadId), endY: lastY });
+    }
+
+    // Build main path SVG from segments
+    const mainPathD = mainPathSegments.map(s => `M ${s.startX} ${s.startY} L ${s.endX} ${s.endY}`).join(' ');
+
+    // Build a global lock-id → short label map (L0, L1, …) across all executions
+    const lockIdToLabel = (() => {
+      const map = new Map();
+      for (const ex of DATA.executions)
+        for (const le of (ex.lock_events || []))
+          if (!map.has(le.lock_id)) map.set(le.lock_id, 'L' + map.size);
+      return map;
+    })();
+
+    // Parse a lock reference from the cycle description.
+    // Handles both new format "lock <decimal>" and legacy "lock 0x<hex>".
+    function parseLockRef(lockStr) {
+      if (lockStr.startsWith('lock 0x')) return parseInt(lockStr.slice(7), 16);
+      if (lockStr.startsWith('lock '))   return parseInt(lockStr.slice(5));
+      return NaN;
+    }
+
+    // Synthesize the missing lock_wait event for the deadlock-triggering thread.
+    // That thread's wait fires SchedulerAbort before _sync_reporter records it,
+    // so it's absent from lock_events. We find the gap by checking which (thread, lock)
+    // wait pair in the cycle description isn't present in the recorded events.
+    let syntheticDeadlockWait = null;
+    if (exec.was_deadlock && exec.deadlock_cycle_description) {
+      const recordedWaits = new Set(
+        (exec.lock_events || []).filter(le => le.event_type === 'wait').map(le => `${le.thread_id}:${le.lock_id}`)
+      );
+      const cycleNodes = exec.deadlock_cycle_description.split(' -> ');
+      for (let ci = 0; ci < cycleNodes.length - 1; ci += 2) {
+        const waiterStr = cycleNodes[ci];
+        const lockStr = cycleNodes[ci + 1];
+        if (!waiterStr.startsWith('thread ') || !lockStr.startsWith('lock ')) continue;
+        const waiterId = parseInt(waiterStr.slice(7));
+        const lockId = parseLockRef(lockStr);
+        if (isNaN(lockId)) continue;
+        if (!recordedWaits.has(`${waiterId}:${lockId}`)) {
+          // Find the last schedule step in trace where this thread ran
+          let lastIdx = trace.length - 1;
+          for (let k = trace.length - 1; k >= 0; k--) {
+            if (trace[k] === waiterId) { lastIdx = k; break; }
+          }
+          if (!lockIdToLabel.has(lockId)) lockIdToLabel.set(lockId, 'L' + lockIdToLabel.size);
+          syntheticDeadlockWait = { schedule_index: lastIdx, thread_id: waiterId, event_type: 'wait', lock_id: lockId };
+          break;
+        }
+      }
+    }
+
+    // Smart row lookup: acquire → forward search (thread's NEXT run = where it resumes with the lock);
+    // wait/release → backward search (thread's last run = where the event happened).
+    function findRowForLockEvent(le) {
+      if (le.event_type === 'acquire') {
+        for (const row of expandedRows)
+          if (row.threadId === le.thread_id && row.realIdx >= le.schedule_index) return row;
+      }
+      let best = null;
+      for (const row of expandedRows) {
+        if (row.threadId !== le.thread_id) continue;
+        if (row.realIdx > le.schedule_index) continue;
+        if (!best || row.realIdx > best.realIdx) best = row;
+      }
+      return best;
+    }
+
+    // Compute cumulative lock state at each event (for the tooltip modal)
+    const lockStateAtEvent = [];
+    const _heldBy = new Map();   // lock_id → thread_id
+    const _waiting = new Map();  // lock_id → Set<thread_id>
+    for (const le of (exec.lock_events || [])) {
+      lockStateAtEvent.push({ heldBy: new Map(_heldBy), waiting: new Map([..._waiting].map(([k, v]) => [k, new Set(v)])) });
+      if (le.event_type === 'acquire') {
+        _heldBy.set(le.lock_id, le.thread_id);
+        if (_waiting.has(le.lock_id)) _waiting.get(le.lock_id).delete(le.thread_id);
+      } else if (le.event_type === 'release') {
+        _heldBy.delete(le.lock_id);
+      } else if (le.event_type === 'wait') {
+        if (!_waiting.has(le.lock_id)) _waiting.set(le.lock_id, new Set());
+        _waiting.get(le.lock_id).add(le.thread_id);
+      }
+    }
+
+    // Render lock acquire/release/wait tick marks
+    let lockMarks = '';
+    const lockOffsets = new Map();
+    for (let leIdx = 0; leIdx < (exec.lock_events || []).length; leIdx++) {
+      const le = exec.lock_events[leIdx];
+      const row = findRowForLockEvent(le);
+      if (!row) continue;
+      const tx = threadX(le.thread_id);
+      const baseY = headerHeight + row.y * stepHeight;
+      const offsetKey = `${row.realIdx}:${le.thread_id}`;
+      const offsetIdx = lockOffsets.get(offsetKey) || 0;
+      lockOffsets.set(offsetKey, offsetIdx + 1);
+      const ty = baseY + offsetIdx * 10;
+
+      const isAcquire = le.event_type === 'acquire';
+      const isWait = le.event_type === 'wait';
+      const color = isAcquire ? '#a6e3a1' : isWait ? '#f9e2af' : '#8888aa';
+      const symbol = isAcquire ? ' ⊕' : isWait ? ' ⊙' : ' ⊖';
+      const lockLabel = lockIdToLabel.get(le.lock_id) || '?';
+      const label = lockLabel + symbol;
+      const tooltip = isAcquire ? `Lock ${lockLabel}` : isWait ? `Wait on lock ${lockLabel}` : `Release lock ${lockLabel}`;
+      const tickX1 = tx - 30;
+      const tickX2 = tx + 5;
+      lockMarks += `<g class="lock-event" data-le-index="${leIdx}" data-tooltip="${tooltip}" style="cursor:pointer">`;
+      lockMarks += `<rect x="${tickX1 - 48}" y="${ty - 7}" width="83" height="14" fill="transparent"/>`;
+      lockMarks += `<line x1="${tickX1}" y1="${ty}" x2="${tickX2}" y2="${ty}" stroke="${color}" stroke-width="1"/>`;
+      lockMarks += `<circle cx="${tickX1}" cy="${ty}" r="2.5" fill="${color}"/>`;
+      lockMarks += `<text x="${tickX1 - 3}" y="${ty + 3}" fill="${color}" font-size="9" text-anchor="end" style="pointer-events:none">${label}</text>`;
+      lockMarks += `</g>`;
+    }
+
+    // Render the synthesized deadlock-trigger wait event (dispatches select-deadlock on click)
+    if (syntheticDeadlockWait) {
+      const le = syntheticDeadlockWait;
+      const row = findRowForLockEvent(le);
+      if (row) {
+        const tx = threadX(le.thread_id);
+        const baseY = headerHeight + row.y * stepHeight;
+        const offsetKey = `${row.realIdx}:${le.thread_id}`;
+        const offsetIdx = lockOffsets.get(offsetKey) || 0;
+        lockOffsets.set(offsetKey, offsetIdx + 1);
+        const ty = baseY + offsetIdx * 10;
+        const color = '#f9e2af';
+        const lockLabel = lockIdToLabel.get(le.lock_id) || '?';
+        const label = lockLabel + ' ⊙';
+        const tooltip = `Wait on lock ${lockLabel} (deadlock)`;
+        const tickX1 = tx - 30;
+        const tickX2 = tx + 5;
+        lockMarks += `<g class="deadlock-marker" data-tooltip="${tooltip}" style="cursor:pointer">`;
+        lockMarks += `<rect x="${tickX1 - 48}" y="${ty - 7}" width="83" height="14" fill="transparent"/>`;
+        lockMarks += `<line x1="${tickX1}" y1="${ty}" x2="${tickX2}" y2="${ty}" stroke="${color}" stroke-width="1"/>`;
+        lockMarks += `<circle cx="${tickX1}" cy="${ty}" r="2.5" fill="${color}"/>`;
+        lockMarks += `<text x="${tickX1 - 3}" y="${ty + 3}" fill="${color}" font-size="9" text-anchor="end" style="pointer-events:none">${label}</text>`;
+        lockMarks += `</g>`;
+      }
+    }
+
+    // Deadlock: draw a single clickable "DEADLOCK" marker below the last rendered row
+    let deadlockMarkers = '';
+    if (exec.was_deadlock && expandedRows.length > 0) {
+      const lastRow = expandedRows[expandedRows.length - 1];
+      const dlY = headerHeight + lastRow.y * stepHeight + stepHeight + 10;
+      const dlX = svgWidth / 2;
+      deadlockMarkers = `<g class="deadlock-marker" style="cursor:pointer">` +
+        `<rect x="${dlX - 50}" y="${dlY - 10}" width="100" height="20" rx="3" fill="rgba(243,139,168,0.15)" stroke="var(--red)" stroke-width="1"/>` +
+        `<text x="${dlX}" y="${dlY + 4}" text-anchor="middle" fill="var(--red)" font-size="11" font-weight="bold">⚠ DEADLOCK</text>` +
+        `</g>`;
+    }
+
+    // Thread column headers
+    let headers = '';
+    for (let t = 0; t < numThreads; t++) {
+      const x = threadX(t);
+      headers += `<text x="${x}" y="16" text-anchor="middle" fill="var(--text)" font-size="12" font-weight="bold">${DATA.thread_names[t]}</text>`;
+      // Column line
+      headers += `<line x1="${x}" y1="${headerHeight}" x2="${x}" y2="${svgHeight - 10}" stroke="var(--border)" stroke-width="1" stroke-dasharray="4,4"/>`;
+    }
+
+    // Execution info
+    const statusColor = (!exec.invariant_held || exec.was_deadlock) ? 'var(--red)' : 'var(--green)';
+    const statusText = exec.was_deadlock ? 'DEADLOCK' : (!exec.invariant_held ? 'INVARIANT VIOLATED' : 'PASSED');
+
+    let racesListHtml = '';
+    if (exec.race_info && exec.race_info.length > 0) {
+      racesListHtml = `
+        <div class="races-list">
+          <span class="races-title">Races found during this execution (click to inspect):</span>
+          ${exec.race_info.map((r, ri) => {
+            const esc = (s) => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+            return `<div class="race-item" data-race-index="${ri}">Thread ${r.thread_id}: step ${r.current_step} vs ${r.prev_step}${r.object ? ' on ' + esc(r.object) : ''}</div>`;
+          }).join('')}
+        </div>
+      `;
+    }
+
+
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host { display: block; padding: 16px; overflow: auto; }
+        .exec-header {
+          margin-bottom: 12px;
+          padding: 8px 12px;
+          background: var(--bg-surface);
+          border-radius: 4px;
+          border: 1px solid var(--border);
+        }
+        .exec-title { font-size: 13px; }
+        .status { font-weight: bold; }
+        .races-list { margin-top: 8px; }
+        .races-title { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+        .race-item {
+          font-size: 12px; padding: 3px 6px; color: var(--yellow);
+          cursor: pointer; border-radius: 3px; margin-top: 2px;
+        }
+        .race-item:hover { background: var(--bg-hover); }
+        .legend { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--text-dim); }
+        .legend-item { display: inline-flex; align-items: center; gap: 4px; }
+        .legend-item svg { vertical-align: middle; }
+        svg { display: block; margin: 0 auto; }
+        .switch-point:hover { r: 7; }
+        .deadlock-marker:hover rect { fill: rgba(243,139,168,0.25); }
+        .svg-tooltip {
+          position: absolute; pointer-events: none;
+          background: var(--bg-surface); color: var(--text); border: 1px solid var(--border);
+          padding: 3px 7px; border-radius: 4px; font-size: 11px; white-space: nowrap;
+          box-shadow: 0 2px 6px rgba(0,0,0,0.3); z-index: 10;
+          transition: opacity 0.1s; opacity: 0;
+        }
+        .svg-tooltip.visible { opacity: 1; }
+      </style>
+      <div class="exec-header">
+        <div class="exec-title">
+          Execution ${execIdx}
+          <span class="status" style="color:${statusColor}"> ${statusText}</span>
+          <span style="color:var(--text-dim)">  |  ${trace.length} steps  |  ${switches.length} switches</span>
+        </div>
+        ${racesListHtml}
+        <div class="legend">
+          <span class="legend-item"><svg width="12" height="12"><line x1="0" y1="6" x2="12" y2="6" stroke="var(--blue)" stroke-width="2"/></svg> Execution trace</span>
+          <span class="legend-item"><svg width="12" height="12"><circle cx="6" cy="6" r="5" fill="var(--blue)"/></svg> Context switch</span>
+          ${lockIdToLabel.size > 0 ? `
+          <span class="legend-item"><svg width="12" height="12"><circle cx="4" cy="6" r="2.5" fill="#a6e3a1"/><line x1="4" y1="6" x2="12" y2="6" stroke="#a6e3a1" stroke-width="1"/></svg> Lock acquire</span>
+          <span class="legend-item"><svg width="12" height="12"><circle cx="4" cy="6" r="2.5" fill="#f9e2af"/><line x1="4" y1="6" x2="12" y2="6" stroke="#f9e2af" stroke-width="1"/></svg> Lock wait</span>
+          <span class="legend-item"><svg width="12" height="12"><circle cx="4" cy="6" r="2.5" fill="#8888aa"/><line x1="4" y1="6" x2="12" y2="6" stroke="#8888aa" stroke-width="1"/></svg> Lock release</span>
+          ` : ''}
+        </div>
+      </div>
+      <div class="svg-container" style="position:relative;display:inline-block">
+        <svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg">
+          ${headers}
+          <path d="${mainPathD}" fill="none" stroke="var(--blue)" stroke-width="2"/>
+          ${transitionLines}
+          ${lockMarks}
+          ${deadlockMarkers}
+          ${threadStartMarkers}
+          ${threadEndMarkers}
+          ${switchCircles}
+          ${collapseMarks}
+        </svg>
+        <div class="svg-tooltip"></div>
+      </div>
+    `;
+
+    // Click handlers for switch points
+    this.shadowRoot.querySelectorAll('.switch-point').forEach(circle => {
+      circle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const spIdx = parseInt(circle.dataset.spIndex);
+        this.dispatchEvent(new CustomEvent('select-switch', {
+          detail: { executionIndex: execIdx, switchIndex: spIdx },
+          bubbles: true, composed: true
+        }));
+      });
+    });
+
+    // Click handlers for deadlock markers (the DEADLOCK badge + synthetic trigger wait tick)
+    this.shadowRoot.querySelectorAll('.deadlock-marker').forEach(dlMarker => {
+      dlMarker.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.dispatchEvent(new CustomEvent('select-deadlock', {
+          detail: { executionIndex: execIdx },
+          bubbles: true, composed: true
+        }));
+      });
+    });
+
+    // Click handlers for lock events
+    // Pass pre-computed lockStateAtEvent so the modal doesn't need to recompute
+    this.shadowRoot.querySelectorAll('.lock-event').forEach(g => {
+      g.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const leIdx = parseInt(g.dataset.leIndex);
+        this.dispatchEvent(new CustomEvent('select-lock', {
+          detail: { executionIndex: execIdx, lockEventIndex: leIdx, lockStateAtEvent },
+          bubbles: true, composed: true
+        }));
+      });
+    });
+
+    // Click handlers for race items in the header
+    this.shadowRoot.querySelectorAll('.race-item').forEach(item => {
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const raceIdx = parseInt(item.dataset.raceIndex);
+        this.dispatchEvent(new CustomEvent('select-race', {
+          detail: { executionIndex: execIdx, raceIndex: raceIdx },
+          bubbles: true, composed: true
+        }));
+      });
+    });
+
+    // Hover tooltips for lock events and deadlock markers
+    const tooltipEl = this.shadowRoot.querySelector('.svg-tooltip');
+    this.shadowRoot.querySelectorAll('[data-tooltip]').forEach(g => {
+      g.addEventListener('mouseenter', (e) => {
+        tooltipEl.textContent = g.dataset.tooltip;
+        const rect = g.getBoundingClientRect();
+        const container = g.closest('svg').parentElement.getBoundingClientRect();
+        tooltipEl.style.left = (rect.left - container.left + rect.width / 2) + 'px';
+        tooltipEl.style.top = (rect.top - container.top - 24) + 'px';
+        tooltipEl.classList.add('visible');
+      });
+      g.addEventListener('mouseleave', () => {
+        tooltipEl.classList.remove('visible');
+      });
+    });
+  }
+}
+customElements.define('dpor-timeline', DporTimeline);
+
+// ---- <dpor-modal> ----
+class DporModal extends HTMLElement {
+  connectedCallback() {
+    this.attachShadow({ mode: 'open' });
+    this._visible = false;
+    this._mode = 'switch'; // 'switch', 'race', or 'lock'
+    this._execIdx = 0;
+    this._spIdx = 0;
+    this._raceIdx = 0;
+    this._leIdx = 0;
+    this._lockStateAtEvent = [];
+    this.render();
+  }
+
+  show(execIdx, spIdx) {
+    this._visible = true;
+    this._mode = 'switch';
+    this._execIdx = execIdx;
+    this._spIdx = spIdx;
+    this.render();
+  }
+
+  showRace(execIdx, raceIdx) {
+    this._visible = true;
+    this._mode = 'race';
+    this._execIdx = execIdx;
+    this._raceIdx = raceIdx;
+    this.render();
+  }
+
+  showLock(execIdx, leIdx, lockStateAtEvent) {
+    this._visible = true;
+    this._mode = 'lock';
+    this._execIdx = execIdx;
+    this._leIdx = leIdx;
+    this._lockStateAtEvent = lockStateAtEvent || [];
+    this.render();
+  }
+
+  showDeadlock(execIdx) {
+    this._visible = true;
+    this._mode = 'deadlock';
+    this._execIdx = execIdx;
+    this.render();
+  }
+
+  hide() {
+    this._visible = false;
+    this.render();
+  }
+
+  navigate(dir) {
+    if (!this._visible) return;
+    if (this._mode === 'race') {
+      const races = DATA.executions[this._execIdx].race_info || [];
+      const next = this._raceIdx + dir;
+      if (next >= 0 && next < races.length) { this._raceIdx = next; this.render(); }
+    } else if (this._mode === 'lock') {
+      const events = DATA.executions[this._execIdx].lock_events || [];
+      const next = this._leIdx + dir;
+      if (next >= 0 && next < events.length) { this._leIdx = next; this.render(); }
+    } else {
+      const switches = DATA.executions[this._execIdx].switch_points;
+      const next = this._spIdx + dir;
+      if (next >= 0 && next < switches.length) { this._spIdx = next; this.render(); }
+    }
+  }
+
+  _modalStyles() {
+    return `
+      <style>
+        :host { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; }
+        .overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.6); }
+        .modal {
+          position: relative;
+          background: var(--bg-surface);
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          max-width: 800px;
+          width: 92%;
+          max-height: 85vh;
+          overflow-y: auto;
+          padding: 20px;
+        }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+        .modal-title { font-size: 14px; font-weight: bold; color: var(--blue); }
+        .close-btn {
+          background: transparent; border: none; color: var(--text-dim);
+          cursor: pointer; font-size: 18px; padding: 4px 8px;
+        }
+        .close-btn:hover { color: var(--text); }
+        .section { margin-bottom: 16px; }
+        .section-title { color: var(--text-dim); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; letter-spacing: 0.5px; }
+        .info-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
+        .info-label { color: var(--text-dim); }
+        .source-code {
+          background: var(--bg);
+          border-radius: 4px;
+          padding: 8px 0;
+          font-size: 12px;
+          overflow-x: auto;
+        }
+        .source-line { padding: 1px 12px; display: flex; gap: 12px; white-space: pre; }
+        .source-line.highlight { background: rgba(137, 180, 250, 0.15); }
+        .source-line.highlight-red { background: rgba(243, 139, 168, 0.15); }
+        .line-no { color: var(--text-dim); min-width: 30px; text-align: right; user-select: none; }
+        .line-text { color: var(--text); }
+        .stack-entry { font-size: 12px; padding: 2px 0; }
+        .dim { color: var(--text-dim); }
+        .race-item {
+          font-size: 12px; padding: 4px 6px; color: var(--yellow);
+          cursor: pointer; border-radius: 3px;
+        }
+        .race-item:hover { background: var(--bg-hover); }
+        .nav-buttons { display: flex; gap: 8px; }
+        .nav-btn {
+          padding: 4px 12px;
+          border: 1px solid var(--border);
+          background: transparent;
+          color: var(--text);
+          cursor: pointer;
+          font-family: var(--mono);
+          font-size: 12px;
+          border-radius: 3px;
+        }
+        .nav-btn:hover:not(:disabled) { background: var(--bg-hover); }
+        .nav-btn:disabled { opacity: 0.3; cursor: default; }
+        .race-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        @media (max-width: 600px) {
+          .race-pair { grid-template-columns: 1fr; }
+          .modal-header { flex-wrap: wrap; gap: 8px; }
+        }
+        .race-side { }
+        .race-side-title { font-size: 12px; font-weight: bold; margin-bottom: 6px; }
+        .step-tag {
+          display: inline-block; padding: 1px 6px; border-radius: 3px;
+          font-size: 11px; margin-left: 4px;
+        }
+      </style>
+    `;
+  }
+
+  _renderSourceContext(filename, lineno, highlightClass = 'highlight') {
+    const sourceLines = DATA.source_files[filename] || [];
+    const contextStart = Math.max(0, lineno - 4);
+    const contextEnd = Math.min(sourceLines.length, lineno + 3);
+    let html = '<div class="source-code">';
+    for (let i = contextStart; i < contextEnd; i++) {
+      const cls = (i + 1 === lineno) ? ` ${highlightClass}` : '';
+      html += `<div class="source-line${cls}"><span class="line-no">${i + 1}</span><span class="line-text">${this._escapeHtml(sourceLines[i] || '')}</span></div>`;
+    }
+    html += '</div>';
+    return html;
+  }
+
+  _renderStepInfo(step, stepIdx) {
+    if (!step) return `<div class="dim">Step ${stepIdx}: no data recorded</div>`;
+    const accessStr = step.access_type
+      ? `${step.access_type}${step.obj_type_name ? ' ' + step.obj_type_name : ''}${step.attr_name ? '.' + step.attr_name : ''}`
+      : '';
+    return `
+      <div class="info-grid" style="margin-bottom:8px">
+        <span class="info-label">Step:</span><span>${stepIdx}</span>
+        <span class="info-label">Thread:</span><span style="color:var(--blue)">${DATA.thread_names[step.thread_id] || 'Thread ' + step.thread_id}</span>
+        <span class="info-label">Opcode:</span><span>${step.opcode}</span>
+        ${accessStr ? `<span class="info-label">Access:</span><span>${accessStr}</span>` : ''}
+        ${step.value_repr ? `<span class="info-label">Value:</span><span style="color:var(--green)">${this._escapeHtml(step.value_repr)}</span>` : ''}
+        <span class="info-label">Location:</span><span>${this._shortFilename(step.filename)}:${step.lineno} in ${step.function_name}</span>
+      </div>
+      ${this._renderSourceContext(step.filename, step.lineno)}
+    `;
+  }
+
+  render() {
+    if (!this._visible) {
+      this.shadowRoot.innerHTML = '';
+      return;
+    }
+
+    if (this._mode === 'race') {
+      this._renderRace();
+    } else if (this._mode === 'lock') {
+      this._renderLock();
+    } else if (this._mode === 'deadlock') {
+      this._renderDeadlock();
+    } else {
+      this._renderSwitch();
+    }
+
+    // Common event handlers
+    this.shadowRoot.getElementById('overlay').addEventListener('click', () => this.hide());
+    this.shadowRoot.getElementById('close-btn').addEventListener('click', () => this.hide());
+    const handler = (e) => {
+      if (e.key === 'Escape') { this.hide(); document.removeEventListener('keydown', handler); }
+    };
+    document.addEventListener('keydown', handler);
+  }
+
+  _renderSwitch() {
+    const exec = DATA.executions[this._execIdx];
+    const sp = exec.switch_points[this._spIdx];
+    if (!sp) { this.hide(); return; }
+
+    // Shadow stack
+    const stackHtml = sp.shadow_stack_top5.length > 0
+      ? sp.shadow_stack_top5.map((s, i) => `<div class="stack-entry">TOS${i > 0 ? '-' + i : ''}: ${this._escapeHtml(s)}</div>`).join('')
+      : '<div class="stack-entry dim">empty</div>';
+
+    // Navigation between switch points
+    const totalSwitches = exec.switch_points.length;
+    const canPrev = this._spIdx > 0;
+    const canNext = this._spIdx < totalSwitches - 1;
+
+    // Race info
+    let raceHtml = '';
+    if (exec.race_info && exec.race_info.length > 0) {
+      raceHtml = `
+        <div class="section">
+          <div class="section-title">Races found during this execution <span class="dim">(click to inspect)</span></div>
+          ${exec.race_info.map((r, ri) => `
+            <div class="race-item" data-race-index="${ri}">
+              Thread ${r.thread_id}: step ${r.current_step} conflicts with step ${r.prev_step}
+              ${r.object ? ` on <strong>${this._escapeHtml(r.object)}</strong>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    this.shadowRoot.innerHTML = `
+      ${this._modalStyles()}
+      <div class="overlay" id="overlay"></div>
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title">Switch Point ${this._spIdx + 1} of ${totalSwitches}</span>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <div class="nav-buttons">
+              <button class="nav-btn" id="prev-btn" ${canPrev ? '' : 'disabled'}>&larr; Prev</button>
+              <button class="nav-btn" id="next-btn" ${canNext ? '' : 'disabled'}>Next &rarr;</button>
+            </div>
+            <button class="close-btn" id="close-btn">&times;</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Switch Details</div>
+          <div class="info-grid">
+            <span class="info-label">Schedule index:</span><span>${sp.schedule_index}</span>
+            <span class="info-label">From:</span><span style="color:var(--blue)">${DATA.thread_names[sp.from_thread] || 'start'}</span>
+            <span class="info-label">To:</span><span style="color:var(--blue)">${DATA.thread_names[sp.to_thread]}</span>
+            <span class="info-label">Opcode:</span><span>${sp.opcode}</span>
+            ${sp.access_type ? `<span class="info-label">Access:</span><span>${sp.access_type}${sp.obj_type_name ? ' ' + sp.obj_type_name : ''}${sp.attr_name ? '.' + sp.attr_name : ''}</span>` : ''}
+            <span class="info-label">Location:</span><span>${this._shortFilename(sp.filename)}:${sp.lineno} in ${sp.function_name}</span>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Source Context</div>
+          ${this._renderSourceContext(sp.filename, sp.lineno)}
+        </div>
+
+        <div class="section">
+          <div class="section-title">Shadow Stack (top of stack)</div>
+          ${stackHtml}
+        </div>
+
+        ${raceHtml}
+      </div>
+    `;
+
+    if (canPrev) {
+      this.shadowRoot.getElementById('prev-btn').addEventListener('click', () => {
+        this._spIdx--;
+        this.render();
+      });
+    }
+    if (canNext) {
+      this.shadowRoot.getElementById('next-btn').addEventListener('click', () => {
+        this._spIdx++;
+        this.render();
+      });
+    }
+    // Race item click handlers
+    this.shadowRoot.querySelectorAll('.race-item').forEach(item => {
+      item.addEventListener('click', () => {
+        this._raceIdx = parseInt(item.dataset.raceIndex);
+        this._mode = 'race';
+        this.render();
+      });
+    });
+  }
+
+  _renderDeadlock() {
+    const exec = DATA.executions[this._execIdx];
+
+    const lockIdToLabel = (() => {
+      const map = new Map();
+      for (const ex of DATA.executions)
+        for (const le of (ex.lock_events || []))
+          if (!map.has(le.lock_id)) map.set(le.lock_id, 'L' + map.size);
+      return map;
+    })();
+
+    // Reconstruct final lock state from lock_events (already truncated at deadlock point)
+    const heldBy = new Map();    // lock_id → thread_id
+    const waiting = new Map();   // lock_id → Set<thread_id>
+    for (const le of (exec.lock_events || [])) {
+      if (le.event_type === 'acquire') {
+        heldBy.set(le.lock_id, le.thread_id);
+        if (waiting.has(le.lock_id)) waiting.get(le.lock_id).delete(le.thread_id);
+      } else if (le.event_type === 'release') {
+        heldBy.delete(le.lock_id);
+      } else if (le.event_type === 'wait') {
+        if (!waiting.has(le.lock_id)) waiting.set(le.lock_id, new Set());
+        waiting.get(le.lock_id).add(le.thread_id);
+      }
+    }
+
+    // The triggering thread never recorded a lock_wait (SchedulerAbort fired first),
+    // so its waiting edge and the corresponding held-by edge are missing from lock_events.
+    // Fill them in by parsing deadlock_cycle_description.
+    // Format: "thread X -> lock ID -> thread Y -> lock ID -> ..."
+    // (ID is a decimal stable lock ID, or legacy "0xHEX" for older reports.)
+    // Semantics: threadNodes[i] waits for lockNodes[i], lockNodes[i] is held by threadNodes[i+1 mod n].
+    const cycleNodes = exec.deadlock_cycle_description
+      ? exec.deadlock_cycle_description.split(' -> ')
+      : [];
+    // cycleNodes alternates: thread, lock, thread, lock, … ending at a lock
+    for (let i = 0; i < cycleNodes.length - 1; i += 2) {
+      const waiterStr = cycleNodes[i];       // "thread X"
+      const lockStr   = cycleNodes[i + 1];   // "lock ID"
+      const holderStr = cycleNodes[(i + 2) % cycleNodes.length]; // next thread (wraps)
+      if (!waiterStr.startsWith('thread ') || !lockStr.startsWith('lock ')) continue;
+      const waiterId = parseInt(waiterStr.slice(7));
+      const lockId   = parseLockRef(lockStr);
+      if (isNaN(lockId)) continue;
+      const holderId = parseInt(holderStr.slice(7));
+      if (!waiting.has(lockId)) waiting.set(lockId, new Set());
+      waiting.get(lockId).add(waiterId);
+      if (!heldBy.has(lockId)) heldBy.set(lockId, holderId);
+    }
+
+    // Build rows: one per lock that's held or waited on
+    const allLockIds = new Set([...heldBy.keys(), ...waiting.keys()]);
+    let tableRows = '';
+    for (const lockId of allLockIds) {
+      const lbl = lockIdToLabel.get(lockId) || '?';
+      const holder = heldBy.get(lockId);
+      const ws = waiting.get(lockId) || new Set();
+      const holderStr = holder !== undefined ? (DATA.thread_names[holder] || `Thread ${holder}`) : '—';
+      const waitStr = ws.size > 0
+        ? [...ws].map(t => DATA.thread_names[t] || `Thread ${t}`).join(', ')
+        : '—';
+      tableRows += `<tr>
+        <td style="color:var(--yellow);padding:6px 12px">${this._escapeHtml(lbl)}</td>
+        <td style="color:var(--blue);padding:6px 12px">${this._escapeHtml(holderStr)}</td>
+        <td style="color:var(--text-dim);padding:6px 12px">${this._escapeHtml(waitStr)}</td>
+      </tr>`;
+    }
+    if (!tableRows) tableRows = `<tr><td colspan="3" style="padding:6px 12px;color:var(--text-dim)">No lock state recorded.</td></tr>`;
+
+    // Cycle description — append the starting node to visually close the cycle
+    let cycleHtml = '';
+    if (cycleNodes.length > 0) {
+      const esc = (s) => { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+      const displayNodes = [...cycleNodes, cycleNodes[0]]; // close the loop
+      const parts = displayNodes.map(p =>
+        p.startsWith('thread ')
+          ? `<span style="color:var(--blue)">${esc(p)}</span>`
+          : `<span style="color:var(--yellow)">${esc(p)}</span>`
+      );
+      cycleHtml = `<div class="section">
+        <div class="section-title">Wait-for cycle</div>
+        <div style="font-size:12px;line-height:2">${parts.join('<span style="color:var(--text-dim)"> → </span>')}</div>
+      </div>`;
+    }
+
+    this.shadowRoot.innerHTML = `
+      ${this._modalStyles()}
+      <style>
+        table { border-collapse: collapse; width: 100%; }
+        th { text-align: left; padding: 4px 12px; color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+        td { border-bottom: 1px solid rgba(69,71,90,0.4); font-size: 12px; }
+      </style>
+      <div class="overlay" id="overlay"></div>
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title" style="color:var(--red)">⚠ Deadlock — Lock Wait State</span>
+          <button class="close-btn" id="close-btn">&times;</button>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Lock state at deadlock detection</div>
+          <table>
+            <thead><tr><th>Lock</th><th>Held by</th><th>Waiting</th></tr></thead>
+            <tbody>${tableRows}</tbody>
+          </table>
+        </div>
+
+        ${cycleHtml}
+      </div>
+    `;
+  }
+
+  _renderLock() {
+    const exec = DATA.executions[this._execIdx];
+    const events = exec.lock_events || [];
+    const le = events[this._leIdx];
+    if (!le) { this.hide(); return; }
+
+    const lockIdToLabel = (() => {
+      const map = new Map();
+      for (const ex of DATA.executions)
+        for (const lev of (ex.lock_events || []))
+          if (!map.has(lev.lock_id)) map.set(lev.lock_id, 'L' + map.size);
+      return map;
+    })();
+
+    // State BEFORE this event (captured during timeline render; fallback: recompute)
+    let stateSnap = this._lockStateAtEvent[this._leIdx];
+    if (!stateSnap) {
+      // Recompute from events
+      const heldBy = new Map(); const waiting = new Map();
+      for (let i = 0; i < this._leIdx; i++) {
+        const lev = events[i];
+        if (lev.event_type === 'acquire') { heldBy.set(lev.lock_id, lev.thread_id); if (waiting.has(lev.lock_id)) waiting.get(lev.lock_id).delete(lev.thread_id); }
+        else if (lev.event_type === 'release') { heldBy.delete(lev.lock_id); }
+        else if (lev.event_type === 'wait') { if (!waiting.has(lev.lock_id)) waiting.set(lev.lock_id, new Set()); waiting.get(lev.lock_id).add(lev.thread_id); }
+      }
+      stateSnap = { heldBy, waiting };
+    }
+
+    const lockLabel = lockIdToLabel.get(le.lock_id) || '?';
+    const threadName = DATA.thread_names[le.thread_id] || `Thread ${le.thread_id}`;
+    const eventVerb = le.event_type === 'acquire' ? 'acquired' : le.event_type === 'release' ? 'released' : 'waiting for';
+    const eventColor = le.event_type === 'acquire' ? 'var(--green)' : le.event_type === 'release' ? 'var(--text-dim)' : 'var(--yellow)';
+
+    // This lock's state before the event
+    const holder = stateSnap.heldBy.get(le.lock_id);
+    const heldStr = holder !== undefined ? (DATA.thread_names[holder] || `Thread ${holder}`) : 'free';
+    const waitSet = stateSnap.waiting.get(le.lock_id) || new Set();
+    const waitersStr = waitSet.size > 0
+      ? [...waitSet].map(t => DATA.thread_names[t] || `Thread ${t}`).join(', ')
+      : 'none';
+
+    // All locks state
+    const allLocks = new Set([...stateSnap.heldBy.keys(), ...stateSnap.waiting.keys()]);
+    let allLockRows = '';
+    for (const lockId of allLocks) {
+      const lbl = lockIdToLabel.get(lockId) || '?';
+      const h = stateSnap.heldBy.get(lockId);
+      const ws = stateSnap.waiting.get(lockId) || new Set();
+      const hStr = h !== undefined ? (DATA.thread_names[h] || `Thread ${h}`) : 'free';
+      const wStr = ws.size > 0 ? [...ws].map(t => DATA.thread_names[t] || `Thread ${t}`).join(', ') : 'none';
+      allLockRows += `<div style="margin-bottom:4px"><span style="color:var(--yellow)">${this._escapeHtml(lbl)}</span> &nbsp; held by: <span style="color:var(--blue)">${this._escapeHtml(hStr)}</span> &nbsp; waiting: <span style="color:var(--text-dim)">${this._escapeHtml(wStr)}</span></div>`;
+    }
+    if (!allLockRows) allLockRows = '<div class="dim">No locks held or waited on before this event.</div>';
+
+    const canPrev = this._leIdx > 0;
+    const canNext = this._leIdx < events.length - 1;
+
+    this.shadowRoot.innerHTML = `
+      ${this._modalStyles()}
+      <div class="overlay" id="overlay"></div>
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title">Lock Event ${this._leIdx + 1} of ${events.length}</span>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <div class="nav-buttons">
+              <button class="nav-btn" id="prev-btn" ${canPrev ? '' : 'disabled'}>&larr; Prev</button>
+              <button class="nav-btn" id="next-btn" ${canNext ? '' : 'disabled'}>Next &rarr;</button>
+            </div>
+            <button class="close-btn" id="close-btn">&times;</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Event</div>
+          <div class="info-grid">
+            <span class="info-label">Thread:</span><span style="color:var(--blue)">${this._escapeHtml(threadName)}</span>
+            <span class="info-label">Action:</span><span style="color:${eventColor}">${eventVerb} ${this._escapeHtml(lockLabel)}</span>
+            <span class="info-label">Schedule step:</span><span>${le.schedule_index}</span>
+            <span class="info-label">${this._escapeHtml(lockLabel)} held by:</span><span style="color:var(--blue)">${this._escapeHtml(heldStr)}</span>
+            <span class="info-label">${this._escapeHtml(lockLabel)} waiting:</span><span style="color:var(--text-dim)">${this._escapeHtml(waitersStr)}</span>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">All lock state (before this event)</div>
+          ${allLockRows}
+        </div>
+      </div>
+    `;
+
+    if (canPrev) this.shadowRoot.getElementById('prev-btn').addEventListener('click', () => { this._leIdx--; this.render(); });
+    if (canNext) this.shadowRoot.getElementById('next-btn').addEventListener('click', () => { this._leIdx++; this.render(); });
+  }
+
+  _renderRace() {
+    const exec = DATA.executions[this._execIdx];
+    const races = exec.race_info || [];
+    const race = races[this._raceIdx];
+    if (!race) { this.hide(); return; }
+
+    const steps = exec.step_events || {};
+    const stepA = steps[String(race.prev_step)];
+    const stepB = steps[String(race.current_step)];
+
+    const canPrev = this._raceIdx > 0;
+    const canNext = this._raceIdx < races.length - 1;
+
+    this.shadowRoot.innerHTML = `
+      ${this._modalStyles()}
+      <div class="overlay" id="overlay"></div>
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title">
+            Race ${this._raceIdx + 1} of ${races.length}
+            ${race.object ? ` — <span style="color:var(--yellow)">${this._escapeHtml(race.object)}</span>` : ''}
+          </span>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <button class="nav-btn" id="back-btn">&larr; Back</button>
+            <div class="nav-buttons">
+              <button class="nav-btn" id="prev-btn" ${canPrev ? '' : 'disabled'}>&larr; Prev race</button>
+              <button class="nav-btn" id="next-btn" ${canNext ? '' : 'disabled'}>Next race &rarr;</button>
+            </div>
+            <button class="close-btn" id="close-btn">&times;</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Conflicting accesses on ${race.object ? this._escapeHtml(race.object) : 'shared object'}</div>
+          <div class="race-pair">
+            <div class="race-side">
+              <div class="race-side-title" style="color:var(--blue)">
+                Step ${race.prev_step}
+                <span class="step-tag" style="background:rgba(137,180,250,0.2);color:var(--blue)">first access</span>
+              </div>
+              ${this._renderStepInfo(stepA, race.prev_step)}
+            </div>
+            <div class="race-side">
+              <div class="race-side-title" style="color:var(--red)">
+                Step ${race.current_step}
+                <span class="step-tag" style="background:rgba(243,139,168,0.2);color:var(--red)">conflicting access</span>
+              </div>
+              ${this._renderStepInfo(stepB, race.current_step)}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    this.shadowRoot.getElementById('back-btn').addEventListener('click', () => {
+      this._mode = 'switch';
+      this.render();
+    });
+    if (canPrev) {
+      this.shadowRoot.getElementById('prev-btn').addEventListener('click', () => {
+        this._raceIdx--;
+        this.render();
+      });
+    }
+    if (canNext) {
+      this.shadowRoot.getElementById('next-btn').addEventListener('click', () => {
+        this._raceIdx++;
+        this.render();
+      });
+    }
+  }
+
+  _escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+  }
+
+  _shortFilename(path) {
+    const parts = path.split('/');
+    return parts[parts.length - 1];
+  }
+}
+customElements.define('dpor-modal', DporModal);
+
+// ---- <dpor-report> (root) ----
+class DporReport extends HTMLElement {
+  _isFail(ex) { return !ex.invariant_held || ex.was_deadlock; }
+
+  _filteredIndices() {
+    if (!this._showFailed) return DATA.executions.map((_, i) => i);
+    return DATA.executions.map((ex, i) => ({ex, i})).filter(({ex}) => this._isFail(ex)).map(({i}) => i);
+  }
+
+  _navigateFiltered(dir) {
+    const indices = this._filteredIndices();
+    if (indices.length === 0) return;
+    const pos = indices.indexOf(this._currentExec);
+    let nextPos;
+    if (pos < 0) {
+      // Current not in filtered list — jump to nearest in the direction
+      nextPos = dir > 0 ? 0 : indices.length - 1;
+    } else {
+      nextPos = pos + dir;
+    }
+    if (nextPos >= 0 && nextPos < indices.length) {
+      this._currentExec = indices[nextPos];
+      this.render();
+    }
+  }
+
+  connectedCallback() {
+    this.attachShadow({ mode: 'open' });
+    this._currentExec = 0;
+    this._showFailed = false;
+    this.render();
+
+    this.addEventListener('select-execution', (e) => {
+      this._currentExec = e.detail.index;
+      this.render();
+    });
+
+    this.addEventListener('filter-changed', (e) => {
+      this._showFailed = e.detail.showFailed;
+    });
+
+    this.addEventListener('select-switch', (e) => {
+      const modal = this.shadowRoot.querySelector('dpor-modal');
+      if (modal) modal.show(e.detail.executionIndex, e.detail.switchIndex);
+    });
+
+    this.addEventListener('select-race', (e) => {
+      const modal = this.shadowRoot.querySelector('dpor-modal');
+      if (modal) modal.showRace(e.detail.executionIndex, e.detail.raceIndex);
+    });
+
+    this.addEventListener('select-lock', (e) => {
+      const modal = this.shadowRoot.querySelector('dpor-modal');
+      if (modal) modal.showLock(e.detail.executionIndex, e.detail.lockEventIndex, e.detail.lockStateAtEvent);
+    });
+
+    this.addEventListener('select-deadlock', (e) => {
+      const modal = this.shadowRoot.querySelector('dpor-modal');
+      if (modal) modal.showDeadlock(e.detail.executionIndex);
+    });
+
+    // Re-render nav on resize so page size adapts (e.g. device rotation)
+    window.addEventListener('resize', () => {
+      const nav = this.shadowRoot.querySelector('dpor-nav');
+      if (nav) nav.render();
+    });
+
+    // Keyboard navigation: arrows switch traces or navigate modal
+    document.addEventListener('keydown', (e) => {
+      const modal = this.shadowRoot.querySelector('dpor-modal');
+      const modalVisible = modal && modal._visible;
+
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        const dir = e.key === 'ArrowLeft' ? -1 : 1;
+        if (modalVisible) {
+          // Navigate within modal (prev/next race or switch point)
+          modal.navigate(dir);
+        } else {
+          // Navigate respecting the active filter
+          this._navigateFiltered(dir);
+        }
+        e.preventDefault();
+      }
+    });
+
+    // Touch swipe navigation
+    let touchStartX = 0;
+    document.addEventListener('touchstart', (e) => {
+      touchStartX = e.touches[0].clientX;
+    }, { passive: true });
+    document.addEventListener('touchend', (e) => {
+      const dx = e.changedTouches[0].clientX - touchStartX;
+      if (Math.abs(dx) < 50) return; // too short
+      const dir = dx < 0 ? 1 : -1; // swipe left = next, right = prev
+      const modal = this.shadowRoot.querySelector('dpor-modal');
+      const modalVisible = modal && modal._visible;
+      if (modalVisible) {
+        modal.navigate(dir);
+      } else {
+        // Navigate respecting the active filter
+        this._navigateFiltered(dir);
+      }
+    }, { passive: true });
+  }
+
+  render() {
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host { display: block; min-height: 100vh; }
+      </style>
+      <dpor-nav current="${this._currentExec}"></dpor-nav>
+      <dpor-timeline execution="${this._currentExec}"></dpor-timeline>
+      <dpor-modal></dpor-modal>
+    `;
+  }
+}
+customElements.define('dpor-report', DporReport);
+</script>
+</body>
+</html>

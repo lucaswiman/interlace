@@ -114,12 +114,15 @@ impl PyDporEngine {
     /// Report a synchronization event.
     /// event_type: "lock_acquire", "lock_release", "thread_join", "thread_spawn"
     /// sync_id: identifier for the sync primitive or thread
+    /// path_id: optional path position for lock events (free-threaded fix)
+    #[pyo3(signature = (execution, thread_id, event_type, sync_id, path_id=None))]
     fn report_sync(
         &mut self,
         execution: &mut PyExecution,
         thread_id: usize,
         event_type: &str,
         sync_id: u64,
+        path_id: Option<usize>,
     ) -> PyResult<()> {
         let event = match event_type {
             "lock_acquire" => SyncEvent::LockAcquire { lock_id: sync_id },
@@ -136,7 +139,7 @@ impl PyDporEngine {
                 ))
             }
         };
-        self.inner.process_sync(&mut execution.inner, thread_id, event);
+        self.inner.process_sync(&mut execution.inner, thread_id, event, path_id);
         Ok(())
     }
 
@@ -155,9 +158,27 @@ impl PyDporEngine {
         self.inner.tree_depth()
     }
 
+    /// Return the current path position (number of scheduling steps so far).
+    /// Used by Python to snapshot the position for sync event attribution.
+    #[getter]
+    fn path_position(&self) -> usize {
+        self.inner.path.current_position()
+    }
+
     #[getter]
     fn num_threads(&self) -> usize {
         self.inner.num_threads()
+    }
+
+    /// Return pending races detected during the current execution.
+    /// Each race is (prev_path_id, current_path_id, thread_id, race_object).
+    /// Call before next_execution() which consumes them.
+    fn pending_races(&self) -> Vec<(usize, usize, usize, Option<u64>)> {
+        self.inner
+            .pending_races()
+            .iter()
+            .map(|r| (r.prev_path_id, r.current_path_id, r.thread_id, r.race_object))
+            .collect()
     }
 }
 

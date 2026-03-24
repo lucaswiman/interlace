@@ -53,7 +53,7 @@ class TestGCReentrancyGuard:
 
             reporter_entered = False
 
-            def sync_reporter(event: str, obj_id: int) -> None:
+            def sync_reporter(event: str, obj_id: int, lock_obj: object) -> None:
                 nonlocal reporter_entered, acquired
                 reporter_entered = True
                 # Simulate GC-triggered __del__ that acquires another lock.

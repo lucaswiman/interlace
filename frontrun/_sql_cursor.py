@@ -96,12 +96,28 @@ def _warm_sql_parsers() -> None:
     the preload bridge observes a burst of unrelated file I/O and exploration
     can spend its small preemption budget on import noise instead of the user
     race. Warm the parser stack once on the main thread when patching SQL.
+
+    Importantly, this also forces ``sqlglot.dialects.Dialect`` to be imported
+    eagerly.  The ``sqlglot.dialects`` module uses a module-level
+    ``_import_lock = threading.RLock()`` to guard lazy dialect loading.  If
+    this lock is created after cooperative lock patching replaces
+    ``threading.RLock``, it becomes a :class:`CooperativeRLock` which can
+    deadlock when acquired outside a DPOR scheduler context (e.g. during
+    counterexample reproduction).  Warming here — before ``patch_locks()`` —
+    ensures the lock is a real ``RLock`` and all lazy imports are resolved.
     """
     try:
         extract_row_level_access("SELECT * FROM frontrun_warmup WHERE id = 1")
     except Exception:
         # Optional dependency missing or parser warmup failed. The actual SQL
         # interception path remains best-effort and will fall back naturally.
+        pass
+    # Force the lazy Dialect import so that sqlglot's _import_lock (which
+    # guards __getattr__ for dialect loading) is exercised while threading
+    # primitives are still real (not cooperative).
+    try:
+        from sqlglot.dialects import Dialect  # noqa: F401
+    except Exception:
         pass
 
 
