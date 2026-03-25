@@ -242,6 +242,40 @@ impl DporEngine {
         self.path.record_access(current_path_id, object_id, kind);
     }
 
+    /// Like [`process_access`] but uses `dpor_vv` (lock-aware) with
+    /// `record_io_access` recording semantics.  Intended for I/O
+    /// operations that go through Python-level code (Redis, SQL) where
+    /// Python locks are tracked by `report_sync` and should be respected.
+    pub fn process_synced_io_access(
+        &mut self,
+        execution: &mut Execution,
+        thread_id: usize,
+        object_id: ObjectId,
+        kind: AccessKind,
+    ) {
+        let current_path_id = self.path.current_position().saturating_sub(1);
+        let current_dpor_vv = execution.threads[thread_id].dpor_vv.clone();
+
+        let object_state = execution.objects.entry(object_id).or_insert_with(ObjectState::new);
+
+        for prev_access in object_state.dependent_accesses(kind, thread_id) {
+            if !prev_access.happens_before(&current_dpor_vv) {
+                self.path.insert_wakeup(prev_access.path_id, thread_id, Some(object_id));
+                self.pending_races.push(PendingRace {
+                    prev_path_id: prev_access.path_id,
+                    current_path_id,
+                    thread_id,
+                    race_object: Some(object_id),
+                });
+            }
+        }
+
+        let access = Access::new(current_path_id, current_dpor_vv, thread_id);
+        object_state.record_io_access(access, kind);
+
+        self.path.record_access(current_path_id, object_id, kind);
+    }
+
     /// Like [`process_access`] but uses the thread's `io_vv` instead of
     /// `dpor_vv`.  Because `io_vv` does not include lock-based
     /// happens-before edges, I/O accesses from different threads always

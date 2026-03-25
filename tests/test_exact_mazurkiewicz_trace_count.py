@@ -446,20 +446,12 @@ class TestFileIOTraceCount:
         """N threads with lock guarding a shared file.
 
         The abstract proof gives N! traces (same as TestNThreadsWithLock).
-        However, the DPOR engine uses a separate ``io_vv`` vector clock
-        for I/O accesses that intentionally excludes lock-based
-        happens-before edges.  This is by design: it enables detection of
-        TOCTOU races across lock boundaries.  The consequence is that
-        file I/O inside a lock still appears concurrent to the I/O layer,
-        producing more traces than the lock-only model predicts.
+        With synced I/O (Python-level I/O inside a lock uses dpor_vv which
+        respects lock happens-before), the file writes are properly
+        serialized and the trace counts match the theoretical N!.
 
-        Current counts (io_vv model): N=1 → 1, N=2 → 3, N=3 → 17.
-        These match the pure-lock overcounting pattern before Fix 8,
-        because the I/O layer adds a second independent race dimension.
-
-        When the I/O layer is eventually made lock-aware (so that
-        file writes inside the same lock are serialized), the expected
-        counts should revert to N! (1, 2, 6).
+        Previously the io_vv model (which ignores lock HB for I/O)
+        gave N=2 → 3, N=3 → 17.  The synced I/O change fixed this.
         """
         tmpdir = tempfile.mkdtemp()
         path = os.path.join(tmpdir, "counter.txt")
@@ -478,9 +470,10 @@ class TestFileIOTraceCount:
 
             return thread_fn
 
-        # io_vv model expected counts (lock HB not respected for I/O)
-        io_vv_expected = {1: 1, 2: 3, 3: 17}
-        expected = io_vv_expected[n]
+        # N! traces: synced I/O respects lock HB
+        import math
+
+        expected = math.factorial(n)
         result = explore_dpor(
             setup=State,
             threads=[make_thread(i) for i in range(n)],
@@ -492,9 +485,7 @@ class TestFileIOTraceCount:
             total_timeout=60.0,
         )
 
-        assert result.num_explored == expected, (
-            f"N={n}: Expected {expected} traces (io_vv model), got {result.num_explored}"
-        )
+        assert result.num_explored == expected, f"N={n}: Expected {expected} traces (N!), got {result.num_explored}"
 
 
 # ---------------------------------------------------------------------------
