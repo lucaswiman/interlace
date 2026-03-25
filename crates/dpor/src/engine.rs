@@ -75,6 +75,21 @@ impl Execution {
 /// races are collected during execution as `PendingRace` entries and processed
 /// at maximal executions (in `next_execution()`), where the full trace is
 /// available for computing notdep sequences.
+
+/// A lock release event recorded during execution for deferred backtracking.
+#[derive(Clone, Debug)]
+struct DeferredLockRelease {
+    thread_id: usize,
+    path_id: usize,
+}
+
+/// A lock acquire event recorded during execution for deferred backtracking.
+#[derive(Clone, Debug)]
+struct DeferredLockAcquire {
+    thread_id: usize,
+    path_id: usize,
+}
+
 pub struct DporEngine {
     pub path: Path,
     num_threads: usize,
@@ -86,13 +101,17 @@ pub struct DporEngine {
     /// during execution and processed at maximal executions where the full
     /// trace is available for computing notdep sequences.
     pending_races: Vec<PendingRace>,
+    /// Lock releases collected during the current execution.
+    /// Processed in `next_execution()` for inter-critical-section backtracking.
+    deferred_lock_releases: Vec<DeferredLockRelease>,
+    /// Lock acquires collected during the current execution.
+    /// Used to determine whether a release should trigger backtracking.
+    deferred_lock_acquires: Vec<DeferredLockAcquire>,
 }
 
 impl DporEngine {
     /// XOR mask to derive virtual object IDs for lock acquire conflict tracking.
     const LOCK_OBJECT_XOR: u64 = 0x4C4F_434B_4C4F_434B; // "LOCKLOCK"
-    /// XOR mask for lock release objects (distinct from acquire).
-    const LOCK_RELEASE_XOR: u64 = 0x524C_5345_524C_5345; // "RLSERLSE"
 
     pub fn new(
         num_threads: usize,
@@ -107,6 +126,8 @@ impl DporEngine {
             executions_completed: 0,
             max_branches,
             pending_races: Vec::new(),
+            deferred_lock_releases: Vec::new(),
+            deferred_lock_acquires: Vec::new(),
         }
     }
 
@@ -321,20 +342,39 @@ impl DporEngine {
                         execution, thread_id, lock_obj_id, AccessKind::Write,
                     );
                 }
+                // Record for deferred lock release backtracking.
+                let pid = path_id.unwrap_or_else(|| self.path.current_position().saturating_sub(1));
+                self.deferred_lock_acquires.push(DeferredLockAcquire {
+                    thread_id,
+                    path_id: pid,
+                });
             }
             SyncEvent::LockRelease { lock_id } => {
                 let vv = execution.threads[thread_id].dpor_vv.clone();
                 execution.lock_release_vv.insert(lock_id, vv);
-                let lock_rel_obj_id = lock_id ^ Self::LOCK_RELEASE_XOR;
-                if let Some(pid) = path_id {
-                    self.process_io_access_at(
-                        execution, thread_id, lock_rel_obj_id, AccessKind::Write, pid,
-                    );
-                } else {
-                    self.process_io_access(
-                        execution, thread_id, lock_rel_obj_id, AccessKind::Write,
-                    );
-                }
+                // Lock-aware DPOR: release does NOT create an io_vv access.
+                //
+                // Previous approach: separate virtual objects for acquire/release,
+                // both as Write via io_vv.  This created TWO independent race
+                // dimensions per lock, causing overcounting (e.g. 3 traces
+                // instead of 2 for N=2 threads with a single lock).
+                //
+                // New approach: acquire-acquire races (via LOCK_OBJECT_XOR) handle
+                // lock ordering.  For multi-lock bugs (where thread T releases
+                // lock_a then acquires lock_b), we use DEFERRED release
+                // backtracking: at the end of the execution, we check if any
+                // thread released a lock then later acquired another.  If so, we
+                // insert backtracks at the release position, enabling another
+                // thread to interleave between the two critical sections.
+                //
+                // This is precise: single-lock tests get no release backtracks
+                // (thread doesn't acquire after releasing), while multi-lock
+                // tests get exactly the backtracks needed for bug detection.
+                let pid = path_id.unwrap_or_else(|| self.path.current_position().saturating_sub(1));
+                self.deferred_lock_releases.push(DeferredLockRelease {
+                    thread_id,
+                    path_id: pid,
+                });
             }
             SyncEvent::ThreadJoin { joined_thread } => {
                 let joined_causality = execution.threads[joined_thread].causality.clone();
@@ -377,7 +417,49 @@ impl DporEngine {
         let races = std::mem::take(&mut self.pending_races);
         self.path.process_deferred_races(&races);
 
+        // Lock-aware DPOR: deferred release backtracking.
+        //
+        // For each lock release where the releasing thread later acquires
+        // another lock, insert backtrack opportunities for other runnable
+        // threads at the release position.  This is the key mechanism for
+        // detecting multi-lock atomicity bugs: it allows another thread to
+        // run between a thread's two critical sections.
+        //
+        // This is DEFERRED (not inline during execution) so that we only
+        // insert backtracks when we can confirm the thread continued to
+        // another lock acquire.  For single-lock programs, no thread does
+        // acquire-after-release, so no backtracks are inserted — giving
+        // exact trace counts.
+        self.process_deferred_lock_releases();
+
         self.path.step()
+    }
+
+    /// Process deferred lock releases for inter-critical-section backtracking.
+    ///
+    /// For each lock release by thread T, check if T later acquired any lock
+    /// in this execution.  If so, insert backtrack opportunities at the release
+    /// position for all other runnable threads, enabling exploration of
+    /// interleavings between T's critical sections.
+    fn process_deferred_lock_releases(&mut self) {
+        let releases = std::mem::take(&mut self.deferred_lock_releases);
+        let acquires = std::mem::take(&mut self.deferred_lock_acquires);
+
+        for release in &releases {
+            let has_later_acquire = acquires.iter().any(|acq| {
+                acq.thread_id == release.thread_id && acq.path_id > release.path_id
+            });
+            if has_later_acquire {
+                // Insert backtrack for each other runnable thread at the
+                // release position.
+                let pid = release.path_id;
+                for tid in 0..self.num_threads {
+                    if tid != release.thread_id {
+                        self.path.insert_wakeup(pid, tid, None);
+                    }
+                }
+            }
+        }
     }
 
     pub fn executions_completed(&self) -> u64 {
@@ -1363,6 +1445,7 @@ mod tests {
                             &mut execution,
                             chosen,
                             SyncEvent::LockAcquire { lock_id: obj_id },
+                            None,
                         );
                     }
                     "lock_release" => {
@@ -1371,6 +1454,7 @@ mod tests {
                             &mut execution,
                             chosen,
                             SyncEvent::LockRelease { lock_id: obj_id },
+                            None,
                         );
                         for tid in 0..num_threads {
                             if tid != chosen && execution.threads[tid].blocked {
