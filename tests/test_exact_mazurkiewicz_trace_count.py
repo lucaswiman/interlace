@@ -1051,3 +1051,84 @@ class TestPostgreSQLRawPsycopg2TraceCount:
         assert result.num_explored <= expected + 2, (
             f"N={n}: Expected ≤{expected + 2} Mazurkiewicz traces (2^{n} + pipe tolerance), got {result.num_explored}"
         )
+
+
+@pytest.mark.integration
+class TestPostgreSQLRawPsycopg2SuppressBug:
+    """Regression tests for suppress_tid_permanently over-suppressing.
+
+    When a thread performs SQL via psycopg2, the I/O suppression mechanism
+    (suppress_tid_permanently) may incorrectly suppress *all* file I/O events
+    from that thread — including plain open()/write() calls that have nothing
+    to do with the database socket.  This causes DPOR to miss file-level
+    conflicts and under-count Mazurkiewicz traces.
+    """
+
+    def test_sql_thread_with_file_io_not_suppressed(self, _pg_available) -> None:
+        """Two threads doing SQL + shared-file write → more than 2 traces.
+
+        Each thread:
+            1. Opens a psycopg2 connection, does SELECT FOR UPDATE + UPDATE + COMMIT on row1.
+            2. Writes its tid to a shared file (plain open() + write()).
+
+        The SQL serialises via the row lock (2 orderings).  The file write
+        is an *independent* conflict point — it can be ordered independently
+        of the SQL, so total traces should be > 2.
+
+        With the suppress_tid_permanently bug, the file I/O events from
+        threads that touched psycopg2 are silently dropped, so DPOR only
+        sees the SQL conflicts and reports exactly 2 traces.
+        """
+        tmpdir = tempfile.mkdtemp()
+        shared_path = os.path.join(tmpdir, "shared.txt")
+
+        class _State:
+            def __init__(self) -> None:
+                # Reset the DB row
+                conn = _pg_connect_suppressed(_DB_URL)
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE maz_trace_test SET value = 0 WHERE id = 'row1'")
+                _pg_close_suppressed(conn)
+                # Reset the shared file
+                with open(shared_path, "w") as f:
+                    f.write("init")
+
+        def make_thread(tid: int):  # noqa: ANN202
+            def thread_fn(state: _State) -> None:
+                # Part 1: SQL work (SELECT FOR UPDATE + UPDATE + COMMIT)
+                conn = _pg_connect_suppressed(_DB_URL)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT value FROM maz_trace_test WHERE id = 'row1' FOR UPDATE")
+                        cur.execute("UPDATE maz_trace_test SET value = %s WHERE id = 'row1'", (tid,))
+                    _pg_commit_suppressed(conn)
+                finally:
+                    _pg_close_suppressed(conn)
+                # Part 2: File I/O — this should NOT be suppressed
+                with open(shared_path, "w") as f:
+                    f.write(str(tid))
+
+            return thread_fn
+
+        result = explore_dpor(
+            setup=_State,
+            threads=[make_thread(0), make_thread(1)],
+            invariant=lambda s: True,
+            lock_timeout=2000,
+            deadlock_timeout=10.0,
+            timeout_per_run=15.0,
+            max_executions=100,
+            preemption_bound=None,
+            stop_on_first=False,
+            detect_io=True,
+            warn_nondeterministic_sql=False,
+        )
+
+        # SQL row lock gives 2 orderings; file write is an additional
+        # independent conflict, so total traces must be > 2.
+        # With suppress_tid_permanently bug, we get exactly 2.
+        assert result.num_explored > 2, (
+            f"Expected >2 Mazurkiewicz traces (SQL + file I/O conflicts), got {result.num_explored}. "
+            f"This likely means suppress_tid_permanently is hiding non-SQL file I/O events."
+        )
