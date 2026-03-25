@@ -235,24 +235,17 @@ Therefore the exact count under the current Python event alphabet is **2**.
 
 ### Fix 3: Restrict LOAD_ATTR Weak Read to Container Types (Implemented)
 
-Restricted the LOAD_ATTR `weak_read` on `__cmethods__` to only fire when the loaded
-value is `isinstance(val, (list, dict, set))`. Previously fired for all non-immutable
-types, creating spurious weak reads on user-defined objects like `_Slot`.
-
-**Impact on trace counts**: Zero — weak_read-weak_read pairs are non-conflicting.
-This is a correct optimization that reduces per-execution overhead.
+Restricted the LOAD_ATTR `weak_read` on `__cmethods__` to only fire for container types (`list`, `dict`, `set`), eliminating spurious weak reads on user-defined objects.
+**Impact**: Zero effect on trace counts; pure optimization that reduces per-execution overhead.
 
 ### Fix 4+5: First-Access Semantics for Iterator Reads (Implemented)
 
-Changed GET_ITER and FOR_ITER from `_report_read` to `_report_first_read`, pinning
-repeated reads of `__cmethods__` and per-element keys to the first scheduling point.
-
-**Impact on trace counts**: Zero — read-read pairs don't generate wakeup insertions.
-Correct optimization that reduces unnecessary work in the DPOR engine.
+Changed GET_ITER and FOR_ITER from `_report_read` to `_report_first_read`, pinning repeated reads to the first scheduling point.
+**Impact**: Zero effect on trace counts; optimization that reduces unnecessary DPOR engine work.
 
 ### Fix 6: Trace Cache Merge Fix (Implemented)
 
-See Root Cause 3 above. The only fix that actually reduced trace counts.
+Fixed trace cache merge to correctly apply `AccessKind::merge()`, handling Read + WeakRead → Read instead of escalating to Write. This prevented false wakeups when sleeping threads appeared to write objects they only read. The only fix that actually reduced trace counts.
 
 ## Proposed Fixes (Not Yet Implemented)
 
@@ -373,215 +366,7 @@ analysis pass.
 
 ### Fix 8: Lock-Aware DPOR via Deferred Release Backtracking (IMPLEMENTED)
 
-**Previous idea**: Remove lock acquire/release from the generic `io_vv` machinery and model
-them directly as synchronization events in the DPOR engine.
-
-`io_vv` is a good fit for interactions we do not control directly (file/socket/DB
-activity observed from the side). Locks are different:
-
-- lock state is fully under the scheduler's control
-- blocked/runnable transitions are already explicit
-- the relevant happens-before edges are deterministic
-- the "resource" is not an opaque external object; it is a synchronization primitive
-
-So treating `lock_acquire` / `lock_release` as fake I/O writes to virtual objects is
-not conceptually aligned with the rest of the design.
-
-**Goal**: preserve the useful multi-lock bug-finding behavior while replacing the
-current lock-object approximation with a model that matches lock semantics more
-directly and gives cleaner trace counts.
-
-#### Concrete implementation plan
-
-**Phase 1: Separate lock races from I/O races in the engine API**
-
-Add a dedicated lock-sync path instead of routing lock events through
-`process_io_access_at()`:
-
-- keep `process_sync()` for HB updates and runnable/blocking state
-- add a dedicated helper, e.g. `process_lock_event(...)`
-- stop XOR-ing `lock_id` into fake object IDs for acquire/release
-- stop using `io_vv` for lock events entirely
-
-This makes the code reflect the actual distinction:
-
-- `process_io_access*()` is for external effects whose ordering we observe
-- `process_lock_event()` is for synchronization primitives we control
-
-**Phase 2: Represent lock events explicitly in the path**
-
-Extend the path/branch representation with lock-event metadata for each scheduling
-position, e.g.:
-
-```text
-LockEvent {
-    thread_id,
-    lock_id,
-    kind: Acquire | Release,
-}
-```
-
-Record these in parallel with `active_accesses`, but do **not** merge them into the
- ordinary object-access maps. They have different semantics and should participate in
-independence checks separately.
-
-**Phase 3: Define lock-specific dependency rules**
-
-Use lock-aware dependence instead of generic object-access dependence.
-
-For the same lock `L`:
-
-- `Acquire(L)` vs `Acquire(L)` are dependent
-- `Release(L)` vs `Acquire(L)` are dependent
-- `Release(L)` vs `Release(L)` are usually not a useful independent race dimension
-  for exact counting; in normal mutex semantics they can be treated as dependent only
-  insofar as they order future acquires, not as standalone conflicting "writes"
-
-For different locks `L1 != L2`:
-
-- `Acquire(L1)` vs `Acquire(L2)` are independent
-- `Release(L1)` vs `Acquire(L2)` are independent at the primitive level
-
-That last rule is the critical difference from the current `io_vv` model. The
-multi-lock bugs do **not** fundamentally require pretending that releasing `L1` races
-with acquiring `L2`. What they require is that DPOR can backtrack to the boundary
-between adjacent critical sections in the same thread.
-
-**Phase 4: Preserve inter-critical-section backtracking explicitly**
-
-The current virtual-object trick uses release/acquire "races" to create a scheduling
-point between:
-
-```python
-with lock_a:
-    ...
-with lock_b:
-    ...
-```
-
-Instead of faking that via `io_vv`, add an explicit backtracking rule at lock-section
-boundaries:
-
-- when thread T executes `Release(L)` and remains runnable
-- and another thread U is runnable immediately after that release
-- record a backtrack opportunity at the release position to allow U to run before
-  T's next action
-
-This is closer to what we actually want:
-
-- not "release writes an external resource"
-- but "the end of a critical section is a semantically important scheduling boundary"
-
-In other words, use the path/wakeup machinery to preserve post-release alternatives
-directly, instead of encoding them as fake data races.
-
-**Phase 5: Incorporate lock events into sleep-set propagation**
-
-Update the independence check used by `propagate_sleep()` so that it consults both:
-
-- normal access summaries for shared-memory / I/O objects
-- lock-event summaries for synchronization behavior
-
-This likely needs a second summary structure, analogous to `active_accesses`, but for
-future lock events:
-
-```text
-future_lock_events[(path_pos, thread_id)] = summary of remaining lock actions
-```
-
-At minimum, the summary needs:
-
-- which locks may be acquired next
-- whether the thread may perform a release that ends a critical section while
-  remaining runnable
-
-This is the lock analogue of Fix 3's position-sensitive future-access cache.
-
-**Phase 6: Remove lock-specific overcounting from the frontend**
-
-Once lock events are modeled explicitly in the engine:
-
-- suppress redundant Python-level lock metadata reports (`LOAD_ATTR lock`,
-  `LOAD_SPECIAL __enter__`, `LOAD_SPECIAL __exit__`) for lock types covered by the
-  lock-aware path
-- keep the Python-level reports only for objects that do not participate in the
-  explicit lock-sync path
-
-That should eliminate a large amount of front-end lock noise while leaving the actual
-lock semantics intact.
-
-#### Why this should still catch the multi-lock bugs
-
-Consider the motivating pattern:
-
-```python
-with lock_a:
-    write_a()
-with lock_b:
-    write_b()
-```
-
-and a competing thread:
-
-```python
-with lock_a:
-    read_a()
-with lock_b:
-    read_b()
-```
-
-The bug exists because another thread can run **after** `Release(lock_a)` and
-**before** the next `Acquire(lock_b)`.
-
-The lock-aware plan preserves this by:
-
-- treating `Release(lock_a)` as a first-class scheduling boundary
-- adding an explicit backtrack opportunity at that boundary when another thread is
-  runnable
-- continuing to use normal shared-memory races inside the critical sections for
-  `write_a/read_a` and `write_b/read_b`
-
-So the multi-lock behavior does not depend on fake `io_vv` conflicts between
-different lock objects; it depends on preserving the release boundary as a place
-where another runnable thread may take over.
-
-#### Minimum migration strategy
-
-To reduce risk, implement this in two steps:
-
-1. **Dual-path stage**
-   Keep the current `io_vv` lock modeling behind a flag, add the lock-aware path
-   behind another flag, and run both implementations against the same tests.
-2. **Cutover stage**
-   Once the lock-aware path passes the lock-count tests and the multi-lock defect
-   tests, remove the `io_vv` lock route.
-
-#### Test plan
-
-The minimum test matrix for this change should include:
-
-- `test_n_threads_single_lock`
-- `test_two_threads_locked_n_vars`
-- `test_prometheus_summary_observe_pattern`
-- `test_transfer_between_two_locked_accounts`
-- existing deadlock / lock-wait tests
-
-Add one new focused unit test at the Rust-path layer for the key behavior:
-
-- when a thread releases `lock_a` and immediately continues to unrelated work,
-  another runnable thread must still be insertable at that release boundary even
-  though there is no synthetic object race
-
-#### Expected payoff
-
-- More principled lock semantics
-- Cleaner exact-count behavior for lock-only tests
-- Less dependence on `io_vv` for phenomena that are not actually I/O
-- A better foundation for future lock-specific optimizations than the current
-  acquire/release-as-virtual-write approximation
-
-**Original risk assessment**: High. This is still a larger algorithmic change than the
-fixes above, but unlike the current approximation it has a clear correctness story.
+**Original design**: A 6-phase plan to model locks as explicit synchronization events instead of fake `io_vv` writes, with separate lock-event paths, lock-specific dependency rules, and suppression of redundant Python-level lock metadata reports. The goal was cleaner trace counts while preserving multi-lock bug-finding (which depends on backtracking at release boundaries between adjacent critical sections in the same thread).
 
 #### What was actually implemented
 
