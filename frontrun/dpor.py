@@ -233,8 +233,12 @@ class _PreloadBridge:
         # force DPOR to explore uninteresting interleavings first.
         if event.kind == "close":
             return
-        # Skip if this thread's cursor.execute() or Redis client already reported at a higher level
-        if is_tid_suppressed(event.tid) or is_redis_tid_suppressed(event.tid):
+        # Skip SQL/Redis *socket* I/O if the thread's cursor.execute() or
+        # Redis client already reported at a higher level.  Only suppress
+        # socket events — file I/O from the same thread (e.g. open()/write()
+        # on a regular file) must still be visible to DPOR.
+        is_socket = event.resource_id.startswith("socket:")
+        if is_socket and (is_tid_suppressed(event.tid) or is_redis_tid_suppressed(event.tid)):
             return
         with self._lock:
             dpor_id = self._tid_to_dpor.get(event.tid)
@@ -509,11 +513,13 @@ class DporScheduler:
                 _pending_io: list[tuple[int, str, bool]] | None = getattr(_dpor_tls, "pending_io", None)
                 if self._preload_bridge is not None:
                     _preload_events = self._preload_bridge.drain(thread_id)
-                    # Drop LD_PRELOAD events for threads with SQL-level tracking.
-                    # The listener() suppression check can race with
+                    # Drop LD_PRELOAD *socket* events for threads with SQL-level
+                    # tracking.  The listener() suppression check can race with
                     # suppress_tid_permanently() due to async pipe delivery.
+                    # File I/O events (open/write on regular files) must pass
+                    # through so DPOR can detect non-SQL conflicts.
                     if _preload_events and is_tid_suppressed(threading.get_native_id()):
-                        _preload_events = []
+                        _preload_events = [ev for ev in _preload_events if not ev[2].startswith("socket:")]
                     if _preload_events:
                         # Record into trace for human-readable output.  These events
                         # come from C extensions (e.g. libpq) with no Python frame.
