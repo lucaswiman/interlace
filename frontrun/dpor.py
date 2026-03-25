@@ -992,6 +992,26 @@ _METHOD_WRAPPER_TYPE = type("".__str__)  # method-wrapper
 
 _IMMUTABLE_TYPES = (str, bytes, int, float, bool, complex, tuple, frozenset, type(None), types.ModuleType)
 
+# File-backed I/O types whose conflicts are tracked by the I/O detection layer
+# (LD_PRELOAD + _traced_open) keyed by file path.  DPOR skips Python-level
+# tracking on these because: (1) each thread typically creates its own handle,
+# (2) id() reuse can cause stable_id collisions between short-lived instances,
+# and (3) the real conflicts are captured at the file-path level.
+#
+# NOTE: StringIO and BytesIO are intentionally EXCLUDED — they are in-memory
+# buffers with no file path, so LD_PRELOAD never sees them.  When shared
+# between threads they need normal Python-level conflict tracking.
+import _io as _io_module
+
+_IO_WRAPPER_TYPES: tuple[type, ...] = (
+    _io_module.TextIOWrapper,
+    _io_module.BufferedWriter,
+    _io_module.BufferedReader,
+    _io_module.BufferedRandom,
+    _io_module.BufferedRWPair,
+    _io_module.FileIO,
+)
+
 # C-level methods that are read-only (don't mutate the object).
 _C_METHOD_READ_ONLY = frozenset(
     {
@@ -1607,7 +1627,10 @@ def _process_opcode(
     elif op == "LOAD_ATTR":
         obj = shadow.pop()
         attr = instr.argval
-        _report_read(engine, execution, thread_id, obj, attr, elock, sids)
+        # Skip I/O wrapper types — their conflicts are tracked by the I/O
+        # detection layer (keyed by file path), not by Python object identity.
+        if obj is None or not isinstance(obj, _IO_WRAPPER_TYPES):
+            _report_read(engine, execution, thread_id, obj, attr, elock, sids)
         # Also report on obj.__dict__ so LOAD_ATTR conflicts with
         # STORE_SUBSCR on the same __dict__ (cross-path detection).
         # Off by default: doubles wakeup tree insertions for rare benefit.
@@ -1652,7 +1675,10 @@ def _process_opcode(
     elif op == "STORE_ATTR":
         obj = shadow.pop()  # TOS = object
         _val = shadow.pop()  # TOS1 = value
-        _report_write(engine, execution, thread_id, obj, instr.argval, elock, sids)
+        # Skip I/O wrapper types — their conflicts are tracked by the I/O
+        # detection layer (keyed by file path), not by Python object identity.
+        if obj is None or not isinstance(obj, _IO_WRAPPER_TYPES):
+            _report_write(engine, execution, thread_id, obj, instr.argval, elock, sids)
         # Also report on obj.__dict__ so STORE_ATTR conflicts with
         # STORE_SUBSCR on the same __dict__ (cross-path detection).
         # Off by default: doubles wakeup tree insertions for rare benefit.
@@ -1922,11 +1948,13 @@ def _process_opcode(
                 # This creates per-element conflicts enabling fine-grained interleaving.
                 _report_first_read(engine, execution, thread_id, _iter_container, repr(_iter_counter), elock, sids)
                 # Coarse-grained read for conflict with C-method writes (append,
-                # insert, etc.) and other container-level operations.  Uses first-access
-                # semantics: all FOR_ITER reads point back to the first iteration's
-                # scheduling point, so wakeup insertions target that earliest position
-                # instead of cascading backward through each iteration.
-                _report_first_read(engine, execution, thread_id, _iter_container, "__cmethods__", elock, sids)
+                # insert, etc.) and other container-level operations.  Uses last-access
+                # (regular) semantics: each iteration overwrites the previous read
+                # position.  This means wakeup tree entries target the LAST iteration,
+                # which allows the other thread to interleave after some elements have
+                # already been read — catching mid-iteration mutation races (e.g.
+                # enumerate + insert).
+                _report_read(engine, execution, thread_id, _iter_container, "__cmethods__", elock, sids)
             # Increment counter for next iteration (mutable list, in-place update).
             top[2] = _iter_counter + 1
         shadow.push(None)  # push the yielded value
@@ -2004,6 +2032,12 @@ def _process_opcode(
             if item_type is _BUILTIN_METHOD_TYPE or item_type is _METHOD_WRAPPER_TYPE:
                 self_obj = getattr(item, "__self__", None)
                 if self_obj is not None and not isinstance(self_obj, _IMMUTABLE_TYPES):
+                    if isinstance(self_obj, _IO_WRAPPER_TYPES):
+                        # I/O wrapper methods are tracked via the I/O detection
+                        # layer; skip __cmethods__ to avoid false races from
+                        # id() reuse on short-lived file objects.
+                        _call_handled = True
+                        break
                     method_name = getattr(item, "__name__", None)
                     if method_name in _C_METHOD_READ_ONLY:
                         _report_read(engine, execution, thread_id, self_obj, "__cmethods__", elock, sids)

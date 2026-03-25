@@ -168,28 +168,28 @@ pub struct Path {
     branches: Vec<Branch>,
     pos: usize,
     preemption_bound: Option<u32>,
-    /// Per-thread union of all accesses from the most recently completed
-    /// execution. Used for sleep set propagation to new branches (Phase 2b).
+    /// Step-count-indexed future access cache from the most recently
+    /// completed execution.
     ///
-    /// When propagating sleep to positions beyond the replay prefix, we
-    /// cannot rely on `explored_accesses` (which only captures one scheduling
-    /// step's accesses). Instead, we use this cached union of ALL the
-    /// thread's accesses from the previous execution as a conservative
-    /// approximation of its future behavior.
+    /// `prev_thread_step_future[tid][k]` = union of thread `tid`'s accesses
+    /// at its k-th, (k+1)-th, ... scheduling points in the previous
+    /// execution.  This is a per-thread suffix union indexed by the
+    /// thread's own step count (not global position).
+    ///
+    /// The key insight: a sleeping thread's remaining work depends on how
+    /// many steps IT has taken, not where we are in the global schedule.
+    /// If thread A ran 7 steps total and has completed 5, its remaining
+    /// work is steps 5 and 6 — regardless of where other threads
+    /// interleaved.  This prevents false wakeups when a thread has
+    /// finished its conflicting work at earlier steps.
     ///
     /// Paper ref: JACM'17 Section 10 (p.31-35) — Concuerror maintains
-    /// per-process event sequences to determine sleeping processes' next
-    /// actions during propagation. Our approach uses the full access union
-    /// instead of per-step traces, which is more conservative (may over-wake)
-    /// but simpler and always sound for deterministic access patterns.
+    /// per-process event sequences for sleep set propagation.
     ///
-    /// Soundness note: For threads with data-dependent access patterns (where
-    /// the set of accessed objects depends on values read from shared state),
-    /// the cached union may under-approximate the thread's actual future
-    /// accesses. This could cause a thread to remain asleep when it should
-    /// wake, potentially missing an interleaving. For programs with fixed
-    /// access patterns (like the writer-readers benchmark), the cache is exact.
-    prev_thread_all_accesses: HashMap<usize, HashMap<u64, AccessKind>>,
+    /// Soundness note: For data-dependent access patterns, the cached
+    /// union may under-approximate actual future accesses.  For fixed
+    /// access patterns (most concurrent programs), the cache is exact.
+    prev_thread_step_future: HashMap<usize, Vec<HashMap<u64, AccessKind>>>,
     /// Wakeup subtree carried from step() to schedule() for multi-step
     /// wakeup sequence guidance.
     ///
@@ -212,7 +212,7 @@ impl Path {
             branches: Vec::new(),
             pos: 0,
             preemption_bound,
-            prev_thread_all_accesses: HashMap::new(),
+            prev_thread_step_future: HashMap::new(),
             pending_wakeup_subtree: None,
         }
     }
@@ -223,6 +223,33 @@ impl Path {
 
     pub fn depth(&self) -> usize {
         self.branches.len()
+    }
+
+    /// Look up a thread's future accesses based on how many scheduling
+    /// steps it has completed so far in the current execution.
+    ///
+    /// Counts how many times `tid` was the active thread in branches
+    /// before `pos`, then returns `prev_thread_step_future[tid][k]`
+    /// (the union of tid's accesses from its k-th step onward in the
+    /// previous execution).
+    ///
+    /// Returns `Some(accesses)` if the cache has data (may be empty if
+    /// the thread has completed all its work).  Returns `None` if no
+    /// cache is available (first execution, or thread not in cache).
+    fn future_accesses_for(&self, tid: usize, pos: usize) -> Option<HashMap<u64, AccessKind>> {
+        let futures = self.prev_thread_step_future.get(&tid)?;
+        // Count how many times tid was active before position pos
+        let k = self.branches[..pos]
+            .iter()
+            .filter(|b| b.active_thread == tid)
+            .count();
+        if k < futures.len() {
+            Some(futures[k].clone())
+        } else {
+            // Thread ran more steps in current execution than previous.
+            // Return empty: thread has completed in the cached execution.
+            Some(HashMap::new())
+        }
     }
 
     /// Record that an object was accessed at the given scheduling step.
@@ -316,22 +343,10 @@ impl Path {
         let branch = Branch::new(threads, chosen, preemptions);
         self.branches.push(branch);
 
-        // Propagate sleep set to new branches using trace caching (Phase 2b).
-        //
-        // The trace cache (`prev_thread_all_accesses`) stores the union of
-        // ALL accesses each thread performed in the previous execution. This
-        // provides a conservative approximation of each sleeping thread's
-        // future behavior, enabling the independence check (Algorithm 2
-        // line 16, JACM'17 p.24: Sleep' = {q ∈ sleep(E) | E ⊢ p♦q}) to
-        // work at new positions beyond the replay prefix.
-        //
-        // Without trace caching, `explored_accesses` only captures one
-        // scheduling step's accesses — a thread with reads at one step but
-        // writes at another would appear falsely independent. The trace
-        // cache union includes ALL accesses, preventing this.
-        //
-        // Paper ref: JACM'17 Section 10 (p.31-35) — Concuerror caches
-        // per-process event traces for this purpose.
+        // Propagate sleep set to new branches using position-sensitive
+        // future access cache.  The cache provides each sleeping thread's
+        // FUTURE accesses (from this position onward), enabling precise
+        // independence checks at new positions beyond the replay prefix.
         self.propagate_sleep(self.pos);
 
         self.pos += 1;
@@ -378,24 +393,19 @@ impl Path {
 
         // 1. Locally-sleeping threads (Visited at pos-1)
         //
-        // Use trace cache (`prev_thread_all_accesses`) when available for
-        // the thread's access info. The trace cache provides the union of
-        // ALL the thread's accesses from the previous execution, which is
-        // critical for propagation to new branches: `explored_accesses`
-        // only captures one scheduling step's accesses, so a thread with
-        // reads at one step but writes at another would appear falsely
-        // independent. The trace cache union includes all accesses.
+        // Use the position-sensitive future access cache when available.
+        // Unlike the old full-union cache, this only includes accesses
+        // the thread will perform at positions >= pos in the previous
+        // execution.  This prevents false wakeups when a thread has
+        // already finished its conflicting work at earlier positions.
         //
         // Fallback to `explored_accesses` when no trace cache is available
         // (e.g., during the first execution).
-        //
-        // Paper ref: JACM'17 Section 10 (p.31-35) — Concuerror caches
-        // per-process event traces for this purpose.
         let num_threads = self.branches[prev].sleep.len();
         for tid in 0..num_threads {
             if self.branches[prev].sleep.get(tid).copied().unwrap_or(false) {
-                if let Some(accesses) = self.prev_thread_all_accesses.get(&tid) {
-                    sleeping_threads.insert(tid, accesses.clone());
+                if let Some(accesses) = self.future_accesses_for(tid, pos) {
+                    sleeping_threads.insert(tid, accesses);
                 } else if let Some(accesses) = self.branches[prev].explored_accesses.get(&tid) {
                     sleeping_threads.insert(tid, accesses.clone());
                 }
@@ -406,13 +416,12 @@ impl Path {
 
         // 2. Propagated-sleeping threads (from even earlier positions)
         //
-        // Use trace cache for propagated threads too, since their carried
-        // accesses may only reflect a single-position snapshot from when
-        // they were first put to sleep. The trace cache provides the
-        // complete access union.
+        // Use position-sensitive cache for propagated threads too, since
+        // their carried accesses may only reflect a single-position
+        // snapshot from when they were first put to sleep.
         for (tid, accesses) in &self.branches[prev].propagated_sleep_accesses {
-            if let Some(cached) = self.prev_thread_all_accesses.get(tid) {
-                sleeping_threads.insert(*tid, cached.clone());
+            if let Some(cached) = self.future_accesses_for(*tid, pos) {
+                sleeping_threads.insert(*tid, cached);
             } else {
                 sleeping_threads.insert(*tid, accesses.clone());
             }
@@ -503,32 +512,46 @@ impl Path {
     ///     remove p.w from wut(E) → remove_branch()
     ///     add p to sleep(E)      → sleep[active] = true
     pub fn step(&mut self) -> bool {
-        // Save per-thread access unions from the just-completed execution.
-        // These are used as a trace cache for sleep set propagation to new
-        // branches in the NEXT execution (Phase 2b).
+        // Build step-count-indexed future access cache (per-thread suffix unions).
         //
-        // For each thread, compute the union of all its `active_accesses`
-        // across all positions where it was the active thread. This gives
-        // a conservative approximation of the thread's complete behavior:
-        // if ANY access conflicts, the thread is woken during propagation.
+        // For each thread T, collect its scheduling points in order, then
+        // compute suffix unions: step_future[T][k] = union of T's accesses
+        // at its k-th, (k+1)-th, ... scheduling points.
+        //
+        // This replaces the old "full union" cache with a more precise
+        // version keyed by the thread's own progress.  A sleeping thread
+        // that has completed 5 of its 7 steps only needs its remaining
+        // work (steps 5-6), not everything it ever did.  This prevents
+        // false wakeups when a thread has already finished its conflicting
+        // work at earlier steps.
         //
         // Paper ref: JACM'17 Section 10 (p.31-35) — trace caching for
-        // sleep set propagation. The union is conservative (may over-wake)
-        // but sound for deterministic access patterns.
-        let mut thread_accesses: HashMap<usize, HashMap<u64, AccessKind>> = HashMap::new();
+        // sleep set propagation.
+        let mut per_thread_accesses: HashMap<usize, Vec<&HashMap<u64, AccessKind>>> = HashMap::new();
         for branch in &self.branches {
-            let tid = branch.active_thread;
-            let entry = thread_accesses.entry(tid).or_default();
-            for (obj_id, kind) in &branch.active_accesses {
-                entry
-                    .entry(*obj_id)
-                    .and_modify(|existing| {
-                        *existing = existing.merge(*kind);
-                    })
-                    .or_insert(*kind);
-            }
+            per_thread_accesses
+                .entry(branch.active_thread)
+                .or_default()
+                .push(&branch.active_accesses);
         }
-        self.prev_thread_all_accesses = thread_accesses;
+        let mut step_future: HashMap<usize, Vec<HashMap<u64, AccessKind>>> = HashMap::new();
+        for (tid, steps) in &per_thread_accesses {
+            let m = steps.len();
+            let mut futures: Vec<HashMap<u64, AccessKind>> = vec![HashMap::new(); m + 1];
+            for k in (0..m).rev() {
+                futures[k] = futures[k + 1].clone();
+                for (obj_id, kind) in steps[k] {
+                    futures[k]
+                        .entry(*obj_id)
+                        .and_modify(|existing| {
+                            *existing = existing.merge(*kind);
+                        })
+                        .or_insert(*kind);
+                }
+            }
+            step_future.insert(*tid, futures);
+        }
+        self.prev_thread_step_future = step_future;
 
         while let Some(branch) = self.branches.last_mut() {
             let active = branch.active_thread;
