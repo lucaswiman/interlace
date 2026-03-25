@@ -509,6 +509,11 @@ class DporScheduler:
                 _pending_io: list[tuple[int, str, bool]] | None = getattr(_dpor_tls, "pending_io", None)
                 if self._preload_bridge is not None:
                     _preload_events = self._preload_bridge.drain(thread_id)
+                    # Drop LD_PRELOAD events for threads with SQL-level tracking.
+                    # The listener() suppression check can race with
+                    # suppress_tid_permanently() due to async pipe delivery.
+                    if _preload_events and is_tid_suppressed(threading.get_native_id()):
+                        _preload_events = []
                     if _preload_events:
                         # Record into trace for human-readable output.  These events
                         # come from C extensions (e.g. libpq) with no Python frame.

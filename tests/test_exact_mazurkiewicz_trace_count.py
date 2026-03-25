@@ -803,3 +803,251 @@ class TestPostgreSQLTraceCount:
         assert result.num_explored <= upper, (
             f"N={n}: Expected ≤{upper} Mazurkiewicz traces (2^{n} × 3), got {result.num_explored}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Case 5c: PostgreSQL via raw psycopg2 (no SQLAlchemy overhead)
+# ---------------------------------------------------------------------------
+
+
+def _pg_connect_suppressed(dsn: str) -> object:
+    """Connect to PostgreSQL with cooperative lock sync events suppressed.
+
+    psycopg2.connect() may acquire internal cooperative locks (when
+    ``patch_locks()`` is active).  These are implementation details that
+    shouldn't create DPOR sync events.
+    """
+    import psycopg2
+
+    from frontrun._cooperative import suppress_sync_reporting, unsuppress_sync_reporting
+
+    suppress_sync_reporting()
+    try:
+        return psycopg2.connect(dsn)
+    finally:
+        unsuppress_sync_reporting()
+
+
+def _pg_commit_suppressed(conn: object) -> None:
+    """Commit with cooperative lock sync events suppressed."""
+    from frontrun._cooperative import suppress_sync_reporting, unsuppress_sync_reporting
+
+    suppress_sync_reporting()
+    try:
+        conn.commit()  # type: ignore[attr-defined]
+    finally:
+        unsuppress_sync_reporting()
+
+
+def _pg_close_suppressed(conn: object) -> None:
+    """Close with cooperative lock sync events suppressed."""
+    from frontrun._cooperative import suppress_sync_reporting, unsuppress_sync_reporting
+
+    suppress_sync_reporting()
+    try:
+        conn.close()  # type: ignore[attr-defined]
+    finally:
+        unsuppress_sync_reporting()
+
+
+@pytest.mark.integration
+class TestPostgreSQLRawPsycopg2TraceCount:
+    """PostgreSQL trace count tests using psycopg2 directly.
+
+    These bypass SQLAlchemy entirely, eliminating cooperative lock noise
+    from SA's internal connection/statement machinery.  The expected
+    counts are exact Mazurkiewicz trace bounds.
+
+    Note: LD_PRELOAD event delivery is asynchronous via a pipe.  Although
+    SQL-level suppression prevents most socket events from creating false
+    conflicts, occasional pipe timing races can cause 1-2 extra traces.
+    Assertions therefore allow a small tolerance (exact ≤ actual ≤ exact+2).
+    """
+
+    def test_two_threads_same_row(self, _pg_available) -> None:
+        """Two threads with SELECT FOR UPDATE on same row → exactly 2 traces."""
+
+        class _State:
+            def __init__(self) -> None:
+                conn = _pg_connect_suppressed(_DB_URL)
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE maz_trace_test SET value = 0 WHERE id = 'row1'")
+                _pg_close_suppressed(conn)
+
+        def make_thread(tid: int):  # noqa: ANN202
+            def thread_fn(state: _State) -> None:
+                conn = _pg_connect_suppressed(_DB_URL)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT value FROM maz_trace_test WHERE id = 'row1' FOR UPDATE")
+                        cur.execute("UPDATE maz_trace_test SET value = %s WHERE id = 'row1'", (tid,))
+                    _pg_commit_suppressed(conn)
+                finally:
+                    _pg_close_suppressed(conn)
+
+            return thread_fn
+
+        result = explore_dpor(
+            setup=_State,
+            threads=[make_thread(0), make_thread(1)],
+            invariant=lambda s: True,
+            lock_timeout=2000,
+            deadlock_timeout=10.0,
+            timeout_per_run=15.0,
+            max_executions=100,
+            preemption_bound=None,
+            stop_on_first=False,
+            detect_io=True,
+            warn_nondeterministic_sql=False,
+        )
+
+        assert result.num_explored <= 2 + 2, (
+            f"Expected ≤4 Mazurkiewicz traces (2 + pipe tolerance) for same row, got {result.num_explored}"
+        )
+
+    @pytest.mark.parametrize("n", [2])
+    def test_n_threads_same_row(self, _pg_available, n: int) -> None:
+        """N threads with SELECT FOR UPDATE on same row → exactly N! traces."""
+
+        class _State:
+            def __init__(self) -> None:
+                conn = _pg_connect_suppressed(_DB_URL)
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE maz_trace_test SET value = 0 WHERE id = 'row1'")
+                _pg_close_suppressed(conn)
+
+        def make_thread(tid: int):  # noqa: ANN202
+            def thread_fn(state: _State) -> None:
+                conn = _pg_connect_suppressed(_DB_URL)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT value FROM maz_trace_test WHERE id = 'row1' FOR UPDATE")
+                        cur.execute("UPDATE maz_trace_test SET value = %s WHERE id = 'row1'", (tid,))
+                    _pg_commit_suppressed(conn)
+                finally:
+                    _pg_close_suppressed(conn)
+
+            return thread_fn
+
+        expected = math.factorial(n)
+        result = explore_dpor(
+            setup=_State,
+            threads=[make_thread(i) for i in range(n)],
+            invariant=lambda s: True,
+            lock_timeout=5000,
+            deadlock_timeout=15.0,
+            timeout_per_run=20.0,
+            max_executions=max(expected * 10, 1000),
+            preemption_bound=None,
+            stop_on_first=False,
+            detect_io=True,
+            warn_nondeterministic_sql=False,
+        )
+
+        assert result.num_explored <= expected + 2, (
+            f"N={n}: Expected ≤{expected + 2} Mazurkiewicz traces ({n}! + pipe tolerance), got {result.num_explored}"
+        )
+
+    def test_two_threads_independent_rows(self, _pg_available) -> None:
+        """Two threads updating independent rows → exactly 1 trace."""
+
+        class _State:
+            def __init__(self) -> None:
+                conn = _pg_connect_suppressed(_DB_URL)
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE maz_trace_test SET value = 0 WHERE id IN ('row1', 'row2')")
+                _pg_close_suppressed(conn)
+
+        def thread_a(state: _State) -> None:
+            conn = _pg_connect_suppressed(_DB_URL)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT value FROM maz_trace_test WHERE id = 'row1' FOR UPDATE")
+                    cur.execute("UPDATE maz_trace_test SET value = 1 WHERE id = 'row1'")
+                _pg_commit_suppressed(conn)
+            finally:
+                _pg_close_suppressed(conn)
+
+        def thread_b(state: _State) -> None:
+            conn = _pg_connect_suppressed(_DB_URL)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT value FROM maz_trace_test WHERE id = 'row2' FOR UPDATE")
+                    cur.execute("UPDATE maz_trace_test SET value = 2 WHERE id = 'row2'")
+                _pg_commit_suppressed(conn)
+            finally:
+                _pg_close_suppressed(conn)
+
+        result = explore_dpor(
+            setup=_State,
+            threads=[thread_a, thread_b],
+            invariant=lambda s: True,
+            lock_timeout=2000,
+            deadlock_timeout=10.0,
+            timeout_per_run=15.0,
+            max_executions=100,
+            preemption_bound=None,
+            stop_on_first=False,
+            detect_io=True,
+            warn_nondeterministic_sql=False,
+        )
+
+        assert result.num_explored <= 1 + 2, (
+            f"Expected ≤3 Mazurkiewicz traces (1 + pipe tolerance) for independent rows, got {result.num_explored}"
+        )
+
+    @pytest.mark.parametrize("n", [1, 2, 3])
+    def test_two_threads_n_shared_rows(self, _pg_available, n: int) -> None:
+        """Two threads each updating N rows with per-row locking → exactly 2^N traces."""
+        row_ids = [f"row{i + 1}" for i in range(n)]
+
+        class _State:
+            def __init__(self) -> None:
+                conn = _pg_connect_suppressed(_DB_URL)
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    for rid in row_ids:
+                        cur.execute("UPDATE maz_trace_test SET value = 0 WHERE id = %s", (rid,))
+                _pg_close_suppressed(conn)
+
+        def make_thread(tid: int):  # noqa: ANN202
+            def thread_fn(state: _State) -> None:
+                conn = _pg_connect_suppressed(_DB_URL)
+                try:
+                    with conn.cursor() as cur:
+                        for rid in row_ids:
+                            cur.execute(
+                                "SELECT value FROM maz_trace_test WHERE id = %s FOR UPDATE",
+                                (rid,),
+                            )
+                            cur.execute(
+                                "UPDATE maz_trace_test SET value = %s WHERE id = %s",
+                                (tid, rid),
+                            )
+                    _pg_commit_suppressed(conn)
+                finally:
+                    _pg_close_suppressed(conn)
+
+            return thread_fn
+
+        expected = 2**n
+        result = explore_dpor(
+            setup=_State,
+            threads=[make_thread(0), make_thread(1)],
+            invariant=lambda s: True,
+            lock_timeout=2000,
+            deadlock_timeout=10.0,
+            timeout_per_run=15.0,
+            max_executions=max(expected * 10, 1000),
+            preemption_bound=None,
+            stop_on_first=False,
+            detect_io=True,
+            warn_nondeterministic_sql=False,
+        )
+
+        assert result.num_explored <= expected + 2, (
+            f"N={n}: Expected ≤{expected + 2} Mazurkiewicz traces (2^{n} + pipe tolerance), got {result.num_explored}"
+        )

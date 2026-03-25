@@ -1073,14 +1073,16 @@ def patch_sql() -> None:
             from frontrun._cooperative import suppress_sync_reporting as _ssr
             from frontrun._cooperative import unsuppress_sync_reporting as _usr
 
+            # Suppress LD_PRELOAD events BEFORE the actual connect call.
+            # The background pipe reader may process events from connect()
+            # before we return; suppressing first ensures those events are
+            # dropped in the listener() callback.
+            suppress_tid_permanently()
             _ssr()
             try:
                 conn = orig(*args, **kwargs)
             finally:
                 _usr()
-            # Suppress LD_PRELOAD events now, before any further I/O on
-            # this connection.  SQL-level reporting supersedes socket I/O.
-            suppress_tid_permanently()
             identity = _infer_db_identity_from_connection(conn)
             if identity is None and args and isinstance(args[0], str):
                 identity = f"{driver}-dsn:{args[0]}"
