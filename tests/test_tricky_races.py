@@ -1190,8 +1190,8 @@ class _SharedBinaryFileState:
 
         self.path = tempfile.mktemp(suffix=".bin")
         with open(self.path, "wb") as f:
-            f.write(b"initial")
-        self.snapshot = b""
+            f.write(b"0")
+        self.final_value = 0
 
 
 # -- Even more diabolical tests -----------------------------------------------
@@ -1689,21 +1689,24 @@ class TestSharedBytesIORace:
 
 
 class TestSharedBinaryFileRace:
-    """Two threads sharing a binary file — one reads while the other writes."""
+    """TOCTOU on a binary file — two threads read-then-increment, lost update."""
 
     def test_dpor_detects_shared_binary_file_race(self) -> None:
-        def reader(state: _SharedBinaryFileState) -> None:
+        def incrementer(state: _SharedBinaryFileState) -> None:
             with open(state.path, "rb") as f:
-                state.snapshot = f.read()
-
-        def writer(state: _SharedBinaryFileState) -> None:
+                data = f.read()
+            val = int(data) if data else 0
             with open(state.path, "wb") as f:
-                f.write(b"overwritten")
+                f.write(str(val + 1).encode())
+
+        def read_final(state: _SharedBinaryFileState) -> None:
+            with open(state.path, "rb") as f:
+                state.final_value = int(f.read())
 
         result = explore_dpor(
             setup=_SharedBinaryFileState,
-            threads=[reader, writer],
-            invariant=lambda s: s.snapshot in (b"initial", b"overwritten"),
+            threads=[incrementer, incrementer],
+            invariant=lambda s: int(open(s.path, "rb").read()) == 2,  # noqa: SIM115
             detect_io=True,
             deadlock_timeout=5.0,
         )

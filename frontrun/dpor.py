@@ -992,11 +992,15 @@ _METHOD_WRAPPER_TYPE = type("".__str__)  # method-wrapper
 
 _IMMUTABLE_TYPES = (str, bytes, int, float, bool, complex, tuple, frozenset, type(None), types.ModuleType)
 
-# I/O wrapper types whose internal state changes are already tracked by the
-# I/O detection layer (LD_PRELOAD + _traced_open).  DPOR should NOT track
-# __cmethods__ on these types because: (1) each thread creates its own
-# instance, (2) id() reuse can cause stable_id collisions between short-lived
-# instances, and (3) the real I/O conflicts are captured at a higher level.
+# File-backed I/O types whose conflicts are tracked by the I/O detection layer
+# (LD_PRELOAD + _traced_open) keyed by file path.  DPOR skips Python-level
+# tracking on these because: (1) each thread typically creates its own handle,
+# (2) id() reuse can cause stable_id collisions between short-lived instances,
+# and (3) the real conflicts are captured at the file-path level.
+#
+# NOTE: StringIO and BytesIO are intentionally EXCLUDED — they are in-memory
+# buffers with no file path, so LD_PRELOAD never sees them.  When shared
+# between threads they need normal Python-level conflict tracking.
 import _io as _io_module
 
 _IO_WRAPPER_TYPES: tuple[type, ...] = (
@@ -1006,8 +1010,6 @@ _IO_WRAPPER_TYPES: tuple[type, ...] = (
     _io_module.BufferedRandom,
     _io_module.BufferedRWPair,
     _io_module.FileIO,
-    _io_module.BytesIO,
-    _io_module.StringIO,
 )
 
 # C-level methods that are read-only (don't mutate the object).
