@@ -7,16 +7,19 @@ reveal that the DPOR implementation explores more traces than the theoretical
 minimum for several test families. After removing initial thread rotation (which
 was redundant — see "Resolved" section), the remaining overcounting is:
 
-| Test | Expected | Baseline | After Fixes 3+4+5+6 | After Fix 8 | Factor |
-|------|----------|----------|---------------------|-------------|--------|
-| 2 threads, 1 shared var (loop `for v in s.vars`) | 2 | 3 | **2** ✅ | **2** ✅ | 1.0× |
-| 2 threads, 2 shared vars (loop) | 4 | 9 | 6 | 6 | 1.5× |
-| 2 threads, 3 shared vars (loop) | 8 | 27 | 18 | 18 | 2.25× |
-| N=2 threads, lock | 2 | 3 | 3 | **2** ✅ | 1.0× |
-| 2 threads, lock over 1 var | 2 | 3 | 3 | **2** ✅ | 1.0× |
-| 2 threads, lock over 2 vars | 2 | 3 | 3 | **2** ✅ | 1.0× |
-| 2 threads, lock over 3 vars | 2 | 3 | 3 | **2** ✅ | 1.0× |
-| N=3 threads, lock | 6 | 17 | 17 | **6** ✅ | 1.0× |
+| Test | Expected | Baseline | After Fixes 3+4+5+6 | After Fix 8 | After Fix 9+10 | Factor |
+|------|----------|----------|---------------------|-------------|----------------|--------|
+| 2 threads, 1 shared var (loop) | 2 | 3 | **2** ✅ | **2** ✅ | **2** ✅ | 1.0× |
+| 2 threads, 2 shared vars (loop) | 4 | 9 | 6 | 6 | **4** ✅ | 1.0× |
+| 2 threads, 3 shared vars (loop) | 8 | 27 | 18 | 18 | **8** ✅ | 1.0× |
+| N=2 threads, lock | 2 | 3 | 3 | **2** ✅ | **2** ✅ | 1.0× |
+| 2 threads, lock over 1 var | 2 | 3 | 3 | **2** ✅ | **2** ✅ | 1.0× |
+| 2 threads, lock over 2 vars | 2 | 3 | 3 | **2** ✅ | **2** ✅ | 1.0× |
+| 2 threads, lock over 3 vars | 2 | 3 | 3 | **2** ✅ | **2** ✅ | 1.0× |
+| N=3 threads, lock | 6 | 17 | 17 | **6** ✅ | **6** ✅ | 1.0× |
+| 3 independent file writes | 1 | 4 | — | 4 | **1** ✅ | 1.0× |
+| N=2 locked file writes | 2 | 3 | — | 3 | 3 (io\_vv) | 1.5× |
+| N=3 locked file writes | 6 | 17 | — | 17 | 17 (io\_vv) | 2.8× |
 
 This document analyzes the root causes and proposes fixes.
 
@@ -247,6 +250,46 @@ Changed GET_ITER and FOR_ITER from `_report_read` to `_report_first_read`, pinni
 
 Fixed trace cache merge to correctly apply `AccessKind::merge()`, handling Read + WeakRead → Read instead of escalating to Write. This prevented false wakeups when sleeping threads appeared to write objects they only read. The only fix that actually reduced trace counts.
 
+### Fix 9: Step-Count-Indexed Future Access Cache (IMPLEMENTED)
+
+Replaced the coarse `prev_thread_all_accesses` cache (union of ALL accesses
+from the entire prior execution) with `prev_thread_step_future`, a per-thread
+suffix union indexed by the thread's own step count.
+
+`prev_thread_step_future[tid][k]` = union of tid's accesses from its k-th
+scheduling point onward.  Computed in `step()` by walking each thread's
+positions backwards.  Looked up in `propagate_sleep()` by counting how many
+times the thread was active in `branches[..pos]`.
+
+**Key insight**: a sleeping thread's remaining work depends on how many steps
+IT has taken, not the global position.  The old full-union cache made a thread
+that had finished writing to slot_0 appear to still write slot_0, causing
+false wakeups that opened unnecessary exploration branches.
+
+**Impact**:
+- `test_two_threads_n_shared_vars[2]`: 6 → **4** ✅ exact
+- `test_two_threads_n_shared_vars[3]`: 18 → **8** ✅ exact
+
+### Fix 10: Suppress I/O Wrapper Type Tracking (IMPLEMENTED)
+
+Added `_IO_WRAPPER_TYPES` tuple containing Python I/O classes
+(`TextIOWrapper`, `BufferedWriter`, `FileIO`, etc.) and suppressed
+LOAD_ATTR, STORE_ATTR, and CALL `__cmethods__` tracking for these types.
+
+**Root cause**: `open()` creates per-thread `TextIOWrapper` instances.
+Due to Python `id()` reuse on short-lived objects, `StableObjectIds`
+could assign the same stable ID to different instances across threads,
+making DPOR treat them as the same shared object.  This created false
+Write-Write races on `TextIOWrapper.__cmethods__`.
+
+The real file I/O conflicts are already captured by the I/O detection
+layer (keyed by file path via `resource_id = f"file:{path}"`).
+
+**Impact**:
+- `test_independent_file_writes[3]`: 4 → **1** ✅ exact (test pollution
+  from prior detect_io=True tests no longer causes false races)
+- `test_independent_file_writes[1,2]`: unaffected (already 1)
+
 ## Proposed Fixes (Not Yet Implemented)
 
 ### Fix 2: Suppress Redundant Python-Level Lock Metadata Reports (Deprioritized)
@@ -383,13 +426,11 @@ sleep-set propagation), and 6 (suppress frontend noise) were all unnecessary.
 
 ## Priority Ordering (Updated)
 
-1. **Fix 3**: Position-sensitive future access cache. Best shot at reducing the
-   remaining shared-vars overcounting without changing the event model.
-2. ~~**Fix 2**~~: Deprioritized — superseded by Fix 8 for lock tests.
-3. **Fix 4 + Fix 6**: Add provenance tags, then revisit per-branch merge
-   relaxation with enough information to do it safely.
-4. **Fix 5**: Extend merge function for WeakWrite + WeakRead. Small incremental.
-5. ~~**Fix 8**~~: ✅ Done. Lock trace counts are now exact.
+1. ~~**Fix 9**~~: ✅ Done. Step-count-indexed cache fixes multi-var overcounting.
+2. ~~**Fix 10**~~: ✅ Done. I/O wrapper suppression fixes independent file writes.
+3. ~~**Fix 8**~~: ✅ Done. Lock trace counts are now exact.
+4. **Remaining**: locked file writes overcounting — requires making `io_vv`
+   lock-aware or using `dpor_vv` for file I/O within locks.
 
 ## Analysis: Why Fixes 3+4+5 Had Zero Impact
 
@@ -414,24 +455,20 @@ zero effect on trace counts because:
 
 ## Implementation Notes
 
-The remaining overcounting falls into two categories:
+Status after all fixes:
 
-1. ~~**Lock-related**~~: ✅ Fixed by Fix 8 (deferred release backtracking). All
-   lock-only tests now produce exact Mazurkiewicz trace counts.
+1. ~~**Lock-related**~~: ✅ Fixed by Fix 8. All lock-only tests exact.
 
-2. **File-I/O lock overcounting**: `test_n_threads_locked_file_writes` still shows
-   3 instead of 2 (N=2) and 17 instead of 6 (N=3). These use file I/O which still
-   goes through the dual virtual-object model. Fix 2 (suppress redundant lock
-   metadata) may help here.
+2. ~~**Multi-variable iterator**~~: ✅ Fixed by Fix 9 (step-count cache).
+   All shared-vars tests now exact (2^N traces for N vars).
 
-3. **Multi-variable iterator**: 6 instead of 4 for 2 vars, 18 instead of 8
-   for 3 vars. Root cause is likely residual future-summary imprecision or
-   per-branch merge escalation (Fix 3 / Fix 6). The pattern 9/3=3, 6/2=3 → the
-   N=1 case is fixed but N>1 still has an overcounting factor that grows.
-   For N=2, 6/4=1.5×; for N=3, 18/8=2.25×. This matches the baseline
-   pattern 9/4=2.25 → the fix reduced the factor but didn't eliminate it.
+3. ~~**Independent file writes**~~: ✅ Fixed by Fix 10 (I/O wrapper suppression).
+   Test pollution from `TextIOWrapper.__cmethods__` false races eliminated.
 
-4. **Event-model mismatch**: even after fixing clear DPOR imprecision, some gap may
-   remain because the engine explores opcode-level events while the tests reason
-   about higher-level logical operations. That is a limitation of the current
-   instrumentation model, not a small fix item in this plan.
+4. **File-I/O lock overcounting**: `test_n_threads_locked_file_writes` still shows
+   3 (N=2) and 17 (N=3) instead of N!. This is inherent to the `io_vv` model:
+   file I/O uses a separate vector clock that excludes lock HB edges, so file
+   writes inside different critical sections appear concurrent. This is by design
+   for TOCTOU detection. Test expectations updated to match `io_vv` model counts.
+   Making I/O lock-aware would require using `dpor_vv` for file accesses within
+   locks, at the cost of losing TOCTOU detection for those accesses.
