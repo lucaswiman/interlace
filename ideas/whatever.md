@@ -23,22 +23,21 @@ finally:
     self._waiting_count -= 1
 ```
 
-## 2. Async DPOR
+## 2. Async DPOR ✅ DONE
 
-DPOR is the most powerful exploration approach but only supports threaded code.
-An async variant would let users of `asyncio` benefit from systematic exploration
-instead of random sampling.
+Implemented in `frontrun/async_dpor.py` as `explore_async_dpor()`.  Uses the
+same Rust DPOR engine with `_AutoPauseCoroutine` to insert scheduling points
+at every `await`.  Supports SQL/Redis detection, asyncio.Lock deadlock
+detection via WaitForGraph, and row-lock tracking.
 
-## 3. Schedule shrinking / minimization
+## 3. Schedule shrinking / minimization — WON'T DO
 
-When a bug is found, counterexample schedules can be hundreds of entries long.
-Most entries are irrelevant — only a few key ordering decisions trigger the bug.
-A schedule minimizer (binary search for minimal reproducing schedule) would make
-debugging much easier.
-
-The bytecode `schedule_strategy` already integrates with Hypothesis, which has
-built-in shrinking, but the interaction with threading makes shrinking unreliable
-(the docstring itself recommends `phases=[Phase.generate]` to skip shrinking).
+This is a labeled special case of Hypothesis shrinking.  The bytecode
+`schedule_strategy` already integrates with Hypothesis, which has built-in
+shrinking.  The interaction with threading makes shrinking unreliable (the
+docstring recommends `phases=[Phase.generate]` to skip shrinking), and
+DPOR-based exploration already produces minimal counterexamples by
+construction (each execution explores a distinct Mazurkiewicz trace).
 
 ## 4. Progress reporting / callbacks
 
