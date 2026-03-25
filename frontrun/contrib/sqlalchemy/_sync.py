@@ -66,19 +66,61 @@ def sqlalchemy_dpor(
     from frontrun.dpor import explore_dpor
 
     def wrapped_setup() -> T:
-        engine.dispose()
-        return setup()
+        from frontrun._cooperative import suppress_sync_reporting, unsuppress_sync_reporting
+
+        suppress_sync_reporting()
+        try:
+            engine.dispose()
+            return setup()
+        finally:
+            unsuppress_sync_reporting()
 
     def wrap_thread(fn: Callable[[T], None]) -> Callable[[T], None]:
         def wrapper(state: T) -> None:
-            with engine.connect() as conn:
+            from frontrun._cooperative import suppress_sync_reporting, unsuppress_sync_reporting
+
+            # Suppress cooperative lock sync events during connection setup
+            # and teardown.  Internal SQLAlchemy/psycopg2 locks (pool mutex,
+            # connection state) are implementation details that shouldn't
+            # create DPOR sync events.
+            suppress_sync_reporting()
+            try:
+                conn_ctx = engine.connect()
+                conn = conn_ctx.__enter__()
                 if lock_timeout is not None:
                     conn.exec_driver_sql(f"SET lock_timeout = '{int(lock_timeout)}ms'")
-                token = _current_connection.set(conn)
+            finally:
+                unsuppress_sync_reporting()
+            # Wrap SA Connection methods that trigger internal locks.
+            # conn.execute() acquires statement compilation locks.
+            # conn.commit()/rollback() acquires transaction state locks.
+            _orig_execute = conn.execute
+            _orig_commit = conn.commit
+            _orig_rollback = conn.rollback
+
+            def _wrap_sa_method(method: Any) -> Any:
+                def wrapped(*args: Any, **kw: Any) -> Any:
+                    suppress_sync_reporting()
+                    try:
+                        return method(*args, **kw)
+                    finally:
+                        unsuppress_sync_reporting()
+
+                return wrapped
+
+            conn.execute = _wrap_sa_method(_orig_execute)  # type: ignore[method-assign]
+            conn.commit = _wrap_sa_method(_orig_commit)  # type: ignore[method-assign]
+            conn.rollback = _wrap_sa_method(_orig_rollback)  # type: ignore[method-assign]
+            token = _current_connection.set(conn)
+            try:
+                fn(state)
+            finally:
+                _current_connection.reset(token)
+                suppress_sync_reporting()
                 try:
-                    fn(state)
+                    conn_ctx.__exit__(None, None, None)
                 finally:
-                    _current_connection.reset(token)
+                    unsuppress_sync_reporting()
 
         return wrapper
 

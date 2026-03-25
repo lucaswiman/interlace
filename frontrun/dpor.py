@@ -858,6 +858,13 @@ class DporScheduler:
                 self._thread_row_locks.setdefault(thread_id, set()).add(res_id)
                 if graph is not None:
                     graph.add_holding(thread_id, lock_int_id, kind="row_lock")
+                # Report row-lock acquire to the DPOR engine so vector clocks
+                # reflect the serialization from database row locking.
+                _elock = getattr(self, "_engine_lock", None)
+                if _elock is not None:
+                    _saved_path_id = getattr(_dpor_tls, "_last_path_id", None)
+                    with _elock:
+                        self.engine.report_sync(self.execution, thread_id, "lock_acquire", lock_int_id, _saved_path_id)
 
     def _release_row_locks_unlocked(self, thread_id: int) -> bool:
         """Remove row locks for *thread_id*. Caller must hold ``self._condition``."""
@@ -869,10 +876,16 @@ class DporScheduler:
         graph = get_wait_for_graph()
         for r in held:
             self._active_row_locks.pop(r, None)
-            if graph is not None:
-                lid = self._row_lock_ids.get(r)
-                if lid is not None:
-                    graph.remove_holding(thread_id, lid, kind="row_lock")
+            lid = self._row_lock_ids.get(r)
+            if graph is not None and lid is not None:
+                graph.remove_holding(thread_id, lid, kind="row_lock")
+            # Report row-lock release to the DPOR engine so vector clocks
+            # reflect the serialization from database row locking.
+            _elock = getattr(self, "_engine_lock", None)
+            if lid is not None and _elock is not None:
+                _saved_path_id = getattr(_dpor_tls, "_last_path_id", None)
+                with _elock:
+                    self.engine.report_sync(self.execution, thread_id, "lock_release", lid, _saved_path_id)
         return True
 
     def release_row_locks(self, thread_id: int) -> None:
@@ -1071,6 +1084,23 @@ try:
             _redis_conn_module.Connection,
         ]
     )
+except ImportError:
+    pass
+try:
+    import psycopg2.extensions as _psycopg2_ext  # type: ignore[import-untyped]
+
+    _io_client_types.extend(
+        [
+            _psycopg2_ext.connection,
+            _psycopg2_ext.cursor,
+        ]
+    )
+except ImportError:
+    pass
+try:
+    import sqlalchemy.engine as _sa_engine  # type: ignore[import-untyped]
+
+    _io_client_types.append(_sa_engine.Connection)
 except ImportError:
     pass
 _IO_CLIENT_TYPES: tuple[type, ...] = tuple(_io_client_types)
@@ -3159,6 +3189,10 @@ def explore_dpor(
             # Clear bridge state for this new execution.
             if preload_bridge is not None:
                 preload_bridge.clear()
+            # Clear persistent SQL suppression flags from previous execution.
+            from frontrun._sql_cursor import clear_permanent_suppressions
+
+            clear_permanent_suppressions()
             # Set up switch point collection for the report
             _collecting_report = report is not None and len(report.executions) < _MAX_RECORDED_EXECUTIONS
             switch_points: list[Any] = [] if _collecting_report else []
