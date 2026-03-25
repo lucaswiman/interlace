@@ -894,6 +894,9 @@ class _ReplayEngine:
     def report_io_access(self, execution: Any, thread_id: int, object_id: int, kind: str) -> None:
         return None
 
+    def report_synced_io_access(self, execution: Any, thread_id: int, object_id: int, kind: str) -> None:
+        return None
+
     def report_sync(
         self, execution: Any, thread_id: int, event_type: str, sync_id: int, path_id: int | None = None
     ) -> None:

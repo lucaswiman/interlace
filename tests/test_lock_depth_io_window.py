@@ -43,6 +43,9 @@ class _FakeEngine:
     def report_io_access(self, execution: _FakeExecution, thread_id: int, object_id: int, kind: str) -> None:
         self.io_calls.append((thread_id, object_id, kind))
 
+    def report_synced_io_access(self, execution: _FakeExecution, thread_id: int, object_id: int, kind: str) -> None:
+        self.io_calls.append((thread_id, object_id, kind))
+
 
 class TestLockDepthIoWindow:
     def teardown_method(self) -> None:
@@ -55,7 +58,7 @@ class TestLockDepthIoWindow:
         execution = _FakeExecution([0])
         scheduler = DporScheduler(engine, execution, num_threads=1)
 
-        pending_io = [(123, "write")]
+        pending_io = [(123, "write", False)]
         scheduler._pending_io_by_thread[0] = pending_io
         scheduler._lock_depth_by_thread[0] = 0
         _dpor_tls.pending_io = pending_io
@@ -71,7 +74,7 @@ class TestLockDepthIoWindow:
         execution = _FakeExecution([0, 1])
         scheduler = DporScheduler(engine, execution, num_threads=2)
 
-        pending_io = [(456, "read")]
+        pending_io = [(456, "read", False)]
         scheduler._pending_io_by_thread[0] = pending_io
         scheduler._lock_depth_by_thread[0] = 1
         _dpor_tls.pending_io = pending_io
@@ -80,15 +83,15 @@ class TestLockDepthIoWindow:
         assert scheduler._report_and_wait(None, 0)
 
         assert engine.io_calls == []
-        assert _dpor_tls.pending_io == [(456, "read")]
+        assert _dpor_tls.pending_io == [(456, "read", False)]
 
     def test_flushes_other_threads_deferred_io_when_current_thread_reaches_io_boundary(self) -> None:
         engine = _FakeEngine()
         execution = _FakeExecution([0, 1])
         scheduler = DporScheduler(engine, execution, num_threads=2)
 
-        deferred_other = [(789, "write")]
-        current_io = [(999, "read")]
+        deferred_other = [(789, "write", False)]
+        current_io = [(999, "read", False)]
         scheduler._pending_io_by_thread[0] = deferred_other
         scheduler._pending_io_by_thread[1] = current_io
         scheduler._lock_depth_by_thread[0] = 1
@@ -111,7 +114,7 @@ class TestLockDepthIoWindow:
         graph.add_holding(0, 123, kind="lock")
         graph.add_waiting(1, 123, kind="lock")
 
-        pending_io = [(321, "write")]
+        pending_io = [(321, "write", False)]
         scheduler._pending_io_by_thread[0] = pending_io
         scheduler._lock_depth_by_thread[0] = 1
         scheduler._current_thread = 0
@@ -127,4 +130,4 @@ class TestLockDepthIoWindow:
             "new scheduling point."
         )
         assert engine.io_calls == []
-        assert _dpor_tls.pending_io == [(321, "write")]
+        assert _dpor_tls.pending_io == [(321, "write", False)]
