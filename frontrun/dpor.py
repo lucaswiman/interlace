@@ -236,11 +236,16 @@ class _PreloadBridge:
             return
         # Skip events to known SQL/Redis socket endpoints — the cursor/client
         # layer already reports at a higher granularity (table/row/key level).
-        # Also skip if the thread is temporarily suppressed (during execute).
-        # Non-SQL sockets and file I/O always pass through.
+        # Also skip socket events from permanently-suppressed SQL threads (covers
+        # the race window where connect() events arrive before the endpoint is
+        # registered).  Non-socket events (file I/O) always pass through even
+        # for SQL threads, so DPOR can detect non-SQL conflicts.
+        is_socket = event.resource_id.startswith("socket:")
         if is_sql_endpoint_suppressed(event.resource_id):
             return
-        if is_tid_suppressed(event.tid) or is_redis_tid_suppressed(event.tid):
+        if is_socket and is_tid_suppressed(event.tid):
+            return
+        if is_redis_tid_suppressed(event.tid):
             return
         with self._lock:
             dpor_id = self._tid_to_dpor.get(event.tid)
@@ -517,8 +522,16 @@ class DporScheduler:
                     _preload_events = self._preload_bridge.drain(thread_id)
                     # Drop events for known SQL/Redis endpoints that raced past
                     # the listener() check due to async pipe delivery.
+                    # Also drop socket events from permanently-suppressed SQL
+                    # threads (belt-and-suspenders for connect-time race).
+                    _is_sql_tid = is_tid_suppressed(threading.get_native_id())
                     if _preload_events:
-                        _preload_events = [ev for ev in _preload_events if not is_sql_endpoint_suppressed(ev[2])]
+                        _preload_events = [
+                            ev
+                            for ev in _preload_events
+                            if not is_sql_endpoint_suppressed(ev[2])
+                            and not (_is_sql_tid and ev[2].startswith("socket:"))
+                        ]
                     if _preload_events:
                         # Record into trace for human-readable output.  These events
                         # come from C extensions (e.g. libpq) with no Python frame.

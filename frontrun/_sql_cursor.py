@@ -1159,11 +1159,12 @@ def patch_sql() -> None:
             finally:
                 _usr()
             # Now that the connection is established, register its socket
-            # endpoint for permanent suppression and remove the thread-level
-            # suppression (so non-SQL I/O from this thread remains visible).
+            # endpoint for permanent suppression.  The thread-level tid
+            # suppression remains as a belt-and-suspenders fallback for
+            # any socket events that raced through the pipe before the
+            # endpoint was registered.  The listener only uses tid
+            # suppression for *socket* events, so file I/O passes through.
             suppress_sql_endpoint(conn)
-            with _suppress_lock:
-                _permanently_suppressed_tids.discard(threading.get_native_id())
             identity = _infer_db_identity_from_connection(conn)
             if identity is None and args and isinstance(args[0], str):
                 identity = f"{driver}-dsn:{args[0]}"
