@@ -1946,11 +1946,13 @@ def _process_opcode(
                 # This creates per-element conflicts enabling fine-grained interleaving.
                 _report_first_read(engine, execution, thread_id, _iter_container, repr(_iter_counter), elock, sids)
                 # Coarse-grained read for conflict with C-method writes (append,
-                # insert, etc.) and other container-level operations.  Uses first-access
-                # semantics: all FOR_ITER reads point back to the first iteration's
-                # scheduling point, so wakeup insertions target that earliest position
-                # instead of cascading backward through each iteration.
-                _report_first_read(engine, execution, thread_id, _iter_container, "__cmethods__", elock, sids)
+                # insert, etc.) and other container-level operations.  Uses last-access
+                # (regular) semantics: each iteration overwrites the previous read
+                # position.  This means wakeup tree entries target the LAST iteration,
+                # which allows the other thread to interleave after some elements have
+                # already been read — catching mid-iteration mutation races (e.g.
+                # enumerate + insert).
+                _report_read(engine, execution, thread_id, _iter_container, "__cmethods__", elock, sids)
             # Increment counter for next iteration (mutable list, in-place update).
             top[2] = _iter_counter + 1
         shadow.push(None)  # push the yielded value
