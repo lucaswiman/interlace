@@ -7,15 +7,16 @@ reveal that the DPOR implementation explores more traces than the theoretical
 minimum for several test families. After removing initial thread rotation (which
 was redundant — see "Resolved" section), the remaining overcounting is:
 
-| Test | Expected | Baseline | After Fixes 3+4+5+6 | Factor |
-|------|----------|----------|---------------------|--------|
-| 2 threads, 1 shared var (loop `for v in s.vars`) | 2 | 3 | **2** ✅ exact under current Python event alphabet | 1.0× |
-| 2 threads, 2 shared vars (loop) | 4 | 9 | 6 | 1.5× |
-| 2 threads, 3 shared vars (loop) | 8 | 27 | 18 | 2.25× |
-| 2 threads, lock, N=2 | 2 | 3 | 3 | 1.5× |
-| 2 threads, lock over 1 var | 2 | 3 | 3 | 1.5× |
-| N=2 threads, lock | 2 | 3 | 3 | 1.5× |
-| N=3 threads, lock | 6 | 17 | 17 | 2.83× |
+| Test | Expected | Baseline | After Fixes 3+4+5+6 | After Fix 8 | Factor |
+|------|----------|----------|---------------------|-------------|--------|
+| 2 threads, 1 shared var (loop `for v in s.vars`) | 2 | 3 | **2** ✅ | **2** ✅ | 1.0× |
+| 2 threads, 2 shared vars (loop) | 4 | 9 | 6 | 6 | 1.5× |
+| 2 threads, 3 shared vars (loop) | 8 | 27 | 18 | 18 | 2.25× |
+| N=2 threads, lock | 2 | 3 | 3 | **2** ✅ | 1.0× |
+| 2 threads, lock over 1 var | 2 | 3 | 3 | **2** ✅ | 1.0× |
+| 2 threads, lock over 2 vars | 2 | 3 | 3 | **2** ✅ | 1.0× |
+| 2 threads, lock over 3 vars | 2 | 3 | 3 | **2** ✅ | 1.0× |
+| N=3 threads, lock | 6 | 17 | 17 | **6** ✅ | 1.0× |
 
 This document analyzes the root causes and proposes fixes.
 
@@ -370,9 +371,9 @@ shared opcodes that are redundant with stronger semantic events. Examples:
 unsound. The promising version is targeted and semantics-aware, not a global
 analysis pass.
 
-### Fix 8: Lock-Aware DPOR Instead of Synthetic `io_vv` Lock Objects
+### Fix 8: Lock-Aware DPOR via Deferred Release Backtracking (IMPLEMENTED)
 
-**Idea**: Remove lock acquire/release from the generic `io_vv` machinery and model
+**Previous idea**: Remove lock acquire/release from the generic `io_vv` machinery and model
 them directly as synchronization events in the DPOR engine.
 
 `io_vv` is a good fit for interactions we do not control directly (file/socket/DB
@@ -579,19 +580,47 @@ Add one new focused unit test at the Rust-path layer for the key behavior:
 - A better foundation for future lock-specific optimizations than the current
   acquire/release-as-virtual-write approximation
 
-**Risk**: High. This is still a larger algorithmic change than the fixes above, but
-unlike the current approximation it has a clear correctness story.
+**Original risk assessment**: High. This is still a larger algorithmic change than the
+fixes above, but unlike the current approximation it has a clear correctness story.
 
-## Priority Ordering
+#### What was actually implemented
+
+The 6-phase plan above was the original design. The actual implementation was much
+simpler — only a subset of Phase 1 and Phase 4 was needed:
+
+1. **Lock acquire**: unchanged (still a Write to `LOCK_OBJECT_XOR`-masked virtual
+   object via `io_vv`), plus records a `DeferredLockAcquire { thread_id, path_id }`.
+2. **Lock release**: only does the HB update (`lock_release_vv`), NO `io_vv` access.
+   Records a `DeferredLockRelease { thread_id, path_id }`. The `LOCK_RELEASE_XOR`
+   constant was removed.
+3. **At execution end** (`next_execution()`), `process_deferred_lock_releases()` checks:
+   for each release by thread T at position P, did T later acquire any lock at
+   position P' > P? If so, insert backtrack opportunities at position P for all other
+   threads via `path.insert_wakeup()`.
+
+**Key insight**: Acquire-acquire races (via the existing `LOCK_OBJECT_XOR` mechanism)
+already handle lock ordering correctly. The only missing piece was inter-critical-section
+backtracking — which the deferred release mechanism provides precisely. Phases 2
+(explicit lock events in path), 3 (lock-specific dependency rules), 5 (lock events in
+sleep-set propagation), and 6 (suppress frontend noise) were all unnecessary.
+
+**Impact**:
+- `test_n_threads_single_lock[2]`: 3 → **2** ✅ exact
+- `test_n_threads_single_lock[3]`: 17 → **6** ✅ exact
+- `test_two_threads_locked_n_vars[1,2,3]`: 3 → **2** ✅ exact
+- Multi-lock defect tests: PASS (Prometheus summary, bank transfer)
+- Full test suite: zero regressions
+
+## Priority Ordering (Updated)
 
 1. **Fix 3**: Position-sensitive future access cache. Best shot at reducing the
    remaining shared-vars overcounting without changing the event model.
-2. **Fix 2**: Suppress redundant Python-level lock metadata reports. Cheap and
-   likely to help lock tests without weakening the current lock race coverage.
+2. **Fix 2**: Suppress redundant Python-level lock metadata reports. May still help
+   with file-I/O lock overcounting (`test_n_threads_locked_file_writes`).
 3. **Fix 4 + Fix 6**: Add provenance tags, then revisit per-branch merge
    relaxation with enough information to do it safely.
 4. **Fix 5**: Extend merge function for WeakWrite + WeakRead. Small incremental.
-5. **Fix 8**: Larger algorithmic work if exact lock trace counts become a priority.
+5. ~~**Fix 8**~~: ✅ Done. Lock trace counts are now exact.
 
 ## Analysis: Why Fixes 3+4+5 Had Zero Impact
 
@@ -618,18 +647,22 @@ zero effect on trace counts because:
 
 The remaining overcounting falls into two categories:
 
-1. **Lock-related**: 3 instead of 2 for all lock tests. Root cause is the
-   conservative lock model plus redundant Python-level lock metadata events.
-   Fix 2 may reduce this, but fully exact counts may require Fix 9.
+1. ~~**Lock-related**~~: ✅ Fixed by Fix 8 (deferred release backtracking). All
+   lock-only tests now produce exact Mazurkiewicz trace counts.
 
-2. **Multi-variable iterator**: 6 instead of 4 for 2 vars, 18 instead of 8
+2. **File-I/O lock overcounting**: `test_n_threads_locked_file_writes` still shows
+   3 instead of 2 (N=2) and 17 instead of 6 (N=3). These use file I/O which still
+   goes through the dual virtual-object model. Fix 2 (suppress redundant lock
+   metadata) may help here.
+
+3. **Multi-variable iterator**: 6 instead of 4 for 2 vars, 18 instead of 8
    for 3 vars. Root cause is likely residual future-summary imprecision or
    per-branch merge escalation (Fix 3 / Fix 6). The pattern 9/3=3, 6/2=3 → the
    N=1 case is fixed but N>1 still has an overcounting factor that grows.
    For N=2, 6/4=1.5×; for N=3, 18/8=2.25×. This matches the baseline
    pattern 9/4=2.25 → the fix reduced the factor but didn't eliminate it.
 
-3. **Event-model mismatch**: even after fixing clear DPOR imprecision, some gap may
+4. **Event-model mismatch**: even after fixing clear DPOR imprecision, some gap may
    remain because the engine explores opcode-level events while the tests reason
    about higher-level logical operations. That is a limitation of the current
    instrumentation model, not a small fix item in this plan.
