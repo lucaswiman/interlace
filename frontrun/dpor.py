@@ -344,7 +344,7 @@ class DporScheduler:
         # Per-thread deferred I/O buffers. Lists are shared with thread-local
         # storage so other threads can flush deferred I/O when they reach a
         # real competing I/O boundary.
-        self._pending_io_by_thread: dict[int, list[tuple[int, str]]] = {}
+        self._pending_io_by_thread: dict[int, list[tuple[int, str, bool]]] = {}
         # Per-thread lock nesting depth mirrored from TLS for cross-thread
         # deferred-I/O flush decisions.
         self._lock_depth_by_thread: dict[int, int] = {}
@@ -461,13 +461,33 @@ class DporScheduler:
                     pending_io = self._pending_io_by_thread.get(flush_thread_id)
                     if not pending_io:
                         return
-                    if not allow_inside_lock and self._lock_depth_by_thread.get(flush_thread_id, 0) > 0:
+                    inside_lock = self._lock_depth_by_thread.get(flush_thread_id, 0) > 0
+                    if not allow_inside_lock and inside_lock:
+                        # Even though we defer most events, synced events
+                        # (Python-level Redis/SQL) can be flushed now — they use
+                        # dpor_vv which respects lock HB, so recording them at
+                        # the in-lock path_id is correct and avoids position
+                        # misattribution from deferred flushing.
+                        engine = self.engine
+                        execution = self.execution
+                        remaining: list[tuple[int, str, bool]] = []
+                        for obj_key, io_kind, synced in pending_io:
+                            if synced:
+                                with self._engine_lock:
+                                    engine.report_synced_io_access(execution, flush_thread_id, obj_key, io_kind)
+                            else:
+                                remaining.append((obj_key, io_kind, synced))
+                        pending_io.clear()
+                        pending_io.extend(remaining)
                         return
                     engine = self.engine
                     execution = self.execution
-                    for obj_key, io_kind in pending_io:
+                    for obj_key, io_kind, synced in pending_io:
                         with self._engine_lock:
-                            engine.report_io_access(execution, flush_thread_id, obj_key, io_kind)
+                            if synced:
+                                engine.report_synced_io_access(execution, flush_thread_id, obj_key, io_kind)
+                            else:
+                                engine.report_io_access(execution, flush_thread_id, obj_key, io_kind)
                     pending_io.clear()
 
                 def _flush_other_pending_io_for_current_io() -> None:
@@ -486,9 +506,14 @@ class DporScheduler:
                 # psycopg2) into the thread's pending_io list.  The preload
                 # bridge buffers events from the pipe reader thread, keyed by
                 # DPOR thread ID.
-                _pending_io: list[tuple[int, str]] | None = getattr(_dpor_tls, "pending_io", None)
+                _pending_io: list[tuple[int, str, bool]] | None = getattr(_dpor_tls, "pending_io", None)
                 if self._preload_bridge is not None:
                     _preload_events = self._preload_bridge.drain(thread_id)
+                    # Drop LD_PRELOAD events for threads with SQL-level tracking.
+                    # The listener() suppression check can race with
+                    # suppress_tid_permanently() due to async pipe delivery.
+                    if _preload_events and is_tid_suppressed(threading.get_native_id()):
+                        _preload_events = []
                     if _preload_events:
                         # Record into trace for human-readable output.  These events
                         # come from C extensions (e.g. libpq) with no Python frame.
@@ -502,8 +527,11 @@ class DporScheduler:
                                     call_chain=_call_chain,
                                     detail=_detail,
                                 )
-                        # Convert 3-tuples to 2-tuples for the pending list
-                        _io_pairs = [(_key, _kind) for _key, _kind, _, _, _ in _preload_events]
+                        # LD_PRELOAD events inside a Python lock should respect lock HB
+                        # (synced=True uses dpor_vv).  Events outside locks use io_vv
+                        # for TOCTOU detection.
+                        _inside_lock = self._lock_depth_by_thread.get(thread_id, 0) > 0
+                        _io_pairs = [(_key, _kind, _inside_lock) for _key, _kind, _, _, _ in _preload_events]
                         if _pending_io is not None:
                             _pending_io.extend(_io_pairs)
                         else:
@@ -527,6 +555,10 @@ class DporScheduler:
                             and self._lock_depth_by_thread.get(thread_id, 0) > 0
                             and self._all_other_live_threads_blocked_by_current(thread_id)
                         ):
+                            # Flush synced IO events even when skipping the
+                            # scheduling point — they use dpor_vv and should
+                            # be recorded at the correct in-lock position.
+                            _flush_pending_io_for(thread_id)
                             return True
                         _flush_other_pending_io_for_current_io()
                         # Flush deferred I/O only once this thread actually owns
@@ -831,6 +863,13 @@ class DporScheduler:
                 self._thread_row_locks.setdefault(thread_id, set()).add(res_id)
                 if graph is not None:
                     graph.add_holding(thread_id, lock_int_id, kind="row_lock")
+                # Report row-lock acquire to the DPOR engine so vector clocks
+                # reflect the serialization from database row locking.
+                _elock = getattr(self, "_engine_lock", None)
+                if _elock is not None:
+                    _saved_path_id = getattr(_dpor_tls, "_last_path_id", None)
+                    with _elock:
+                        self.engine.report_sync(self.execution, thread_id, "lock_acquire", lock_int_id, _saved_path_id)
 
     def _release_row_locks_unlocked(self, thread_id: int) -> bool:
         """Remove row locks for *thread_id*. Caller must hold ``self._condition``."""
@@ -842,10 +881,16 @@ class DporScheduler:
         graph = get_wait_for_graph()
         for r in held:
             self._active_row_locks.pop(r, None)
-            if graph is not None:
-                lid = self._row_lock_ids.get(r)
-                if lid is not None:
-                    graph.remove_holding(thread_id, lid, kind="row_lock")
+            lid = self._row_lock_ids.get(r)
+            if graph is not None and lid is not None:
+                graph.remove_holding(thread_id, lid, kind="row_lock")
+            # Report row-lock release to the DPOR engine so vector clocks
+            # reflect the serialization from database row locking.
+            _elock = getattr(self, "_engine_lock", None)
+            if lid is not None and _elock is not None:
+                _saved_path_id = getattr(_dpor_tls, "_last_path_id", None)
+                with _elock:
+                    self.engine.report_sync(self.execution, thread_id, "lock_release", lid, _saved_path_id)
         return True
 
     def release_row_locks(self, thread_id: int) -> None:
@@ -865,6 +910,9 @@ class _ReplayEngine:
         return None
 
     def report_io_access(self, execution: Any, thread_id: int, object_id: int, kind: str) -> None:
+        return None
+
+    def report_synced_io_access(self, execution: Any, thread_id: int, object_id: int, kind: str) -> None:
         return None
 
     def report_sync(
@@ -1011,6 +1059,57 @@ _IO_WRAPPER_TYPES: tuple[type, ...] = (
     _io_module.BufferedRWPair,
     _io_module.FileIO,
 )
+
+# Types whose real I/O conflicts are tracked by a higher-level reporter
+# (Redis key-level, SQL table-level).  Python-level attribute/method
+# tracking on these objects creates false races due to id() reuse on
+# short-lived per-thread instances (same issue as _IO_WRAPPER_TYPES).
+# Also suppress cooperative lock wrapper — its synchronization semantics
+# are fully captured by report_sync(); Python-level attribute writes
+# (_owner_thread_id) are redundant and create false wakeups.
+from frontrun._cooperative import CooperativeLock as _CooperativeLock
+
+_io_client_types: list[type] = [
+    # socket objects: per-connection, tracked by I/O detection layer
+    __import__("socket").socket,
+    # Cooperative lock: tracked by report_sync, not Python attributes
+    _CooperativeLock,
+]
+try:
+    import redis as _redis_module  # type: ignore[import-untyped]
+    import redis.asyncio as _aioredis_module  # type: ignore[import-untyped]
+    import redis.connection as _redis_conn_module  # type: ignore[import-untyped]
+
+    _io_client_types.extend(
+        [
+            _redis_module.Redis,
+            _redis_module.StrictRedis,
+            _aioredis_module.Redis,
+            _redis_conn_module.ConnectionPool,
+            _redis_conn_module.Connection,
+        ]
+    )
+except ImportError:
+    pass
+try:
+    import psycopg2.extensions as _psycopg2_ext  # type: ignore[import-untyped]
+
+    _io_client_types.extend(
+        [
+            _psycopg2_ext.connection,
+            _psycopg2_ext.cursor,
+        ]
+    )
+except ImportError:
+    pass
+try:
+    import sqlalchemy.engine as _sa_engine  # type: ignore[import-untyped]
+
+    _io_client_types.append(_sa_engine.Connection)
+except ImportError:
+    pass
+_IO_CLIENT_TYPES: tuple[type, ...] = tuple(_io_client_types)
+del _io_client_types
 
 # C-level methods that are read-only (don't mutate the object).
 _C_METHOD_READ_ONLY = frozenset(
@@ -1627,9 +1726,10 @@ def _process_opcode(
     elif op == "LOAD_ATTR":
         obj = shadow.pop()
         attr = instr.argval
-        # Skip I/O wrapper types — their conflicts are tracked by the I/O
-        # detection layer (keyed by file path), not by Python object identity.
-        if obj is None or not isinstance(obj, _IO_WRAPPER_TYPES):
+        # Skip I/O wrapper and client types — their conflicts are tracked by
+        # higher-level reporters (file path, Redis key, SQL table), not by
+        # Python object identity.
+        if obj is None or not isinstance(obj, (_IO_WRAPPER_TYPES + _IO_CLIENT_TYPES)):
             _report_read(engine, execution, thread_id, obj, attr, elock, sids)
         # Also report on obj.__dict__ so LOAD_ATTR conflicts with
         # STORE_SUBSCR on the same __dict__ (cross-path detection).
@@ -1675,9 +1775,9 @@ def _process_opcode(
     elif op == "STORE_ATTR":
         obj = shadow.pop()  # TOS = object
         _val = shadow.pop()  # TOS1 = value
-        # Skip I/O wrapper types — their conflicts are tracked by the I/O
-        # detection layer (keyed by file path), not by Python object identity.
-        if obj is None or not isinstance(obj, _IO_WRAPPER_TYPES):
+        # Skip I/O wrapper and client types — their conflicts are tracked by
+        # higher-level reporters, not by Python object identity.
+        if obj is None or not isinstance(obj, (_IO_WRAPPER_TYPES + _IO_CLIENT_TYPES)):
             _report_write(engine, execution, thread_id, obj, instr.argval, elock, sids)
         # Also report on obj.__dict__ so STORE_ATTR conflicts with
         # STORE_SUBSCR on the same __dict__ (cross-path detection).
@@ -1723,7 +1823,9 @@ def _process_opcode(
         _arg = instr.arg if instr.arg is not None else -1
         attr = _special_names.get(_arg, f"__special_{_arg}__")
         obj = shadow.pop()
-        _report_read(engine, execution, thread_id, obj, attr, elock, sids)
+        # Skip I/O wrapper and client types (same as LOAD_ATTR).
+        if obj is None or not isinstance(obj, (_IO_WRAPPER_TYPES + _IO_CLIENT_TYPES)):
+            _report_read(engine, execution, thread_id, obj, attr, elock, sids)
         if obj is not None:
             try:
                 val = _safe_getattr(obj, attr)
@@ -2032,10 +2134,10 @@ def _process_opcode(
             if item_type is _BUILTIN_METHOD_TYPE or item_type is _METHOD_WRAPPER_TYPE:
                 self_obj = getattr(item, "__self__", None)
                 if self_obj is not None and not isinstance(self_obj, _IMMUTABLE_TYPES):
-                    if isinstance(self_obj, _IO_WRAPPER_TYPES):
-                        # I/O wrapper methods are tracked via the I/O detection
-                        # layer; skip __cmethods__ to avoid false races from
-                        # id() reuse on short-lived file objects.
+                    if isinstance(self_obj, (_IO_WRAPPER_TYPES + _IO_CLIENT_TYPES)):
+                        # I/O wrapper and client methods are tracked via
+                        # higher-level reporters; skip __cmethods__ to avoid
+                        # false races from id() reuse on short-lived objects.
                         _call_handled = True
                         break
                     method_name = getattr(item, "__name__", None)
@@ -2593,7 +2695,7 @@ class DporBytecodeRunner:
         # only block on the same lock.
         _dpor_tls.lock_depth = 0
         self.scheduler._lock_depth_by_thread[thread_id] = 0
-        pending_io: list[tuple[int, str]] = []
+        pending_io: list[tuple[int, str, bool]] = []
         _dpor_tls.pending_io = pending_io
         self.scheduler._pending_io_by_thread[thread_id] = pending_io
 
@@ -2611,8 +2713,8 @@ class DporBytecodeRunner:
 
             def _io_reporter(resource_id: str, kind: str) -> None:
                 object_key = _make_object_key(hash(resource_id), resource_id)
-                pending: list[tuple[int, str]] = _dpor_tls.pending_io
-                pending.append((object_key, kind))
+                pending: list[tuple[int, str, bool]] = _dpor_tls.pending_io
+                pending.append((object_key, kind, True))  # synced=True: Python-level I/O respects locks
                 # Record I/O event in the trace for human-readable output
                 if _recorder is not None:
                     _frame = sys._getframe(1)
@@ -2652,9 +2754,12 @@ class DporBytecodeRunner:
             _execution = getattr(_dpor_tls, "execution", None)
             if _tid is not None and _engine is not None and _execution is not None:
                 _elock = self.scheduler._engine_lock
-                for _obj_key, _io_kind in _pending:
+                for _obj_key, _io_kind, _synced in _pending:
                     with _elock:
-                        _engine.report_io_access(_execution, _tid, _obj_key, _io_kind)
+                        if _synced:
+                            _engine.report_synced_io_access(_execution, _tid, _obj_key, _io_kind)
+                        else:
+                            _engine.report_io_access(_execution, _tid, _obj_key, _io_kind)
                 _pending.clear()
 
         if self.detect_io:
@@ -3089,6 +3194,10 @@ def explore_dpor(
             # Clear bridge state for this new execution.
             if preload_bridge is not None:
                 preload_bridge.clear()
+            # Clear persistent SQL suppression flags from previous execution.
+            from frontrun._sql_cursor import clear_permanent_suppressions
+
+            clear_permanent_suppressions()
             # Set up switch point collection for the report
             _collecting_report = report is not None and len(report.executions) < _MAX_RECORDED_EXECUTIONS
             switch_points: list[Any] = [] if _collecting_report else []

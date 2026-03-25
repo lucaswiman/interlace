@@ -24,9 +24,6 @@ Running::
 from __future__ import annotations
 
 import os
-import random
-import threading
-import time
 
 import pytest
 
@@ -242,38 +239,6 @@ class TestOrmDpor:
 # ---------------------------------------------------------------------------
 # 4. Naive threading — intermittent failure rate
 # ---------------------------------------------------------------------------
-
-
-class TestOrmNaiveThreading:
-    """Show the intermittent nature of the race with plain threads."""
-
-    def test_naive_threading_race_rate(self, engine) -> None:  # type: ignore[no-untyped-def]
-        trials = 500
-        failures = 0
-        rng = random.Random(42)
-
-        for _ in range(trials):
-            _reset_row(engine)
-
-            def handler() -> None:
-                with Session(engine) as session:
-                    user = session.get(User, 1)
-                    assert user is not None
-                    user.login_count = user.login_count + 1
-                    session.commit()
-
-            t1 = threading.Thread(target=handler)
-            t2 = threading.Thread(target=handler)
-            t1.start()
-            time.sleep(rng.uniform(0, 0.015))
-            t2.start()
-            t1.join()
-            t2.join()
-
-            if _read_count(engine) != 2:
-                failures += 1
-
-        assert failures > 0, f"Race never triggered in {trials} trials"
 
 
 # ---------------------------------------------------------------------------

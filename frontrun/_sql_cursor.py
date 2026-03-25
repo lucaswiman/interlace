@@ -180,7 +180,30 @@ def _suppress_endpoint_io() -> Generator[None, None, None]:
 def is_tid_suppressed(tid: int) -> bool:
     """Check if a thread ID is currently suppressed (for LD_PRELOAD bridge)."""
     with _suppress_lock:
-        return tid in _suppress_tids
+        return tid in _suppress_tids or tid in _permanently_suppressed_tids
+
+
+# Persistent suppression: once a thread executes a SQL statement through
+# the traced cursor, ALL its LD_PRELOAD I/O should be suppressed for the
+# rest of the DPOR execution, since the SQL layer reports at a higher
+# granularity (table/row level).  The temporary _suppress_endpoint_io()
+# context manager has a timing problem: LD_PRELOAD events travel through
+# an async pipe, so by the time they're read the context has exited.
+_permanently_suppressed_tids: set[int] = set()
+
+
+def suppress_tid_permanently(tid: int | None = None) -> None:
+    """Mark a thread as permanently suppressed for LD_PRELOAD events."""
+    if tid is None:
+        tid = threading.get_native_id()
+    with _suppress_lock:
+        _permanently_suppressed_tids.add(tid)
+
+
+def clear_permanent_suppressions() -> None:
+    """Clear all permanent suppressions (between DPOR executions)."""
+    with _suppress_lock:
+        _permanently_suppressed_tids.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -759,6 +782,8 @@ def _intercept_execute(
     called.  ROLLBACK clears the buffer.  SAVEPOINTs and ROLLBACK TO SAVEPOINT
     are supported via buffer truncation.
     """
+    from frontrun._cooperative import suppress_sync_reporting, unsuppress_sync_reporting
+
     insert_match = _RE_INSERT_TABLE.match(operation) if isinstance(operation, str) else None
     update_match = _RE_UPDATE_TABLE.match(operation) if isinstance(operation, str) else None
 
@@ -774,6 +799,13 @@ def _intercept_execute(
     # its own transaction, locks released immediately) or when we've
     # already seen an explicit BEGIN.
     _detect_autobegin(self)
+
+    # Permanently suppress LD_PRELOAD events for this thread.  SQL-level
+    # reporting (table/row granularity) supersedes socket-level I/O.
+    # This must be persistent (not scoped to execute) because LD_PRELOAD
+    # events travel through an async pipe and may arrive after the
+    # _suppress_endpoint_io() context has exited.
+    suppress_tid_permanently()
 
     reported = _report_sql_access(
         operation,
@@ -797,6 +829,9 @@ def _intercept_execute(
         _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
 
     _set_active_sql_io_context(operation, parameters, paramstyle)
+    # Suppress cooperative lock sync events during the actual DB call.
+    # Internal psycopg2/driver locks are implementation details.
+    suppress_sync_reporting()
     try:
         if reported:
             with _suppress_endpoint_io():
@@ -811,6 +846,8 @@ def _intercept_execute(
         # exit, blocking other DPOR threads indefinitely.
         _release_dpor_row_locks()
         raise
+    finally:
+        unsuppress_sync_reporting()
 
     # Defect #6 fix: release row locks for 0-row UPDATEs.
     # In PostgreSQL, an UPDATE that matches 0 rows acquires no row locks
@@ -1033,7 +1070,19 @@ def patch_sql() -> None:
             if user_factory not in _cache:
                 _cache[user_factory] = _make_traced_cursor_class(user_factory, paramstyle=paramstyle)
             kwargs["cursor_factory"] = _cache[user_factory]
-            conn = orig(*args, **kwargs)
+            from frontrun._cooperative import suppress_sync_reporting as _ssr
+            from frontrun._cooperative import unsuppress_sync_reporting as _usr
+
+            # Suppress LD_PRELOAD events BEFORE the actual connect call.
+            # The background pipe reader may process events from connect()
+            # before we return; suppressing first ensures those events are
+            # dropped in the listener() callback.
+            suppress_tid_permanently()
+            _ssr()
+            try:
+                conn = orig(*args, **kwargs)
+            finally:
+                _usr()
             identity = _infer_db_identity_from_connection(conn)
             if identity is None and args and isinstance(args[0], str):
                 identity = f"{driver}-dsn:{args[0]}"
@@ -1050,14 +1099,18 @@ def patch_sql() -> None:
             # Use the *original* cursor class to avoid triggering DPOR
             # scheduling points during connection setup.
             if _lock_timeout_ms is not None and driver in ("psycopg2", "psycopg"):
-                _was_autocommit = conn.autocommit
-                conn.autocommit = True
-                _lt_cur = conn.cursor(cursor_factory=default_cursor_cls)
+                _ssr()
                 try:
-                    _lt_cur.execute(f"SET lock_timeout = '{int(_lock_timeout_ms)}ms'")
+                    _was_autocommit = conn.autocommit
+                    conn.autocommit = True
+                    _lt_cur = conn.cursor(cursor_factory=default_cursor_cls)
+                    try:
+                        _lt_cur.execute(f"SET lock_timeout = '{int(_lock_timeout_ms)}ms'")
+                    finally:
+                        _lt_cur.close()
+                    conn.autocommit = _was_autocommit
                 finally:
-                    _lt_cur.close()
-                conn.autocommit = _was_autocommit
+                    _usr()
             return conn
 
         return patched_connect

@@ -96,6 +96,22 @@ impl PyDporEngine {
         Ok(())
     }
 
+    /// Report a Python-level I/O access (Redis, SQL).  Uses `dpor_vv`
+    /// so that lock-based happens-before edges are respected.  These
+    /// operations go through Python code, so Python locks tracked via
+    /// `report_sync` should order them correctly.
+    fn report_synced_io_access(
+        &mut self,
+        execution: &mut PyExecution,
+        thread_id: usize,
+        object_id: u64,
+        kind: &str,
+    ) -> PyResult<()> {
+        let access_kind = Self::parse_access_kind(kind)?;
+        self.inner.process_synced_io_access(&mut execution.inner, thread_id, object_id, access_kind);
+        Ok(())
+    }
+
     /// Report an I/O access (file/socket).  Uses a separate vector clock
     /// that ignores lock-based happens-before, so I/O from different
     /// threads is always treated as potentially concurrent.
