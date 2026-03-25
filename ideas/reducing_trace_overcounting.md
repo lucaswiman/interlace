@@ -249,26 +249,11 @@ Fixed trace cache merge to correctly apply `AccessKind::merge()`, handling Read 
 
 ## Proposed Fixes (Not Yet Implemented)
 
-### Fix 2: Suppress Redundant Python-Level Lock Metadata Reports
+### Fix 2: Suppress Redundant Python-Level Lock Metadata Reports (Deprioritized)
 
-**Idea**: For lock types that already emit `report_sync(lock_acquire/lock_release)`,
-avoid also treating Python-level metadata lookup as independent shared-memory events.
-In particular:
-
-- `LOAD_ATTR lock` on the owning object
-- `LOAD_SPECIAL __enter__`
-- `LOAD_SPECIAL __exit__`
-
-are mostly artifact of how `with lock:` is compiled, not meaningful semantic events
-for the lock-count tests.
-
-**Why this is sounder than collapsing release races**: It removes redundant
-front-end noise while keeping the actual synthetic synchronization events intact.
-We still preserve the acquire/release backtrack points that are currently needed for
-multi-lock race detection.
-
-**Likely impact**: Reduces lock-test overcounting and shrinks the number of branch
-positions around `with lock:` without weakening the lock model itself.
+Superseded by Fix 8; lock-only tests are now exact, and the remaining file-I/O lock
+overcounting is likely dominated by the dual virtual-object model rather than extra
+scheduling points from lock metadata.
 
 ### Fix 3: Position-Sensitive Future Access Cache
 
@@ -400,8 +385,7 @@ sleep-set propagation), and 6 (suppress frontend noise) were all unnecessary.
 
 1. **Fix 3**: Position-sensitive future access cache. Best shot at reducing the
    remaining shared-vars overcounting without changing the event model.
-2. **Fix 2**: Suppress redundant Python-level lock metadata reports. May still help
-   with file-I/O lock overcounting (`test_n_threads_locked_file_writes`).
+2. ~~**Fix 2**~~: Deprioritized — superseded by Fix 8 for lock tests.
 3. **Fix 4 + Fix 6**: Add provenance tags, then revisit per-branch merge
    relaxation with enough information to do it safely.
 4. **Fix 5**: Extend merge function for WeakWrite + WeakRead. Small incremental.
