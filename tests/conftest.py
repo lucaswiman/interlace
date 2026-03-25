@@ -129,23 +129,22 @@ def _check_thread_cleanup(request):
             status = "daemon" if t.daemon else "NON-DAEMON"
             print(f"  - {t.name} (ident={t.ident}, {status}, alive={t.is_alive()})")
 
-    # Fail on ANY lingering threads unless explicitly marked as intentional
-    if alive_threads and not request.node.get_closest_marker("intentionally_leaves_dangling_threads"):
-        thread_info = ", ".join(
-            f"{t.name} ({'daemon' if t.daemon else 'NON-DAEMON'}, ident={t.ident})" for t in alive_threads
-        )
-        pytest.fail(
-            f"Test {request.node.nodeid} left {len(alive_threads)} thread(s) running: {thread_info}. "
-            f"All threads must be joined before test completion. "
-            f"If this is intentional (e.g., testing deadlocks that cannot be cleaned up), "
-            f"mark the test with @pytest.mark.intentionally_leaves_dangling_threads"
-        )
-    # Fail on non-daemon threads (these would block pytest exit)
-    if non_daemon_threads and not request.node.get_closest_marker("intentionally_leaves_dangling_threads"):
+    # Non-daemon threads block pytest exit — always fail on these
+    if non_daemon_threads:
         thread_info = ", ".join(f"{t.name} (ident={t.ident})" for t in non_daemon_threads)
         pytest.fail(
             f"Test {request.node.nodeid} left {len(non_daemon_threads)} non-daemon thread(s) running: {thread_info}. "
             f"All threads must be joined before test completion."
+        )
+
+    # Daemon threads don't block exit but still indicate cleanup issues
+    if daemon_threads and not request.node.get_closest_marker("intentionally_leaves_dangling_threads"):
+        thread_info = ", ".join(f"{t.name} (ident={t.ident})" for t in daemon_threads)
+        pytest.fail(
+            f"Test {request.node.nodeid} left {len(daemon_threads)} daemon thread(s) running: {thread_info}. "
+            f"All threads must be joined before test completion. "
+            f"If this is intentional (e.g., testing deadlocks that cannot be cleaned up), "
+            f"mark the test with @pytest.mark.intentionally_leaves_dangling_threads"
         )
 
 

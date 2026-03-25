@@ -846,6 +846,23 @@ def _semaphore_invariant(state: _SemaphoreCounterState) -> bool:
     return state.counter == 2
 
 
+class _BoundedSemaphoreCounterState:
+    def __init__(self) -> None:
+        self.counter = 0
+        self.sem = threading.BoundedSemaphore(1)
+
+
+def _bounded_semaphore_increment(state: _BoundedSemaphoreCounterState) -> None:
+    state.sem.acquire()
+    tmp = state.counter
+    state.counter = tmp + 1
+    state.sem.release()
+
+
+def _bounded_semaphore_invariant(state: _BoundedSemaphoreCounterState) -> bool:
+    return state.counter == 2
+
+
 class _LockCounterState:
     def __init__(self) -> None:
         self.counter = 0
@@ -894,6 +911,19 @@ class TestSyncPrimitiveCorrectness:
         assert result.property_holds, (
             "DPOR incorrectly reports a race on Semaphore-protected code! "
             "CooperativeSemaphore sync reporting may be broken."
+        )
+
+    def test_dpor_correctly_handles_bounded_semaphore(self) -> None:
+        result = explore_dpor(
+            setup=_BoundedSemaphoreCounterState,
+            threads=[_bounded_semaphore_increment, _bounded_semaphore_increment],
+            invariant=_bounded_semaphore_invariant,
+            detect_io=False,
+            deadlock_timeout=5.0,
+        )
+        assert result.property_holds, (
+            "DPOR incorrectly reports a race on BoundedSemaphore-protected code! "
+            "CooperativeBoundedSemaphore sync reporting may be broken."
         )
 
     def test_dpor_correctly_handles_lock(self) -> None:

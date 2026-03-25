@@ -584,6 +584,7 @@ class CooperativeBoundedSemaphore(CooperativeSemaphore):
             raise ValueError("Semaphore released too many times")
         self._value += n
         self._lock.release()
+        self._report("lock_release")
 
     def __repr__(self) -> str:
         return f"<CooperativeBoundedSemaphore value={self._value}/{self._initial_value}>"
