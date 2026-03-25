@@ -622,6 +622,7 @@ def explore_interleavings(
     total_timeout: float | None = None,
     warn_nondeterministic_sql: bool = True,
     trace_packages: list[str] | None = None,
+    on_progress: Callable[[int, int | None], None] | None = None,
 ) -> InterleavingResult:
     """Search for interleavings that violate an invariant.
 
@@ -709,6 +710,8 @@ def explore_interleavings(
                 trace_recorder=recorder,
             )
             result.num_explored += 1
+            if on_progress is not None:
+                on_progress(result.num_explored, None)
             seen_schedule_hashes.add(hash(tuple(schedule)))
 
             if warn_nondeterministic_sql:

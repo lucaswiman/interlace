@@ -359,6 +359,7 @@ async def explore_interleavings(
     deadlock_timeout: float = 5.0,
     detect_sql: bool = False,
     trace_packages: list[str] | None = None,
+    on_progress: Callable[[int, int | None], None] | None = None,
 ) -> InterleavingResult:
     """Search for async interleavings that violate an invariant.
 
@@ -416,6 +417,8 @@ async def explore_interleavings(
                 schedule, setup, tasks, timeout=timeout_per_run, deadlock_timeout=deadlock_timeout
             )
             result.num_explored += 1
+            if on_progress is not None:
+                on_progress(result.num_explored, None)
             seen_schedule_hashes.add(hash(tuple(schedule)))
 
             if not invariant(state):

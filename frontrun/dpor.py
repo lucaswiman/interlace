@@ -2868,6 +2868,7 @@ def explore_dpor(
     lock_timeout: int | None = None,
     trace_packages: list[str] | None = None,
     track_dunder_dict_accesses: bool = False,
+    on_progress: Callable[[int, int | None], None] | None = None,
 ) -> InterleavingResult:
     """Systematically explore interleavings using DPOR.
 
@@ -3094,6 +3095,8 @@ def explore_dpor(
                 runner._unpatch_locks()
 
             result.num_explored += 1
+            if on_progress is not None:
+                on_progress(result.num_explored, None)
 
             # Check for deadlock before running the invariant — a deadlock
             # means the program never completed, so the invariant can never be

@@ -1087,6 +1087,7 @@ async def explore_async_dpor(
     total_timeout: float | None = None,
     warn_nondeterministic_sql: bool = True,
     lock_timeout: int | None = None,
+    on_progress: Callable[[int, int | None], None] | None = None,
 ) -> InterleavingResult:
     """Systematically explore async interleavings using DPOR.
 
@@ -1229,6 +1230,8 @@ async def explore_async_dpor(
                 scheduler.finish_task(i)
 
             result.num_explored += 1
+            if on_progress is not None:
+                on_progress(result.num_explored, None)
 
             # Check for deadlock: explicit DeadlockError from wait-for
             # graph cycle detection, or timeout (tasks blocked on locks
