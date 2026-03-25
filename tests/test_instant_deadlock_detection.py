@@ -6,8 +6,6 @@ DporScheduler, _ReplayDporScheduler) have a _waiting_count attribute for
 all-threads-waiting detection, mirroring the async approach.
 """
 
-import time
-
 from frontrun.bytecode import OpcodeScheduler
 
 
@@ -24,7 +22,7 @@ def test_opcode_scheduler_has_waiting_count():
 
 def test_dpor_scheduler_has_waiting_count():
     """DporScheduler must have _waiting_count attribute initialized to 0."""
-    from frontrun.dpor import DporScheduler, _ReplayDporScheduler
+    from frontrun.dpor import _ReplayDporScheduler
 
     # _ReplayDporScheduler is a subclass of DporScheduler with simpler init
     scheduler = _ReplayDporScheduler(
@@ -50,7 +48,6 @@ def test_opcode_scheduler_instant_schedule_deadlock():
     both threads are stuck in wait_for_turn simultaneously, instant detection
     should fire.
     """
-    from frontrun.bytecode import run_with_schedule
 
     # A schedule that wants thread 1 but thread 1 immediately blocks on
     # thread 0 finishing something. We force both threads to enter
@@ -77,7 +74,6 @@ def test_opcode_scheduler_instant_schedule_deadlock():
 
 def test_replay_dpor_scheduler_instant_schedule_deadlock():
     """_ReplayDporScheduler detects schedule-based deadlock instantly via _waiting_count."""
-    from frontrun.bytecode import BytecodeShuffler
     from frontrun.dpor import _ReplayDporScheduler
 
     # Create a replay scheduler with a schedule that will cause both threads

@@ -330,6 +330,7 @@ class DporScheduler:
         self._finished = False
         self._error: Exception | None = None
         self._threads_done: set[int] = set()
+        self._waiting_count: int = 0
         self._current_thread: int | None = None
 
         # Shadow stacks are per-thread (each thread only accesses its own),
@@ -586,20 +587,26 @@ class DporScheduler:
                         return True
 
                     # Wait for our turn (fallback timeout for C-blocked threads)
-                    if not self._condition.wait(timeout=self.deadlock_timeout):
-                        if self._current_thread in self._threads_done:
-                            # Current thread is done, try scheduling again
-                            next_thread = self._schedule_next()
-                            self._current_thread = next_thread
-                            if next_thread is None:
-                                self._finished = True
+                    alive = self.num_threads - len(self._threads_done)
+                    self._waiting_count += 1
+                    try:
+                        all_waiting = self._waiting_count >= alive and alive > 0
+                        timeout = 0.1 if all_waiting else self.deadlock_timeout
+                        if not self._condition.wait(timeout=timeout):
+                            if self._current_thread in self._threads_done:
+                                next_thread = self._schedule_next()
+                                self._current_thread = next_thread
+                                if next_thread is None:
+                                    self._finished = True
+                                self._condition.notify_all()
+                                continue
+                            self._error = TimeoutError(
+                                f"DPOR deadlock: waiting for thread {thread_id}, current is {self._current_thread}"
+                            )
                             self._condition.notify_all()
-                            continue
-                        self._error = TimeoutError(
-                            f"DPOR deadlock: waiting for thread {thread_id}, current is {self._current_thread}"
-                        )
-                        self._condition.notify_all()
-                        return False
+                            return False
+                    finally:
+                        self._waiting_count -= 1
             finally:
                 _scheduler_tls._in_dpor_machinery = False
 
@@ -956,18 +963,25 @@ class _ReplayDporScheduler(DporScheduler):
                     self._condition.notify_all()
                     return True
 
-                if not self._condition.wait(timeout=self.deadlock_timeout):
-                    if self._current_thread in self._threads_done:
-                        self._current_thread = self._schedule_next()
-                        if self._current_thread is None and len(self._threads_done) >= self.num_threads:
-                            self._finished = True
+                alive = self.num_threads - len(self._threads_done)
+                self._waiting_count += 1
+                try:
+                    all_waiting = self._waiting_count >= alive and alive > 0
+                    timeout = 0.1 if all_waiting else self.deadlock_timeout
+                    if not self._condition.wait(timeout=timeout):
+                        if self._current_thread in self._threads_done:
+                            self._current_thread = self._schedule_next()
+                            if self._current_thread is None and len(self._threads_done) >= self.num_threads:
+                                self._finished = True
+                            self._condition.notify_all()
+                            continue
+                        self._error = TimeoutError(
+                            f"DPOR replay deadlock: waiting for thread {thread_id}, current is {self._current_thread}"
+                        )
                         self._condition.notify_all()
-                        continue
-                    self._error = TimeoutError(
-                        f"DPOR replay deadlock: waiting for thread {thread_id}, current is {self._current_thread}"
-                    )
-                    self._condition.notify_all()
-                    return False
+                        return False
+                finally:
+                    self._waiting_count -= 1
 
 
 # ---------------------------------------------------------------------------

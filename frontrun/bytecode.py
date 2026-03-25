@@ -114,6 +114,7 @@ class OpcodeScheduler:
         self._finished = False
         self._error: Exception | None = None
         self._threads_done: set[int] = set()
+        self._waiting_count: int = 0
         self.trace_recorder = trace_recorder
 
     def _extend_schedule(self) -> bool:
@@ -155,15 +156,24 @@ class OpcodeScheduler:
                     self._condition.notify_all()
                     return True
 
-                if not self._condition.wait(timeout=self.deadlock_timeout):
-                    needed = self.schedule[self._index]
-                    if needed in self._threads_done:
-                        continue
-                    self._error = TimeoutError(
-                        f"Deadlock: schedule wants thread {needed} at index {self._index}/{len(self.schedule)}"
-                    )
-                    self._condition.notify_all()
-                    return False
+                alive = self.num_threads - len(self._threads_done)
+                self._waiting_count += 1
+                try:
+                    # Use a short timeout when all alive threads are
+                    # in the wait section — likely a deadlock.
+                    all_waiting = self._waiting_count >= alive and alive > 0
+                    timeout = 0.1 if all_waiting else self.deadlock_timeout
+                    if not self._condition.wait(timeout=timeout):
+                        needed = self.schedule[self._index]
+                        if needed in self._threads_done:
+                            continue
+                        self._error = TimeoutError(
+                            f"Deadlock: schedule wants thread {needed} at index {self._index}/{len(self.schedule)}"
+                        )
+                        self._condition.notify_all()
+                        return False
+                finally:
+                    self._waiting_count -= 1
 
     def mark_done(self, thread_id: int):
         """Mark a thread as finished."""
