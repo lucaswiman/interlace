@@ -872,13 +872,13 @@ def _intercept_execute(
     # already seen an explicit BEGIN.
     _detect_autobegin(self)
 
-    # Permanently suppress LD_PRELOAD events for this connection's socket
-    # endpoint.  SQL-level reporting (table/row granularity) supersedes
-    # socket-level I/O.  We suppress by endpoint (not thread) so that
-    # non-SQL file I/O from the same thread remains visible to DPOR.
-    conn = getattr(self, "connection", None)
-    if conn is not None:
-        suppress_sql_endpoint(conn)
+    # Permanently suppress LD_PRELOAD *socket* events for this thread.
+    # SQL-level reporting (table/row granularity) supersedes socket-level
+    # I/O.  The listener only applies tid suppression to socket events,
+    # so non-SQL file I/O from this thread passes through.
+    # The patched connect() also registers the connection's socket endpoint
+    # for endpoint-based suppression (which handles remote connections).
+    suppress_tid_permanently()
 
     reported = _report_sql_access(
         operation,
