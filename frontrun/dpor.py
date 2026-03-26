@@ -1000,6 +1000,13 @@ class _ReplayDporScheduler(DporScheduler):
         return self._wait_for_turn(thread_id)
 
     def report_and_wait(self, frame: Any, thread_id: int) -> bool:
+        # Process the opcode to keep the shadow stack in sync with
+        # exploration.  Without this, _call_might_report_access sees an
+        # empty shadow stack during replay and skips CALL scheduling
+        # points that existed during exploration, desynchronising the
+        # schedule and preventing reproduction.
+        if frame is not None:
+            _process_opcode(frame, self, thread_id)
         return self._wait_for_turn(thread_id)
 
     def _wait_for_turn(self, thread_id: int) -> bool:

@@ -161,8 +161,14 @@ def _intercept_execute_command(
 
     # In replay mode (defect #9 fix), force a scheduling point even
     # without IO reporting so the replay scheduler can enforce the
-    # interleaving at Redis command boundaries.
-    needs_scheduling_point = reported or _redis_replay_mode
+    # interleaving at Redis command boundaries.  Only do this for
+    # data commands (those that have keys), not connection-setup
+    # commands (AUTH, SELECT, CLIENT SETNAME, etc.) which didn't
+    # create scheduling points during exploration.
+    needs_scheduling_point = reported
+    if not needs_scheduling_point and _redis_replay_mode:
+        access = parse_redis_access(cmd_name, cmd_args)
+        needs_scheduling_point = bool(access.read_keys or access.write_keys)
 
     # Force a DPOR scheduling point so the engine can interleave between
     # Redis operations.
