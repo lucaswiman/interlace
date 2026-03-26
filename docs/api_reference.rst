@@ -37,6 +37,16 @@ Trace Markers
    :show-inheritance:
 
 
+Marker Schedule Exploration
+-----------------------------
+
+.. autofunction:: frontrun.trace_markers.marker_schedule_strategy
+
+.. autofunction:: frontrun.trace_markers.all_marker_schedules
+
+.. autofunction:: frontrun.trace_markers.explore_marker_interleavings
+
+
 Async Trace Markers
 --------------------
 
