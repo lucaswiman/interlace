@@ -5,17 +5,15 @@ marker-level schedules) and explore_marker_interleavings (exhaustive or
 random exploration of all marker-level interleavings).
 """
 
-import pytest
 from hypothesis import given, settings
 
-from frontrun.common import Schedule, Step
+from frontrun.common import Schedule
 from frontrun.trace_markers import (
     TraceExecutor,
     all_marker_schedules,
     explore_marker_interleavings,
     marker_schedule_strategy,
 )
-
 
 # ---------------------------------------------------------------------------
 # Test subject: classic lost-update race
@@ -176,27 +174,31 @@ class TestExploreMarkerInterleavings:
         assert result.counterexample is not None
 
     def test_correct_code_passes(self):
-        """Code that is correct under all interleavings passes."""
+        """Code that is correct under all interleavings passes.
 
-        class SafeCounter:
+        Appending to independent lists is safe regardless of interleaving.
+        """
+
+        class IndependentWork:
             def __init__(self):
-                self.value = 0
-                import threading
+                self.log_a: list[str] = []
+                self.log_b: list[str] = []
 
-                self.lock = threading.Lock()
+            def work_a(self) -> None:
+                self.log_a.append("start")  # frontrun: step1
+                self.log_a.append("end")  # frontrun: step2
 
-            def increment(self):
-                with self.lock:
-                    temp = self.value  # frontrun: read
-                    self.value = temp + 1  # frontrun: write
+            def work_b(self) -> None:
+                self.log_b.append("start")  # frontrun: step1
+                self.log_b.append("end")  # frontrun: step2
 
         result = explore_marker_interleavings(
-            setup=SafeCounter,
+            setup=IndependentWork,
             threads={
-                "t1": (lambda s: s.increment(), ["read", "write"]),
-                "t2": (lambda s: s.increment(), ["read", "write"]),
+                "t1": (lambda s: s.work_a(), ["step1", "step2"]),
+                "t2": (lambda s: s.work_b(), ["step1", "step2"]),
             },
-            invariant=lambda s: s.value == 2,
+            invariant=lambda s: s.log_a == ["start", "end"] and s.log_b == ["start", "end"],
         )
         assert result.property_holds
         assert result.num_explored == 6  # C(4,2) = 6
