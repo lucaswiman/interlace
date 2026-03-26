@@ -53,29 +53,11 @@ only remaining work is listed here.
 
 ### P3 -- Deferred / exploratory
 
-15. **Lock precision (Algorithms 3-6)** (dpor-improvements: Phase 5) -- Current `io_vv` model
-    works; revisit only if lock-aware file I/O becomes important.
-16. **Spec-guided schedule generation from TLC** (formal-methods: 2.3) -- Replace random
+15. **Spec-guided schedule generation from TLC** (formal-methods: 2.3) -- Replace random
     exploration with TLC-enumerated behaviors.
-17. **Refinement checking** (formal-methods: 3.1) -- Mathematical proof that code implements
+16. **Refinement checking** (formal-methods: 3.1) -- Mathematical proof that code implements
     spec. Requires solid foundation from P1 formal-methods items.
-18. **Record/replay of external state** (integrations-and-detection) -- Deterministic I/O replay.
+17. **Record/replay of external state** (integrations-and-detection) -- Deterministic I/O replay.
     High complexity; most tests use isolated DBs anyway.
-19. **Wire-protocol parsing at LD_PRELOAD level** (integrations-and-detection) -- For non-Python
+18. **Wire-protocol parsing at LD_PRELOAD level** (integrations-and-detection) -- For non-Python
     drivers. Niche use case.
-
-## What was removed
-
-The following ideas were fully implemented and removed from the roadmap:
-
-- **SQL conflict detection** (Phases 1-4) -- `_sql_cursor.py`, `_sql_anomaly.py`, row-level predicates, endpoint suppression
-- **Optimal DPOR core** -- Wakeup trees, sleep set propagation, deferred race detection, notdep sequences, trace caching
-- **Trace overcounting fixes** 6, 8, 9, 10 -- Lock-aware backtracking, step-count-indexed cache, I/O wrapper suppression
-- **Resource detection layers** 1, 1.5, 2 -- Socket/file patching, sys.setprofile C_CALL, SQL cursor monkey-patching
-- **Property-based marker schedules** -- `marker_schedule_strategy()`, `all_marker_schedules()`, `explore_marker_interleavings()`
-- **Redis key-level conflict detection** -- Sync and async
-- **Cooperative threading primitives** -- Lock, RLock, Event, Semaphore, Queue wrappers
-- **Deadlock detection** -- WaitForGraph with cycle detection
-- **INSERT tracking with autoincrement** -- `sql:table:seq` resources
-- **LD_PRELOAD I/O interception** -- Linux + macOS, pipe-based event streaming
-- **Async variants** of all three exploration strategies
