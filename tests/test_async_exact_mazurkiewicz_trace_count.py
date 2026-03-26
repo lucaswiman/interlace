@@ -135,6 +135,16 @@ class TestAsyncTwoTasksSharedState:
 class TestAsyncNTasksWithLock:
     """N async tasks competing for a single asyncio.Lock, then updating
     shared state.  The lock serializes all critical sections → N! traces.
+
+    For N ≤ 2, the async DPOR achieves the exact N! bound.  For N = 3,
+    the DPOR sleep set's interaction with the async scheduler's extra
+    scheduling points (initial AutoPause, mark-done) causes minor
+    under-exploration (5 instead of 6).  The sleep set's position-sensitive
+    trace cache attributes accesses from the previous execution to the
+    wrong step in the new execution because the async model has more
+    scheduling positions than the pure DPOR path expects.  The Rust engine
+    itself produces exact counts when called with the ideal schedule
+    pattern; the discrepancy is in the Python async scheduling layer.
     """
 
     @pytest.mark.parametrize("n", [1, 2, 3])
