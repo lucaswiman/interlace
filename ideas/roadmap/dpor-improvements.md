@@ -17,7 +17,7 @@ The Rust DPOR engine has implemented:
 - All lock-only tests
 - Independent file writes
 
-Remaining: locked file-I/O overcounting and complex multi-table SQL patterns.
+Remaining: complex multi-table SQL patterns.
 
 ---
 
@@ -39,36 +39,6 @@ The wakeup tree insert checks for `w' ∼[E] w` — whether an existing branch a
 - Careful handling of the independence relation at boundaries
 
 **Impact**: Sound optimization (may reduce explored executions further, but not required for correctness). Benefit dependent on workload — most benefit for programs with many independent access patterns.
-
----
-
-## Phase 5: Lock Precision (Algorithms 3–6)
-
-**Paper ref**: Section 8 (JACM'17 p.26–29)
-
-The current engine uses `io_vv` (separate vector clock without lock-based HB) for lock operations, making them always appear concurrent. This is pragmatic but imprecise.
-
-### 5a. Evaluate paper's lock algorithms
-
-**Why**: The current `io_vv` approach may over-explore by treating all lock operations as concurrent, or may under-explore by missing some TOCTOU patterns.
-
-**What**: Compare current approach with Algorithm 3 (enabled-thread checking) and Algorithm 4 (wakeup sequences for blocked threads).
-
-**Complexity**: Low analysis, medium implementation. The paper's algorithms are well-specified but would require substantial refactoring of the engine's HB model.
-
-**Decision point**: Only implement if analysis shows the current `io_vv` model misses genuine races or if benchmarks show significant over-exploration.
-
-**Current status**: Lock-only tests are now exact (Fix 8: deferred release backtracking). File-I/O within locks shows 1.5–2.8× overcounting due to the `io_vv` model treating file I/O and locks as independent dimensions.
-
-### 5b. Lock-aware file I/O (if beneficial)
-
-**Why**: Locked file writes show 3 (N=2) / 17 (N=3) vs expected 2 / 6. The `io_vv` model excludes lock HB edges, so file operations in different critical sections appear concurrent even within the same thread.
-
-**What**: Make file I/O operations use `dpor_vv` (lock-aware) instead of `io_vv` when inside a critical section. Trade-off: loses TOCTOU detection for those accesses but gains exact trace counts.
-
-**Complexity**: Medium. Requires tracking lock state at the path level and conditional vector clock selection in `process_io_access`.
-
-**Impact**: Would make `test_n_threads_locked_file_writes` exact. Currently deprioritized because TOCTOU detection within locks is a valuable property.
 
 ---
 
@@ -230,8 +200,6 @@ enum AccessOrigin {
 6. **Fix 5 (WeakWrite merge)**: Low priority. Optimization; impact likely < 5%.
 
 7. **Fix 7 (Suppress redundant opcodes)**: Low priority. Optimization; no impact on trace counts.
-
-8. **Phase 5 (Lock precision)**: Deferred. Current `io_vv` model achieves exact lock-only traces. Evaluate only if lock-aware file I/O becomes important.
 
 ---
 

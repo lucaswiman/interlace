@@ -53,15 +53,13 @@ only remaining work is listed here.
 
 ### P3 -- Deferred / exploratory
 
-15. **Lock precision (Algorithms 3-6)** (dpor-improvements: Phase 5) -- Current `io_vv` model
-    works; revisit only if lock-aware file I/O becomes important.
-16. **Spec-guided schedule generation from TLC** (formal-methods: 2.3) -- Replace random
+15. **Spec-guided schedule generation from TLC** (formal-methods: 2.3) -- Replace random
     exploration with TLC-enumerated behaviors.
-17. **Refinement checking** (formal-methods: 3.1) -- Mathematical proof that code implements
+16. **Refinement checking** (formal-methods: 3.1) -- Mathematical proof that code implements
     spec. Requires solid foundation from P1 formal-methods items.
-18. **Record/replay of external state** (integrations-and-detection) -- Deterministic I/O replay.
+17. **Record/replay of external state** (integrations-and-detection) -- Deterministic I/O replay.
     High complexity; most tests use isolated DBs anyway.
-19. **Wire-protocol parsing at LD_PRELOAD level** (integrations-and-detection) -- For non-Python
+18. **Wire-protocol parsing at LD_PRELOAD level** (integrations-and-detection) -- For non-Python
     drivers. Niche use case.
 
 ## What was removed
@@ -79,3 +77,4 @@ The following ideas were fully implemented and removed from the roadmap:
 - **INSERT tracking with autoincrement** -- `sql:table:seq` resources
 - **LD_PRELOAD I/O interception** -- Linux + macOS, pipe-based event streaming
 - **Async variants** of all three exploration strategies
+- **Lock-aware I/O (Phase 5)** -- Synced I/O uses `dpor_vv` when inside a lock; locked file writes now produce exact Mazurkiewicz trace counts
