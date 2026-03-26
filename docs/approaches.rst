@@ -242,6 +242,119 @@ The synchronization contract:
            await self.set_count(current + 1)
 
 
+Marker Schedule Exploration
+-----------------------------
+
+Marker schedule exploration bridges the gap between manual trace markers
+(which require knowing the bug-triggering interleaving in advance) and
+bytecode exploration (which searches an enormous opcode-level space).  It
+uses ``# frontrun:`` comments as the vocabulary for schedule generation,
+then systematically or randomly explores all valid orderings.
+
+**Search space comparison:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 35 35
+
+   * - Approach
+     - 2 threads, 100 opcodes each
+     - 2 threads, 5 markers each
+   * - Bytecode
+     - 2\ :sup:`200` ≈ 10\ :sup:`60`
+     - ---
+   * - Markers
+     - ---
+     - C(10, 5) = 252
+
+For two threads with five markers each, the marker-level search space is
+just 252 valid orderings --- small enough to explore exhaustively with
+completeness guarantees.
+
+**Exhaustive exploration:**
+
+``explore_marker_interleavings()`` generates every valid interleaving of
+thread markers (preserving per-thread order), runs each one against real code
+via ``TraceExecutor``, and checks an invariant.  When it passes, the
+invariant is proven correct for all marker-level interleavings.
+
+.. code-block:: python
+
+   from frontrun.trace_markers import explore_marker_interleavings
+
+   class Counter:
+       def __init__(self):
+           self.value = 0
+
+       def increment(self):
+           temp = self.value  # frontrun: read_value
+           self.value = temp + 1  # frontrun: write_value
+
+   result = explore_marker_interleavings(
+       setup=Counter,
+       threads={
+           "t1": (lambda c: c.increment(), ["read_value", "write_value"]),
+           "t2": (lambda c: c.increment(), ["read_value", "write_value"]),
+       },
+       invariant=lambda c: c.value == 2,
+   )
+   # result.property_holds is False — the lost-update race is found
+   # result.counterexample is a Schedule that reproduces the bug
+
+When a violation is found, ``result.counterexample`` is a ``Schedule``
+object that can be replayed directly with ``TraceExecutor`` for
+deterministic reproduction.
+
+**Hypothesis integration:**
+
+``marker_schedule_strategy()`` is a Hypothesis strategy that generates
+valid ``Schedule`` objects.  It integrates with Hypothesis's shrinking to
+produce minimal counterexamples:
+
+.. code-block:: python
+
+   from hypothesis import given
+   from frontrun.trace_markers import marker_schedule_strategy, TraceExecutor
+
+   @given(schedule=marker_schedule_strategy(
+       threads={"t1": ["read_value", "write_value"],
+                "t2": ["read_value", "write_value"]},
+   ))
+   def test_counter_is_atomic(schedule):
+       counter = Counter()
+       executor = TraceExecutor(schedule)
+       executor.run("t1", counter.increment)
+       executor.run("t2", counter.increment)
+       executor.wait(timeout=5.0)
+       assert counter.value == 2
+
+**Enumeration:**
+
+``all_marker_schedules()`` returns all valid interleavings as a list of
+``Schedule`` objects.  The count equals the multinomial coefficient
+``(k₁ + k₂ + … + kₙ)! / (k₁! · k₂! · … · kₙ!)`` where each *kᵢ* is
+the number of markers for thread *i*.
+
+.. code-block:: python
+
+   from frontrun.trace_markers import all_marker_schedules
+
+   schedules = all_marker_schedules(
+       threads={"t1": ["a", "b"], "t2": ["x", "y"]},
+   )
+   assert len(schedules) == 6  # C(4,2) = 4! / (2! · 2!)
+
+**Complementary workflow:**
+
+The three marker-level tools are complementary:
+
+1. Use **bytecode exploration** or **DPOR** to discover a race automatically.
+2. Add ``# frontrun:`` markers at the identified race window for regression
+   testing.
+3. Use ``explore_marker_interleavings()`` to verify the fix eliminates
+   **all** problematic interleavings, not just the one counterexample.
+
+
 Automatic I/O Detection
 -------------------------
 

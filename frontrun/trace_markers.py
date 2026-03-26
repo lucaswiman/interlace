@@ -36,7 +36,7 @@ from collections.abc import Callable
 from typing import Any
 
 from frontrun._cooperative import real_condition, real_lock
-from frontrun.common import Schedule
+from frontrun.common import InterleavingResult, Schedule, Step
 
 MARKER_PATTERN = re.compile(r"#\s*frontrun:\s*(\w+)")
 
@@ -522,3 +522,199 @@ def frontrun(
 
     executor.wait(timeout=timeout)
     return executor
+
+
+# ---------------------------------------------------------------------------
+# Property-based marker schedule generation
+# ---------------------------------------------------------------------------
+
+
+def marker_schedule_strategy(
+    threads: dict[str, list[str]],
+) -> Any:
+    """Hypothesis strategy that generates valid marker-level Schedule objects.
+
+    A valid schedule interleaves each thread's markers while preserving
+    their relative order within each thread.  This provides a much smaller
+    search space than opcode-level exploration while still covering all
+    meaningful interleavings at the marker granularity.
+
+    Args:
+        threads: Mapping from thread/execution names to their ordered list
+            of marker names.  Example::
+
+                {"t1": ["read", "write"], "t2": ["read", "write"]}
+
+    Returns:
+        A Hypothesis strategy producing :class:`Schedule` objects.
+
+    Example::
+
+        from hypothesis import given
+        from frontrun.trace_markers import marker_schedule_strategy
+
+        @given(schedule=marker_schedule_strategy(
+            threads={"w1": ["read", "write"], "w2": ["read", "write"]},
+        ))
+        def test_no_lost_update(schedule):
+            ...
+    """
+    from hypothesis import strategies as st
+
+    thread_items = list(threads.items())
+
+    @st.composite
+    def gen(draw: Any) -> Schedule:
+        remaining = {name: list(markers) for name, markers in thread_items}
+        steps: list[Step] = []
+
+        while any(remaining.values()):
+            available = [name for name, m in remaining.items() if m]
+            thread_name = draw(st.sampled_from(sorted(available)))
+            marker = remaining[thread_name].pop(0)
+            steps.append(Step(thread_name, marker))
+
+        return Schedule(steps)
+
+    return gen()
+
+
+def all_marker_schedules(
+    threads: dict[str, list[str]],
+) -> list[Schedule]:
+    """Enumerate ALL valid interleavings of thread markers.
+
+    A valid interleaving places every thread's markers in the schedule
+    while preserving their relative order within each thread.
+
+    For *N* threads with marker counts *k1, k2, ..., kN*, the total
+    number of valid interleavings is the multinomial coefficient::
+
+        (k1 + k2 + ... + kN)! / (k1! * k2! * ... * kN!)
+
+    Args:
+        threads: Mapping from thread/execution names to their ordered list
+            of marker names.
+
+    Returns:
+        A list of :class:`Schedule` objects covering every valid interleaving.
+
+    Example::
+
+        schedules = all_marker_schedules(
+            threads={"t1": ["a", "b"], "t2": ["x", "y"]},
+        )
+        assert len(schedules) == 6  # C(4,2)
+    """
+    thread_items = sorted(threads.items())  # deterministic order
+    schedules: list[Schedule] = []
+
+    def _recurse(
+        remaining: dict[str, list[str]],
+        path: list[Step],
+    ) -> None:
+        available = [name for name, markers in remaining.items() if markers]
+        if not available:
+            schedules.append(Schedule(list(path)))
+            return
+
+        for name in available:
+            marker = remaining[name][0]
+            # Pop first marker, recurse, restore
+            remaining[name] = remaining[name][1:]
+            path.append(Step(name, marker))
+            _recurse(remaining, path)
+            path.pop()
+            remaining[name] = [marker, *remaining[name]]
+
+    initial = {name: list(markers) for name, markers in thread_items}
+    _recurse(initial, [])
+    return schedules
+
+
+def explore_marker_interleavings(
+    setup: Callable[..., Any],
+    threads: dict[str, tuple[Callable[..., None], list[str]]],
+    invariant: Callable[..., bool],
+    *,
+    stop_on_first: bool = True,
+    deadlock_timeout: float = 5.0,
+    timeout: float | None = 10.0,
+) -> InterleavingResult:
+    """Explore all marker-level interleavings and check an invariant.
+
+    Generates every valid interleaving of the declared markers (preserving
+    per-thread order), runs each one against real code via :class:`TraceExecutor`,
+    and checks the invariant after each execution.
+
+    This sits between manual trace markers (exact schedule, one interleaving)
+    and bytecode exploration (random, enormous search space).  For *N* threads
+    with a few markers each, the search space is small enough to explore
+    exhaustively — giving completeness guarantees at the marker granularity.
+
+    Args:
+        setup: Factory producing fresh shared state for each execution.
+        threads: Mapping from execution name to ``(target_fn, markers)`` where
+            *target_fn* takes the setup result and *markers* is the ordered
+            list of ``# frontrun:`` marker names that *target_fn* hits.
+        invariant: Predicate on the shared state; returns True if correct.
+        stop_on_first: Stop after finding the first invariant violation
+            (default True).
+        deadlock_timeout: Per-schedule deadlock detection timeout.
+        timeout: Per-schedule join timeout.
+
+    Returns:
+        An :class:`~frontrun.common.InterleavingResult`.  The ``counterexample``
+        field is a :class:`Schedule` (not a list of ints) when a violation is
+        found.
+    """
+    marker_decl = {name: markers for name, (_, markers) in threads.items()}
+    schedules = all_marker_schedules(marker_decl)
+
+    num_explored = 0
+    failures: list[tuple[int, Schedule]] = []
+
+    for i, schedule in enumerate(schedules):
+        state = setup()
+        executor = TraceExecutor(schedule, deadlock_timeout=deadlock_timeout)
+
+        for exec_name, (target_fn, _markers) in threads.items():
+
+            def _make_runner(s: Any = state, fn: Callable[..., None] = target_fn) -> None:
+                fn(s)
+
+            executor.run(exec_name, _make_runner)
+
+        try:
+            executor.wait(timeout=timeout)
+        except (TimeoutError, Exception):
+            # Schedule stall or thread error — treat as non-violation and skip
+            num_explored += 1
+            continue
+
+        num_explored += 1
+
+        if not invariant(state):
+            failures.append((i, schedule))
+            if stop_on_first:
+                return InterleavingResult(
+                    property_holds=False,
+                    counterexample=schedule,  # type: ignore[arg-type]
+                    num_explored=num_explored,
+                    unique_interleavings=num_explored,
+                )
+
+    if failures:
+        return InterleavingResult(
+            property_holds=False,
+            counterexample=failures[0][1],  # type: ignore[arg-type]
+            num_explored=num_explored,
+            unique_interleavings=num_explored,
+            failures=failures,  # type: ignore[arg-type]
+        )
+
+    return InterleavingResult(
+        property_holds=True,
+        num_explored=num_explored,
+        unique_interleavings=num_explored,
+    )
