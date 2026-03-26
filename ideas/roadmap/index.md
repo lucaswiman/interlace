@@ -61,20 +61,3 @@ only remaining work is listed here.
     High complexity; most tests use isolated DBs anyway.
 18. **Wire-protocol parsing at LD_PRELOAD level** (integrations-and-detection) -- For non-Python
     drivers. Niche use case.
-
-## What was removed
-
-The following ideas were fully implemented and removed from the roadmap:
-
-- **SQL conflict detection** (Phases 1-4) -- `_sql_cursor.py`, `_sql_anomaly.py`, row-level predicates, endpoint suppression
-- **Optimal DPOR core** -- Wakeup trees, sleep set propagation, deferred race detection, notdep sequences, trace caching
-- **Trace overcounting fixes** 6, 8, 9, 10 -- Lock-aware backtracking, step-count-indexed cache, I/O wrapper suppression
-- **Resource detection layers** 1, 1.5, 2 -- Socket/file patching, sys.setprofile C_CALL, SQL cursor monkey-patching
-- **Property-based marker schedules** -- `marker_schedule_strategy()`, `all_marker_schedules()`, `explore_marker_interleavings()`
-- **Redis key-level conflict detection** -- Sync and async
-- **Cooperative threading primitives** -- Lock, RLock, Event, Semaphore, Queue wrappers
-- **Deadlock detection** -- WaitForGraph with cycle detection
-- **INSERT tracking with autoincrement** -- `sql:table:seq` resources
-- **LD_PRELOAD I/O interception** -- Linux + macOS, pipe-based event streaming
-- **Async variants** of all three exploration strategies
-- **Lock-aware I/O (Phase 5)** -- Synced I/O uses `dpor_vv` when inside a lock; locked file writes now produce exact Mazurkiewicz trace counts
