@@ -97,6 +97,27 @@ def set_sync_reporter(reporter: SyncReporter | None) -> None:
     _scheduler_tls.sync_reporter = reporter
 
 
+def suppress_sync_reporting() -> None:
+    """Suppress sync reporting for the current thread (for SQL internal locks).
+
+    Supports nesting: each call increments a counter, and reporting is
+    suppressed as long as the counter is positive.
+    """
+    depth = getattr(_scheduler_tls, "_sync_suppress_depth", 0)
+    _scheduler_tls._sync_suppress_depth = depth + 1
+
+
+def unsuppress_sync_reporting() -> None:
+    """Decrement the sync suppression counter for the current thread."""
+    depth = getattr(_scheduler_tls, "_sync_suppress_depth", 0)
+    _scheduler_tls._sync_suppress_depth = max(0, depth - 1)
+
+
+def is_sync_suppressed() -> bool:
+    """Check if sync reporting is suppressed for the current thread."""
+    return getattr(_scheduler_tls, "_sync_suppress_depth", 0) > 0
+
+
 def _in_dpor_machinery() -> bool:
     """Return ``True`` if the current thread is already inside DPOR machinery.
 
@@ -261,6 +282,8 @@ class CooperativeLock:
         self._report(event)
 
     def _report(self, event: str) -> None:
+        if is_sync_suppressed():
+            return
         reporter = get_sync_reporter()
         if reporter is not None:
             prev = getattr(_scheduler_tls, "_in_dpor_machinery", False)
@@ -415,6 +438,8 @@ class CooperativeRLock:
         self._report(event)
 
     def _report(self, event: str) -> None:
+        if is_sync_suppressed():
+            return
         reporter = get_sync_reporter()
         if reporter is not None:
             prev = getattr(_scheduler_tls, "_in_dpor_machinery", False)
@@ -458,6 +483,8 @@ class CooperativeSemaphore:
         self._object_id = id(self)
 
     def _report(self, event: str) -> None:
+        if is_sync_suppressed():
+            return
         reporter = get_sync_reporter()
         if reporter is not None:
             prev = getattr(_scheduler_tls, "_in_dpor_machinery", False)

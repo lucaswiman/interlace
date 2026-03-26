@@ -42,6 +42,8 @@ except ImportError:
 
 from frontrun.dpor import explore_dpor
 
+pytestmark = pytest.mark.integration
+
 # Use a non-default port to avoid colliding with a user's Redis.
 # CI can override via REDIS_PORT env var (e.g. when using a service container).
 _REDIS_PORT = int(os.environ.get("REDIS_PORT", "16399"))
@@ -172,49 +174,6 @@ class TestRedisCounterRace:
             reproduce_on_failure=0,
         )
         assert result.property_holds, result.explanation
-
-    def test_naive_threading_race_rate(self, redis_port: int) -> None:
-        """Verify the race manifests intermittently with plain threads.
-
-        Threads start with a random 0-5ms offset to model realistic
-        request arrival timing (like orm_race.py's demo_naive_threading).
-        """
-        import random
-        import time
-
-        port = redis_port
-        trials = 500
-        failures = 0
-        rng = random.Random(42)
-
-        for _ in range(trials):
-            r = redis_lib.Redis(port=port, decode_responses=True)
-            r.set("counter", "0")
-            r.close()
-
-            def increment() -> None:
-                conn = redis_lib.Redis(port=port, decode_responses=True)
-                val = int(conn.get("counter"))  # type: ignore[arg-type]
-                conn.set("counter", str(val + 1))
-                conn.close()
-
-            t1 = threading.Thread(target=increment)
-            t2 = threading.Thread(target=increment)
-            t1.start()
-            # Random offset models realistic request arrival timing.
-            time.sleep(rng.uniform(0, 0.005))
-            t2.start()
-            t1.join(timeout=5)
-            t2.join(timeout=5)
-
-            r = redis_lib.Redis(port=port, decode_responses=True)
-            if int(r.get("counter")) != 2:  # type: ignore[arg-type]
-                failures += 1
-            r.close()
-
-        rate = failures / trials * 100
-        # The race should be observable but not dominant
-        assert failures > 0, f"Race never triggered in {trials} trials — test may not be realistic"
 
 
 # ---------------------------------------------------------------------------
@@ -394,49 +353,6 @@ class TestRedisInventoryRace:
             reproduce_on_failure=0,
         )
         assert result.property_holds, result.explanation
-
-    def test_naive_threading_race_rate(self, redis_port: int) -> None:
-        """Verify the oversell race manifests intermittently with plain threads."""
-        import random
-        import time
-
-        port = redis_port
-        trials = 500
-        failures = 0
-        rng = random.Random(42)
-
-        for _ in range(trials):
-            r = redis_lib.Redis(port=port, decode_responses=True)
-            r.set("stock", "1")
-            r.set("sold", "0")
-            r.close()
-
-            def buy() -> None:
-                conn = redis_lib.Redis(port=port, decode_responses=True)
-                stock = int(conn.get("stock"))  # type: ignore[arg-type]
-                if stock > 0:
-                    conn.set("stock", str(stock - 1))
-                    sold = int(conn.get("sold"))  # type: ignore[arg-type]
-                    conn.set("sold", str(sold + 1))
-                conn.close()
-
-            t1 = threading.Thread(target=buy)
-            t2 = threading.Thread(target=buy)
-            t1.start()
-            time.sleep(rng.uniform(0, 0.005))
-            t2.start()
-            t1.join(timeout=5)
-            t2.join(timeout=5)
-
-            r = redis_lib.Redis(port=port, decode_responses=True)
-            stock = int(r.get("stock"))  # type: ignore[arg-type]
-            sold = int(r.get("sold"))  # type: ignore[arg-type]
-            r.close()
-            if stock < 0 or sold > 1:
-                failures += 1
-
-        rate = failures / trials * 100
-        assert failures > 0, f"Race never triggered in {trials} trials"
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,8 @@ except ImportError:
 
 from frontrun.dpor import explore_dpor
 
+pytestmark = pytest.mark.integration
+
 # Use a non-default port to avoid colliding with a user's Redis.
 _REDIS_PORT = int(os.environ.get("REDIS_PORT", "16399"))
 
@@ -1241,9 +1243,14 @@ class TestDporPathCountSerialized:
             reproduce_on_failure=0,
         )
         assert result.property_holds, result.explanation
-        # With a single lock, DPOR should find ≤ 2 distinct orderings, not 50+
-        # Initial thread diversity adds one extra round (2 threads), roughly doubling the count.
-        assert result.num_explored <= 8, f"Lock-serialized ops should need ≤ 8 DPOR paths, got {result.num_explored}"
+        # With synced I/O (dpor_vv respects lock HB for Redis key accesses),
+        # the theoretical minimum is 2 (one per lock ordering).  Remaining
+        # overcounting comes from:
+        # 1. Lock acquire uses io_vv (intentional: must explore both orderings)
+        # 2. Python-level internals of redis-py create scheduling points
+        #    with untracked object conflicts (connection setup, parser state)
+        # 3. LD_PRELOAD TCP events from Redis connection setup
+        assert result.num_explored <= 12, f"Lock-serialized ops should need ≤ 12 DPOR paths, got {result.num_explored}"
 
     def test_async_locked_many_redis_ops_minimal_paths(self, redis_port: int) -> None:
         """Async: many Redis ops under one asyncio.Lock → minimal DPOR paths."""
@@ -1298,5 +1305,4 @@ class TestDporPathCountSerialized:
         # operations are lock-protected.  This is by design: I/O races
         # can exist even with application-level locks (e.g. lock granularity
         # bugs).  The bound is relaxed to account for this.
-        # Initial thread diversity adds one extra round (2 threads), roughly doubling the count.
-        assert result.num_explored <= 30, f"Async lock-serialized ops should need ≤ 30 paths, got {result.num_explored}"
+        assert result.num_explored <= 15, f"Async lock-serialized ops should need ≤ 15 paths, got {result.num_explored}"

@@ -42,14 +42,10 @@ pub struct Execution {
 
 impl Execution {
     pub fn new(num_threads: usize) -> Self {
-        Self::new_with_initial(num_threads, 0)
-    }
-
-    pub fn new_with_initial(num_threads: usize, initial_thread: usize) -> Self {
         Self {
             threads: (0..num_threads).map(|i| Thread::new(i, num_threads)).collect(),
             objects: HashMap::new(),
-            active_thread: initial_thread,
+            active_thread: 0,
             lock_release_vv: HashMap::new(),
             aborted: false,
             schedule_trace: Vec::new(),
@@ -79,6 +75,21 @@ impl Execution {
 /// races are collected during execution as `PendingRace` entries and processed
 /// at maximal executions (in `next_execution()`), where the full trace is
 /// available for computing notdep sequences.
+
+/// A lock release event recorded during execution for deferred backtracking.
+#[derive(Clone, Debug)]
+struct DeferredLockRelease {
+    thread_id: usize,
+    path_id: usize,
+}
+
+/// A lock acquire event recorded during execution for deferred backtracking.
+#[derive(Clone, Debug)]
+struct DeferredLockAcquire {
+    thread_id: usize,
+    path_id: usize,
+}
+
 pub struct DporEngine {
     pub path: Path,
     num_threads: usize,
@@ -90,29 +101,17 @@ pub struct DporEngine {
     /// during execution and processed at maximal executions where the full
     /// trace is available for computing notdep sequences.
     pending_races: Vec<PendingRace>,
-    /// The thread ID used as the starting thread for the current exploration
-    /// round.  After the exploration tree for one initial thread is exhausted,
-    /// the engine resets the path and starts a fresh round with the next
-    /// initial thread.  This ensures DPOR explores interleavings where each
-    /// thread can go first, even when initial events are independent (e.g.,
-    /// dining philosophers acquiring different locks).
-    current_initial_thread: usize,
-    preemption_bound: Option<u32>,
-    /// Number of executions completed in the first round (initial thread 0).
-    /// If only 1 execution was needed (no races detected), we skip rotation
-    /// since all threads are independent and reordering doesn't matter.
-    first_round_executions: u64,
-    /// Set of threads that have already appeared as the first-scheduled thread
-    /// at position 0 (via race-driven wakeup tree exploration).  We skip
-    /// rotation for these since their exploration was already covered.
-    explored_initial_threads: Vec<bool>,
+    /// Lock releases collected during the current execution.
+    /// Processed in `next_execution()` for inter-critical-section backtracking.
+    deferred_lock_releases: Vec<DeferredLockRelease>,
+    /// Lock acquires collected during the current execution.
+    /// Used to determine whether a release should trigger backtracking.
+    deferred_lock_acquires: Vec<DeferredLockAcquire>,
 }
 
 impl DporEngine {
     /// XOR mask to derive virtual object IDs for lock acquire conflict tracking.
     const LOCK_OBJECT_XOR: u64 = 0x4C4F_434B_4C4F_434B; // "LOCKLOCK"
-    /// XOR mask for lock release objects (distinct from acquire).
-    const LOCK_RELEASE_XOR: u64 = 0x524C_5345_524C_5345; // "RLSERLSE"
 
     pub fn new(
         num_threads: usize,
@@ -127,15 +126,13 @@ impl DporEngine {
             executions_completed: 0,
             max_branches,
             pending_races: Vec::new(),
-            current_initial_thread: 0,
-            preemption_bound,
-            first_round_executions: 0,
-            explored_initial_threads: vec![false; num_threads],
+            deferred_lock_releases: Vec::new(),
+            deferred_lock_acquires: Vec::new(),
         }
     }
 
     pub fn begin_execution(&self) -> Execution {
-        Execution::new_with_initial(self.num_threads, self.current_initial_thread)
+        Execution::new(self.num_threads)
     }
 
     pub fn schedule(&mut self, execution: &mut Execution) -> Option<usize> {
@@ -148,13 +145,7 @@ impl DporEngine {
             execution.aborted = true;
             return None;
         }
-        let pos = self.path.current_position();
         let chosen = self.path.schedule(&runnable, execution.active_thread, self.num_threads)?;
-        // Track which thread was first-scheduled at position 0.
-        // Used to skip redundant initial thread rotation.
-        if pos == 0 {
-            self.explored_initial_threads[chosen] = true;
-        }
         execution.threads[chosen].dpor_vv.increment(chosen);
         execution.threads[chosen].io_vv.increment(chosen);
         execution.active_thread = chosen;
@@ -222,6 +213,40 @@ impl DporEngine {
     /// interleavings where another thread runs between the first and
     /// subsequent writes.
     pub fn process_first_access(
+        &mut self,
+        execution: &mut Execution,
+        thread_id: usize,
+        object_id: ObjectId,
+        kind: AccessKind,
+    ) {
+        let current_path_id = self.path.current_position().saturating_sub(1);
+        let current_dpor_vv = execution.threads[thread_id].dpor_vv.clone();
+
+        let object_state = execution.objects.entry(object_id).or_insert_with(ObjectState::new);
+
+        for prev_access in object_state.dependent_accesses(kind, thread_id) {
+            if !prev_access.happens_before(&current_dpor_vv) {
+                self.path.insert_wakeup(prev_access.path_id, thread_id, Some(object_id));
+                self.pending_races.push(PendingRace {
+                    prev_path_id: prev_access.path_id,
+                    current_path_id,
+                    thread_id,
+                    race_object: Some(object_id),
+                });
+            }
+        }
+
+        let access = Access::new(current_path_id, current_dpor_vv, thread_id);
+        object_state.record_io_access(access, kind);
+
+        self.path.record_access(current_path_id, object_id, kind);
+    }
+
+    /// Like [`process_access`] but uses `dpor_vv` (lock-aware) with
+    /// `record_io_access` recording semantics.  Intended for I/O
+    /// operations that go through Python-level code (Redis, SQL) where
+    /// Python locks are tracked by `report_sync` and should be respected.
+    pub fn process_synced_io_access(
         &mut self,
         execution: &mut Execution,
         thread_id: usize,
@@ -351,20 +376,39 @@ impl DporEngine {
                         execution, thread_id, lock_obj_id, AccessKind::Write,
                     );
                 }
+                // Record for deferred lock release backtracking.
+                let pid = path_id.unwrap_or_else(|| self.path.current_position().saturating_sub(1));
+                self.deferred_lock_acquires.push(DeferredLockAcquire {
+                    thread_id,
+                    path_id: pid,
+                });
             }
             SyncEvent::LockRelease { lock_id } => {
                 let vv = execution.threads[thread_id].dpor_vv.clone();
                 execution.lock_release_vv.insert(lock_id, vv);
-                let lock_rel_obj_id = lock_id ^ Self::LOCK_RELEASE_XOR;
-                if let Some(pid) = path_id {
-                    self.process_io_access_at(
-                        execution, thread_id, lock_rel_obj_id, AccessKind::Write, pid,
-                    );
-                } else {
-                    self.process_io_access(
-                        execution, thread_id, lock_rel_obj_id, AccessKind::Write,
-                    );
-                }
+                // Lock-aware DPOR: release does NOT create an io_vv access.
+                //
+                // Previous approach: separate virtual objects for acquire/release,
+                // both as Write via io_vv.  This created TWO independent race
+                // dimensions per lock, causing overcounting (e.g. 3 traces
+                // instead of 2 for N=2 threads with a single lock).
+                //
+                // New approach: acquire-acquire races (via LOCK_OBJECT_XOR) handle
+                // lock ordering.  For multi-lock bugs (where thread T releases
+                // lock_a then acquires lock_b), we use DEFERRED release
+                // backtracking: at the end of the execution, we check if any
+                // thread released a lock then later acquired another.  If so, we
+                // insert backtracks at the release position, enabling another
+                // thread to interleave between the two critical sections.
+                //
+                // This is precise: single-lock tests get no release backtracks
+                // (thread doesn't acquire after releasing), while multi-lock
+                // tests get exactly the backtracks needed for bug detection.
+                let pid = path_id.unwrap_or_else(|| self.path.current_position().saturating_sub(1));
+                self.deferred_lock_releases.push(DeferredLockRelease {
+                    thread_id,
+                    path_id: pid,
+                });
             }
             SyncEvent::ThreadJoin { joined_thread } => {
                 let joined_causality = execution.threads[joined_thread].causality.clone();
@@ -407,34 +451,47 @@ impl DporEngine {
         let races = std::mem::take(&mut self.pending_races);
         self.path.process_deferred_races(&races);
 
-        if self.path.step() {
-            return true;
-        }
+        // Lock-aware DPOR: deferred release backtracking.
+        //
+        // For each lock release where the releasing thread later acquires
+        // another lock, insert backtrack opportunities for other runnable
+        // threads at the release position.  This is the key mechanism for
+        // detecting multi-lock atomicity bugs: it allows another thread to
+        // run between a thread's two critical sections.
+        //
+        // This is DEFERRED (not inline during execution) so that we only
+        // insert backtracks when we can confirm the thread continued to
+        // another lock acquire.  For single-lock programs, no thread does
+        // acquire-after-release, so no backtracks are inserted — giving
+        // exact trace counts.
+        self.process_deferred_lock_releases();
 
-        // Exploration tree for the current initial thread is exhausted.
-        if self.current_initial_thread == 0 {
-            self.first_round_executions = self.executions_completed;
-        }
+        self.path.step()
+    }
 
-        // Only rotate initial threads if the first round explored more than
-        // one interleaving (meaning races exist).  When threads are fully
-        // independent (no conflicts), one execution suffices and rotation
-        // would just add N-1 redundant executions.
-        if self.first_round_executions <= 1 {
-            return false;
-        }
+    /// Process deferred lock releases for inter-critical-section backtracking.
+    ///
+    /// For each lock release by thread T, check if T later acquired any lock
+    /// in this execution.  If so, insert backtrack opportunities at the release
+    /// position for all other runnable threads, enabling exploration of
+    /// interleavings between T's critical sections.
+    fn process_deferred_lock_releases(&mut self) {
+        let releases = std::mem::take(&mut self.deferred_lock_releases);
+        let acquires = std::mem::take(&mut self.deferred_lock_acquires);
 
-        // Start a fresh exploration round with the next initial thread,
-        // skipping threads that were already explored at position 0 by
-        // race-driven wakeup tree exploration in a previous round.
-        loop {
-            self.current_initial_thread += 1;
-            if self.current_initial_thread >= self.num_threads {
-                return false;
-            }
-            if !self.explored_initial_threads[self.current_initial_thread] {
-                self.path = Path::new(self.preemption_bound);
-                return true;
+        for release in &releases {
+            let has_later_acquire = acquires.iter().any(|acq| {
+                acq.thread_id == release.thread_id && acq.path_id > release.path_id
+            });
+            if has_later_acquire {
+                // Insert backtrack for each other runnable thread at the
+                // release position.
+                let pid = release.path_id;
+                for tid in 0..self.num_threads {
+                    if tid != release.thread_id {
+                        self.path.insert_wakeup(pid, tid, None);
+                    }
+                }
             }
         }
     }
@@ -1422,6 +1479,7 @@ mod tests {
                             &mut execution,
                             chosen,
                             SyncEvent::LockAcquire { lock_id: obj_id },
+                            None,
                         );
                     }
                     "lock_release" => {
@@ -1430,6 +1488,7 @@ mod tests {
                             &mut execution,
                             chosen,
                             SyncEvent::LockRelease { lock_id: obj_id },
+                            None,
                         );
                         for tid in 0..num_threads {
                             if tid != chosen && execution.threads[tid].blocked {

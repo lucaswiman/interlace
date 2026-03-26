@@ -23,6 +23,8 @@ except ImportError:
 
 from frontrun.cli import require_active
 
+pytestmark = pytest.mark.integration
+
 _DB_NAME = os.environ.get("FRONTRUN_TEST_DB", "frontrun_test")
 
 if not settings.configured:

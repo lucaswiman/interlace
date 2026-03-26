@@ -19,10 +19,12 @@ except ImportError:
     pytest.skip("psycopg2 not installed", allow_module_level=True)
 
 from frontrun.cli import require_active
+
+pytestmark = pytest.mark.integration
 from frontrun.dpor import explore_dpor
 
 _DB_NAME = os.environ.get("FRONTRUN_TEST_DB", "frontrun_test")
-_DSN = f"dbname={_DB_NAME}"
+_DSN = os.environ.get("DATABASE_URL", f"dbname={_DB_NAME}")
 
 
 @pytest.fixture(scope="module")
@@ -31,7 +33,7 @@ def pg_tables():
     try:
         conn = psycopg2.connect(_DSN)
     except Exception:
-        pytest.skip(f"Postgres not available at {_DB_NAME}")
+        pytest.skip(f"Postgres not available at {_DSN}")
     conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
     with conn.cursor() as cur:
         cur.execute("DROP TABLE IF EXISTS defect15_versions CASCADE")

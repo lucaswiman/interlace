@@ -480,7 +480,7 @@ class AsyncDporScheduler(InterleavedLoop):
         self._monitoring_active = False
         self._stable_ids = stable_ids if stable_ids is not None else StableObjectIds()
         # Pending I/O accesses per task (from SQL interception)
-        self._pending_io: dict[int, list[tuple[int, str]]] = {i: [] for i in range(num_tasks)}
+        self._pending_io: dict[int, list[tuple[int, str, bool]]] = {i: [] for i in range(num_tasks)}
 
         # Track tasks blocked on asyncio.Lock: task_id → lock-holder task_id.
         # When DPOR schedules a blocked task, override to run the holder.
@@ -581,7 +581,7 @@ class AsyncDporScheduler(InterleavedLoop):
                 if current_task is None:
                     current_task = task_id
                 object_key = _make_object_key(hash(resource_id), resource_id)
-                self._pending_io.setdefault(current_task, []).append((object_key, kind))
+                self._pending_io.setdefault(current_task, []).append((object_key, kind, True))
 
             set_io_reporter(_io_reporter)
 
@@ -867,8 +867,11 @@ class AsyncDporScheduler(InterleavedLoop):
         """Flush pending I/O accesses to the DPOR engine."""
         pending = self._pending_io.get(task_id)
         if pending:
-            for obj_key, kind in pending:
-                self.engine.report_io_access(self.execution, task_id, obj_key, kind)
+            for obj_key, kind, synced in pending:
+                if synced:
+                    self.engine.report_synced_io_access(self.execution, task_id, obj_key, kind)
+                else:
+                    self.engine.report_io_access(self.execution, task_id, obj_key, kind)
             pending.clear()
 
     def report_and_wait_sync(self, task_id: int) -> None:

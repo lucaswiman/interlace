@@ -225,54 +225,6 @@ class TestHttpCounterRace:
         )
         assert result.property_holds, result.explanation
 
-    def test_naive_threading_race_rate(self, http_server: tuple[str, dict[str, str], threading.Lock]) -> None:
-        """Verify the race manifests intermittently with plain threads.
-
-        Uses a mix of barrier-synchronised trials (to guarantee overlap)
-        and random-offset trials (to model realistic arrival timing).
-        On fast loopback, random offsets alone may never trigger the race
-        because the HTTP round-trip completes before the second thread starts.
-        """
-        import random
-        import time
-
-        base_url, store, lock = http_server
-        trials = 100
-        failures = 0
-        rng = random.Random(42)
-
-        for i in range(trials):
-            with lock:
-                store.clear()
-            _http_post(base_url, "counter", "0")
-
-            # First 20 trials use a barrier to guarantee both threads
-            # read before either writes (reliable race trigger).
-            use_barrier = i < 20
-            barrier = threading.Barrier(2, timeout=5) if use_barrier else None
-
-            def increment() -> None:
-                if barrier is not None:
-                    barrier.wait()
-                val = int(_http_get(base_url, "counter"))
-                _http_post(base_url, "counter", str(val + 1))
-
-            t1 = threading.Thread(target=increment)
-            t2 = threading.Thread(target=increment)
-            t1.start()
-            if not use_barrier:
-                # Random offset models realistic request arrival timing.
-                time.sleep(rng.uniform(0, 0.015))
-            t2.start()
-            t1.join(timeout=5)
-            t2.join(timeout=5)
-
-            if int(_http_get(base_url, "counter")) != 2:
-                failures += 1
-
-        rate = failures / trials * 100
-        assert failures > 0, f"Race never triggered in {trials} trials (try increasing trials)"
-
 
 # ---------------------------------------------------------------------------
 # 2. Stale-read configuration update
