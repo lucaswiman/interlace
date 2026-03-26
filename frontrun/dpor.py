@@ -68,6 +68,7 @@ from frontrun._sql_anomaly import classify_sql_anomaly
 from frontrun._sql_cursor import (
     clear_sql_metadata,
     get_active_sql_io_context,
+    is_sql_endpoint_suppressed,
     is_tid_suppressed,
     patch_sql,
     unpatch_sql,
@@ -233,8 +234,18 @@ class _PreloadBridge:
         # force DPOR to explore uninteresting interleavings first.
         if event.kind == "close":
             return
-        # Skip if this thread's cursor.execute() or Redis client already reported at a higher level
-        if is_tid_suppressed(event.tid) or is_redis_tid_suppressed(event.tid):
+        # Skip events to known SQL/Redis socket endpoints — the cursor/client
+        # layer already reports at a higher granularity (table/row/key level).
+        # Also skip socket events from permanently-suppressed SQL threads (covers
+        # the race window where connect() events arrive before the endpoint is
+        # registered).  Non-socket events (file I/O) always pass through even
+        # for SQL threads, so DPOR can detect non-SQL conflicts.
+        is_socket = event.resource_id.startswith("socket:")
+        if is_sql_endpoint_suppressed(event.resource_id):
+            return
+        if is_socket and is_tid_suppressed(event.tid):
+            return
+        if is_redis_tid_suppressed(event.tid):
             return
         with self._lock:
             dpor_id = self._tid_to_dpor.get(event.tid)
@@ -509,11 +520,18 @@ class DporScheduler:
                 _pending_io: list[tuple[int, str, bool]] | None = getattr(_dpor_tls, "pending_io", None)
                 if self._preload_bridge is not None:
                     _preload_events = self._preload_bridge.drain(thread_id)
-                    # Drop LD_PRELOAD events for threads with SQL-level tracking.
-                    # The listener() suppression check can race with
-                    # suppress_tid_permanently() due to async pipe delivery.
-                    if _preload_events and is_tid_suppressed(threading.get_native_id()):
-                        _preload_events = []
+                    # Drop events for known SQL/Redis endpoints that raced past
+                    # the listener() check due to async pipe delivery.
+                    # Also drop socket events from permanently-suppressed SQL
+                    # threads (belt-and-suspenders for connect-time race).
+                    _is_sql_tid = is_tid_suppressed(threading.get_native_id())
+                    if _preload_events:
+                        _preload_events = [
+                            ev
+                            for ev in _preload_events
+                            if not is_sql_endpoint_suppressed(ev[2])
+                            and not (_is_sql_tid and ev[2].startswith("socket:"))
+                        ]
                     if _preload_events:
                         # Record into trace for human-readable output.  These events
                         # come from C extensions (e.g. libpq) with no Python frame.

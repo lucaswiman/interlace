@@ -111,6 +111,6 @@ jobs:
           enable-cache: true
 
       - name: Run integration tests
-        run: make test-integration-3.14t
+        run: make test-integration-3.14
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/frontrun_test
