@@ -1272,6 +1272,44 @@ class TestDeadlockAsInvariantViolation:
         assert result.explanation is not None
         assert "deadlock" in result.explanation.lower()
 
+    def test_dining_philosophers_four_deadlock_without_diversity(self) -> None:
+        """Four dining philosophers — DPOR finds deadlock via race detection alone.
+
+        With scheduling coarsening removing spurious scheduling points, N=4
+        pure locks terminates quickly: ~121 interleavings exhaustively in ~1s.
+        """
+
+        num_philosophers = 4
+
+        class State:
+            def __init__(self) -> None:
+                self.forks = [threading.Lock() for _ in range(num_philosophers)]
+
+        def make_philosopher(i: int):  # noqa: ANN202
+            def philosopher(s: State) -> None:
+                left = i
+                right = (i + 1) % num_philosophers
+                with s.forks[left]:
+                    with s.forks[right]:
+                        pass
+
+            return philosopher
+
+        result = explore_dpor(
+            setup=State,
+            threads=[make_philosopher(i) for i in range(num_philosophers)],
+            invariant=lambda s: True,
+            max_executions=5000,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            stop_on_first=False,
+        )
+
+        assert not result.property_holds, "Dining philosophers deadlock should be found"
+        assert result.explanation is not None
+        assert "deadlock" in result.explanation.lower()
+
     def test_dining_philosophers_three_with_shared_write(self) -> None:
         """Three dining philosophers with a shared write inside the critical section.
 
