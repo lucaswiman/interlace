@@ -133,30 +133,43 @@ class InterleavedLoop:
             marker: Optional scheduling context.
         """
         async with self._condition:
-            while True:
-                if self._finished or self._error:
+            # First check before entering the waiting state.
+            if self._finished or self._error:
+                return
+            if self.should_proceed(task_id, marker):
+                self.on_proceed(task_id, marker)
+                self._condition.notify_all()
+                return
+
+            # Enter waiting state: increment _waiting_count ONCE and keep
+            # it incremented for the entire time this task is blocked.
+            # This avoids a false-positive deadlock when multiple tasks
+            # wake from condition.wait() simultaneously: the first to
+            # reacquire the lock would decrement-then-re-increment before
+            # the second can decrement, making _waiting_count transiently
+            # equal to alive even though the second task CAN proceed.
+            alive = self._num_tasks - len(self._tasks_done)
+            self._waiting_count += 1
+            try:
+                if self._waiting_count >= alive and alive > 0:
+                    self._handle_all_waiting_deadlock(task_id, marker)
                     return
 
-                if self.should_proceed(task_id, marker):
-                    self.on_proceed(task_id, marker)
-                    self._condition.notify_all()
-                    return
-
-                # All-tasks-waiting detection
-                alive = self._num_tasks - len(self._tasks_done)
-                self._waiting_count += 1
-                try:
-                    if self._waiting_count >= alive and alive > 0:
-                        self._handle_all_waiting_deadlock(task_id, marker)
-                        return
-
+                while True:
                     try:
                         await asyncio.wait_for(self._condition.wait(), timeout=self.deadlock_timeout)
                     except asyncio.TimeoutError:
                         self._handle_timeout(task_id, marker)
                         return
-                finally:
-                    self._waiting_count -= 1
+
+                    if self._finished or self._error:
+                        return
+                    if self.should_proceed(task_id, marker):
+                        self.on_proceed(task_id, marker)
+                        self._condition.notify_all()
+                        return
+            finally:
+                self._waiting_count -= 1
 
     def _handle_timeout(self, task_id: Any, marker: Any = None) -> None:
         """Handle a timeout in pause(). Sets the error and wakes everyone.
