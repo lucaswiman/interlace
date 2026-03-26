@@ -1232,8 +1232,8 @@ class TestDeadlockAsInvariantViolation:
         assert result.counterexample is not None
         assert result.counterexample[0] == 1, f"Counterexample should start with thread 1, got: {result.counterexample}"
 
-    def test_dining_philosophers_three_deadlock_without_diversity(self) -> None:
-        """Three dining philosophers — DPOR finds deadlock via race detection alone.
+    def test_dining_philosophers_four_deadlock_without_diversity(self) -> None:
+        """Four dining philosophers — DPOR finds deadlock via race detection alone.
 
         Standard DPOR race detection discovers the deadlock without needing
         to artificially rotate the initial thread.  The initial lock acquires
@@ -1241,7 +1241,7 @@ class TestDeadlockAsInvariantViolation:
         create conflicts that DPOR explores.
         """
 
-        num_philosophers = 3
+        num_philosophers = 4
 
         class State:
             def __init__(self) -> None:
@@ -1261,7 +1261,7 @@ class TestDeadlockAsInvariantViolation:
             setup=State,
             threads=[make_philosopher(i) for i in range(num_philosophers)],
             invariant=lambda s: True,
-            max_executions=1000,
+            max_executions=5000,
             preemption_bound=2,
             detect_io=False,
             deadlock_timeout=2.0,

@@ -163,8 +163,8 @@ class TestSchedulingCoarsening:
 
         assert result.property_holds
 
-    def test_dining_philosophers_three_trace_count(self) -> None:
-        """Three dining philosophers (pure locks, no shared state) trace count.
+    def test_dining_philosophers_four_trace_count(self) -> None:
+        """Four dining philosophers (pure locks, no shared state) trace count.
 
         With scheduling coarsening, the pure lock-based dining philosophers
         should produce a small, bounded number of interleavings.  This
@@ -175,12 +175,12 @@ class TestSchedulingCoarsening:
 
         class Table:
             def __init__(self) -> None:
-                self.forks = [threading.Lock() for _ in range(3)]
+                self.forks = [threading.Lock() for _ in range(4)]
 
         def make_philosopher(i: int):  # noqa: ANN202
             def philosopher(table: Table) -> None:
                 left = i
-                right = (i + 1) % 3
+                right = (i + 1) % 4
                 with table.forks[left]:
                     with table.forks[right]:
                         pass
@@ -189,9 +189,9 @@ class TestSchedulingCoarsening:
 
         result = explore_dpor(
             setup=Table,
-            threads=[make_philosopher(i) for i in range(3)],
+            threads=[make_philosopher(i) for i in range(4)],
             invariant=lambda _: True,
-            max_executions=2000,
+            max_executions=5000,
             preemption_bound=2,
             detect_io=False,
             deadlock_timeout=2.0,
@@ -199,10 +199,10 @@ class TestSchedulingCoarsening:
         )
 
         assert not result.property_holds, "Deadlock should be found"
-        # The exploration should complete well under the 2000 cap.
-        # Without initial thread diversity, this produces ~21 interleavings.
-        assert result.num_explored <= 40, (
-            f"Expected <=40 interleavings for 3-philosopher pure lock example, "
+        # The exploration should complete well under the 5000 cap.
+        # N=4 pure locks produces ~121 interleavings exhaustively.
+        assert result.num_explored <= 200, (
+            f"Expected <=200 interleavings for 4-philosopher pure lock example, "
             f"got {result.num_explored}. Likely a scheduling regression "
             f"(e.g. unhandled opcode inflating the DPOR search tree)."
         )
