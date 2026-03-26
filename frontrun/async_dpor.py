@@ -537,12 +537,27 @@ class AsyncDporScheduler(InterleavedLoop):
         # Flush any pending I/O accesses before advancing
         self._flush_pending_io(task_id)
         if isinstance(marker, tuple) and marker and marker[0] == "lock_acquire":
-            self.engine.report_access(
-                self.execution,
-                task_id,
-                _SHARED_SYNC_ACQUIRE_KEY,
-                "write",
-            )
+            # When SQL/Redis detection is active, opcode-level tracing is
+            # disabled, so the only way to create cross-resource conflicts
+            # (asyncio.Lock vs row lock) is via _SHARED_SYNC_ACQUIRE_KEY.
+            # Without it, DPOR won't explore interleavings needed to find
+            # cross-resource deadlocks.
+            #
+            # When SQL/Redis detection is NOT active, skip this write.
+            # The Rust engine's process_sync("lock_acquire") already creates
+            # a virtual lock-object Write access WITH the happens-before
+            # join from the prior release applied first.  Reporting
+            # _SHARED_SYNC_ACQUIRE_KEY here (before report_sync runs)
+            # creates a write-write conflict that isn't ordered by the
+            # lock's HB, causing spurious trace exploration (e.g. 4 traces
+            # instead of 2 for two tasks with a single lock).
+            if self._detect_sql or self._detect_redis:
+                self.engine.report_access(
+                    self.execution,
+                    task_id,
+                    _SHARED_SYNC_ACQUIRE_KEY,
+                    "write",
+                )
 
         # Schedule next task.  If the engine returns None (no runnable
         # threads), keep _current_task as the current task_id so the
