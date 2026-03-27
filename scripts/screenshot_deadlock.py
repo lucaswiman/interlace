@@ -39,9 +39,16 @@ def _take_screenshot(html_path: str, output_path: str) -> None:
     """Open the HTML report in a headless browser and screenshot the deadlock view."""
     from playwright.sync_api import sync_playwright
 
+    import glob as _glob
+
+    # Find a cached chromium binary (playwright may have a different version than installed).
+    _chromium_candidates = sorted(_glob.glob(os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux/chrome")))
+    _executable = _chromium_candidates[-1] if _chromium_candidates else None
+
     with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 1400, "height": 900})
+        launch_kwargs: dict = {"executable_path": _executable} if _executable else {}
+        browser = p.chromium.launch(**launch_kwargs)
+        page = browser.new_page(viewport={"width": 800, "height": 900})
 
         file_url = f"file://{os.path.abspath(html_path)}"
         page.goto(file_url)
@@ -82,9 +89,37 @@ def _take_screenshot(html_path: str, output_path: str) -> None:
         }""")
         page.wait_for_timeout(1000)
 
-        # Take screenshot of the viewport
+        # Determine the actual content bounding box by inspecting shadow DOM elements.
+        # We want just the nav panel + timeline SVG area, cropped tightly.
+        content_bounds = page.evaluate("""() => {
+            const report = document.querySelector('dpor-report');
+            if (!report || !report.shadowRoot) return null;
+
+            let maxX = 0, maxY = 0;
+            const padding = 16;
+
+            // Walk all elements in each shadow root and accumulate the bounding rect.
+            function expandBounds(root) {
+                for (const el of root.querySelectorAll('*')) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) {
+                        maxX = Math.max(maxX, r.right);
+                        maxY = Math.max(maxY, r.bottom);
+                    }
+                    if (el.shadowRoot) expandBounds(el.shadowRoot);
+                }
+            }
+            expandBounds(report.shadowRoot);
+
+            if (maxX === 0 || maxY === 0) return null;
+            return {x: 0, y: 0, width: maxX + padding, height: maxY + padding};
+        }""")
+
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        page.screenshot(path=output_path, full_page=False)
+        if content_bounds:
+            page.screenshot(path=output_path, full_page=False, clip=content_bounds)
+        else:
+            page.screenshot(path=output_path, full_page=False)
 
         browser.close()
 
