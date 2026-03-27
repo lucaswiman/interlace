@@ -1191,70 +1191,82 @@ class _IOAnchoredReplayScheduler(DporScheduler):
         return self._wait_for_turn(thread_id)
 
     def before_io(self, thread_id: int, resource_id: str) -> None:
+        from frontrun._cooperative import _scheduler_tls
+
         with self._condition:
-            while True:
-                if self._finished or self._error:
-                    return
-
-                if self._current_thread in self._threads_done:
-                    self._current_thread = self._schedule_next()
-                    if self._current_thread is None and len(self._threads_done) >= self.num_threads:
-                        self._finished = True
-                        self._condition.notify_all()
+            _scheduler_tls._in_dpor_machinery = True
+            try:
+                while True:
+                    if self._finished or self._error:
                         return
 
-                if self._active_io_thread is not None and self._active_io_thread != thread_id:
-                    pass
-                elif self._current_thread == thread_id:
-                    if self._io_index >= len(self._io_schedule):
-                        self._error = RuntimeError(
-                            "DPOR IO-anchored replay desynchronised: "
-                            f"unexpected extra I/O anchor {(thread_id, resource_id)!r}"
-                        )
-                        self._condition.notify_all()
-                        return
-
-                    expected_tid, expected_resource_id = self._io_schedule[self._io_index]
-                    if expected_tid != thread_id or expected_resource_id != resource_id:
-                        self._error = RuntimeError(
-                            "DPOR IO-anchored replay desynchronised: "
-                            f"expected {(expected_tid, expected_resource_id)!r}, "
-                            f"got {(thread_id, resource_id)!r}"
-                        )
-                        self._condition.notify_all()
-                        return
-
-                    self._io_index += 1
-                    self._active_io_thread = thread_id
-                    self._next_thread_after_io = self._schedule_next()
-                    self._current_thread = thread_id
-                    self._condition.notify_all()
-                    return
-
-                if not self._condition.wait(timeout=self.deadlock_timeout):
                     if self._current_thread in self._threads_done:
                         self._current_thread = self._schedule_next()
                         if self._current_thread is None and len(self._threads_done) >= self.num_threads:
                             self._finished = True
+                            self._condition.notify_all()
+                            return
+
+                    if self._active_io_thread is not None and self._active_io_thread != thread_id:
+                        pass
+                    elif self._current_thread == thread_id:
+                        if self._io_index >= len(self._io_schedule):
+                            self._error = RuntimeError(
+                                "DPOR IO-anchored replay desynchronised: "
+                                f"unexpected extra I/O anchor {(thread_id, resource_id)!r}"
+                            )
+                            self._condition.notify_all()
+                            return
+
+                        expected_tid, expected_resource_id = self._io_schedule[self._io_index]
+                        if expected_tid != thread_id or expected_resource_id != resource_id:
+                            self._error = RuntimeError(
+                                "DPOR IO-anchored replay desynchronised: "
+                                f"expected {(expected_tid, expected_resource_id)!r}, "
+                                f"got {(thread_id, resource_id)!r}"
+                            )
+                            self._condition.notify_all()
+                            return
+
+                        self._io_index += 1
+                        self._active_io_thread = thread_id
+                        self._next_thread_after_io = self._schedule_next()
+                        self._current_thread = thread_id
                         self._condition.notify_all()
-                        continue
-                    self._error = TimeoutError(
-                        f"DPOR IO-anchored replay deadlock before {resource_id}: "
-                        f"waiting for thread {thread_id}, current is {self._current_thread}, "
-                        f"io_index={self._io_index}"
-                    )
-                    self._condition.notify_all()
-                    return
+                        return
+
+                    if not self._condition.wait(timeout=self.deadlock_timeout):
+                        if self._current_thread in self._threads_done:
+                            self._current_thread = self._schedule_next()
+                            if self._current_thread is None and len(self._threads_done) >= self.num_threads:
+                                self._finished = True
+                            self._condition.notify_all()
+                            continue
+                        self._error = TimeoutError(
+                            f"DPOR IO-anchored replay deadlock before {resource_id}: "
+                            f"waiting for thread {thread_id}, current is {self._current_thread}, "
+                            f"io_index={self._io_index}"
+                        )
+                        self._condition.notify_all()
+                        return
+            finally:
+                _scheduler_tls._in_dpor_machinery = False
 
     def after_io(self, thread_id: int, resource_id: str) -> None:
+        from frontrun._cooperative import _scheduler_tls
+
         with self._condition:
-            if self._finished or self._error:
-                return
-            if self._active_io_thread == thread_id:
-                self._active_io_thread = None
-                self._current_thread = self._next_thread_after_io
-                self._next_thread_after_io = None
-            self._condition.notify_all()
+            _scheduler_tls._in_dpor_machinery = True
+            try:
+                if self._finished or self._error:
+                    return
+                if self._active_io_thread == thread_id:
+                    self._active_io_thread = None
+                    self._current_thread = self._next_thread_after_io
+                    self._next_thread_after_io = None
+                self._condition.notify_all()
+            finally:
+                _scheduler_tls._in_dpor_machinery = False
 
     def _wait_for_turn(self, thread_id: int) -> bool:
         with self._condition:
