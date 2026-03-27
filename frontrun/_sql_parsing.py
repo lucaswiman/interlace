@@ -117,12 +117,12 @@ def _strip_quotes(name: str) -> str:
     if '"."' in name:
         parts = name.split('"."')
         last = parts[-1]
-    elif '".`' in name or '`.`' in name or '`."' in name:
-        # Mixed quoting — unlikely but handle gracefully
-        last = name.rsplit(".", 1)[-1]
     elif "`.`" in name:
         parts = name.split("`.`")
         last = parts[-1]
+    elif '".`' in name or '`."' in name:
+        # Mixed quoting — unlikely but handle gracefully
+        last = name.rsplit(".", 1)[-1]
     else:
         # Unquoted or single quoted identifier
         if name.startswith(('"', "`")):
