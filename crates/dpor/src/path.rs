@@ -258,20 +258,18 @@ impl Path {
     /// (E ⊢ p♦q, JACM'17 Def 3.3 p.13).
     ///
     /// When the same object is accessed multiple times at one scheduling
-    /// point with different AccessKinds, we conservatively upgrade to
-    /// Write (which conflicts with everything). This ensures the
-    /// independence check remains sound.
+    /// point with different AccessKinds, we use AccessKind::merge() to
+    /// combine them: Read + WeakRead → Read (since Read already covers
+    /// WeakRead's conflicts), while other mixed pairs → Write (conservative).
     pub fn record_access(&mut self, path_id: usize, object_id: u64, kind: AccessKind) {
         if let Some(branch) = self.branches.get_mut(path_id) {
             branch.active_accesses
                 .entry(object_id)
                 .and_modify(|existing| {
-                    // If access kinds differ, upgrade to Write (conservative:
-                    // Write conflicts with everything, so independence checks
-                    // will correctly report dependent).
-                    if *existing != kind {
-                        *existing = AccessKind::Write;
-                    }
+                    // Use merge() to combine access kinds correctly.
+                    // Read + WeakRead → Read (Read subsumes WeakRead).
+                    // All other mixed pairs → Write (conservative).
+                    *existing = existing.merge(kind);
                 })
                 .or_insert(kind);
         }
