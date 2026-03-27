@@ -1,4 +1,4 @@
-.PHONY: test clean docs docs-clean docs-html docs-clean-build lint type-check check test-integration build-all
+.PHONY: test clean docs docs-clean docs-html docs-clean-build lint type-check check test-integration build-all screenshot
 
 # Python versions to test
 PYTHON_VERSIONS := 3.14t 3.10 3.11 3.12 3.13 3.14
@@ -99,6 +99,12 @@ docs-clean:
 	cd docs && rm -rf _build
 
 docs-clean-build: docs-clean docs-html
+
+# Take a screenshot of the dining philosophers deadlock diagram.
+# Requires playwright: uv pip install playwright --python=.venv-3.14/bin/python
+# and chromium: .venv-3.14/bin/python -m playwright install chromium
+screenshot: build-dpor-3.14 build-io
+	PATH=$(CURDIR)/.venv-3.14/bin:$$PATH $(CURDIR)/.venv-3.14/bin/frontrun $(CURDIR)/.venv-3.14/bin/python scripts/screenshot_deadlock.py
 
 clean: docs-clean
 	rm -rf __pycache__ .pytest_cache .eggs *.egg-info dist build .uv-cache .venv $(addprefix .venv-,$(PYTHON_VERSIONS))

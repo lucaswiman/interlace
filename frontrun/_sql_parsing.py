@@ -74,7 +74,7 @@ _EMPTY = SqlAccessResult(set(), set(), None, None, None, None, None)
 
 # Precompiled patterns — matches the leading keyword + first table name.
 # Handles optional schema qualification (schema.table) and quoted identifiers.
-_IDENT = r'(?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)'
+_IDENT = r'(?:"[^"]+"(?:\."[^"]+")?|`[^`]+`(?:\.`[^`]+`)?|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)'
 _WS = r"[\s\n]+"
 
 _RE_SELECT = re.compile(r"\bSELECT\b", re.I)
@@ -106,11 +106,35 @@ _RE_DEALLOCATE = re.compile(rf"^\s*DEALLOCATE{_WS}", re.I)
 
 
 def _strip_quotes(name: str) -> str:
-    """Remove surrounding quotes/backticks and extract table from schema.table."""
-    if name.startswith(('"', "`")):
-        name = name[1:-1]
-    # Take last component: "public"."users" → users
-    return name.rsplit(".", 1)[-1]
+    """Remove surrounding quotes/backticks and extract table from schema.table.
+
+    Handles quoted schema-qualified names like "public"."users" and
+    `myschema`.`users` by splitting on "." or `.` boundaries first,
+    then stripping quotes from the last component.
+    """
+    # Split on dot boundaries between quoted identifiers: "schema"."table"
+    # or `schema`.`table`.  Also handles unquoted schema.table.
+    if '"."' in name:
+        parts = name.split('"."')
+        last = parts[-1]
+    elif "`.`" in name:
+        parts = name.split("`.`")
+        last = parts[-1]
+    elif '".`' in name or '`."' in name:
+        # Mixed quoting — unlikely but handle gracefully
+        last = name.rsplit(".", 1)[-1]
+    else:
+        # Unquoted or single quoted identifier
+        if name.startswith(('"', "`")):
+            name = name[1:-1]
+        return name.rsplit(".", 1)[-1]
+
+    # Strip remaining quotes from the last component
+    if last.startswith(('"', "`")):
+        last = last[1:]
+    if last.endswith(('"', "`")):
+        last = last[:-1]
+    return last
 
 
 def _regex_parse(sql: str) -> SqlAccessResult | None:

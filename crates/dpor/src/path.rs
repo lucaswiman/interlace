@@ -258,20 +258,18 @@ impl Path {
     /// (E ⊢ p♦q, JACM'17 Def 3.3 p.13).
     ///
     /// When the same object is accessed multiple times at one scheduling
-    /// point with different AccessKinds, we conservatively upgrade to
-    /// Write (which conflicts with everything). This ensures the
-    /// independence check remains sound.
+    /// point with different AccessKinds, we use AccessKind::merge() to
+    /// combine them: Read + WeakRead → Read (since Read already covers
+    /// WeakRead's conflicts), while other mixed pairs → Write (conservative).
     pub fn record_access(&mut self, path_id: usize, object_id: u64, kind: AccessKind) {
         if let Some(branch) = self.branches.get_mut(path_id) {
             branch.active_accesses
                 .entry(object_id)
                 .and_modify(|existing| {
-                    // If access kinds differ, upgrade to Write (conservative:
-                    // Write conflicts with everything, so independence checks
-                    // will correctly report dependent).
-                    if *existing != kind {
-                        *existing = AccessKind::Write;
-                    }
+                    // Use merge() to combine access kinds correctly.
+                    // Read + WeakRead → Read (Read subsumes WeakRead).
+                    // All other mixed pairs → Write (conservative).
+                    *existing = existing.merge(kind);
                 })
                 .or_insert(kind);
         }
@@ -1205,6 +1203,122 @@ mod tests {
         assert!(wakeup.contains_thread(1), "notdep [1,2] starts with T1");
         let leaves = wakeup.leaf_sequences();
         assert_eq!(leaves, vec![vec![1, 2]], "full notdep sequence [1, 2]");
+    }
+
+    /// Test that record_access merges Read + WeakRead to Read (not Write).
+    ///
+    /// Bug: record_access() unconditionally upgrades to Write when the same
+    /// object is accessed with two different AccessKinds. The correct behavior
+    /// is to use AccessKind::merge() which handles Read+WeakRead as Read.
+    ///
+    /// This matters for sleep set independence: a merged Read is independent
+    /// of WeakRead (no conflict), but Write conflicts with everything.
+    /// Incorrect merge causes spurious sleep set wakeups.
+    #[test]
+    fn test_record_access_merges_read_weakread_to_read() {
+        use crate::access::AccessKind;
+        let mut path = Path::new(None);
+
+        path.schedule(&[0, 1], 0, 2);
+
+        // Thread 0 does Read then WeakRead on the same object
+        path.record_access(0, 200, AccessKind::Read);
+        path.record_access(0, 200, AccessKind::WeakRead);
+
+        // The merged kind should be Read (Read subsumes WeakRead),
+        // NOT Write (which would cause false conflicts with WeakRead).
+        let merged = path.branches[0].active_accesses.get(&200).unwrap();
+        assert_eq!(
+            *merged,
+            AccessKind::Read,
+            "Read + WeakRead should merge to Read via AccessKind::merge(), \
+             but got {:?}. record_access() is incorrectly upgrading to Write.",
+            merged
+        );
+    }
+
+    /// Test that record_access merges WeakRead + Read to Read (commutative).
+    #[test]
+    fn test_record_access_merges_weakread_read_to_read() {
+        use crate::access::AccessKind;
+        let mut path = Path::new(None);
+
+        path.schedule(&[0, 1], 0, 2);
+
+        // Reverse order: WeakRead then Read
+        path.record_access(0, 200, AccessKind::WeakRead);
+        path.record_access(0, 200, AccessKind::Read);
+
+        let merged = path.branches[0].active_accesses.get(&200).unwrap();
+        assert_eq!(
+            *merged,
+            AccessKind::Read,
+            "WeakRead + Read should merge to Read, but got {:?}.",
+            merged
+        );
+    }
+
+    /// Test that record_access merges Read + Write to Write (correct).
+    #[test]
+    fn test_record_access_merges_read_write_to_write() {
+        use crate::access::AccessKind;
+        let mut path = Path::new(None);
+
+        path.schedule(&[0, 1], 0, 2);
+
+        path.record_access(0, 200, AccessKind::Read);
+        path.record_access(0, 200, AccessKind::Write);
+
+        let merged = path.branches[0].active_accesses.get(&200).unwrap();
+        assert_eq!(
+            *merged,
+            AccessKind::Write,
+            "Read + Write should merge to Write, but got {:?}.",
+            merged
+        );
+    }
+
+    /// Test that the buggy merge in record_access causes a false sleep set
+    /// wakeup when a sleeping thread's WeakRead is checked against
+    /// incorrectly-merged Write (should be Read).
+    #[test]
+    fn test_record_access_merge_bug_causes_false_wakeup() {
+        use crate::access::AccessKind;
+        let mut path = Path::new(None);
+
+        // --- First execution: T0 at pos 0, T1 at pos 1 ---
+        path.schedule(&[0, 1], 0, 2);
+        // T0 does Read + WeakRead on obj 200
+        path.record_access(0, 200, AccessKind::Read);
+        path.record_access(0, 200, AccessKind::WeakRead);
+
+        path.schedule(&[1], 1, 2);
+        path.record_access(1, 200, AccessKind::WeakRead); // T1 does WeakRead
+
+        // Add T1 to wakeup tree at pos 0 to force backtracking
+        path.insert_wakeup(0, 1, None);
+
+        // step(): T0 → Visited at pos 0, T1 Active at pos 0
+        assert!(path.step());
+
+        // --- Second execution: T1 at pos 0 (replay), then new pos 1 ---
+        let chosen = path.schedule(&[0, 1], 0, 2);
+        assert_eq!(chosen, Some(1));
+        path.record_access(0, 200, AccessKind::WeakRead); // T1 WeakReads
+
+        // New branch at pos 1: T0 chosen
+        path.schedule(&[0], 0, 2);
+
+        // T0 is sleeping. T0's cached accesses = {200: Read+WeakRead merged}.
+        // T1's active at pos 0 = {200: WeakRead}.
+        //
+        // With correct merge (Read): Read vs WeakRead → NOT a conflict → T0 stays asleep.
+        // With buggy merge (Write): Write vs WeakRead → conflict → T0 wakes up.
+        assert!(
+            path.branches[1].propagated_sleep_accesses.contains_key(&0),
+            "T0 should stay asleep at pos 1 (Read vs WeakRead is independent). \
+             If T0 woke up, record_access merged Read+WeakRead to Write instead of Read."
+        );
     }
 
     /// Test that propagation correctly wakes threads on conflict during replay.

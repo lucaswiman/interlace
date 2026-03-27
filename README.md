@@ -22,6 +22,14 @@ Three approaches, in order of decreasing interpretability:
 
 All three have async variants. A C-level `LD_PRELOAD` library intercepts libc I/O for database drivers and other opaque extensions.
 
+### DPOR deadlock detection (dining philosophers)
+
+DPOR explores thread interleavings and detects deadlocks via wait-for-graph cycle analysis. Here it finds the circular wait in the classic 3-philosopher dining problem:
+
+![Deadlock diagram showing DPOR exploration of the dining philosophers problem. Three threads each acquire one fork (lock) then block waiting for the next, forming a cycle.](docs/_static/deadlock-diagram.png)
+
+The timeline shows each thread's lock acquisitions (green), context switches (pink arrows), and the point where the deadlock is detected. Run `make screenshot` to regenerate this image from `examples/dpor_dining_philosophers.py`.
+
 ## Quick Start: Bank Account Race Condition
 
 A pytest test that uses trace markers to trigger a lost-update race:

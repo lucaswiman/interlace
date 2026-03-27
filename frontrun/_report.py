@@ -27,7 +27,7 @@ def _strip_none(d: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None}
 
 
-def _safe_repr(obj: Any, max_len: int = 80) -> str:  # pyright: ignore[reportUnusedFunction]
+def _safe_repr(obj: Any, max_len: int = 80) -> str:  # pyright: ignore[reportUnusedFunction] — imported by dpor.py at runtime
     """Return a truncated repr() of an object, safe for JSON embedding."""
     try:
         r = repr(obj)
