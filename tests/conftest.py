@@ -48,7 +48,6 @@ def _global_patch_active() -> bool:
     return _patched
 
 
-
 @pytest.fixture(autouse=True)
 def _patch_locks_for_marked_tests(request):
     """Auto-used fixture that patches threading.Lock for tests marked with @pytest.mark.frontrun.
@@ -124,5 +123,3 @@ def _check_thread_cleanup(request):
             f"If this is intentional (e.g., testing deadlocks that cannot be cleaned up), "
             f"mark the test with @pytest.mark.intentionally_leaves_dangling_threads"
         )
-
-

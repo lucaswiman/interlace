@@ -111,6 +111,7 @@ _real_socket_recv = socket.socket.recv
 _real_socket_recv_into = socket.socket.recv_into
 _real_socket_recvfrom = socket.socket.recvfrom
 
+
 def _report_socket_io(sock: socket.socket, kind: str) -> None:
     """Report a socket I/O event to the per-thread reporter, if installed."""
     # Skip if SQL-level or Redis-level detection already reported for this call
