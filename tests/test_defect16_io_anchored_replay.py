@@ -91,6 +91,7 @@ class TestStateDependentReplayReproduction:
         class State:
             def __init__(self) -> None:
                 import json
+
                 r = redis_lib.Redis(port=port, decode_responses=True)
                 r.set(key, json.dumps({"status": "STARTED", "result": "started"}))
                 r.close()
@@ -98,11 +99,13 @@ class TestStateDependentReplayReproduction:
         def _encode(value: str) -> str:
             """Simulate celery's encode() — adds extra CALL scheduling points."""
             import json
+
             return json.dumps({"status": value, "result": value.lower()})
 
         def _decode(raw: str) -> dict:
             """Simulate celery's decode() — adds extra CALL scheduling points."""
             import json
+
             return json.loads(raw)
 
         def store_success(state: State) -> None:
@@ -140,6 +143,7 @@ class TestStateDependentReplayReproduction:
         def invariant(state: State) -> bool:
             """Once SUCCESS is written, FAILURE must not overwrite it."""
             import json
+
             r = redis_lib.Redis(port=port, decode_responses=True)
             raw = r.get(key)
             r.close()

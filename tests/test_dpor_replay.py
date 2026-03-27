@@ -74,6 +74,7 @@ class TestReplayHarness:
             def fn(s: _State) -> None:
                 with _push_pop(s, f"v{idx}"):
                     s.seen[idx] = s.stack[-1] if s.stack else None
+
             return fn
 
         def invariant(s: _State) -> bool:
