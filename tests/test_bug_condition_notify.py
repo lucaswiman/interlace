@@ -102,10 +102,7 @@ def test_condition_notify_all_wakes_all():
 
     woken = sum(1 for t in waiter_tickets if t < served)
 
-    assert woken == 4, (
-        f"notify_all() should wake all 4 waiters, but {woken} would "
-        f"see the notification."
-    )
+    assert woken == 4, f"notify_all() should wake all 4 waiters, but {woken} would see the notification."
 
 
 def test_condition_notify_more_than_waiters():
@@ -127,10 +124,7 @@ def test_condition_notify_more_than_waiters():
 
     woken = sum(1 for t in waiter_tickets if t < served)
 
-    assert woken == 2, (
-        f"notify(5) with only 2 waiters should wake 2, not {woken}. "
-        f"served={served} should be 2, not 5."
-    )
+    assert woken == 2, f"notify(5) with only 2 waiters should wake 2, not {woken}. served={served} should be 2, not 5."
     assert served == 2, f"served should be capped at number of waiters (2), got {served}"
 
 
@@ -153,6 +147,4 @@ def test_condition_sequential_notify_accumulates():
 
     woken = sum(1 for t in waiter_tickets if t < served)
 
-    assert woken == 2, (
-        f"Two notify(1) calls should wake 2 waiters, but {woken} would wake."
-    )
+    assert woken == 2, f"Two notify(1) calls should wake 2 waiters, but {woken} would wake."
