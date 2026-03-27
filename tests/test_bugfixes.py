@@ -61,28 +61,34 @@ class TestCooperativeConditionNotificationLoss:
         assert flag[0], "waiter should have been woken by notify()"
 
     def test_notification_counter_does_not_lose_updates(self):
-        """The notification counter approach should never lose a notify().
+        """The ticket-based notification system should never lose a notify().
 
-        This directly tests the counter mechanism: snapshot before release,
-        increment on notify, check after yield.
+        This directly tests the mechanism: each waiting thread gets a
+        ticket, and notify(n) advances the served counter by exactly n,
+        waking only the intended number of waiters.
         """
         cond = CooperativeCondition()
 
-        # Simulate what wait() does: snapshot, release, check
-        with cond:
-            snapshot = cond._notify_count
-
-        # notify()/notify_all() require holding the lock (standard Condition API).
+        # notify() without waiters is a no-op (correct: nothing to wake)
         with cond:
             cond.notify()
-        assert cond._notify_count > snapshot, "notify should increment the counter"
+        assert cond._served == 0, "notify with no waiters should not advance served"
 
-        # Simulate notify_all
+        # Simulate 3 waiters taking tickets
         cond._waiters = 3
-        before = cond._notify_count
+        cond._next_ticket = 3  # tickets 0, 1, 2
+
+        # notify(1) should serve exactly 1 ticket
+        before = cond._served
+        with cond:
+            cond.notify()
+        assert cond._served == before + 1, "notify should advance served by 1"
+
+        # notify_all should serve all remaining waiters (capped at _waiters)
+        before = cond._served
         with cond:
             cond.notify_all()
-        assert cond._notify_count >= before + 3, "notify_all should increment by at least waiters count"
+        assert cond._served >= before + 3, "notify_all should advance served by at least waiters count"
 
     def test_notify_without_lock_raises(self):
         """Calling notify() without holding the lock should raise RuntimeError."""

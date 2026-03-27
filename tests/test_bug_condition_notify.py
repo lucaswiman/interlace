@@ -1,9 +1,9 @@
 """Test that CooperativeCondition.notify(1) wakes exactly one waiter.
 
-Bug: CooperativeCondition uses a monotonically increasing _notify_count
-to track notifications.  notify(n) increments by n, and each waiter spins
-until _notify_count exceeds its snapshot.  But when multiple waiters hold
-the same snapshot value, notify(1) wakes ALL of them instead of just one.
+Bug: CooperativeCondition used a monotonically increasing _notify_count
+to track notifications.  notify(n) incremented by n, and each waiter spun
+until _notify_count exceeded its snapshot.  But when multiple waiters held
+the same snapshot value, notify(1) woke ALL of them instead of just one.
 
 Example:
   - Waiters A, B, C all record snapshot = 5
@@ -14,68 +14,49 @@ This violates the threading.Condition contract where notify(1) should
 wake at most one waiter.  In user code that relies on this (e.g.,
 bounded producer-consumer queues), the bug causes spurious wakeups
 that can lead to incorrect behavior during concurrency testing.
-"""
 
-import threading
-import time
+Fix: Use a ticket-based system where each waiter gets a unique sequential
+ticket. notify(n) advances a served counter by n.  A waiter wakes only
+when its ticket < served.
+"""
 
 from frontrun._cooperative import (
     CooperativeCondition,
     CooperativeLock,
-    set_context,
-    clear_context,
 )
-
-
-class FakeScheduler:
-    """Minimal scheduler stub for testing cooperative primitives."""
-
-    _finished = False
-    _error = None
-
-    def wait_for_turn(self, thread_id: int) -> None:
-        time.sleep(0.001)
 
 
 def test_condition_notify_one_wakes_only_one():
     """Verify that notify(1) wakes exactly one waiter, not all.
 
-    We directly test the _notify_count mechanism:
-    - Set up 3 "waiters" that all record the same snapshot
-    - Call notify(1)
-    - Check how many would see the notification
-
-    This is a unit test of the notification counting logic.
+    We simulate the ticket/served mechanism:
+    - 3 waiters take tickets 0, 1, 2 (_next_ticket becomes 3)
+    - notify(1) advances _served to 1
+    - Only ticket 0 satisfies ticket < served; tickets 1, 2 do not.
     """
     lock = CooperativeLock()
     cond = CooperativeCondition(lock)
 
-    # Simulate 3 waiters that all recorded the same snapshot
-    # In real usage, all three call wait() and see notify_count_before_wait=0.
-    # After notify(1), _notify_count becomes 1.
-    # All three check: 1 > 0 → True → all wake up (BUG: should be just 1).
-
-    # We can test this directly by checking the counting logic:
-    initial_count = cond._notify_count
-
-    # Simulate what 3 concurrent waiters would snapshot:
-    snapshots = [initial_count, initial_count, initial_count]
-
-    # Producer calls notify(1) — should wake exactly 1 waiter
     lock.acquire()
+
+    # Simulate 3 waiters taking tickets while holding the lock.
+    # In real usage, each wait() call takes a ticket before releasing.
+    cond._waiters = 3
+    cond._next_ticket = 3  # tickets 0, 1, 2 assigned
+    waiter_tickets = [0, 1, 2]
+
+    # Producer calls notify(1)
     cond.notify(1)
+
+    served = cond._served
     lock.release()
 
-    new_count = cond._notify_count
-
-    # Count how many waiters would see the notification
-    woken = sum(1 for snap in snapshots if new_count > snap)
+    # Count how many waiters would wake: ticket < served
+    woken = sum(1 for t in waiter_tickets if t < served)
 
     assert woken == 1, (
         f"notify(1) should wake exactly 1 waiter out of 3, but {woken} would "
-        f"see the notification (snapshots={snapshots}, new_count={new_count}). "
-        f"The _notify_count mechanism broadcasts to ALL waiters with the same "
-        f"snapshot instead of waking exactly n."
+        f"see the notification (tickets={waiter_tickets}, served={served})."
     )
 
 
@@ -84,17 +65,94 @@ def test_condition_notify_two_wakes_exactly_two():
     lock = CooperativeLock()
     cond = CooperativeCondition(lock)
 
-    initial_count = cond._notify_count
-    snapshots = [initial_count] * 5  # 5 waiters
-
     lock.acquire()
+
+    cond._waiters = 5
+    cond._next_ticket = 5  # tickets 0..4
+    waiter_tickets = list(range(5))
+
     cond.notify(2)
+
+    served = cond._served
     lock.release()
 
-    new_count = cond._notify_count
-    woken = sum(1 for snap in snapshots if new_count > snap)
+    woken = sum(1 for t in waiter_tickets if t < served)
 
     assert woken == 2, (
         f"notify(2) should wake exactly 2 waiters out of 5, but {woken} would "
+        f"see the notification (tickets={waiter_tickets}, served={served})."
+    )
+
+
+def test_condition_notify_all_wakes_all():
+    """Verify that notify_all() wakes all waiters."""
+    lock = CooperativeLock()
+    cond = CooperativeCondition(lock)
+
+    lock.acquire()
+
+    cond._waiters = 4
+    cond._next_ticket = 4
+    waiter_tickets = list(range(4))
+
+    cond.notify_all()
+
+    served = cond._served
+    lock.release()
+
+    woken = sum(1 for t in waiter_tickets if t < served)
+
+    assert woken == 4, (
+        f"notify_all() should wake all 4 waiters, but {woken} would "
         f"see the notification."
+    )
+
+
+def test_condition_notify_more_than_waiters():
+    """Verify that notify(n) where n > waiters doesn't over-serve."""
+    lock = CooperativeLock()
+    cond = CooperativeCondition(lock)
+
+    lock.acquire()
+
+    cond._waiters = 2
+    cond._next_ticket = 2
+    waiter_tickets = [0, 1]
+
+    # notify(5) but only 2 waiters exist
+    cond.notify(5)
+
+    served = cond._served
+    lock.release()
+
+    woken = sum(1 for t in waiter_tickets if t < served)
+
+    assert woken == 2, (
+        f"notify(5) with only 2 waiters should wake 2, not {woken}. "
+        f"served={served} should be 2, not 5."
+    )
+    assert served == 2, f"served should be capped at number of waiters (2), got {served}"
+
+
+def test_condition_sequential_notify_accumulates():
+    """Verify that multiple notify(1) calls accumulate correctly."""
+    lock = CooperativeLock()
+    cond = CooperativeCondition(lock)
+
+    lock.acquire()
+
+    cond._waiters = 3
+    cond._next_ticket = 3
+    waiter_tickets = [0, 1, 2]
+
+    cond.notify(1)  # serves ticket 0
+    cond.notify(1)  # serves ticket 1
+
+    served = cond._served
+    lock.release()
+
+    woken = sum(1 for t in waiter_tickets if t < served)
+
+    assert woken == 2, (
+        f"Two notify(1) calls should wake 2 waiters, but {woken} would wake."
     )
