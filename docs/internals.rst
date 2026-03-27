@@ -329,14 +329,16 @@ High overhead, but complete control over interleaving.
 **DPOR** uses the same opcode-level ``sys.settrace`` and cooperative
 primitives as bytecode exploration.  The difference is the scheduling
 policy: DPOR uses a Rust engine (``crates/dpor/``) that tracks
-shared-memory accesses via vector clocks and only explores alternative
-orderings at conflict points.  The engine implements a hybrid of classic
-and Optimal DPOR (Abdulla et al., JACM 2017): wakeup trees guide
-exploration order, sleep set propagation with trace caching eliminates
-equivalent interleavings of independent operations, and deferred race
-detection computes ``notdep`` wakeup sequences for better coverage.
-Optionally adds ``sys.setprofile`` for C-call detection and
-monkey-patched I/O.
+shared-memory accesses via dual vector clocks (``dpor_vv`` for
+lock-aware happens-before, ``io_vv`` for lock-oblivious I/O tracking)
+and only explores alternative orderings at conflict points.  The engine
+implements a hybrid of classic and Optimal DPOR (Abdulla et al., JACM
+2017): wakeup trees guide exploration order, sleep set propagation with
+step-count-indexed trace caching eliminates equivalent interleavings of
+independent operations, and deferred race detection computes ``notdep``
+wakeup sequences for better coverage.  Optionally adds
+``sys.setprofile`` for C-call detection and monkey-patched I/O.  See
+`The DPOR algorithm in detail`_ below for the full description.
 
 **Async shuffler** does *not* use opcode tracing.  It stays entirely in a
 single asyncio event loop and uses ``InterleavedLoop`` plus
@@ -639,5 +641,277 @@ exploration loop.
 - Deadlocks that occur entirely inside a C extension without going through
   the row-lock registry (e.g. two threads sharing a single psycopg2
   connection object, which is unsupported anyway).
-- ``LOCK TABLE`` or advisory locks — only ``SELECT FOR UPDATE`` /
+- ``LOCK TABLE`` or advisory locks --- only ``SELECT FOR UPDATE`` /
   ``SELECT FOR SHARE`` row locks are intercepted by the SQL cursor layer.
+
+
+The DPOR algorithm in detail
+-----------------------------
+
+This section describes the Rust DPOR engine (``crates/dpor/``) and how it
+interacts with the Python scheduler to systematically explore thread
+interleavings.  The implementation is a hybrid of Algorithms 1 and 2 from
+Abdulla et al., "Source Sets: A Foundation for Optimal Dynamic Partial
+Order Reduction" (JACM 2017), augmented with a dual vector clock scheme
+for I/O conflict detection.
+
+
+Rust engine / Python scheduler interaction
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The Rust extension exposes two PyO3 classes: ``DporEngine`` (persistent
+across executions) and ``Execution`` (per-execution state).  The Python
+scheduler drives exploration via a loop:
+
+.. code-block:: text
+
+   engine = DporEngine(num_threads, preemption_bound, max_branches)
+   while True:
+       execution = engine.begin_execution()
+       # ... start threads ...
+       while True:
+           thread_id = engine.schedule(execution)      # pick next thread
+           if thread_id is None:
+               break                                   # deadlock or all done
+           # ... run thread until next scheduling point ...
+           # opcode tracing reports accesses:
+           engine.report_access(execution, tid, obj_id, "read"|"write"|...)
+           engine.report_io_access(execution, tid, obj_id, "write")
+           engine.report_sync(execution, tid, "lock_acquire", lock_id)
+           # ... etc. ...
+       # check invariant, record result
+       if not engine.next_execution():
+           break                                       # exploration complete
+
+Each ``schedule()`` call advances the path position, increments both
+vector clocks for the chosen thread, records the scheduling trace, and
+returns the thread to run.  During replay (re-executing a prefix), the
+engine follows the recorded path; at new branches, it consults the wakeup
+tree or defaults to the current thread to minimize preemptions.
+
+``next_execution()`` processes deferred races (computing ``notdep``
+sequences), handles deferred lock-release backtracking, then calls
+``step()`` to find the next unexplored path in the exploration tree.
+``step()`` walks backward through the branch stack, marks explored threads
+as ``Visited``, adds them to sleep sets, and picks the next thread from
+the wakeup tree (minimum thread ID as a deterministic proxy for the
+paper's ordering).
+
+
+Three vector clocks: ``dpor_vv``, ``io_vv``, ``causality``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Each thread maintains three vector clocks (``VersionVec``, indexed by
+thread ID):
+
+**``dpor_vv``** --- the primary happens-before clock.  Incremented on
+each scheduling step and joined on synchronization events (lock
+acquire, lock release, thread spawn, thread join).  Used by
+``process_access()`` and ``process_synced_io_access()`` to detect races
+between shared-memory accesses.  Two accesses race when their
+``dpor_vv`` values are *incomparable* (neither is component-wise less
+than or equal to the other).  Because ``dpor_vv`` includes lock edges,
+two accesses protected by the same lock will appear ordered and will
+*not* be reported as a race.
+
+**``io_vv``** --- the I/O-specific clock.  Incremented on each scheduling
+step (same as ``dpor_vv``) and joined on thread spawn/join, but
+**not** joined on lock acquire/release.  Used by ``process_io_access()``
+for file and socket operations (``LD_PRELOAD`` events, C-call profiling).
+Because ``io_vv`` omits lock edges, I/O accesses from different threads
+*always* appear potentially concurrent --- even when they occur inside
+separate critical sections of the same lock.  This conservative treatment
+ensures DPOR explores interleavings around I/O operations and catches
+TOCTOU races that lock-aware tracking would suppress.
+
+**``causality``** --- a general causal ordering clock.  Joined on lock
+acquire, thread spawn, and thread join (same events as ``dpor_vv``).
+It is not incremented on scheduling steps.  It serves as a shared
+clock for propagating causal information across synchronization points.
+
+The dual-clock design is a pragmatic extension not in the original paper.
+The paper's Algorithms 3--4 (JACM'17 p.27--28) handle locks by tracking
+enabled/disabled threads.  Frontrun instead uses the separate ``io_vv``
+without lock edges to force exploration at lock boundaries --- conservative
+(may over-explore) but catches multi-lock races that pure happens-before
+tracking would miss.
+
+**How each access API uses the clocks:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 20 25 25
+
+   * - API
+     - Clock used
+     - Recording mode
+     - Typical use
+   * - ``report_access``
+     - ``dpor_vv``
+     - last-write-wins
+     - Python attribute/subscript accesses
+   * - ``report_first_access``
+     - ``dpor_vv``
+     - first-write-wins
+     - container-level keys (earliest position for wakeup insertion)
+   * - ``report_synced_io_access``
+     - ``dpor_vv``
+     - first-write-wins
+     - Python-level I/O (Redis, SQL) ordered by Python locks
+   * - ``report_io_access``
+     - ``io_vv``
+     - first-write-wins
+     - file/socket I/O (``LD_PRELOAD``, C-call detection)
+
+The "last-write-wins" recording mode (``record_access``) overwrites the
+per-thread access entry with the latest access, so the race check always
+considers the most recent access to each object.  The "first-write-wins"
+mode (``record_io_access``) keeps the earliest access per thread, enabling
+wakeup tree insertion at the earliest point --- for example, between a
+``SELECT`` and ``UPDATE`` in a database transaction.
+
+
+Conflict detection and race checking
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Two accesses to the same shared object form a **race** (JACM'17 Def 3.3)
+when:
+
+1. They are from different threads.
+2. At least one is a write (or a weak-write conflicting with a
+   non-weak access --- see below).
+3. Their vector clocks are incomparable (neither happens-before the other).
+
+The engine tracks per-object, per-thread access history in
+``ObjectState``.  Each object maintains four maps (per-thread-read,
+per-thread-write, per-thread-weak-write, per-thread-weak-read).  When a
+new access arrives, ``dependent_accesses()`` returns all prior accesses
+from other threads that conflict with the new access's kind.
+
+**Access kinds and conflict rules:**
+
+- ``Write`` conflicts with everything (Read, Write, WeakWrite, WeakRead).
+- ``Read`` conflicts with Write and WeakWrite.
+- ``WeakWrite`` conflicts with Read and Write, but *not* with other
+  WeakWrites or WeakReads.  Used for container subscript writes
+  (``STORE_SUBSCR``): two writes to different keys of the same dict should
+  not conflict.
+- ``WeakRead`` conflicts only with Write.  Used for ``LOAD_ATTR`` on
+  mutable containers: loading a container to subscript it should not
+  conflict with subscript writes on disjoint keys.
+
+For each conflicting prior access, the engine checks
+``prev_access.dpor_vv <= current_dpor_vv`` (or ``io_vv`` for I/O
+accesses).  If the check fails, the two accesses are concurrent and a
+race is detected.
+
+
+Backtracking: wakeup trees and deferred races
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When a race is detected, the engine responds in two ways (hybrid
+approach):
+
+**Inline insertion (Algorithm 1 style, JACM'17 p.16 lines 5--9):**
+Immediately inserts the racing thread as a single-element sequence
+``[thread_id]`` into the wakeup tree at the position of the first racing
+access (``prev_path_id``).  This guarantees that no race is dropped ---
+the racing thread is always available for exploration at the conflict
+point.
+
+**Deferred ``notdep`` processing (Algorithm 2 style, JACM'17 p.24 lines
+1--6):** The race is also stored as a ``PendingRace``.  At the end of the
+execution (in ``next_execution()``), each pending race is processed by
+computing a ``notdep`` sequence: the threads of events between the two
+racing accesses that are *independent* of the first access.  An event is
+independent if it is by a different thread AND its recorded accesses do
+not conflict with the first event's accesses on any shared object.  The
+resulting sequence (independent prefix + racing thread) is inserted into
+the wakeup tree, providing a multi-step wakeup path that guides
+exploration through independent intermediates.
+
+**Deferred lock-release backtracking:** For multi-lock atomicity bugs,
+the engine collects all lock acquire and release events during
+execution.  At the end (in ``next_execution()``), for each lock release
+by thread T where T later acquires another lock, backtrack opportunities
+are inserted at the release position for all other threads.  This allows
+another thread to interleave between T's two critical sections.  For
+single-lock programs, no thread does acquire-after-release, so no
+backtracks are inserted --- giving exact trace counts.
+
+
+Wakeup trees
+~~~~~~~~~~~~~~
+
+A wakeup tree (JACM'17 Def 6.1) is an ordered tree of thread-ID
+sequences at each scheduling point.  Each root-to-leaf path represents a
+wakeup sequence --- an initial fragment of an execution that reverses a
+detected race.
+
+Insertion merges shared prefixes (if thread 0 already exists as a child,
+descend into it) and adds new branches at the rightmost position.  The
+current implementation uses exact prefix matching rather than the paper's
+equivalence checking (``v ~ w``, Lemma 6.2), which is sound but may keep
+redundant branches.
+
+When ``step()`` backtracks, it picks the minimum thread ID from the
+wakeup tree (deterministic proxy for the paper's ordering), extracts
+the subtree for that thread, and stores it as
+``pending_wakeup_subtree``.  During the next execution's scheduling, this
+subtree guides thread choices at new branches beyond the replay prefix,
+ensuring multi-step wakeup sequences are followed correctly.
+
+
+Sleep sets and trace caching
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sleep sets prevent re-exploration of equivalent interleavings.  At each
+scheduling point, after a thread is explored it is marked ``Visited``
+and added to the local sleep set.  A thread in the sleep set is skipped
+during wakeup tree insertion --- it will not be re-explored at this
+position.
+
+Sleep sets propagate across scheduling points via the independence
+relation (JACM'17 Def 3.3): a sleeping thread q stays asleep at position
+i+1 if q's recorded accesses are independent of the chosen thread p's
+accesses at position i.  Independence means that for every shared object
+accessed by both threads, the access kinds are non-conflicting.
+
+To make this precise across executions, the engine maintains a
+**step-count-indexed future access cache**.  After each completed
+execution, ``step()`` computes per-thread suffix unions:
+``future[tid][k]`` is the union of thread ``tid``'s accesses from its
+k-th scheduling step onward.  During the next execution, a sleeping
+thread that has completed k steps only needs to check its remaining work
+(steps k, k+1, ...) against the active thread's accesses.  This prevents
+false wakeups when a thread has already finished its conflicting work at
+earlier steps.
+
+
+Exploration structure
+~~~~~~~~~~~~~~~~~~~~~~
+
+The exploration tree is a stack of ``Branch`` nodes (one per scheduling
+point).  Each branch records:
+
+- Thread statuses (Disabled, Pending, Active, Visited, Blocked, Yield)
+- The active (chosen) thread
+- The wakeup tree for this position
+- The sleep set (local + propagated)
+- Per-thread access records for independence checks
+- Preemption count (for bounded exploration)
+
+Exploration proceeds as depth-first search.  ``step()`` walks backward
+through the stack: at each branch, it marks the current thread as Visited,
+removes it from the wakeup tree, and looks for the next unexplored thread.
+If the wakeup tree has more branches, it picks the minimum thread and
+resets ``pos`` to 0 for a full replay from scratch (stateless model
+checking).  If the wakeup tree is empty, it pops the branch and continues
+backtracking.
+
+A **preemption bound** limits how many times the scheduler forces a
+context switch away from a runnable thread.  When the bound is reached,
+wakeup tree insertions that would require a preemption are deferred to an
+ancestor branch where the target thread is already active (conservative
+wakeup propagation).  This keeps exploration tractable while still
+covering most concurrency bugs, which typically require few preemptions.
