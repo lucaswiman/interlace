@@ -360,6 +360,14 @@ class DporScheduler:
         # deferred-I/O flush decisions.
         self._lock_depth_by_thread: dict[int, int] = {}
 
+        # IO trace: records (thread_id, resource_id) in IO execution order.
+        # Populated by after_io() under the condition lock.  See defect #16.
+        self._io_trace: list[tuple[int, str]] = []
+        # Explicit Python-level I/O boundary currently in progress. While set,
+        # the owning thread keeps the scheduler turn until after_io() runs.
+        self._active_io_thread: int | None = None
+        self._next_thread_after_io: int | None = None
+
         # Maps iterator id → original container object. When GET_ITER creates
         # an iterator from a mutable container, we record the mapping so that
         # FOR_ITER can report reads on the underlying container.
@@ -458,6 +466,51 @@ class DporScheduler:
         """
         return self._report_and_wait(frame, thread_id)
 
+    def _flush_pending_io_for_unlocked(self, flush_thread_id: int, *, allow_inside_lock: bool = False) -> None:
+        pending_io = self._pending_io_by_thread.get(flush_thread_id)
+        if not pending_io:
+            return
+        inside_lock = self._lock_depth_by_thread.get(flush_thread_id, 0) > 0
+        if not allow_inside_lock and inside_lock:
+            # Even though we defer most events, synced events
+            # (Python-level Redis/SQL) can be flushed now — they use
+            # dpor_vv which respects lock HB, so recording them at
+            # the in-lock path_id is correct and avoids position
+            # misattribution from deferred flushing.
+            engine = self.engine
+            execution = self.execution
+            remaining: list[tuple[int, str, bool]] = []
+            for obj_key, io_kind, synced in pending_io:
+                if synced:
+                    with self._engine_lock:
+                        engine.report_synced_io_access(execution, flush_thread_id, obj_key, io_kind)
+                else:
+                    remaining.append((obj_key, io_kind, synced))
+            pending_io.clear()
+            pending_io.extend(remaining)
+            return
+        engine = self.engine
+        execution = self.execution
+        for obj_key, io_kind, synced in pending_io:
+            with self._engine_lock:
+                if synced:
+                    engine.report_synced_io_access(execution, flush_thread_id, obj_key, io_kind)
+                else:
+                    engine.report_io_access(execution, flush_thread_id, obj_key, io_kind)
+        pending_io.clear()
+
+    def _flush_other_pending_io_for_current_io_unlocked(self, thread_id: int) -> None:
+        current_pending = self._pending_io_by_thread.get(thread_id)
+        if not current_pending:
+            return
+        for other_thread_id, pending_io in list(self._pending_io_by_thread.items()):
+            if other_thread_id == thread_id or not pending_io:
+                continue
+            # Another thread reached a real I/O boundary, so any
+            # deferred I/O from this thread is now part of a real
+            # race window and must become visible to the engine.
+            self._flush_pending_io_for_unlocked(other_thread_id, allow_inside_lock=True)
+
     def _report_and_wait(self, frame: Any | None, thread_id: int) -> bool:
         from frontrun._cooperative import _scheduler_tls
 
@@ -467,52 +520,6 @@ class DporScheduler:
             # See defect #7.
             _scheduler_tls._in_dpor_machinery = True
             try:
-
-                def _flush_pending_io_for(flush_thread_id: int, *, allow_inside_lock: bool = False) -> None:
-                    pending_io = self._pending_io_by_thread.get(flush_thread_id)
-                    if not pending_io:
-                        return
-                    inside_lock = self._lock_depth_by_thread.get(flush_thread_id, 0) > 0
-                    if not allow_inside_lock and inside_lock:
-                        # Even though we defer most events, synced events
-                        # (Python-level Redis/SQL) can be flushed now — they use
-                        # dpor_vv which respects lock HB, so recording them at
-                        # the in-lock path_id is correct and avoids position
-                        # misattribution from deferred flushing.
-                        engine = self.engine
-                        execution = self.execution
-                        remaining: list[tuple[int, str, bool]] = []
-                        for obj_key, io_kind, synced in pending_io:
-                            if synced:
-                                with self._engine_lock:
-                                    engine.report_synced_io_access(execution, flush_thread_id, obj_key, io_kind)
-                            else:
-                                remaining.append((obj_key, io_kind, synced))
-                        pending_io.clear()
-                        pending_io.extend(remaining)
-                        return
-                    engine = self.engine
-                    execution = self.execution
-                    for obj_key, io_kind, synced in pending_io:
-                        with self._engine_lock:
-                            if synced:
-                                engine.report_synced_io_access(execution, flush_thread_id, obj_key, io_kind)
-                            else:
-                                engine.report_io_access(execution, flush_thread_id, obj_key, io_kind)
-                    pending_io.clear()
-
-                def _flush_other_pending_io_for_current_io() -> None:
-                    current_pending = self._pending_io_by_thread.get(thread_id)
-                    if not current_pending:
-                        return
-                    for other_thread_id, pending_io in list(self._pending_io_by_thread.items()):
-                        if other_thread_id == thread_id or not pending_io:
-                            continue
-                        # Another thread reached a real I/O boundary, so any
-                        # deferred I/O from this thread is now part of a real
-                        # race window and must become visible to the engine.
-                        _flush_pending_io_for(other_thread_id, allow_inside_lock=True)
-
                 # Merge LD_PRELOAD I/O events (C-level send/recv from e.g.
                 # psycopg2) into the thread's pending_io list.  The preload
                 # bridge buffers events from the pipe reader thread, keyed by
@@ -576,15 +583,15 @@ class DporScheduler:
                             # Flush synced IO events even when skipping the
                             # scheduling point — they use dpor_vv and should
                             # be recorded at the correct in-lock position.
-                            _flush_pending_io_for(thread_id)
+                            self._flush_pending_io_for_unlocked(thread_id)
                             return True
-                        _flush_other_pending_io_for_current_io()
+                        self._flush_other_pending_io_for_current_io_unlocked(thread_id)
                         # Flush deferred I/O only once this thread actually owns
                         # the current DPOR step. On free-threaded Python a thread
                         # can reach report_and_wait while another thread still owns
                         # the step; flushing earlier stamps the access onto the
                         # wrong path_id and can hide the wakeup tree insertion point.
-                        _flush_pending_io_for(thread_id)
+                        self._flush_pending_io_for_unlocked(thread_id)
                         # Process opcode accesses only when it's our turn.
                         # Deferring this until the thread is scheduled ensures
                         # that accesses are recorded at the correct path_id
@@ -652,6 +659,84 @@ class DporScheduler:
                         return False
             finally:
                 _scheduler_tls._in_dpor_machinery = False
+
+    def before_io(self, thread_id: int, resource_id: str) -> None:
+        """Enter an explicit Python-level I/O boundary.
+
+        Unlike wait_for_turn(), this does not release the scheduler turn
+        immediately. The current thread keeps running until after_io()
+        records completion and hands off to the precomputed next thread.
+        """
+        from frontrun._cooperative import _scheduler_tls
+
+        with self._condition:
+            _scheduler_tls._in_dpor_machinery = True
+            try:
+                while True:
+                    if self._finished or self._error:
+                        return
+
+                    if self._active_io_thread is not None and self._active_io_thread != thread_id:
+                        pass
+                    elif self._current_thread == thread_id:
+                        current_pending = self._pending_io_by_thread.get(thread_id)
+                        if (
+                            current_pending
+                            and self._lock_depth_by_thread.get(thread_id, 0) > 0
+                            and self._all_other_live_threads_blocked_by_current(thread_id)
+                        ):
+                            # Keep ownership of the turn and avoid forcing a
+                            # preemption inside a lock-held deadlock-avoidance path.
+                            self._flush_pending_io_for_unlocked(thread_id)
+                            self._active_io_thread = thread_id
+                            self._next_thread_after_io = thread_id
+                            self._condition.notify_all()
+                            return
+
+                        self._flush_other_pending_io_for_current_io_unlocked(thread_id)
+                        self._flush_pending_io_for_unlocked(thread_id)
+                        next_thread = self._schedule_next()
+                        _pp = self._last_scheduled_path_id
+                        if _pp is not None:
+                            _dpor_tls._last_path_id = _pp
+                        self._active_io_thread = thread_id
+                        self._next_thread_after_io = next_thread
+                        self._current_thread = thread_id
+                        self._condition.notify_all()
+                        return
+
+                    if not self._condition.wait(timeout=self.deadlock_timeout):
+                        if self._current_thread in self._threads_done:
+                            next_thread = self._schedule_next()
+                            self._current_thread = next_thread
+                            if next_thread is None:
+                                self._finished = True
+                            self._condition.notify_all()
+                            continue
+                        self._error = TimeoutError(
+                            f"DPOR I/O deadlock before {resource_id}: waiting for thread {thread_id}, "
+                            f"current is {self._current_thread}"
+                        )
+                        self._condition.notify_all()
+                        return
+            finally:
+                _scheduler_tls._in_dpor_machinery = False
+
+    def after_io(self, thread_id: int, resource_id: str) -> None:
+        """Called immediately after an IO command completes.
+
+        During exploration, records the IO event and releases the turn to
+        the next thread chosen at before_io().
+        """
+        with self._condition:
+            self._io_trace.append((thread_id, resource_id))
+            if self._active_io_thread == thread_id:
+                self._active_io_thread = None
+                self._current_thread = self._next_thread_after_io
+                self._next_thread_after_io = None
+                if self._current_thread is None and len(self._threads_done) >= self.num_threads:
+                    self._finished = True
+                self._condition.notify_all()
 
     def mark_done(self, thread_id: int) -> None:
         with self._condition:
@@ -1038,6 +1123,169 @@ class _ReplayDporScheduler(DporScheduler):
                         continue
                     self._error = TimeoutError(
                         f"DPOR replay deadlock: waiting for thread {thread_id}, current is {self._current_thread}"
+                    )
+                    self._condition.notify_all()
+                    return False
+
+
+class _IOAnchoredReplayScheduler(DporScheduler):
+    """Replay using only IO boundaries as schedule anchors (defect #16).
+
+    When detect_io=True, every CALL opcode is a scheduling point. If the code
+    under test has state-dependent paths (e.g., early returns that skip Redis
+    operations), the number of opcode-level scheduling points can change
+    between exploration and replay, desynchronising the schedule.
+
+    This scheduler uses a two-phase IO protocol:
+
+    1. ``before_io(tid, resource_id)`` checks the next recorded anchor and
+       blocks if it's not this thread's turn.
+
+    2. ``after_io(tid, resource_id)`` (post-IO hook): called from the Redis
+       interception layer *after* the command completes, inside the
+       scheduler's condition lock.  Atomically records the IO event and
+       switches ``current_thread`` to the next IO schedule entry.
+
+    Between IO boundaries, one thread runs exclusively (enforced by opcode-
+    level ``report_and_wait(frame, tid)`` blocking on ``current_thread``).
+    """
+
+    def __init__(
+        self,
+        io_schedule: list[tuple[int, str]],
+        num_threads: int,
+        *,
+        deadlock_timeout: float = 5.0,
+        trace_recorder: TraceRecorder | None = None,
+        detect_io: bool = False,
+    ) -> None:
+        self._io_schedule = list(io_schedule)
+        self._io_index = 0
+        super().__init__(
+            _ReplayEngine(),  # type: ignore[arg-type]
+            _ReplayExecution(),  # type: ignore[arg-type]
+            num_threads,
+            deadlock_timeout=deadlock_timeout,
+            trace_recorder=trace_recorder,
+            detect_io=detect_io,
+        )
+        # _schedule_next() in super().__init__ consumed an entry.
+        # Reset so the first IO scheduling point matches entry 0.
+        self._io_index = 0
+        # Set initial current_thread to the first IO schedule entry.
+        self._current_thread = io_schedule[0][0] if io_schedule else 0
+
+    def _schedule_next(self) -> int | None:
+        """Override to use IO schedule instead of DPOR engine."""
+        if self._io_index >= len(self._io_schedule):
+            active = [t for t in range(self.num_threads) if t not in self._threads_done]
+            return active[0] if active else None
+        return self._io_schedule[self._io_index][0]
+
+    def wait_for_turn(self, thread_id: int) -> bool:
+        return self._wait_for_turn(thread_id)
+
+    def report_and_wait(self, frame: Any, thread_id: int) -> bool:
+        if frame is not None:
+            _process_opcode(frame, self, thread_id)
+        return self._wait_for_turn(thread_id)
+
+    def before_io(self, thread_id: int, resource_id: str) -> None:
+        with self._condition:
+            while True:
+                if self._finished or self._error:
+                    return
+
+                if self._current_thread in self._threads_done:
+                    self._current_thread = self._schedule_next()
+                    if self._current_thread is None and len(self._threads_done) >= self.num_threads:
+                        self._finished = True
+                        self._condition.notify_all()
+                        return
+
+                if self._active_io_thread is not None and self._active_io_thread != thread_id:
+                    pass
+                elif self._current_thread == thread_id:
+                    if self._io_index >= len(self._io_schedule):
+                        # No more anchors; let the active thread finish freely.
+                        self._active_io_thread = thread_id
+                        self._next_thread_after_io = thread_id
+                        self._condition.notify_all()
+                        return
+
+                    expected_tid, expected_resource_id = self._io_schedule[self._io_index]
+                    if expected_tid != thread_id or expected_resource_id != resource_id:
+                        self._error = RuntimeError(
+                            "DPOR IO-anchored replay desynchronised: "
+                            f"expected {(expected_tid, expected_resource_id)!r}, "
+                            f"got {(thread_id, resource_id)!r}"
+                        )
+                        self._condition.notify_all()
+                        return
+
+                    self._io_index += 1
+                    self._active_io_thread = thread_id
+                    self._next_thread_after_io = self._schedule_next()
+                    self._current_thread = thread_id
+                    self._condition.notify_all()
+                    return
+
+                if not self._condition.wait(timeout=self.deadlock_timeout):
+                    if self._current_thread in self._threads_done:
+                        self._current_thread = self._schedule_next()
+                        if self._current_thread is None and len(self._threads_done) >= self.num_threads:
+                            self._finished = True
+                        self._condition.notify_all()
+                        continue
+                    self._error = TimeoutError(
+                        f"DPOR IO-anchored replay deadlock before {resource_id}: "
+                        f"waiting for thread {thread_id}, current is {self._current_thread}, "
+                        f"io_index={self._io_index}"
+                    )
+                    self._condition.notify_all()
+                    return
+
+    def after_io(self, thread_id: int, resource_id: str) -> None:
+        with self._condition:
+            if self._finished or self._error:
+                return
+            if self._active_io_thread == thread_id:
+                self._active_io_thread = None
+                self._current_thread = self._next_thread_after_io
+                self._next_thread_after_io = None
+            self._condition.notify_all()
+
+    def _wait_for_turn(self, thread_id: int) -> bool:
+        with self._condition:
+            while True:
+                if self._finished or self._error:
+                    return False
+
+                if self._current_thread in self._threads_done:
+                    self._current_thread = self._schedule_next()
+                    if self._current_thread is None and len(self._threads_done) >= self.num_threads:
+                        self._finished = True
+                        self._condition.notify_all()
+                        return False
+                    self._condition.notify_all()
+                    continue
+
+                if self._active_io_thread == thread_id:
+                    return True
+
+                if self._current_thread == thread_id:
+                    return True
+
+                if not self._condition.wait(timeout=self.deadlock_timeout):
+                    if self._current_thread in self._threads_done:
+                        self._current_thread = self._schedule_next()
+                        if self._current_thread is None and len(self._threads_done) >= self.num_threads:
+                            self._finished = True
+                        self._condition.notify_all()
+                        continue
+                    self._error = TimeoutError(
+                        f"DPOR IO-anchored replay deadlock: waiting for thread {thread_id}, "
+                        f"current is {self._current_thread}, io_index={self._io_index}"
                     )
                     self._condition.notify_all()
                     return False
@@ -2916,15 +3164,31 @@ def _run_dpor_schedule(
     detect_io: bool = False,
     deadlock_timeout: float = 5.0,
     trace_recorder: TraceRecorder | None = None,
+    io_schedule: list[tuple[int, str]] | None = None,
 ) -> T:
-    """Replay a DPOR schedule using the DPOR runner rather than OpcodeScheduler."""
-    scheduler = _ReplayDporScheduler(
-        schedule,
-        len(threads),
-        deadlock_timeout=deadlock_timeout,
-        trace_recorder=trace_recorder,
-        detect_io=detect_io,
-    )
+    """Replay a DPOR schedule using the DPOR runner rather than OpcodeScheduler.
+
+    When *io_schedule* is provided and *detect_io* is True, uses the
+    IO-anchored replay scheduler (defect #16) which only enforces the
+    schedule at IO boundaries, tolerating state-dependent changes in
+    opcode-level scheduling points.
+    """
+    if io_schedule is not None and detect_io:
+        scheduler: DporScheduler = _IOAnchoredReplayScheduler(
+            io_schedule,
+            len(threads),
+            deadlock_timeout=deadlock_timeout,
+            trace_recorder=trace_recorder,
+            detect_io=detect_io,
+        )
+    else:
+        scheduler = _ReplayDporScheduler(
+            schedule,
+            len(threads),
+            deadlock_timeout=deadlock_timeout,
+            trace_recorder=trace_recorder,
+            detect_io=detect_io,
+        )
     runner = DporBytecodeRunner(scheduler, detect_io=detect_io)
 
     runner._patch_locks()
@@ -2962,12 +3226,19 @@ def _reproduce_dpor_counterexample(
     lock_timeout: int | None,
     invariant: Callable[[T], bool] | None = None,
     detect_io: bool = True,
+    io_schedule: list[tuple[int, str]] | None = None,
 ) -> tuple[int, int]:
     """Measure how often a DPOR counterexample reproduces under the DPOR runner.
 
     Reproduction runs with the same IO interception (SQL, Redis) as
     exploration so that the replay scheduler can enforce interleavings at
     IO boundaries, not just bytecode boundaries.
+
+    When *io_schedule* is provided, tries IO-anchored replay first
+    (defect #16).  Falls back to full-schedule replay only if the
+    anchored trace fails to reproduce at all, which keeps older
+    non-anchored cases from regressing while explicit I/O hooks are
+    rolled out incrementally.
     """
     from frontrun._preload_io import _set_preload_pipe_fd
     from frontrun._redis_client import patch_redis, set_redis_replay_mode, unpatch_redis
@@ -2994,6 +3265,7 @@ def _reproduce_dpor_counterexample(
                     timeout=timeout_per_run,
                     detect_io=detect_io,
                     deadlock_timeout=deadlock_timeout,
+                    io_schedule=io_schedule,
                 )
                 if invariant is not None and not invariant(replay_state):
                     successes += 1
@@ -3002,6 +3274,29 @@ def _reproduce_dpor_counterexample(
                     successes += 1
             except Exception:
                 pass  # timeout / crash during replay — not a reproduction
+
+        # Fallback: if IO-anchored replay got 0/N, retry with the regular
+        # full-schedule replay.  This is a compatibility safety net for
+        # cases that do not yet expose enough explicit I/O anchors.
+        if successes == 0 and io_schedule is not None:
+            for _ in range(reproduce_on_failure):
+                try:
+                    replay_state = _run_dpor_schedule(
+                        schedule_list,
+                        setup,
+                        threads,
+                        timeout=timeout_per_run,
+                        detect_io=detect_io,
+                        deadlock_timeout=deadlock_timeout,
+                        io_schedule=None,  # use full-schedule replay
+                    )
+                    if invariant is not None and not invariant(replay_state):
+                        successes += 1
+                except DeadlockError:
+                    if invariant is None:
+                        successes += 1
+                except Exception:
+                    pass
     finally:
         set_redis_replay_mode(False)
         unpatch_redis()
@@ -3292,6 +3587,7 @@ def explore_dpor(
                         lock_timeout=lock_timeout,
                         invariant=None,
                         detect_io=detect_io,
+                        io_schedule=list(scheduler._io_trace) if detect_io and scheduler._io_trace else None,
                     )
                     result.reproduction_attempts = attempts
                     result.reproduction_successes = successes
@@ -3352,6 +3648,7 @@ def explore_dpor(
                         lock_timeout=lock_timeout,
                         invariant=invariant,
                         detect_io=detect_io,
+                        io_schedule=list(scheduler._io_trace) if detect_io and scheduler._io_trace else None,
                     )
                     result.reproduction_attempts = attempts
                     result.reproduction_successes = successes
