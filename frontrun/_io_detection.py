@@ -110,8 +110,6 @@ _real_socket_sendto = socket.socket.sendto
 _real_socket_recv = socket.socket.recv
 _real_socket_recv_into = socket.socket.recv_into
 _real_socket_recvfrom = socket.socket.recvfrom
-_real_socket_close = socket.socket.close
-
 
 def _report_socket_io(sock: socket.socket, kind: str) -> None:
     """Report a socket I/O event to the per-thread reporter, if installed."""

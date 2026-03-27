@@ -1,8 +1,9 @@
 """
 Bytecode-tracing DPOR (Dynamic Partial Order Reduction) for frontrun.
 
-This module implements systematic interleaving exploration using DPOR,
-completely separate from the existing bytecode.py random exploration.
+This module implements systematic interleaving exploration using DPOR.
+Shares cooperative threading primitives and shadow-stack infrastructure
+with bytecode.py (random exploration).
 
 The approach:
 1. A Rust DPOR engine (frontrun._dpor) manages the exploration tree,
@@ -3387,13 +3388,11 @@ def explore_dpor(
     if trace_packages is not None:
         _set_active_trace_filter(_TraceFilter(trace_packages))
     num_threads = len(threads)
-    pb = None if preemption_bound is None else preemption_bound
-    me = None if max_executions is None else max_executions
     engine = PyDporEngine(
         num_threads=num_threads,
-        preemption_bound=pb,
+        preemption_bound=preemption_bound,
         max_branches=max_branches,
-        max_executions=me,
+        max_executions=max_executions,
     )
 
     result = InterleavingResult(property_holds=True)
@@ -3509,7 +3508,7 @@ def explore_dpor(
             clear_permanent_suppressions()
             # Set up switch point collection for the report
             _collecting_report = report is not None and len(report.executions) < _MAX_RECORDED_EXECUTIONS
-            switch_points: list[Any] = [] if _collecting_report else []
+            switch_points: list[Any] = []
             scheduler = DporScheduler(
                 engine,
                 execution,
