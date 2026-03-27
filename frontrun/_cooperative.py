@@ -835,9 +835,10 @@ class CooperativeCondition:
     def notify_all(self) -> None:
         # Enforce the Condition invariant: caller must hold self._lock.
         self._check_owned()
-        actual = max(self._waiters, 1)
-        self._served += actual
-        self._notify_count += actual
+        actual = self._waiters
+        if actual > 0:
+            self._served += actual
+            self._notify_count += actual
         with self._real_cond:
             self._real_cond.notify_all()
 

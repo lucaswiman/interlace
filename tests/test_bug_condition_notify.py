@@ -105,6 +105,29 @@ def test_condition_notify_all_wakes_all():
     assert woken == 4, f"notify_all() should wake all 4 waiters, but {woken} would see the notification."
 
 
+def test_condition_notify_all_no_waiters_is_noop():
+    """Verify that notify_all() with no waiters doesn't advance served.
+
+    Bug: notify_all() used max(self._waiters, 1) which always incremented
+    served by at least 1, even with no waiters. This caused the next thread
+    to call wait() to wake up immediately (spurious wakeup).
+    """
+    lock = CooperativeLock()
+    cond = CooperativeCondition(lock)
+
+    lock.acquire()
+    # No waiters
+    assert cond._waiters == 0
+    before = cond._served
+
+    cond.notify_all()
+
+    assert cond._served == before, (
+        f"notify_all() with 0 waiters should not advance served, but served went from {before} to {cond._served}."
+    )
+    lock.release()
+
+
 def test_condition_notify_more_than_waiters():
     """Verify that notify(n) where n > waiters doesn't over-serve."""
     lock = CooperativeLock()
