@@ -1207,9 +1207,10 @@ class _IOAnchoredReplayScheduler(DporScheduler):
                     pass
                 elif self._current_thread == thread_id:
                     if self._io_index >= len(self._io_schedule):
-                        # No more anchors; let the active thread finish freely.
-                        self._active_io_thread = thread_id
-                        self._next_thread_after_io = thread_id
+                        self._error = RuntimeError(
+                            "DPOR IO-anchored replay desynchronised: "
+                            f"unexpected extra I/O anchor {(thread_id, resource_id)!r}"
+                        )
                         self._condition.notify_all()
                         return
 
@@ -3234,11 +3235,9 @@ def _reproduce_dpor_counterexample(
     exploration so that the replay scheduler can enforce interleavings at
     IO boundaries, not just bytecode boundaries.
 
-    When *io_schedule* is provided, tries IO-anchored replay first
-    (defect #16).  Falls back to full-schedule replay only if the
-    anchored trace fails to reproduce at all, which keeps older
-    non-anchored cases from regressing while explicit I/O hooks are
-    rolled out incrementally.
+    When *io_schedule* is provided, replay is anchored to explicit I/O
+    boundaries (defect #16) so state-dependent opcode paths do not
+    desynchronise the schedule.
     """
     from frontrun._preload_io import _set_preload_pipe_fd
     from frontrun._redis_client import patch_redis, set_redis_replay_mode, unpatch_redis
@@ -3275,28 +3274,6 @@ def _reproduce_dpor_counterexample(
             except Exception:
                 pass  # timeout / crash during replay — not a reproduction
 
-        # Fallback: if IO-anchored replay got 0/N, retry with the regular
-        # full-schedule replay.  This is a compatibility safety net for
-        # cases that do not yet expose enough explicit I/O anchors.
-        if successes == 0 and io_schedule is not None:
-            for _ in range(reproduce_on_failure):
-                try:
-                    replay_state = _run_dpor_schedule(
-                        schedule_list,
-                        setup,
-                        threads,
-                        timeout=timeout_per_run,
-                        detect_io=detect_io,
-                        deadlock_timeout=deadlock_timeout,
-                        io_schedule=None,  # use full-schedule replay
-                    )
-                    if invariant is not None and not invariant(replay_state):
-                        successes += 1
-                except DeadlockError:
-                    if invariant is None:
-                        successes += 1
-                except Exception:
-                    pass
     finally:
         set_redis_replay_mode(False)
         unpatch_redis()
