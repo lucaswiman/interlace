@@ -279,15 +279,17 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
         return RedisAccessResult(read_keys=[], write_keys=keys, is_transaction_control=False)
 
     # Blocking pop commands — first arg(s) are keys, last is timeout.
+    # These are read+write: they return the popped value (read) and remove
+    # the element (write), matching how RPOPLPUSH treats its source key.
     if upper in ("BLPOP", "BRPOP"):
         # Args: key [key ...] timeout
         keys = [str(a) for a in cmd_args[:-1]] if len(cmd_args) > 1 else [first_key]
-        return RedisAccessResult(read_keys=[], write_keys=keys, is_transaction_control=False)
+        return RedisAccessResult(read_keys=keys, write_keys=keys, is_transaction_control=False)
 
-    # BZPOPMIN / BZPOPMAX — key [key ...] timeout
+    # BZPOPMIN / BZPOPMAX — key [key ...] timeout (read+write like BLPOP/BRPOP)
     if upper in ("BZPOPMIN", "BZPOPMAX"):
         keys = [str(a) for a in cmd_args[:-1]] if len(cmd_args) > 1 else [first_key]
-        return RedisAccessResult(read_keys=[], write_keys=keys, is_transaction_control=False)
+        return RedisAccessResult(read_keys=keys, write_keys=keys, is_transaction_control=False)
 
     # Set operations with destination: SUNIONSTORE, SINTERSTORE, SDIFFSTORE
     if upper in ("SUNIONSTORE", "SINTERSTORE", "SDIFFSTORE") and len(cmd_args) >= 2:

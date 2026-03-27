@@ -164,6 +164,30 @@ class TestListCommands:
         result = parse_redis_access("LMPOP", (1, "mylist", "LEFT"))
         assert result.write_keys == ["mylist"]
 
+    def test_blpop_is_read_write(self) -> None:
+        """BLPOP pops (removes) and returns the value — both read and write."""
+        result = parse_redis_access("BLPOP", ("mylist", 0))
+        assert result.read_keys == ["mylist"]
+        assert result.write_keys == ["mylist"]
+
+    def test_brpop_is_read_write(self) -> None:
+        """BRPOP pops (removes) and returns the value — both read and write."""
+        result = parse_redis_access("BRPOP", ("mylist", 0))
+        assert result.read_keys == ["mylist"]
+        assert result.write_keys == ["mylist"]
+
+    def test_blpop_multiple_keys(self) -> None:
+        """BLPOP key [key ...] timeout — all keys are read+write."""
+        result = parse_redis_access("BLPOP", ("list1", "list2", 0))
+        assert result.read_keys == ["list1", "list2"]
+        assert result.write_keys == ["list1", "list2"]
+
+    def test_brpop_multiple_keys(self) -> None:
+        """BRPOP key [key ...] timeout — all keys are read+write."""
+        result = parse_redis_access("BRPOP", ("list1", "list2", 0))
+        assert result.read_keys == ["list1", "list2"]
+        assert result.write_keys == ["list1", "list2"]
+
 
 class TestSetCommands:
     """Test classification of Redis set commands."""
@@ -229,6 +253,18 @@ class TestSortedSetCommands:
         result = parse_redis_access("BZMPOP", (0, 2, "zset1", "zset2", "MIN"))
         assert result.write_keys == ["zset1", "zset2"]
         assert result.read_keys == []
+
+    def test_bzpopmin_is_read_write(self) -> None:
+        """BZPOPMIN pops (removes) and returns the min element — both read and write."""
+        result = parse_redis_access("BZPOPMIN", ("myzset", 0))
+        assert result.read_keys == ["myzset"]
+        assert result.write_keys == ["myzset"]
+
+    def test_bzpopmax_is_read_write(self) -> None:
+        """BZPOPMAX pops (removes) and returns the max element — both read and write."""
+        result = parse_redis_access("BZPOPMAX", ("myzset", 0))
+        assert result.read_keys == ["myzset"]
+        assert result.write_keys == ["myzset"]
 
 
 class TestKeyCommands:
