@@ -48,7 +48,7 @@ def _take_screenshot(html_path: str, output_path: str) -> None:
     with sync_playwright() as p:
         launch_kwargs: dict = {"executable_path": _executable} if _executable else {}
         browser = p.chromium.launch(**launch_kwargs)
-        page = browser.new_page(viewport={"width": 1400, "height": 900})
+        page = browser.new_page(viewport={"width": 800, "height": 900})
 
         file_url = f"file://{os.path.abspath(html_path)}"
         page.goto(file_url)
