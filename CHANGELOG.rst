@@ -6,6 +6,10 @@ All releases: https://github.com/lucaswiman/frontrun/releases
 Unreleased
 ----------
 
+* **Marker-level exhaustive exploration** — new ``explore_marker_interleavings()``, ``all_marker_schedules()``, and ``marker_schedule_strategy()`` provide completeness guarantees at trace-marker granularity.
+* Fixed multiple DPOR correctness bugs: ``BoundedSemaphore.release()`` missing ``_report()``, ``Condition.notify(1)`` waking all waiters instead of one, false deadlock detection in async DPOR, lock over-exploration, and ``record_access()`` unconditionally upgrading ``AccessKind`` to ``Write``.
+* Fixed SQL parsing of quoted schema-qualified table names and Redis blocking-pop classification and reproduction issues.
+
 0.3.0 (2026-03-23)
 -------------------
 
