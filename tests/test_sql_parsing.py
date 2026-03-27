@@ -40,9 +40,8 @@ class TestStripQuotes:
         assert _strip_quotes("public.users") == "users"
 
     def test_schema_qualified_double_quoted(self):
-        # "public"."users" → strip leading quote, rsplit on '.', last component is '"users'
-        # (the closing quote of the second component is not stripped by this function)
-        assert _strip_quotes('"public"."users"') == '"users'
+        # "public"."users" → extract table name 'users' from schema-qualified quoted identifier
+        assert _strip_quotes('"public"."users"') == "users"
 
     def test_deep_dotted(self):
         assert _strip_quotes("db.schema.table") == "table"
