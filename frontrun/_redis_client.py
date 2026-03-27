@@ -161,20 +161,42 @@ def _intercept_execute_command(
 
     # In replay mode (defect #9 fix), force a scheduling point even
     # without IO reporting so the replay scheduler can enforce the
-    # interleaving at Redis command boundaries.
-    needs_scheduling_point = reported or _redis_replay_mode
+    # interleaving at Redis command boundaries.  Only do this for
+    # data commands (those that have keys), not connection-setup
+    # commands (AUTH, SELECT, CLIENT SETNAME, etc.) which didn't
+    # create scheduling points during exploration.
+    needs_scheduling_point = reported
+    if not needs_scheduling_point and _redis_replay_mode:
+        access = parse_redis_access(cmd_name, cmd_args)
+        needs_scheduling_point = bool(access.read_keys or access.write_keys)
 
     # Force a DPOR scheduling point so the engine can interleave between
     # Redis operations.
+    dpor_ctx = None
+    resource_id = ""
     if needs_scheduling_point:
         dpor_ctx = _get_dpor_context()
         if dpor_ctx is not None:
-            dpor_ctx[0].report_and_wait(None, dpor_ctx[1])
+            # Build a structured resource ID for IO-anchored replay.
+            db_scope = _get_redis_db_scope(self) or ""
+            first_key = str(cmd_args[0]) if cmd_args else ""
+            resource_id = f"redis:{cmd_name}:{first_key}:{db_scope}"
+            dpor_ctx[0].before_io(dpor_ctx[1], resource_id)
 
-    if reported:
-        with _suppress_endpoint_io():
-            return original_method(self, *args, **kwargs)
-    return original_method(self, *args, **kwargs)
+    try:
+        if reported:
+            with _suppress_endpoint_io():
+                result = original_method(self, *args, **kwargs)
+        else:
+            result = original_method(self, *args, **kwargs)
+    finally:
+        # after_io runs inside a finally so the IO trace is recorded
+        # even if the command raises.  During replay, this atomically
+        # switches threads under the scheduler's condition lock.
+        if dpor_ctx is not None:
+            dpor_ctx[0].after_io(dpor_ctx[1], resource_id)
+
+    return result
 
 
 def _intercept_pipeline_execute(
@@ -209,15 +231,25 @@ def _intercept_pipeline_execute(
     # schedule to misalign.  See defect #10.
     needs_scheduling_point = reported or _redis_replay_mode
 
+    dpor_ctx = None
+    resource_id = ""
     if needs_scheduling_point:
         dpor_ctx = _get_dpor_context()
         if dpor_ctx is not None:
-            dpor_ctx[0].report_and_wait(None, dpor_ctx[1])
+            resource_id = "redis:PIPELINE"
+            dpor_ctx[0].before_io(dpor_ctx[1], resource_id)
 
-    if reported:
-        with _suppress_endpoint_io():
-            return original_method(self, *args, **kwargs)
-    return original_method(self, *args, **kwargs)
+    try:
+        if reported:
+            with _suppress_endpoint_io():
+                result = original_method(self, *args, **kwargs)
+        else:
+            result = original_method(self, *args, **kwargs)
+    finally:
+        if dpor_ctx is not None:
+            dpor_ctx[0].after_io(dpor_ctx[1], resource_id)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
