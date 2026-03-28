@@ -1378,15 +1378,12 @@ try:
     )
 except ImportError:
     pass
+_db_cursor_types: list[type] = [__import__("sqlite3").Cursor]
 try:
     import psycopg2.extensions as _psycopg2_ext  # type: ignore[import-untyped]
 
-    _io_client_types.extend(
-        [
-            _psycopg2_ext.connection,
-            _psycopg2_ext.cursor,
-        ]
-    )
+    _io_client_types.extend([_psycopg2_ext.connection, _psycopg2_ext.cursor])
+    _db_cursor_types.append(_psycopg2_ext.cursor)
 except ImportError:
     pass
 try:
@@ -1398,21 +1395,11 @@ except ImportError:
 _IO_CLIENT_TYPES: tuple[type, ...] = tuple(_io_client_types)
 del _io_client_types
 
-# DB cursor types that should be tracked at Python object level even though
-# they are also I/O client types.  Two threads sharing a single cursor is a
-# real race (the cursor's internal result buffer is clobbered), but the
-# SQL-level reporter only tracks table/row granularity and misses it.
-# Per-thread cursors are different objects, so tracking them doesn't create
-# false conflicts.
-_db_cursor_types: list[type] = []
-try:
-    import psycopg2.extensions as _psycopg2_ext_cur  # type: ignore[import-untyped]
-
-    _db_cursor_types.append(_psycopg2_ext_cur.cursor)
-except ImportError:
-    pass
-# Also include sqlite3.Cursor — same sharing hazard.
-_db_cursor_types.append(__import__("sqlite3").Cursor)
+# DB cursor types: tracked at Python object level even though they are also
+# I/O client types.  Two threads sharing a single cursor is a real race
+# (the cursor's internal result buffer is clobbered), but the SQL-level
+# reporter only tracks table/row granularity and misses it.  Per-thread
+# cursors are different objects, so tracking them doesn't false-conflict.
 _DB_CURSOR_TYPES: tuple[type, ...] = tuple(_db_cursor_types)
 del _db_cursor_types
 

@@ -130,8 +130,6 @@ class TestSharedCursorRace:
                 self.results: list[int | None] = [None, None]
 
         def make_thread(idx: int):
-            expected = 100 + idx * 100  # thread 0 → 100, thread 1 → 200
-
             def thread_fn(state: State) -> None:
                 state.cursor.execute(
                     "SELECT value FROM cursor_race_test WHERE thread_id = %s",

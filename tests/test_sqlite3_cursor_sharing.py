@@ -28,7 +28,6 @@ import sqlite3
 
 from frontrun.dpor import explore_dpor
 
-
 # ---------------------------------------------------------------------------
 # Racy test: two threads share ONE cursor
 # ---------------------------------------------------------------------------
