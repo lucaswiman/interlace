@@ -22,55 +22,59 @@ only remaining work is listed here. Last reviewed: 2026-03-28.
   in `frontrun/async_trace_markers.py` with `sys.settrace`-based marker detection.
 - ✅ **Search strategies** (search_strategies.md) -- All 5 strategies implemented in
   `crates/dpor/src/path.rs` and exposed via `DporEngine(..., search=...)`.
+- ✅ **Provenance-tagged access summaries** (dpor-improvements: Fix 4) -- `AccessOrigin` enum
+  (`PythonMemory`, `LockSynthetic`, `IoDirect`) in `crates/dpor/src/access.rs`, threaded through
+  `record_access()`, `propagate_sleep()`, and future access cache. Unblocks Fix 6.
+- ✅ **Operation coalescing for unrelated tables** (dpor-improvements: Defect #15, Approach 2) --
+  `register_resource_group()` with cross-group intermediate detection. Automatic SQL table
+  group registration in `frontrun/dpor.py`. Skips inline wakeup for cross-group intermediates.
 
 ## Priority overview
 
 ### P0 -- High impact, unblocks other work
 
-1. **Provenance-tagged access summaries** (dpor-improvements: Fix 4) -- Infrastructure that
-   enables safer per-origin merge strategies and unblocks Fix 6.
-2. **Operation coalescing for unrelated tables** (dpor-improvements: Defect #15, Approach 2) --
-   Enables discovery of multi-table SQL races (django-reversion). ~50-80% reduction for
-   affected patterns.
+1. **Per-branch merge with provenance** (dpor-improvements: Fix 6) -- Now unblocked by Fix 4.
+   Selectively relax Python-memory merges while keeping I/O conservative. Needs investigation
+   of `test_independent_file_writes[2]` regression.
 
 ### P1 -- Valuable, moderate effort
 
-3. **Cross-table FK analysis** (integrations-and-detection) -- Schema introspection for foreign
+2. **Cross-table FK analysis** (integrations-and-detection) -- Schema introspection for foreign
    key dependencies. Catches referential integrity races. ~150 LOC + 25 tests.
-4. **Counterexample replay from TLC** (formal-methods: 2.1) -- TLC finds invariant violation,
+3. **Counterexample replay from TLC** (formal-methods: 2.1) -- TLC finds invariant violation,
    frontrun replays it against real Python code. Agent-driven pipeline.
-5. **Invariant assertion bridge** (formal-methods: 1.2) -- TLA+ invariants become Python
+4. **Invariant assertion bridge** (formal-methods: 1.2) -- TLA+ invariants become Python
    assertions checked after every DPOR step.
-6. **Hybrid marker + bytecode exploration** (testing-strategies: Extension 3) -- Two-level
+5. **Hybrid marker + bytecode exploration** (testing-strategies: Extension 3) -- Two-level
    search: coarse markers + fine bytecode within each window.
-7. **Randomized wakeup tree ordering** (random_dpor.md: Proposal A) -- Different seeds explore
+6. **Randomized wakeup tree ordering** (random_dpor.md: Proposal A) -- Different seeds explore
    different trace space regions. Low effort, high value for `stop_on_first=True` use cases.
 
 ### P2 -- Nice to have, lower effort
 
-8. **Wakeup tree equivalence checking** (dpor-improvements: Phase 4c) -- Sound optimization;
+7. **Wakeup tree equivalence checking** (dpor-improvements: Phase 4c) -- Sound optimization;
     benefit depends on workload.
-9. **RETURNING clause injection** (integrations-and-detection) -- Captures autoincrement IDs
+8. **RETURNING clause injection** (integrations-and-detection) -- Captures autoincrement IDs
     from PostgreSQL INSERTs.
-10. **sys.addaudithook integration** (integrations-and-detection) -- Zero-config I/O safety net.
-11. **sys.monitoring CALL events** (integrations-and-detection) -- Lower-overhead resource
+9. **sys.addaudithook integration** (integrations-and-detection) -- Zero-config I/O safety net.
+10. **sys.monitoring CALL events** (integrations-and-detection) -- Lower-overhead resource
     detection on Python 3.12+.
-12. **Pytest marker plugin** (testing-strategies: Extension 9) -- `@pytest.mark.frontrun_markers`
+11. **Pytest marker plugin** (testing-strategies: Extension 9) -- `@pytest.mark.frontrun_markers`
     for native test integration.
-13. **Marker coverage tracking** (testing-strategies: Extension 8) -- Report which interleavings
+12. **Marker coverage tracking** (testing-strategies: Extension 8) -- Report which interleavings
     were actually exercised.
 
 ### P3 -- Deferred / exploratory
 
-14. **Spec-guided schedule generation from TLC** (formal-methods: 2.3) -- Replace random
+13. **Spec-guided schedule generation from TLC** (formal-methods: 2.3) -- Replace random
     exploration with TLC-enumerated behaviors.
-15. **Refinement checking** (formal-methods: 3.1) -- Mathematical proof that code implements
+14. **Refinement checking** (formal-methods: 3.1) -- Mathematical proof that code implements
     spec. Requires solid foundation from P1 formal-methods items.
-16. **Record/replay of external state** (integrations-and-detection) -- Deterministic I/O replay.
+15. **Record/replay of external state** (integrations-and-detection) -- Deterministic I/O replay.
     High complexity; most tests use isolated DBs anyway.
-17. **Wire-protocol parsing at LD_PRELOAD level** (integrations-and-detection) -- For non-Python
+16. **Wire-protocol parsing at LD_PRELOAD level** (integrations-and-detection) -- For non-Python
     drivers. Niche use case.
-18. **Trace fingerprinting with coverage feedback** (random_dpor.md: Proposal B) -- Hash
+17. **Trace fingerprinting with coverage feedback** (random_dpor.md: Proposal B) -- Hash
     reads-from relations; adaptively skip stale backtrack points. Medium effort.
-19. **Depth-biased backtrack selection** (random_dpor.md: Proposal D) -- Explore/exploit
+18. **Depth-biased backtrack selection** (random_dpor.md: Proposal D) -- Explore/exploit
     trade-off across search phases. Low effort.
