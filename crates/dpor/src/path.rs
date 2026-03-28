@@ -1908,4 +1908,30 @@ mod tests {
         // futures[2] = empty
         assert!(futures[2].is_empty());
     }
+
+    /// Test that WeakWrite + WeakRead merges to WeakWrite in the future cache,
+    /// not Write. This prevents spurious sleep-set wakeups: another thread
+    /// doing WeakWrite on the same object should stay asleep (WeakWrite +
+    /// WeakWrite is independent per access_kinds_conflict).
+    #[test]
+    fn test_future_cache_weak_write_weak_read_no_upgrade() {
+        use crate::access::{AccessKind, AccessOrigin};
+        let mut path = Path::new(None, SearchStrategy::Dfs);
+
+        // T0 does WeakWrite(obj 100) at step 0, WeakRead(obj 100) at step 1.
+        path.schedule(&[0, 1], 0, 2); // pos 0: T0
+        path.record_access(0, 100, AccessKind::WeakWrite, AccessOrigin::PythonMemory);
+        path.schedule(&[0, 1], 0, 2); // pos 1: T0
+        path.record_access(1, 100, AccessKind::WeakRead, AccessOrigin::PythonMemory);
+        path.step();
+
+        let futures = path.prev_thread_step_future.get(&0).unwrap();
+        // Key: merged kind should be WeakWrite (not Write), since WeakWrite
+        // subsumes WeakRead's conflict set.
+        assert_eq!(
+            futures[0].get(&100).unwrap().0,
+            AccessKind::WeakWrite,
+            "WeakWrite + WeakRead should merge to WeakWrite, not Write"
+        );
+    }
 }

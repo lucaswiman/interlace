@@ -113,3 +113,47 @@ impl Access {
         self.dpor_vv.partial_le(later_vv)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_weak_write_weak_read_merge() {
+        // WeakWrite conflicts with {Read, Write}; WeakRead conflicts with {Write}.
+        // WeakWrite's conflict set is a superset of WeakRead's, so WeakWrite
+        // subsumes WeakRead — merging should produce WeakWrite, not Write.
+        assert_eq!(AccessKind::WeakWrite.merge(AccessKind::WeakRead), AccessKind::WeakWrite);
+        assert_eq!(AccessKind::WeakRead.merge(AccessKind::WeakWrite), AccessKind::WeakWrite);
+    }
+
+    #[test]
+    fn test_merge_same_kind() {
+        assert_eq!(AccessKind::Read.merge(AccessKind::Read), AccessKind::Read);
+        assert_eq!(AccessKind::Write.merge(AccessKind::Write), AccessKind::Write);
+        assert_eq!(AccessKind::WeakRead.merge(AccessKind::WeakRead), AccessKind::WeakRead);
+        assert_eq!(AccessKind::WeakWrite.merge(AccessKind::WeakWrite), AccessKind::WeakWrite);
+    }
+
+    #[test]
+    fn test_read_subsumes_weak_read() {
+        assert_eq!(AccessKind::Read.merge(AccessKind::WeakRead), AccessKind::Read);
+        assert_eq!(AccessKind::WeakRead.merge(AccessKind::Read), AccessKind::Read);
+    }
+
+    #[test]
+    fn test_write_subsumes_everything() {
+        assert_eq!(AccessKind::Read.merge(AccessKind::Write), AccessKind::Write);
+        assert_eq!(AccessKind::Write.merge(AccessKind::Read), AccessKind::Write);
+        assert_eq!(AccessKind::WeakWrite.merge(AccessKind::Read), AccessKind::Write);
+        assert_eq!(AccessKind::Read.merge(AccessKind::WeakWrite), AccessKind::Write);
+    }
+
+    #[test]
+    fn test_origin_merge_strength_order() {
+        assert_eq!(AccessOrigin::PythonMemory.merge(AccessOrigin::IoDirect), AccessOrigin::IoDirect);
+        assert_eq!(AccessOrigin::IoDirect.merge(AccessOrigin::PythonMemory), AccessOrigin::IoDirect);
+        assert_eq!(AccessOrigin::PythonMemory.merge(AccessOrigin::LockSynthetic), AccessOrigin::LockSynthetic);
+        assert_eq!(AccessOrigin::LockSynthetic.merge(AccessOrigin::IoDirect), AccessOrigin::IoDirect);
+    }
+}
