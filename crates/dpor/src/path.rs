@@ -1936,4 +1936,93 @@ mod tests {
             "WeakWrite + WeakRead should merge to WeakWrite, not Write"
         );
     }
+
+    /// Test that per-step independence checking avoids false wakeup from
+    /// WeakWrite + Read merge escalation to Write.
+    ///
+    /// T0: WeakWrite(obj 100) at step 0, Read(obj 100) at step 1
+    /// T1: WeakRead(obj 100)
+    ///
+    /// Merged suffix union: merge(WeakWrite, Read) = Write (catch-all in AccessKind::merge).
+    ///   Write vs WeakRead → CONFLICT → T0 wakes up (FALSE wakeup).
+    ///
+    /// Per-step check:
+    ///   step 0: WeakWrite vs WeakRead → independent (not in conflict rules)
+    ///   step 1: Read vs WeakRead → independent (not in conflict rules)
+    ///   → T0 should STAY ASLEEP (correct)
+    #[test]
+    fn test_per_step_independence_avoids_false_wakeup() {
+        use crate::access::{AccessKind, AccessOrigin};
+        let mut path = Path::new(None, SearchStrategy::Dfs);
+
+        // First execution: T0 runs 2 steps, then T1 runs 1 step
+        path.schedule(&[0, 1], 0, 2); // pos 0: T0
+        path.record_access(0, 100, AccessKind::WeakWrite, AccessOrigin::PythonMemory);
+        path.schedule(&[0, 1], 0, 2); // pos 1: T0
+        path.record_access(1, 100, AccessKind::Read, AccessOrigin::PythonMemory);
+        path.schedule(&[1], 1, 2); // pos 2: T1
+        path.record_access(2, 100, AccessKind::WeakRead, AccessOrigin::PythonMemory);
+
+        // Insert T1 at pos 0 to force a second execution with T1 first
+        path.insert_wakeup(0, 1, None);
+        path.step(); // Builds cache
+
+        // Second execution: T1 at pos 0
+        let chosen = path.schedule(&[0, 1], 0, 2);
+        assert_eq!(chosen, Some(1));
+        path.record_access(0, 100, AccessKind::WeakRead, AccessOrigin::PythonMemory);
+
+        // New branch at pos 1
+        path.schedule(&[0], 0, 2);
+
+        // T0 is sleeping at pos 0, propagated to pos 1.
+        // T0's future steps: step 0 = {100: WeakWrite}, step 1 = {100: Read}
+        // T1's access at pos 0 = {100: WeakRead}
+        //
+        // Per-step check:
+        //   step 0: WeakWrite vs WeakRead → independent (not in conflict rules)
+        //   step 1: Read vs WeakRead → independent (not in conflict rules)
+        //   → T0 should STAY ASLEEP
+        //
+        // Merged check (current):
+        //   merged future = {100: Write} (merge(WeakWrite, Read) = Write)
+        //   Write vs WeakRead → CONFLICT
+        //   → T0 wakes up (FALSE wakeup)
+        assert!(
+            path.branches[1].propagated_sleep_accesses.contains_key(&0),
+            "T0 should stay asleep: per-step independence check should avoid false wakeup \
+             from WeakWrite+Read merge escalation to Write"
+        );
+    }
+
+    /// Regression guard: per-step independence must still detect REAL conflicts.
+    /// T0: Write(obj 100) at step 0
+    /// T1: Read(obj 100)
+    /// Write vs Read → conflict → T0 must wake up.
+    #[test]
+    fn test_per_step_keeps_real_conflicts() {
+        use crate::access::{AccessKind, AccessOrigin};
+        let mut path = Path::new(None, SearchStrategy::Dfs);
+
+        path.schedule(&[0, 1], 0, 2); // pos 0: T0
+        path.record_access(0, 100, AccessKind::Write, AccessOrigin::PythonMemory);
+        path.schedule(&[1], 1, 2); // pos 1: T1
+        path.record_access(1, 100, AccessKind::Read, AccessOrigin::PythonMemory);
+
+        path.insert_wakeup(0, 1, None);
+        path.step();
+
+        let chosen = path.schedule(&[0, 1], 0, 2);
+        assert_eq!(chosen, Some(1));
+        path.record_access(0, 100, AccessKind::Read, AccessOrigin::PythonMemory);
+
+        path.schedule(&[0], 0, 2);
+
+        // T0's step 0: Write(100). T1's access: Read(100).
+        // Write vs Read → CONFLICT → T0 must wake up.
+        assert!(
+            !path.branches[1].propagated_sleep_accesses.contains_key(&0),
+            "T0 must wake up: Write vs Read is a real conflict"
+        );
+    }
 }
