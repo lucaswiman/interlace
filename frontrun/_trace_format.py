@@ -242,13 +242,17 @@ class TraceRecorder:
         )
 
 
-# Lightweight instruction cache (separate from DPOR's to avoid cross-module coupling)
-_instr_cache: dict[int, dict[int, dis.Instruction]] = {}
+# Lightweight instruction cache (separate from DPOR's to avoid cross-module coupling).
+#
+# Keyed by the code object itself (not ``id(code)``).  Using the code object as
+# the dict key keeps a strong reference, which prevents the object from being
+# garbage-collected while cached.  This eliminates the stale-cache bug where a
+# GC'd code object's id was reused by a new one.
+_instr_cache: dict[Any, dict[int, dis.Instruction]] = {}
 
 
 def _get_instruction(code: Any, offset: int) -> dis.Instruction | None:
-    code_id = id(code)
-    mapping = _instr_cache.get(code_id)
+    mapping = _instr_cache.get(code)
     if mapping is None:
         mapping = {}
         if _PY_VERSION >= (3, 11):
@@ -257,7 +261,7 @@ def _get_instruction(code: Any, offset: int) -> dis.Instruction | None:
             instructions = dis.get_instructions(code)
         for inst in instructions:
             mapping[inst.offset] = inst
-        _instr_cache[code_id] = mapping
+        _instr_cache[code] = mapping
     return mapping.get(offset)
 
 
