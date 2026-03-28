@@ -13,6 +13,7 @@ Remaining work for the optimal DPOR implementation. Last reviewed: 2026-03-28.
 - Fix 3: Position-sensitive future access cache (exact Mazurkiewicz trace counts)
 - Fix 4: Provenance-tagged access summaries (`AccessOrigin` enum)
 - Fix 5: `merge(WeakWrite, WeakRead) → WeakWrite`
+- Fix 6: Per-step independence check in `propagate_sleep()` (avoids false wakeups from suffix merge escalation)
 - Defect #15 Approach 2: Resource grouping for SQL tables (`register_resource_group()`)
 
 ---
@@ -27,26 +28,6 @@ explores an equivalent interleaving using independence information.
 **Complexity**: Medium. **Priority**: Low. Benefit uncertain without empirical data.
 
 ---
-
-## Fix 6: Per-Step Independence Check
-
-**Status**: Infrastructure ready (Fix 4 + Fix 5 complete). Origin variables wired through
-`accesses_are_independent()` but currently unused.
-
-**Idea**: Instead of merging a thread's future accesses into one suffix union (which
-escalates e.g. `WeakRead + WeakWrite → Write`), check each remaining step individually
-against the active thread. Strictly more precise and provably sound.
-
-**Example where per-step wins**:
-- Thread T: `WeakRead(X)` at step 0, `WeakWrite(X)` at step 1
-- Thread U: `WeakRead(X)`
-- Merged suffix: `Write vs WeakRead` → conflict → U wakes up (false)
-- Per-step: step 0 `WeakRead vs WeakRead` → independent, step 1 `WeakWrite vs WeakRead` → independent → U stays asleep (correct)
-
-**Complexity**: Medium. Requires changing `prev_thread_step_future` from suffix union to
-per-step storage, adding `future_steps_independent_of()`, updating `propagate_sleep()`.
-
-**Priority**: P0.
 
 ---
 
