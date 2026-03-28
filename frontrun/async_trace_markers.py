@@ -115,7 +115,6 @@ class AsyncTraceExecutor:
         Returns:
             A trace function suitable for sys.settrace
         """
-        processed_locations: set[tuple[str, int]] = set()
 
         def trace_function(frame: Any, event: str, arg: Any) -> Any:
             try:
@@ -131,8 +130,7 @@ class AsyncTraceExecutor:
 
                 # Check current line (for inline markers like: x = 1  # frontrun: marker)
                 marker_name = self.marker_registry.get_marker(filename, lineno)
-                if marker_name and (filename, lineno) not in processed_locations:
-                    processed_locations.add((filename, lineno))
+                if marker_name:
                     # Release execution lock while waiting (let other threads run).
                     # wait_for_turn reacquires it before returning.
                     self.coordinator._execution_lock.release()
@@ -145,8 +143,7 @@ class AsyncTraceExecutor:
                 # Check previous line (for separate-line markers)
                 if lineno > 1:
                     prev_marker = self.marker_registry.get_marker(filename, lineno - 1)
-                    if prev_marker and (filename, lineno - 1) not in processed_locations:
-                        processed_locations.add((filename, lineno - 1))
+                    if prev_marker:
                         # Release execution lock while waiting (let other threads run).
                         # wait_for_turn reacquires it before returning.
                         self.coordinator._execution_lock.release()

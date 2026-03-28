@@ -1,7 +1,7 @@
 How Frontrun Works
 ==================
 
-Frontrun provides three approaches for controlling thread interleaving. They
+Frontrun provides four approaches for controlling thread interleaving. They
 operate at different levels of granularity and make different trade-offs between
 interpretability, coverage, and the kinds of bugs they can find.
 

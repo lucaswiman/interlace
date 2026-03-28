@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Deterministic concurrency testing library. Three approaches: trace markers (`# frontrun:` comments, line-level `sys.settrace`), random bytecode exploration (opcode-level fuzzing with Hypothesis), and systematic DPOR (Rust engine, shared-memory conflict analysis). First two have async variants. C-level I/O interception via `LD_PRELOAD` library.
+Deterministic concurrency testing library. Four approaches: trace markers (`# frontrun:` comments, line-level `sys.settrace`), marker schedule exploration (exhaustive interleaving at the marker level), random bytecode exploration (opcode-level fuzzing with Hypothesis), and systematic DPOR (Rust engine, shared-memory conflict analysis). First two have async variants. C-level I/O interception via `LD_PRELOAD` library.
 
 ## Project layout
 

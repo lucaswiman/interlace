@@ -12,15 +12,17 @@ Frontrun is named after the insider trading crime where someone uses insider inf
 
 The core problem: race conditions are hard to test because they depend on timing. A test that passes 95% of the time is worse than a test that always fails, because it breeds false confidence. Frontrun replaces timing-dependent thread interleaving with deterministic scheduling, so race conditions either always happen or never happen.
 
-Three approaches, in order of decreasing interpretability:
+Four approaches, in order of decreasing interpretability:
 
-1. **Trace markers** — Comment-based synchronization points (`# frontrun: marker_name`) that let you force a specific execution order. Useful when you already know the race window and want to reproduce it deterministically in a test.
+1. **DPOR** — Systematically explores every meaningfully different interleaving. When it finds a race, it tells you exactly which shared-memory accesses conflicted and in what order. Powered by a Rust engine using vector clocks to prune redundant orderings.
 
-2. **DPOR** — Systematically explores every meaningfully different interleaving. When it finds a race, it tells you exactly which shared-memory accesses conflicted and in what order. Powered by a Rust engine using vector clocks to prune redundant orderings.
+2. **Bytecode exploration** — Generates random opcode-level schedules and checks an invariant under each one. Often finds races very efficiently (sometimes on the first attempt), and can catch races that are invisible to DPOR (e.g. shared state inside C extensions). The trade-off: error traces show *what happened* but not *why* — you get the interleaving that broke the invariant, not a causal explanation.
 
-3. **Bytecode exploration** — Generates random opcode-level schedules and checks an invariant under each one. Often finds races very efficiently (sometimes on the first attempt), and can catch races that are invisible to DPOR (e.g. shared state inside C extensions). The trade-off: error traces show *what happened* but not *why* — you get the interleaving that broke the invariant, not a causal explanation.
+3. **Marker schedule exploration** — Exhaustive exploration of all interleavings at the `# frontrun:` marker level. Much smaller search space than bytecode exploration, with completeness guarantees.
 
-All three have async variants. A C-level `LD_PRELOAD` library intercepts libc I/O for database drivers and other opaque extensions.
+4. **Trace markers** — Comment-based synchronization points (`# frontrun: marker_name`) that let you force a specific execution order. Useful when you already know the race window and want to reproduce it deterministically in a test.
+
+All four have async variants. A C-level `LD_PRELOAD` library intercepts libc I/O for database drivers and other opaque extensions.
 
 ### DPOR deadlock detection (dining philosophers)
 
