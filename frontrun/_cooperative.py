@@ -204,27 +204,42 @@ class CooperativeLock:
             return result
 
         scheduler, thread_id = ctx
+        before_sync_retry = getattr(scheduler, "before_sync_retry", None)
+        after_sync_retry = getattr(scheduler, "after_sync_retry", None)
 
         # Register waiting edge in the wait-for graph; raises SchedulerAbort on cycle
         graph = get_wait_for_graph()
         if graph is not None:
             _check_lock_cycle(graph, thread_id, self._object_id, scheduler)
 
-        # Tell the DPOR engine that this thread is waiting for the lock
-        # so it can schedule the lock holder instead.
-        self._report("lock_wait")
-
         try:
-            # Spin: yield scheduler turns until we can acquire
-            while not self._lock.acquire(blocking=False):
-                if scheduler._finished or scheduler._error:
-                    if graph is not None:
-                        graph.remove_waiting(thread_id, self._object_id)
-                    result = self._lock.acquire(blocking=blocking, timeout=1.0)
-                    if result:
-                        self._set_owner_and_report("lock_acquire")
-                    return result
-                scheduler.wait_for_turn(thread_id)
+            while True:
+                if before_sync_retry is not None:
+                    assert after_sync_retry is not None
+                    if not before_sync_retry(thread_id):
+                        if graph is not None:
+                            graph.remove_waiting(thread_id, self._object_id)
+                        result = self._lock.acquire(blocking=blocking, timeout=1.0)
+                        if result:
+                            self._set_owner_and_report("lock_acquire")
+                        return result
+                    acquired = self._lock.acquire(blocking=False)
+                    if acquired:
+                        break
+                    self._report("lock_wait")
+                    after_sync_retry(thread_id)
+                else:
+                    self._report("lock_wait")
+                    if scheduler._finished or scheduler._error:
+                        if graph is not None:
+                            graph.remove_waiting(thread_id, self._object_id)
+                        result = self._lock.acquire(blocking=blocking, timeout=1.0)
+                        if result:
+                            self._set_owner_and_report("lock_acquire")
+                        return result
+                    scheduler.wait_for_turn(thread_id)
+                    if self._lock.acquire(blocking=False):
+                        break
         except BaseException:
             if graph is not None:
                 graph.remove_waiting(thread_id, self._object_id)
@@ -237,6 +252,8 @@ class CooperativeLock:
 
         self._owner_thread_id = thread_id
         self._report("lock_acquire")
+        if after_sync_retry is not None:
+            after_sync_retry(thread_id)
         return True
 
     def release(self) -> None:
@@ -249,8 +266,8 @@ class CooperativeLock:
 
         owner = self._owner_thread_id
         self._owner_thread_id = None
-        self._report("lock_release")
         self._lock.release()
+        self._report("lock_release")
 
         # Remove holding edge
         if owner is not None:
@@ -353,28 +370,46 @@ class CooperativeRLock:
             return result
 
         scheduler, thread_id = ctx
+        before_sync_retry = getattr(scheduler, "before_sync_retry", None)
+        after_sync_retry = getattr(scheduler, "after_sync_retry", None)
 
         # Register waiting edge in the wait-for graph; raises SchedulerAbort on cycle
         graph = get_wait_for_graph()
         if graph is not None:
             _check_lock_cycle(graph, thread_id, self._object_id, scheduler)
 
-        # Tell the DPOR engine that this thread is waiting for the lock
-        # so it can schedule the lock holder instead.
-        self._report("lock_wait")
-
         try:
-            while not self._lock.acquire(blocking=False):
-                if scheduler._finished or scheduler._error:
-                    if graph is not None:
-                        graph.remove_waiting(thread_id, self._object_id)
-                    result = self._lock.acquire(blocking=blocking, timeout=1.0)
-                    if result:
-                        self._owner = me
-                        self._count = 1
-                        self._set_owner_and_report("lock_acquire")
-                    return result
-                scheduler.wait_for_turn(thread_id)
+            while True:
+                if before_sync_retry is not None:
+                    assert after_sync_retry is not None
+                    if not before_sync_retry(thread_id):
+                        if graph is not None:
+                            graph.remove_waiting(thread_id, self._object_id)
+                        result = self._lock.acquire(blocking=blocking, timeout=1.0)
+                        if result:
+                            self._owner = me
+                            self._count = 1
+                            self._set_owner_and_report("lock_acquire")
+                        return result
+                    acquired = self._lock.acquire(blocking=False)
+                    if acquired:
+                        break
+                    self._report("lock_wait")
+                    after_sync_retry(thread_id)
+                else:
+                    self._report("lock_wait")
+                    if scheduler._finished or scheduler._error:
+                        if graph is not None:
+                            graph.remove_waiting(thread_id, self._object_id)
+                        result = self._lock.acquire(blocking=blocking, timeout=1.0)
+                        if result:
+                            self._owner = me
+                            self._count = 1
+                            self._set_owner_and_report("lock_acquire")
+                        return result
+                    scheduler.wait_for_turn(thread_id)
+                    if self._lock.acquire(blocking=False):
+                        break
         except BaseException:
             if graph is not None:
                 graph.remove_waiting(thread_id, self._object_id)
@@ -389,6 +424,8 @@ class CooperativeRLock:
         self._owner_thread_id = thread_id
         self._count = 1
         self._report("lock_acquire")
+        if after_sync_retry is not None:
+            after_sync_retry(thread_id)
         return True
 
     def release(self) -> None:
@@ -406,8 +443,8 @@ class CooperativeRLock:
             if _in_dpor_machinery():
                 self._lock.release()
                 return
-            self._report("lock_release")
             self._lock.release()
+            self._report("lock_release")
 
             if owner_tid is not None:
                 graph = get_wait_for_graph()
@@ -536,21 +573,12 @@ class CooperativeSemaphore:
 
         # Spin-yield loop for managed threads
         scheduler, thread_id = ctx
-        # Tell the DPOR engine this thread is waiting for the semaphore.
-        # This blocks the thread in the engine so the scheduler picks
-        # the semaphore holder instead, avoiding starvation.
-        self._report("lock_wait")
+        before_sync_retry = getattr(scheduler, "before_sync_retry", None)
+        after_sync_retry = getattr(scheduler, "after_sync_retry", None)
         while True:
             # Aggressive error check (option 6)
             if scheduler._error:
                 raise SchedulerAbort("scheduler aborted")
-            self._lock.acquire()
-            if self._value > 0:
-                self._value -= 1
-                self._lock.release()
-                self._report("lock_acquire")
-                return True
-            self._lock.release()
             if scheduler._finished:
                 deadline = time.monotonic() + 1.0
                 while time.monotonic() < deadline:
@@ -563,6 +591,22 @@ class CooperativeSemaphore:
                     self._lock.release()
                     time.sleep(0.001)
                 return False
+            if before_sync_retry is not None:
+                assert after_sync_retry is not None
+                if not before_sync_retry(thread_id):
+                    return False
+                self._lock.acquire()
+                if self._value > 0:
+                    self._value -= 1
+                    self._lock.release()
+                    self._report("lock_acquire")
+                    after_sync_retry(thread_id)
+                    return True
+                self._lock.release()
+                self._report("lock_wait")
+                after_sync_retry(thread_id)
+                continue
+            self._report("lock_wait")
             scheduler.wait_for_turn(thread_id)
 
     def release(self, n: int = 1) -> None:

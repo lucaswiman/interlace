@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import math
 import os
-import sysconfig
 import tempfile
 import threading
 
@@ -47,13 +46,6 @@ SEARCH_STRATEGIES = [
     "stride:3",
     "conflict-first",
 ]
-
-FREE_THREADED_UNDERCOUNT_SEARCHES = {
-    "bit-reversal:42",
-    "stride",
-    "stride:3",
-    "conflict-first",
-}
 
 
 class _Slot:
@@ -302,17 +294,6 @@ class TestNThreadsWithLock:
             total_timeout=60.0,
             search=search,
         )
-
-        if (
-            sysconfig.get_config_var("Py_GIL_DISABLED")
-            and n == 3
-            and search in FREE_THREADED_UNDERCOUNT_SEARCHES
-            and result.num_explored != expected
-        ):
-            pytest.xfail(
-                "Known free-threaded/non-DFS undercount: alternative search order does not reliably preserve "
-                "the exact N! exploration count for this single-lock model."
-            )
 
         assert result.num_explored == expected, (
             f"N={n}, search={search}: Expected exactly {expected} Mazurkiewicz traces ({n}!), got {result.num_explored}"

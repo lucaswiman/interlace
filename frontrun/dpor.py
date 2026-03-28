@@ -368,6 +368,12 @@ class DporScheduler:
         # the owning thread keeps the scheduler turn until after_io() runs.
         self._active_io_thread: int | None = None
         self._next_thread_after_io: int | None = None
+        # Like the I/O path, cooperative lock/semaphore retries need to keep
+        # the scheduler turn until the real non-blocking probe completes.
+        # Otherwise free-threaded builds turn the probe into an OS-level race
+        # between multiple awakened waiters.
+        self._active_sync_thread: int | None = None
+        self._next_thread_after_sync: int | None = None
 
         # Maps iterator id → original container object. When GET_ITER creates
         # an iterator from a mutable container, we record the mapping so that
@@ -441,6 +447,56 @@ class DporScheduler:
     def wait_for_turn(self, thread_id: int) -> bool:
         """Block until it's this thread's turn. Returns False when done."""
         return self._report_and_wait(None, thread_id)
+
+    def before_sync_retry(self, thread_id: int) -> bool:
+        """Wait for a turn and keep it through one external sync probe."""
+        from frontrun._cooperative import _scheduler_tls
+
+        with self._condition:
+            _scheduler_tls._in_dpor_machinery = True
+            try:
+                while True:
+                    if self._finished or self._error:
+                        return False
+
+                    if self._active_sync_thread is not None and self._active_sync_thread != thread_id:
+                        pass
+                    elif self._current_thread == thread_id:
+                        next_thread = self._schedule_next()
+                        _pp = self._last_scheduled_path_id
+                        if _pp is not None:
+                            _dpor_tls._last_path_id = _pp
+                        self._active_sync_thread = thread_id
+                        self._next_thread_after_sync = next_thread
+                        self._current_thread = thread_id
+                        self._condition.notify_all()
+                        return True
+
+                    if not self._condition.wait(timeout=self.deadlock_timeout):
+                        if self._current_thread in self._threads_done:
+                            next_thread = self._schedule_next()
+                            self._current_thread = next_thread
+                            if next_thread is None:
+                                self._finished = True
+                            self._condition.notify_all()
+                            continue
+                        self._error = TimeoutError(
+                            f"DPOR sync deadlock: waiting for thread {thread_id}, current is {self._current_thread}"
+                        )
+                        self._condition.notify_all()
+                        return False
+            finally:
+                _scheduler_tls._in_dpor_machinery = False
+
+    def after_sync_retry(self, thread_id: int) -> None:
+        with self._condition:
+            if self._active_sync_thread == thread_id:
+                self._active_sync_thread = None
+                self._current_thread = self._next_thread_after_sync
+                self._next_thread_after_sync = None
+                if self._current_thread is None and len(self._threads_done) >= self.num_threads:
+                    self._finished = True
+                self._condition.notify_all()
 
     def _all_other_live_threads_blocked_by_current(self, thread_id: int) -> bool:
         from frontrun._deadlock import get_wait_for_graph
