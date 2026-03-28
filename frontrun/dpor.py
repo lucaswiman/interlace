@@ -3342,6 +3342,7 @@ def explore_dpor(
     lock_timeout: int | None = None,
     trace_packages: list[str] | None = None,
     track_dunder_dict_accesses: bool = False,
+    search: str | None = None,
 ) -> InterleavingResult:
     """Systematically explore interleavings using DPOR.
 
@@ -3398,6 +3399,22 @@ def explore_dpor(
             uses ``self.__dict__['x'] = v``, but doubles wakeup tree
             insertions and can cause combinatorial explosion.  Default
             False.
+        search: Controls the order in which wakeup tree branches are
+            explored.  All strategies visit the same set of Mazurkiewicz
+            trace equivalence classes; only the order differs.  Accepted
+            values:
+
+            - ``None`` or ``"dfs"`` — classic DFS, lowest thread ID first
+              (default, matches the paper's Algorithm 2).
+            - ``"bit-reversal"`` or ``"bit-reversal:<seed>"`` — visit
+              children in bit-reversal permutation order for maximal
+              spread across distinct conflict points early.
+            - ``"round-robin"`` or ``"round-robin:<seed>"`` — cycle
+              through available threads in rotating order.
+            - ``"stride"`` or ``"stride:<seed>"`` — visit every s-th
+              sibling (s coprime to branching factor, derived from seed).
+            - ``"conflict-first"`` — reverse of DFS (highest thread ID
+              first), preferring threads added by race reversals.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample found.
@@ -3418,6 +3435,7 @@ def explore_dpor(
         preemption_bound=preemption_bound,
         max_branches=max_branches,
         max_executions=max_executions,
+        search=search,
     )
 
     result = InterleavingResult(property_holds=True)

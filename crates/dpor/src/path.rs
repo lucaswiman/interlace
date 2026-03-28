@@ -28,6 +28,41 @@ use crate::access::{AccessKind, AccessOrigin};
 use crate::thread::ThreadStatus;
 use crate::wakeup_tree::WakeupTree;
 
+/// Controls the order in which wakeup tree branches are explored.
+///
+/// All strategies visit exactly the same set of Mazurkiewicz trace equivalence
+/// classes (soundness and completeness are preserved). Only the *order* differs,
+/// which affects how quickly bugs are found with `stop_on_first=True`.
+#[derive(Clone, Debug)]
+pub enum SearchStrategy {
+    /// Classic DFS: always pick `min_thread()` (lowest thread ID).
+    /// Deterministic, no seed. This is the paper's Algorithm 2 default.
+    Dfs,
+    /// Bit-reversal permutation ordering: at each wakeup tree node, visit
+    /// children in bit-reversal order of their position among siblings.
+    /// This maximally spreads exploration across distinct conflict points
+    /// early (low-discrepancy sequence over the tree).
+    ///
+    /// The `seed` rotates the permutation, giving different deterministic
+    /// orderings that all cover the full tree exactly once.
+    BitReversal { seed: u64 },
+    /// Round-robin across thread IDs: cycles through available threads in a
+    /// rotating order. Each call advances the offset, so consecutive picks
+    /// at the same tree level choose different threads.
+    ///
+    /// The `seed` sets the initial offset.
+    RoundRobin { seed: u64 },
+    /// Stride-based: picks every s-th sibling (where s is derived from the
+    /// seed and chosen coprime to the branching factor). Different seeds
+    /// produce different deterministic traversals that each cover the tree
+    /// exactly once.
+    Stride { seed: u64 },
+    /// Conflict-first: prioritize threads involved in deeper wakeup sequences
+    /// (i.e., those that reverse races at shallower depths get explored first).
+    /// Falls back to max_thread() — the reverse of DFS's min_thread().
+    ConflictFirst,
+}
+
 /// A pending race collected during execution for deferred processing.
 ///
 /// Paper ref: Algorithm 2 lines 1-6 (JACM'17 p.24). In Optimal-DPOR,
@@ -176,6 +211,11 @@ pub struct Path {
     branches: Vec<Branch>,
     pos: usize,
     preemption_bound: Option<u32>,
+    search_strategy: SearchStrategy,
+    /// Counter incremented each time we pick a thread from a wakeup tree
+    /// (in step() or schedule()). Used by BitReversal to index into the
+    /// bit-reversal permutation.
+    selection_counter: u64,
     /// Step-count-indexed future access cache from the most recently
     /// completed execution.
     ///
@@ -215,15 +255,18 @@ pub struct Path {
 }
 
 impl Path {
-    pub fn new(preemption_bound: Option<u32>) -> Self {
+    pub fn new(preemption_bound: Option<u32>, search_strategy: SearchStrategy) -> Self {
         Self {
             branches: Vec::new(),
             pos: 0,
             preemption_bound,
+            search_strategy,
+            selection_counter: 0,
             prev_thread_step_future: HashMap::new(),
             pending_wakeup_subtree: None,
         }
     }
+
 
     pub fn current_position(&self) -> usize {
         self.pos
@@ -321,7 +364,10 @@ impl Path {
         // line 17, JACM'17 p.24-25: WuT' = subtree(wut(E), p)), then
         // fall back to preferring the current thread to minimize preemptions.
         let (chosen, next_subtree) = if let Some(ref subtree) = self.pending_wakeup_subtree {
-            if let Some(guided) = subtree.min_thread() {
+            if let Some(guided) = pick_thread_from(&self.search_strategy, self.selection_counter, subtree) {
+                if !matches!(self.search_strategy, SearchStrategy::Dfs | SearchStrategy::ConflictFirst) {
+                    self.selection_counter += 1;
+                }
                 if runnable.contains(&guided) {
                     let sub = subtree.subtree(guided);
                     (guided, if sub.is_empty() { None } else { Some(sub) })
@@ -588,8 +634,12 @@ impl Path {
             // Find next thread to explore from wakeup tree.
             // Paper: Algorithm 2 line 15 (JACM'17 p.24):
             //   "let p = min≺{p ∈ wut(E)}"
-            // We use minimum thread ID as a deterministic proxy for ≺.
-            if let Some(next) = branch.wakeup.min_thread() {
+            // The search strategy controls the ordering ≺ (DFS uses min
+            // thread ID; BitReversal uses a low-discrepancy permutation).
+            if let Some(next) = pick_thread_from(&self.search_strategy, self.selection_counter, &branch.wakeup) {
+                if !matches!(self.search_strategy, SearchStrategy::Dfs | SearchStrategy::ConflictFirst) {
+                    self.selection_counter += 1;
+                }
                 // Extract the subtree for the chosen thread to guide
                 // multi-step wakeup sequences through scheduling.
                 // Paper: Algorithm 2 line 17 (JACM'17 p.24-25):
@@ -846,27 +896,171 @@ impl Path {
     }
 }
 
+/// Pick a thread from a wakeup tree without needing &mut self.
+/// Separated from Path::pick_thread to avoid borrow conflicts when the caller
+/// already borrows other Path fields.
+fn pick_thread_from(strategy: &SearchStrategy, counter: u64, tree: &WakeupTree) -> Option<usize> {
+    let threads = tree.root_threads();
+    if threads.is_empty() {
+        return None;
+    }
+    let mut sorted = threads;
+    sorted.sort_unstable();
+    let n = sorted.len();
+
+    match strategy {
+        SearchStrategy::Dfs => Some(sorted[0]), // min thread
+        SearchStrategy::BitReversal { seed } => {
+            let idx = bit_reversal_index(counter, *seed, n);
+            Some(sorted[idx])
+        }
+        SearchStrategy::RoundRobin { seed } => {
+            let idx = ((counter.wrapping_add(*seed)) % n as u64) as usize;
+            Some(sorted[idx])
+        }
+        SearchStrategy::Stride { seed } => {
+            // Pick a stride coprime to n. For prime n any stride 1..n-1 works.
+            // For composite n, use seed to derive a coprime stride.
+            let stride = coprime_stride(*seed, n);
+            let idx = ((counter.wrapping_mul(stride as u64)) % n as u64) as usize;
+            Some(sorted[idx])
+        }
+        SearchStrategy::ConflictFirst => {
+            // Reverse of DFS: pick max thread ID. This tends to explore
+            // higher-numbered threads first, which are often the ones
+            // added later by race reversals (i.e., the "interesting" ones).
+            Some(sorted[n - 1])
+        }
+    }
+}
+
+/// Compute a stride value coprime to n, derived from the seed.
+///
+/// For n=1, returns 1. For n>1, tries `seed % (n-1) + 1` and adjusts
+/// until gcd(stride, n) == 1.
+fn coprime_stride(seed: u64, n: usize) -> usize {
+    if n <= 1 {
+        return 1;
+    }
+    let mut s = (seed % (n as u64 - 1) + 1) as usize; // 1..n-1
+    while gcd(s, n) != 1 {
+        s += 1;
+        if s >= n {
+            s = 1;
+        }
+    }
+    s
+}
+
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+/// Compute a bit-reversal permutation index.
+///
+/// Given a counter `step` and `n` items, returns an index in `0..n` such that
+/// consecutive steps visit maximally spread positions (low-discrepancy sequence).
+///
+/// Uses a van der Corput-style construction: reverse the bits of `(step + seed)`
+/// in the smallest power-of-two domain >= n, then map to `0..n`.
+///
+/// For any prefix of `n` consecutive calls, the returned indices cover all `n`
+/// positions exactly once (when n is a power of 2) or approximately uniformly
+/// (otherwise). Over `n` calls the full permutation is generated.
+fn bit_reversal_index(step: u64, seed: u64, n: usize) -> usize {
+    if n <= 1 {
+        return 0;
+    }
+    // Find smallest power of 2 >= n
+    let bits = (n as u64).next_power_of_two().trailing_zeros();
+    let mask = (1u64 << bits) - 1;
+    // Try successive values until we land in [0, n)
+    // For power-of-two n this always succeeds on first try.
+    // For non-power-of-two, we skip out-of-range values.
+    let mut attempt = step;
+    loop {
+        let val = (attempt.wrapping_add(seed)) & mask;
+        let reversed = val.reverse_bits() >> (64 - bits);
+        if (reversed as usize) < n {
+            return reversed as usize;
+        }
+        attempt += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn test_bit_reversal_covers_all() {
+        // For n=4 (power of 2), 4 steps should cover all indices
+        let indices: Vec<usize> = (0..4).map(|s| bit_reversal_index(s, 0, 4)).collect();
+        let mut sorted = indices.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2, 3], "bit reversal should cover all 4 indices, got {:?}", indices);
+    }
+
+    #[test]
+    fn test_bit_reversal_spreads() {
+        // First two indices for n=4 should be maximally spread (0 and 2, or similar)
+        let first = bit_reversal_index(0, 0, 4);
+        let second = bit_reversal_index(1, 0, 4);
+        assert_ne!(first, second);
+        // They should be far apart (differ by n/2)
+        let diff = (first as i64 - second as i64).unsigned_abs() as usize;
+        assert_eq!(diff, 2, "first two should be n/2 apart for maximal spread");
+    }
+
+    #[test]
+    fn test_bit_reversal_seed_rotates() {
+        // Different seeds should produce different orderings
+        let order_s0: Vec<usize> = (0..4).map(|s| bit_reversal_index(s, 0, 4)).collect();
+        let order_s1: Vec<usize> = (0..4).map(|s| bit_reversal_index(s, 1, 4)).collect();
+        assert_ne!(order_s0, order_s1);
+        // But both should cover all indices
+        let mut sorted_s1 = order_s1;
+        sorted_s1.sort();
+        assert_eq!(sorted_s1, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_bit_reversal_non_power_of_two() {
+        // For n=3, should still cover all indices in 3 steps
+        let indices: Vec<usize> = (0..3).map(|s| bit_reversal_index(s, 0, 3)).collect();
+        let mut sorted = indices;
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_bit_reversal_n1() {
+        assert_eq!(bit_reversal_index(0, 0, 1), 0);
+        assert_eq!(bit_reversal_index(5, 42, 1), 0);
+    }
+
+    #[test]
     fn test_new_path() {
-        let path = Path::new(None);
+        let path = Path::new(None, SearchStrategy::Dfs);
         assert_eq!(path.depth(), 0);
         assert_eq!(path.current_position(), 0);
     }
 
     #[test]
     fn test_schedule_prefers_current_thread() {
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
         assert_eq!(path.schedule(&[0, 1], 0, 2), Some(0));
         assert_eq!(path.depth(), 1);
     }
 
     #[test]
     fn test_insert_wakeup_and_step() {
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
         path.schedule(&[0, 1], 0, 2);
         path.insert_wakeup(0, 1, None);
         assert!(path.step());
@@ -876,14 +1070,14 @@ mod tests {
 
     #[test]
     fn test_step_exhausted() {
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
         path.schedule(&[0, 1], 0, 2);
         assert!(!path.step());
     }
 
     #[test]
     fn test_full_exploration_two_threads() {
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
         let mut executions = Vec::new();
 
         let chosen = path.schedule(&[0, 1], 0, 2).unwrap();
@@ -900,7 +1094,7 @@ mod tests {
 
     #[test]
     fn test_preemption_bounding_zero() {
-        let mut path = Path::new(Some(0));
+        let mut path = Path::new(Some(0), SearchStrategy::Dfs);
         path.schedule(&[0, 1], 0, 2);
         path.insert_wakeup(0, 1, None);
         // With bound=0, wakeup insertion for thread 1 is a preemption and should be suppressed
@@ -912,7 +1106,7 @@ mod tests {
     #[test]
     fn test_wakeup_tree_min_index_ordering() {
         // step() picks the minimum thread ID from the wakeup tree
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
         path.schedule(&[0, 1, 2], 0, 3);
         path.insert_wakeup(0, 2, None); // add 2 first
         path.insert_wakeup(0, 1, None); // add 1 second
@@ -927,7 +1121,7 @@ mod tests {
     fn test_sleep_set_visited_thread() {
         use crate::access::AccessKind;
         // After exploring thread 0 at position 0, it should be in the sleep set
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
         path.schedule(&[0, 1, 2], 0, 3);
         // Record some access for thread 0
         path.record_access(0, 100, AccessKind::Write, AccessOrigin::PythonMemory);
@@ -947,7 +1141,7 @@ mod tests {
         use crate::access::AccessKind;
         // After exploring T0 at position 0, T0 is Visited and in the sleep set.
         // Wakeup insertions for T0 at position 0 should be rejected.
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
         path.schedule(&[0, 1, 2], 0, 3);
         path.record_access(0, 100, AccessKind::Write, AccessOrigin::PythonMemory);
 
@@ -969,7 +1163,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_wakeup_rejected() {
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
         path.schedule(&[0, 1], 0, 2);
         path.insert_wakeup(0, 1, None);
         path.insert_wakeup(0, 1, None); // duplicate
@@ -979,7 +1173,7 @@ mod tests {
 
     #[test]
     fn test_wakeup_disabled_thread_rejected() {
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
         path.schedule(&[0], 0, 2); // Only thread 0 is runnable; thread 1 is Disabled
         path.insert_wakeup(0, 1, None);
         assert!(path.branches[0].wakeup.is_empty());
@@ -989,7 +1183,7 @@ mod tests {
     fn test_race_object_passed_through() {
         // All racing threads should be added regardless of object
         // (source set filtering is disabled for soundness without sleep sets)
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
         path.schedule(&[0, 1, 2, 3], 0, 4);
 
         path.insert_wakeup(0, 1, Some(100));
@@ -1003,7 +1197,7 @@ mod tests {
     /// same thread is rejected, different threads (even on same object) are added.
     #[test]
     fn test_source_set_check_via_contains_thread() {
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
         path.schedule(&[0, 1, 2, 3], 0, 4);
 
         // First wakeup insertion for object 100: T1 added
@@ -1032,7 +1226,7 @@ mod tests {
     #[test]
     fn test_propagated_sleep_during_replay() {
         use crate::access::AccessKind;
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // --- First execution: T0 at pos 0, T1 at pos 1 ---
         path.schedule(&[0, 1, 2], 0, 3);
@@ -1082,7 +1276,7 @@ mod tests {
     #[test]
     fn test_propagation_to_new_branches_via_trace_cache() {
         use crate::access::AccessKind;
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // --- First execution: T0 writes obj 100, T1 reads obj 200 ---
         path.schedule(&[0, 1], 0, 2);
@@ -1124,7 +1318,7 @@ mod tests {
     #[test]
     fn test_trace_cache_wakes_on_conflict_at_new_branch() {
         use crate::access::AccessKind;
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // --- First execution: T0 writes obj 100, T1 writes obj 100 ---
         path.schedule(&[0, 1], 0, 2);
@@ -1165,7 +1359,7 @@ mod tests {
     #[test]
     fn test_compute_notdep_basic() {
         use crate::access::AccessKind;
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // Build 3 branches manually
         path.schedule(&[0, 1, 2], 0, 3); // pos 0: T0
@@ -1188,7 +1382,7 @@ mod tests {
     #[test]
     fn test_compute_notdep_dependent_intermediate() {
         use crate::access::AccessKind;
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         path.schedule(&[0, 1, 2], 0, 3);
         path.record_access(0, 1, AccessKind::Write, AccessOrigin::PythonMemory);
@@ -1205,7 +1399,7 @@ mod tests {
     #[test]
     fn test_compute_notdep_adjacent() {
         use crate::access::AccessKind;
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         path.schedule(&[0, 1], 0, 2);
         path.record_access(0, 1, AccessKind::Write, AccessOrigin::PythonMemory);
@@ -1223,7 +1417,7 @@ mod tests {
     #[test]
     fn test_compute_notdep_excludes_same_thread() {
         use crate::access::AccessKind;
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // T0 at pos 0, T0 again at pos 1 (same thread!), T1 at pos 2
         path.schedule(&[0, 1], 0, 2);
@@ -1245,7 +1439,7 @@ mod tests {
     #[test]
     fn test_process_deferred_race_inserts_notdep() {
         use crate::access::AccessKind;
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // T0 writes obj 1 at pos 0, T1 writes obj 2 at pos 1, T2 writes obj 1 at pos 2
         path.schedule(&[0, 1, 2], 0, 3);
@@ -1284,7 +1478,7 @@ mod tests {
     #[test]
     fn test_record_access_merges_read_weakread_to_read() {
         use crate::access::AccessKind;
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         path.schedule(&[0, 1], 0, 2);
 
@@ -1309,7 +1503,7 @@ mod tests {
     #[test]
     fn test_record_access_merges_weakread_read_to_read() {
         use crate::access::AccessKind;
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         path.schedule(&[0, 1], 0, 2);
 
@@ -1330,7 +1524,7 @@ mod tests {
     #[test]
     fn test_record_access_merges_read_write_to_write() {
         use crate::access::AccessKind;
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         path.schedule(&[0, 1], 0, 2);
 
@@ -1352,7 +1546,7 @@ mod tests {
     #[test]
     fn test_record_access_merge_bug_causes_false_wakeup() {
         use crate::access::AccessKind;
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // --- First execution: T0 at pos 0, T1 at pos 1 ---
         path.schedule(&[0, 1], 0, 2);
@@ -1393,7 +1587,7 @@ mod tests {
     #[test]
     fn test_propagated_sleep_wakes_on_conflict_during_replay() {
         use crate::access::AccessKind;
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // --- First execution: T0 at pos 0, T1 at pos 1 ---
         path.schedule(&[0, 1, 2], 0, 3);

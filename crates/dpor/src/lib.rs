@@ -14,6 +14,7 @@ use pyo3::prelude::*;
 
 use access::AccessKind;
 use engine::{DporEngine, Execution, SyncEvent};
+use path::SearchStrategy;
 
 // ---------------------------------------------------------------------------
 // PyO3 wrapper types
@@ -42,16 +43,18 @@ struct PyExecution {
 #[pymethods]
 impl PyDporEngine {
     #[new]
-    #[pyo3(signature = (num_threads, preemption_bound=None, max_branches=100_000, max_executions=None))]
+    #[pyo3(signature = (num_threads, preemption_bound=None, max_branches=100_000, max_executions=None, search=None))]
     fn new(
         num_threads: usize,
         preemption_bound: Option<u32>,
         max_branches: usize,
         max_executions: Option<u64>,
-    ) -> Self {
-        Self {
-            inner: DporEngine::new(num_threads, preemption_bound, max_branches, max_executions),
-        }
+        search: Option<&str>,
+    ) -> PyResult<Self> {
+        let strategy = Self::parse_search_strategy(search)?;
+        Ok(Self {
+            inner: DporEngine::new(num_threads, preemption_bound, max_branches, max_executions, strategy),
+        })
     }
 
     /// Start a new execution. Returns fresh per-execution state.
@@ -219,6 +222,52 @@ impl PyDporEngine {
             _ => Err(pyo3::exceptions::PyValueError::new_err(
                 format!("kind must be 'read', 'write', 'weak_write', or 'weak_read', got '{kind}'"),
             )),
+        }
+    }
+
+    /// Parse the `search` parameter into a `SearchStrategy`.
+    ///
+    /// Accepted formats:
+    ///   - None / "dfs"                  → DFS (default)
+    ///   - "bit-reversal"                → BitReversal with seed=0
+    ///   - "bit-reversal:42"             → BitReversal with seed=42
+    ///   - "round-robin"                 → RoundRobin with seed=0
+    ///   - "round-robin:7"               → RoundRobin with seed=7
+    ///   - "stride"                      → Stride with seed=0
+    ///   - "stride:3"                    → Stride with seed=3
+    ///   - "conflict-first"              → ConflictFirst (deterministic priority by race depth)
+    fn parse_search_strategy(search: Option<&str>) -> PyResult<SearchStrategy> {
+        match search {
+            None | Some("dfs") => Ok(SearchStrategy::Dfs),
+            Some(s) if s == "bit-reversal" => Ok(SearchStrategy::BitReversal { seed: 0 }),
+            Some(s) if s.starts_with("bit-reversal:") => {
+                let seed_str = &s["bit-reversal:".len()..];
+                let seed = seed_str.parse::<u64>().map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("invalid seed in '{s}': {e}"))
+                })?;
+                Ok(SearchStrategy::BitReversal { seed })
+            }
+            Some(s) if s == "round-robin" => Ok(SearchStrategy::RoundRobin { seed: 0 }),
+            Some(s) if s.starts_with("round-robin:") => {
+                let seed_str = &s["round-robin:".len()..];
+                let seed = seed_str.parse::<u64>().map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("invalid seed in '{s}': {e}"))
+                })?;
+                Ok(SearchStrategy::RoundRobin { seed })
+            }
+            Some(s) if s == "stride" => Ok(SearchStrategy::Stride { seed: 0 }),
+            Some(s) if s.starts_with("stride:") => {
+                let seed_str = &s["stride:".len()..];
+                let seed = seed_str.parse::<u64>().map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("invalid seed in '{s}': {e}"))
+                })?;
+                Ok(SearchStrategy::Stride { seed })
+            }
+            Some("conflict-first") => Ok(SearchStrategy::ConflictFirst),
+            Some(other) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown search strategy '{other}'; expected 'dfs', 'bit-reversal[:seed]', \
+                 'round-robin[:seed]', 'stride[:seed]', or 'conflict-first'"
+            ))),
         }
     }
 }
