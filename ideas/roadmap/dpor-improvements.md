@@ -46,7 +46,7 @@ against the active thread. Strictly more precise and provably sound.
 **Complexity**: Medium. Requires changing `prev_thread_step_future` from suffix union to
 per-step storage, adding `future_steps_independent_of()`, updating `propagate_sleep()`.
 
-**Priority**: Low. Needs a concrete workload demonstrating measurable benefit.
+**Priority**: P0.
 
 ---
 

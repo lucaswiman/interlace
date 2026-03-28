@@ -20,25 +20,29 @@ search strategies, async/await marker support.
 
 ## Priority overview
 
+### P0 -- High impact
+
+1. **Per-step independence check** (dpor-improvements: Fix 6) -- Replace suffix union merge
+   with per-step checking in `propagate_sleep()`. Avoids false `WeakRead+WeakWrite → Write`
+   escalation. Infrastructure ready (Fix 4 + Fix 5). See dpor-improvements.md for design.
+
 ### P1 -- Valuable, moderate effort
 
-1. **Cross-table FK analysis** (integrations-and-detection) -- Schema introspection for foreign
+2. **Cross-table FK analysis** (integrations-and-detection) -- Schema introspection for foreign
    key dependencies. Catches referential integrity races. ~150 LOC + 25 tests.
-2. **Counterexample replay from TLC** (formal-methods: 2.1) -- TLC finds invariant violation,
+3. **Counterexample replay from TLC** (formal-methods: 2.1) -- TLC finds invariant violation,
    frontrun replays it against real Python code. Agent-driven pipeline.
-3. **Invariant assertion bridge** (formal-methods: 1.2) -- TLA+ invariants become Python
+4. **Invariant assertion bridge** (formal-methods: 1.2) -- TLA+ invariants become Python
    assertions checked after every DPOR step.
-4. **Hybrid marker + bytecode exploration** (testing-strategies: Extension 3) -- Two-level
+5. **Hybrid marker + bytecode exploration** (testing-strategies: Extension 3) -- Two-level
    search: coarse markers + fine bytecode within each window.
-5. **Randomized wakeup tree ordering** (random_dpor.md: Proposal A) -- Different seeds explore
+6. **Randomized wakeup tree ordering** (random_dpor.md: Proposal A) -- Different seeds explore
    different trace space regions. Low effort, high value for `stop_on_first=True` use cases.
 
 ### P2 -- Nice to have, lower effort
 
-6. **Wakeup tree equivalence checking** (dpor-improvements: Phase 4c) -- Sound optimization;
+7. **Wakeup tree equivalence checking** (dpor-improvements: Phase 4c) -- Sound optimization;
     benefit depends on workload.
-7. **Per-step independence check** (dpor-improvements: Fix 6) -- Infrastructure ready
-    (Fix 4 + Fix 5 done). More precise than suffix union merge; needs concrete use case.
 8. **RETURNING clause injection** (integrations-and-detection) -- Captures autoincrement IDs
     from PostgreSQL INSERTs.
 9. **sys.addaudithook integration** (integrations-and-detection) -- Zero-config I/O safety net.
