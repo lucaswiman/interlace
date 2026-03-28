@@ -173,9 +173,18 @@ The ``explore_dpor()`` function is the main entry point:
     bugs. Set to ``None`` for unbounded exploration, but be aware that
     this can be exponentially slower.
 
+``stop_on_first`` *(default: True)*
+    If ``True``, stop exploring as soon as the first invariant violation
+    is found.  Set to ``False`` to continue exploring and collect all
+    failing interleavings.  Use ``False`` when you want an exhaustive
+    census of every distinct race in the program.
+
 ``max_executions`` *(default: None)*
     Safety cap on total executions. Useful for CI where you want a time
-    bound.
+    bound.  When the total number of Mazurkiewicz traces is very large
+    (thousands or more), set this to a reasonable budget and use a
+    non-DFS search strategy (see ``search`` below) to maximize the
+    chance of finding a bug within the budget.
 
 ``max_branches`` *(default: 100,000)*
     Maximum scheduling points per execution. Prevents runaway on programs
@@ -189,6 +198,45 @@ The ``explore_dpor()`` function is the main entry point:
     times to measure how reproducible the failure is. The reproduction
     count and percentage appear in ``result.explanation``. Set to 0 to
     skip.
+
+``search`` *(default: None)*
+    Controls the order in which wakeup-tree branches are explored.
+    All strategies visit the same set of Mazurkiewicz trace equivalence
+    classes; only the *order* differs.
+
+    - ``None`` or ``"dfs"`` --- classic depth-first search, always picking
+      the lowest thread ID.  **Use DFS when the goal is exhaustive
+      exploration** (``stop_on_first=False``): it produces the optimal
+      (minimum) number of executions because the sleep-set pruning is
+      maximally effective under this ordering.
+
+    - ``"bit-reversal"`` or ``"bit-reversal:<seed>"`` --- visit siblings
+      in a low-discrepancy bit-reversal permutation.  Maximally spreads
+      exploration across diverse conflict points early.
+
+    - ``"round-robin"`` or ``"round-robin:<seed>"`` --- cycle through
+      available threads in rotating order.
+
+    - ``"stride"`` or ``"stride:<seed>"`` --- visit every *s*-th sibling
+      (*s* coprime to the branching factor, derived from the seed).
+
+    - ``"conflict-first"`` --- reverse of DFS (highest thread ID first).
+
+    **Use a non-DFS strategy when the trace space is large and you have
+    a limited execution budget** (``stop_on_first=True``, or a low
+    ``max_executions``).  DFS explores traces in a fixed order determined
+    by thread IDs, so it may spend many executions on "similar"
+    interleavings before reaching the one that triggers a bug.  The
+    alternative strategies spread exploration across different conflict
+    points earlier, finding bugs faster on average.
+
+    The trade-off: non-DFS strategies may explore a small number of
+    redundant trace classes (~5% overhead on complex lock patterns like
+    dining philosophers) because changing the sibling ordering can reduce
+    sleep-set effectiveness.  For exhaustive exploration where minimizing
+    total executions matters, DFS is the best choice.
+
+    See :doc:`search` for a detailed comparison of all strategies.
 
 
 Interpreting results
