@@ -167,16 +167,6 @@ When using `marker_schedule_strategy()` with Hypothesis, we could measure:
 
 ---
 
-## Extension 6: Async/Await Marker Support
-
-**Status:** ✅ Implemented
-**Complexity:** Medium
-
-Full `AsyncTraceExecutor` implemented in `frontrun/async_trace_markers.py` with `sys.settrace`-based
-marker detection for async code. Tests in `tests/test_async_trace_markers.py`.
-
----
-
 ## Extension 7: Multi-Level Markers
 
 **Status:** Not implemented
@@ -310,7 +300,6 @@ compare(result_markers, result_bytecode)
 | Hybrid marker + bytecode | Not done | Medium | Medium |
 | Schedule filtering/constraints | Not done | Low-Medium | Low |
 | Distribution analysis | Not done | Low | Low |
-| Async/await support | ✅ Done | Medium | — |
 | Multi-level markers | Not done | Medium | Low |
 | Coverage & regression tracking | Not done | Low | High |
 | pytest plugin integration | Not done | Low | High |

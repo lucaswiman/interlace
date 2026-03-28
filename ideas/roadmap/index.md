@@ -1,36 +1,22 @@
 # Frontrun Roadmap
 
-Consolidated from the original `ideas/` directory. Items already implemented have been removed;
-only remaining work is listed here. Last reviewed: 2026-03-28.
+Last reviewed: 2026-03-28.
 
 ## Documents
 
-| Document | Status | Scope |
-|----------|--------|-------|
-| [dpor-improvements.md](dpor-improvements.md) | Active | Optimal DPOR trace reduction, wakeup tree equivalence, complex SQL race detection |
-| [integrations-and-detection.md](integrations-and-detection.md) | Active | SQL/Redis/resource detection layers, transaction identity, FK analysis |
-| [formal-methods.md](formal-methods.md) | Active | TLA+/Quint integration, spec-guided exploration, counterexample replay |
-| [testing-strategies.md](testing-strategies.md) | Active | Marker schedule extensions, hybrid exploration, pytest plugin |
-| [../search_strategies.md](../search_strategies.md) | ✅ Implemented | All 5 search strategies (DFS, bit-reversal, round-robin, stride, conflict-first) |
-| [../random_dpor.md](../random_dpor.md) | Proposal | Literature survey + 4 proposals for randomized/hybrid DPOR exploration |
+| Document | Scope |
+|----------|-------|
+| [dpor-improvements.md](dpor-improvements.md) | Wakeup tree equivalence, per-step independence, redundant opcode suppression |
+| [integrations-and-detection.md](integrations-and-detection.md) | SQL/Redis/resource detection layers, FK analysis |
+| [formal-methods.md](formal-methods.md) | TLA+/Quint integration, spec-guided exploration, counterexample replay |
+| [testing-strategies.md](testing-strategies.md) | Marker schedule extensions, hybrid exploration, pytest plugin |
+| [../random_dpor.md](../random_dpor.md) | Literature survey + 4 proposals for randomized/hybrid DPOR exploration |
 
-## Completed (removed from active priorities)
+## Implemented (not active)
 
-- ✅ **Position-sensitive future access cache** (dpor-improvements: Fix 3) -- Exact Mazurkiewicz
-  trace counts for shared-variable tests.
-- ✅ **Async/await marker support** (testing-strategies: Extension 6) -- Full `AsyncTraceExecutor`
-  in `frontrun/async_trace_markers.py` with `sys.settrace`-based marker detection.
-- ✅ **Search strategies** (search_strategies.md) -- All 5 strategies implemented in
-  `crates/dpor/src/path.rs` and exposed via `DporEngine(..., search=...)`.
-- ✅ **Provenance-tagged access summaries** (dpor-improvements: Fix 4) -- `AccessOrigin` enum
-  (`PythonMemory`, `LockSynthetic`, `IoDirect`) in `crates/dpor/src/access.rs`, threaded through
-  `record_access()`, `propagate_sleep()`, and future access cache. Unblocks Fix 6.
-- ✅ **Operation coalescing for unrelated tables** (dpor-improvements: Defect #15, Approach 2) --
-  `register_resource_group()` with cross-group intermediate detection. Automatic SQL table
-  group registration in `frontrun/dpor.py`. Skips inline wakeup for cross-group intermediates.
-- ✅ **WeakWrite+WeakRead merge** (dpor-improvements: Fix 5) -- `merge()` now returns `WeakWrite`
-  instead of `Write`, aligning with `access_kinds_conflict()`. Origins wired through
-  `accesses_are_independent()` for future per-origin policies.
+Position-sensitive future access cache (Fix 3), provenance-tagged access summaries (Fix 4),
+WeakWrite+WeakRead merge (Fix 5), operation coalescing for SQL tables (Defect #15), all 5
+search strategies, async/await marker support.
 
 ## Priority overview
 
@@ -51,8 +37,8 @@ only remaining work is listed here. Last reviewed: 2026-03-28.
 
 6. **Wakeup tree equivalence checking** (dpor-improvements: Phase 4c) -- Sound optimization;
     benefit depends on workload.
-7. **Per-branch merge with provenance** (dpor-improvements: Fix 6) -- Infrastructure ready
-    (Fix 4 + Fix 5 done). Needs concrete use case for per-origin conflict relaxation.
+7. **Per-step independence check** (dpor-improvements: Fix 6) -- Infrastructure ready
+    (Fix 4 + Fix 5 done). More precise than suffix union merge; needs concrete use case.
 8. **RETURNING clause injection** (integrations-and-detection) -- Captures autoincrement IDs
     from PostgreSQL INSERTs.
 9. **sys.addaudithook integration** (integrations-and-detection) -- Zero-config I/O safety net.
