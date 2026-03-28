@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::access::{Access, AccessKind};
+use crate::access::{Access, AccessKind, AccessOrigin};
 use crate::object::{ObjectId, ObjectState};
 use crate::path::{Path, PendingRace};
 use crate::thread::Thread;
@@ -194,11 +194,11 @@ impl DporEngine {
             }
         }
 
-        let access = Access::new(current_path_id, current_dpor_vv, thread_id);
+        let access = Access::new(current_path_id, current_dpor_vv, thread_id, AccessOrigin::PythonMemory);
         object_state.record_access(access, kind);
 
         // Record access for sleep set independence checks.
-        self.path.record_access(current_path_id, object_id, kind);
+        self.path.record_access(current_path_id, object_id, kind, AccessOrigin::PythonMemory);
     }
 
     /// Like [`process_access`] but uses first-access recording semantics
@@ -236,10 +236,10 @@ impl DporEngine {
             }
         }
 
-        let access = Access::new(current_path_id, current_dpor_vv, thread_id);
+        let access = Access::new(current_path_id, current_dpor_vv, thread_id, AccessOrigin::PythonMemory);
         object_state.record_io_access(access, kind);
 
-        self.path.record_access(current_path_id, object_id, kind);
+        self.path.record_access(current_path_id, object_id, kind, AccessOrigin::PythonMemory);
     }
 
     /// Like [`process_access`] but uses `dpor_vv` (lock-aware) with
@@ -270,10 +270,10 @@ impl DporEngine {
             }
         }
 
-        let access = Access::new(current_path_id, current_dpor_vv, thread_id);
+        let access = Access::new(current_path_id, current_dpor_vv, thread_id, AccessOrigin::IoDirect);
         object_state.record_io_access(access, kind);
 
-        self.path.record_access(current_path_id, object_id, kind);
+        self.path.record_access(current_path_id, object_id, kind, AccessOrigin::IoDirect);
     }
 
     /// Like [`process_access`] but uses the thread's `io_vv` instead of
@@ -290,14 +290,14 @@ impl DporEngine {
         kind: AccessKind,
     ) {
         let current_path_id = self.path.current_position().saturating_sub(1);
-        self.process_io_access_at(execution, thread_id, object_id, kind, current_path_id);
+        self.process_io_access_at(execution, thread_id, object_id, kind, current_path_id, AccessOrigin::IoDirect);
     }
 
-    /// Like [`process_io_access`] but uses a specific `path_id` instead of
-    /// the current path position.  Used by [`process_sync`] for lock events
-    /// which must be attributed to the thread's last scheduling point, not
-    /// the live path position (which may have been advanced by another
-    /// thread on free-threaded Python).
+    /// Like [`process_io_access`] but uses a specific `path_id` and explicit
+    /// `origin` instead of the current path position.  Used by [`process_sync`]
+    /// for lock events which must be attributed to the thread's last scheduling
+    /// point, not the live path position (which may have been advanced by
+    /// another thread on free-threaded Python).
     fn process_io_access_at(
         &mut self,
         execution: &mut Execution,
@@ -305,6 +305,7 @@ impl DporEngine {
         object_id: ObjectId,
         kind: AccessKind,
         current_path_id: usize,
+        origin: AccessOrigin,
     ) {
         let current_io_vv = execution.threads[thread_id].io_vv.clone();
 
@@ -322,10 +323,10 @@ impl DporEngine {
             }
         }
 
-        let access = Access::new(current_path_id, current_io_vv, thread_id);
+        let access = Access::new(current_path_id, current_io_vv, thread_id, origin);
         object_state.record_io_access(access, kind);
 
-        self.path.record_access(current_path_id, object_id, kind);
+        self.path.record_access(current_path_id, object_id, kind, origin);
     }
 
     /// Process a synchronization event (lock acquire/release, thread spawn/join).
@@ -367,17 +368,11 @@ impl DporEngine {
                     execution.threads[thread_id].dpor_vv.join(&release_vv);
                 }
                 let lock_obj_id = lock_id ^ Self::LOCK_OBJECT_XOR;
-                if let Some(pid) = path_id {
-                    self.process_io_access_at(
-                        execution, thread_id, lock_obj_id, AccessKind::Write, pid,
-                    );
-                } else {
-                    self.process_io_access(
-                        execution, thread_id, lock_obj_id, AccessKind::Write,
-                    );
-                }
-                // Record for deferred lock release backtracking.
                 let pid = path_id.unwrap_or_else(|| self.path.current_position().saturating_sub(1));
+                self.process_io_access_at(
+                    execution, thread_id, lock_obj_id, AccessKind::Write, pid, AccessOrigin::LockSynthetic,
+                );
+                // Record for deferred lock release backtracking.
                 self.deferred_lock_acquires.push(DeferredLockAcquire {
                     thread_id,
                     path_id: pid,

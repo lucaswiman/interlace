@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 
-use crate::access::AccessKind;
+use crate::access::{AccessKind, AccessOrigin};
 use crate::thread::ThreadStatus;
 use crate::wakeup_tree::WakeupTree;
 
@@ -82,11 +82,14 @@ fn access_kinds_conflict(a: AccessKind, b: AccessKind) -> bool {
 /// Paper ref: JACM'17 Def 3.3 (p.13) — independence is the negation of
 /// dependence. We approximate the paper's E ⊢ p♦q (Def 3.3) using access-kind
 /// compatibility as a sufficient condition for independence.
-fn accesses_are_independent(a: &HashMap<u64, AccessKind>, b: &HashMap<u64, AccessKind>) -> bool {
+fn accesses_are_independent(
+    a: &HashMap<u64, (AccessKind, AccessOrigin)>,
+    b: &HashMap<u64, (AccessKind, AccessOrigin)>,
+) -> bool {
     // Iterate over the smaller map for efficiency
     let (smaller, larger) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    for (obj, kind_a) in smaller {
-        if let Some(kind_b) = larger.get(obj) {
+    for (obj, (kind_a, _origin_a)) in smaller {
+        if let Some((kind_b, _origin_b)) = larger.get(obj) {
             if access_kinds_conflict(*kind_a, *kind_b) {
                 return false;
             }
@@ -118,14 +121,14 @@ pub struct Branch {
     ///
     /// Paper: needed to compute E ⊢ p♦q (independence, JACM'17 Def 3.3 p.13)
     /// — two events are independent if their accesses don't conflict.
-    pub active_accesses: HashMap<u64, AccessKind>,
+    pub active_accesses: HashMap<u64, (AccessKind, AccessOrigin)>,
     /// For each previously-explored (Visited) thread at this position,
-    /// its accesses (object → kind). Used for sleep set propagation:
+    /// its accesses (object → (kind, origin)). Used for sleep set propagation:
     /// a sleeping thread stays asleep if its accesses are independent of
     /// the active thread's accesses.
     ///
     /// Paper: approximates the independence check E ⊢ p♦q (JACM'17 p.13).
-    pub explored_accesses: HashMap<usize, HashMap<u64, AccessKind>>,
+    pub explored_accesses: HashMap<usize, HashMap<u64, (AccessKind, AccessOrigin)>>,
     /// Sleep set entries propagated from the previous scheduling point.
     ///
     /// When thread p is chosen at position i, each sleeping thread q at
@@ -138,7 +141,7 @@ pub struct Branch {
     /// In the paper's recursive formulation, Sleep' is passed to the
     /// recursive Explore(E.p, WuT', Sleep') call. In our iterative
     /// implementation, we compute it during replay and store it here.
-    pub propagated_sleep_accesses: HashMap<usize, HashMap<u64, AccessKind>>,
+    pub propagated_sleep_accesses: HashMap<usize, HashMap<u64, (AccessKind, AccessOrigin)>>,
     // Note: pending_race_objects was removed — source set filtering at the
     // race-object level requires sleep sets for soundness.
     // Paper: source set filtering (Def 4.3, JACM'17 p.15) allows adding only
@@ -189,7 +192,7 @@ pub struct Path {
     /// Soundness note: For data-dependent access patterns, the cached
     /// union may under-approximate actual future accesses.  For fixed
     /// access patterns (most concurrent programs), the cache is exact.
-    prev_thread_step_future: HashMap<usize, Vec<HashMap<u64, AccessKind>>>,
+    prev_thread_step_future: HashMap<usize, Vec<HashMap<u64, (AccessKind, AccessOrigin)>>>,
     /// Wakeup subtree carried from step() to schedule() for multi-step
     /// wakeup sequence guidance.
     ///
@@ -236,7 +239,7 @@ impl Path {
     /// Returns `Some(accesses)` if the cache has data (may be empty if
     /// the thread has completed all its work).  Returns `None` if no
     /// cache is available (first execution, or thread not in cache).
-    fn future_accesses_for(&self, tid: usize, pos: usize) -> Option<HashMap<u64, AccessKind>> {
+    fn future_accesses_for(&self, tid: usize, pos: usize) -> Option<HashMap<u64, (AccessKind, AccessOrigin)>> {
         let futures = self.prev_thread_step_future.get(&tid)?;
         // Count how many times tid was active before position pos
         let k = self.branches[..pos]
@@ -261,17 +264,19 @@ impl Path {
     /// point with different AccessKinds, we use AccessKind::merge() to
     /// combine them: Read + WeakRead → Read (since Read already covers
     /// WeakRead's conflicts), while other mixed pairs → Write (conservative).
-    pub fn record_access(&mut self, path_id: usize, object_id: u64, kind: AccessKind) {
+    pub fn record_access(&mut self, path_id: usize, object_id: u64, kind: AccessKind, origin: AccessOrigin) {
         if let Some(branch) = self.branches.get_mut(path_id) {
             branch.active_accesses
                 .entry(object_id)
-                .and_modify(|existing| {
+                .and_modify(|(existing_kind, existing_origin)| {
                     // Use merge() to combine access kinds correctly.
                     // Read + WeakRead → Read (Read subsumes WeakRead).
                     // All other mixed pairs → Write (conservative).
-                    *existing = existing.merge(kind);
+                    *existing_kind = existing_kind.merge(kind);
+                    // Merge origin: keep the "stronger" one.
+                    *existing_origin = existing_origin.merge(origin);
                 })
-                .or_insert(kind);
+                .or_insert((kind, origin));
         }
     }
 
@@ -387,7 +392,7 @@ impl Path {
         // Collect all sleeping threads at pos-1 and their access info.
         // A thread is sleeping if it's locally Visited (sleep[q]=true) or
         // propagated from an earlier position (in propagated_sleep_accesses).
-        let mut sleeping_threads: HashMap<usize, HashMap<u64, AccessKind>> = HashMap::new();
+        let mut sleeping_threads: HashMap<usize, HashMap<u64, (AccessKind, AccessOrigin)>> = HashMap::new();
 
         // 1. Locally-sleeping threads (Visited at pos-1)
         //
@@ -426,7 +431,7 @@ impl Path {
         }
 
         // Compute which sleeping threads stay asleep at pos.
-        let mut propagated: HashMap<usize, HashMap<u64, AccessKind>> = HashMap::new();
+        let mut propagated: HashMap<usize, HashMap<u64, (AccessKind, AccessOrigin)>> = HashMap::new();
         for (tid, tid_accesses) in sleeping_threads {
             if accesses_are_independent(&tid_accesses, &prev_active_accesses) {
                 propagated.insert(tid, tid_accesses);
@@ -525,26 +530,27 @@ impl Path {
         //
         // Paper ref: JACM'17 Section 10 (p.31-35) — trace caching for
         // sleep set propagation.
-        let mut per_thread_accesses: HashMap<usize, Vec<&HashMap<u64, AccessKind>>> = HashMap::new();
+        let mut per_thread_accesses: HashMap<usize, Vec<&HashMap<u64, (AccessKind, AccessOrigin)>>> = HashMap::new();
         for branch in &self.branches {
             per_thread_accesses
                 .entry(branch.active_thread)
                 .or_default()
                 .push(&branch.active_accesses);
         }
-        let mut step_future: HashMap<usize, Vec<HashMap<u64, AccessKind>>> = HashMap::new();
+        let mut step_future: HashMap<usize, Vec<HashMap<u64, (AccessKind, AccessOrigin)>>> = HashMap::new();
         for (tid, steps) in &per_thread_accesses {
             let m = steps.len();
-            let mut futures: Vec<HashMap<u64, AccessKind>> = vec![HashMap::new(); m + 1];
+            let mut futures: Vec<HashMap<u64, (AccessKind, AccessOrigin)>> = vec![HashMap::new(); m + 1];
             for k in (0..m).rev() {
                 futures[k] = futures[k + 1].clone();
-                for (obj_id, kind) in steps[k] {
+                for (obj_id, (kind, origin)) in steps[k] {
                     futures[k]
                         .entry(*obj_id)
-                        .and_modify(|existing| {
-                            *existing = existing.merge(*kind);
+                        .and_modify(|(existing_kind, existing_origin)| {
+                            *existing_kind = existing_kind.merge(*kind);
+                            *existing_origin = existing_origin.merge(*origin);
                         })
-                        .or_insert(*kind);
+                        .or_insert((*kind, *origin));
                 }
             }
             step_future.insert(*tid, futures);
@@ -864,7 +870,7 @@ mod tests {
         let mut path = Path::new(None);
         path.schedule(&[0, 1, 2], 0, 3);
         // Record some access for thread 0
-        path.record_access(0, 100, AccessKind::Write);
+        path.record_access(0, 100, AccessKind::Write, AccessOrigin::PythonMemory);
         path.insert_wakeup(0, 1, None);
 
         // step() marks 0 as Visited and adds to sleep set
@@ -883,7 +889,7 @@ mod tests {
         // Wakeup insertions for T0 at position 0 should be rejected.
         let mut path = Path::new(None);
         path.schedule(&[0, 1, 2], 0, 3);
-        path.record_access(0, 100, AccessKind::Write);
+        path.record_access(0, 100, AccessKind::Write, AccessOrigin::PythonMemory);
 
         // Add T1 to wakeup tree
         path.insert_wakeup(0, 1, None);
@@ -970,9 +976,9 @@ mod tests {
 
         // --- First execution: T0 at pos 0, T1 at pos 1 ---
         path.schedule(&[0, 1, 2], 0, 3);
-        path.record_access(0, 100, AccessKind::Write);
+        path.record_access(0, 100, AccessKind::Write, AccessOrigin::PythonMemory);
         path.schedule(&[1, 2], 1, 3);
-        path.record_access(1, 200, AccessKind::Read);
+        path.record_access(1, 200, AccessKind::Read, AccessOrigin::PythonMemory);
 
         // Add T1 to wakeup tree at pos 0 and T2 at pos 1
         path.insert_wakeup(0, 1, None);
@@ -984,7 +990,7 @@ mod tests {
         // --- Second execution: replay pos 0 (T0), replay pos 1 (T2) ---
         let chosen = path.schedule(&[0, 1, 2], 0, 3);
         assert_eq!(chosen, Some(0)); // replay T0
-        path.record_access(0, 100, AccessKind::Write); // T0 writes obj 100
+        path.record_access(0, 100, AccessKind::Write, AccessOrigin::PythonMemory); // T0 writes obj 100
 
         let chosen = path.schedule(&[1, 2], 1, 3);
         assert_eq!(chosen, Some(2)); // replay T2 (from wakeup)
@@ -1020,9 +1026,9 @@ mod tests {
 
         // --- First execution: T0 writes obj 100, T1 reads obj 200 ---
         path.schedule(&[0, 1], 0, 2);
-        path.record_access(0, 100, AccessKind::Write);
+        path.record_access(0, 100, AccessKind::Write, AccessOrigin::PythonMemory);
         path.schedule(&[1], 1, 2);
-        path.record_access(1, 200, AccessKind::Read);
+        path.record_access(1, 200, AccessKind::Read, AccessOrigin::PythonMemory);
 
         // Backtrack T1 at pos 0
         path.insert_wakeup(0, 1, None);
@@ -1033,7 +1039,7 @@ mod tests {
         // --- Second execution: T1 at pos 0 (replay), then new pos 1 ---
         let chosen = path.schedule(&[0, 1], 0, 2);
         assert_eq!(chosen, Some(1));
-        path.record_access(0, 200, AccessKind::Read); // T1 reads different object
+        path.record_access(0, 200, AccessKind::Read, AccessOrigin::PythonMemory); // T1 reads different object
 
         // New branch at pos 1: T0 chosen
         path.schedule(&[0], 0, 2);
@@ -1062,9 +1068,9 @@ mod tests {
 
         // --- First execution: T0 writes obj 100, T1 writes obj 100 ---
         path.schedule(&[0, 1], 0, 2);
-        path.record_access(0, 100, AccessKind::Write);
+        path.record_access(0, 100, AccessKind::Write, AccessOrigin::PythonMemory);
         path.schedule(&[1], 1, 2);
-        path.record_access(1, 100, AccessKind::Write);
+        path.record_access(1, 100, AccessKind::Write, AccessOrigin::PythonMemory);
 
         // Backtrack T1 at pos 0
         path.insert_wakeup(0, 1, None);
@@ -1075,7 +1081,7 @@ mod tests {
         // --- Second execution: T1 at pos 0 (replay), then new pos 1 ---
         let chosen = path.schedule(&[0, 1], 0, 2);
         assert_eq!(chosen, Some(1));
-        path.record_access(0, 100, AccessKind::Write); // T1 writes same obj 100
+        path.record_access(0, 100, AccessKind::Write, AccessOrigin::PythonMemory); // T1 writes same obj 100
 
         // New branch at pos 1: T0 chosen
         path.schedule(&[0], 0, 2);
@@ -1103,11 +1109,11 @@ mod tests {
 
         // Build 3 branches manually
         path.schedule(&[0, 1, 2], 0, 3); // pos 0: T0
-        path.record_access(0, 1, AccessKind::Write);
+        path.record_access(0, 1, AccessKind::Write, AccessOrigin::PythonMemory);
         path.schedule(&[1, 2], 1, 3); // pos 1: T1
-        path.record_access(1, 2, AccessKind::Write);
+        path.record_access(1, 2, AccessKind::Write, AccessOrigin::PythonMemory);
         path.schedule(&[2], 2, 3); // pos 2: T2
-        path.record_access(2, 1, AccessKind::Write);
+        path.record_access(2, 1, AccessKind::Write, AccessOrigin::PythonMemory);
 
         let notdep = path.compute_notdep(0, 2, 2);
         assert_eq!(notdep, vec![1, 2], "T1 is independent of T0, then T2 races");
@@ -1125,11 +1131,11 @@ mod tests {
         let mut path = Path::new(None);
 
         path.schedule(&[0, 1, 2], 0, 3);
-        path.record_access(0, 1, AccessKind::Write);
+        path.record_access(0, 1, AccessKind::Write, AccessOrigin::PythonMemory);
         path.schedule(&[1, 2], 1, 3);
-        path.record_access(1, 1, AccessKind::Write); // same object — dependent
+        path.record_access(1, 1, AccessKind::Write, AccessOrigin::PythonMemory); // same object — dependent
         path.schedule(&[2], 2, 3);
-        path.record_access(2, 1, AccessKind::Write);
+        path.record_access(2, 1, AccessKind::Write, AccessOrigin::PythonMemory);
 
         let notdep = path.compute_notdep(0, 2, 2);
         assert_eq!(notdep, vec![2], "T1 is dependent (same obj Write), excluded");
@@ -1142,9 +1148,9 @@ mod tests {
         let mut path = Path::new(None);
 
         path.schedule(&[0, 1], 0, 2);
-        path.record_access(0, 1, AccessKind::Write);
+        path.record_access(0, 1, AccessKind::Write, AccessOrigin::PythonMemory);
         path.schedule(&[1], 1, 2);
-        path.record_access(1, 1, AccessKind::Write);
+        path.record_access(1, 1, AccessKind::Write, AccessOrigin::PythonMemory);
 
         let notdep = path.compute_notdep(0, 1, 1);
         assert_eq!(notdep, vec![1], "Adjacent race: just the racing thread");
@@ -1161,11 +1167,11 @@ mod tests {
 
         // T0 at pos 0, T0 again at pos 1 (same thread!), T1 at pos 2
         path.schedule(&[0, 1], 0, 2);
-        path.record_access(0, 1, AccessKind::Write);
+        path.record_access(0, 1, AccessKind::Write, AccessOrigin::PythonMemory);
         path.schedule(&[0, 1], 0, 2); // T0 runs again
-        path.record_access(1, 2, AccessKind::Read); // different obj, but same thread
+        path.record_access(1, 2, AccessKind::Read, AccessOrigin::PythonMemory); // different obj, but same thread
         path.schedule(&[1], 1, 2);
-        path.record_access(2, 1, AccessKind::Write);
+        path.record_access(2, 1, AccessKind::Write, AccessOrigin::PythonMemory);
 
         let notdep = path.compute_notdep(0, 2, 1);
         assert_eq!(
@@ -1183,11 +1189,11 @@ mod tests {
 
         // T0 writes obj 1 at pos 0, T1 writes obj 2 at pos 1, T2 writes obj 1 at pos 2
         path.schedule(&[0, 1, 2], 0, 3);
-        path.record_access(0, 1, AccessKind::Write);
+        path.record_access(0, 1, AccessKind::Write, AccessOrigin::PythonMemory);
         path.schedule(&[1, 2], 1, 3);
-        path.record_access(1, 2, AccessKind::Write);
+        path.record_access(1, 2, AccessKind::Write, AccessOrigin::PythonMemory);
         path.schedule(&[2], 2, 3);
-        path.record_access(2, 1, AccessKind::Write);
+        path.record_access(2, 1, AccessKind::Write, AccessOrigin::PythonMemory);
 
         let race = PendingRace {
             prev_path_id: 0,
@@ -1222,19 +1228,20 @@ mod tests {
         path.schedule(&[0, 1], 0, 2);
 
         // Thread 0 does Read then WeakRead on the same object
-        path.record_access(0, 200, AccessKind::Read);
-        path.record_access(0, 200, AccessKind::WeakRead);
+        path.record_access(0, 200, AccessKind::Read, AccessOrigin::PythonMemory);
+        path.record_access(0, 200, AccessKind::WeakRead, AccessOrigin::PythonMemory);
 
         // The merged kind should be Read (Read subsumes WeakRead),
         // NOT Write (which would cause false conflicts with WeakRead).
-        let merged = path.branches[0].active_accesses.get(&200).unwrap();
+        let (merged_kind, merged_origin) = path.branches[0].active_accesses.get(&200).unwrap();
         assert_eq!(
-            *merged,
+            *merged_kind,
             AccessKind::Read,
             "Read + WeakRead should merge to Read via AccessKind::merge(), \
              but got {:?}. record_access() is incorrectly upgrading to Write.",
-            merged
+            merged_kind
         );
+        assert_eq!(*merged_origin, AccessOrigin::PythonMemory);
     }
 
     /// Test that record_access merges WeakRead + Read to Read (commutative).
@@ -1246,15 +1253,15 @@ mod tests {
         path.schedule(&[0, 1], 0, 2);
 
         // Reverse order: WeakRead then Read
-        path.record_access(0, 200, AccessKind::WeakRead);
-        path.record_access(0, 200, AccessKind::Read);
+        path.record_access(0, 200, AccessKind::WeakRead, AccessOrigin::PythonMemory);
+        path.record_access(0, 200, AccessKind::Read, AccessOrigin::PythonMemory);
 
-        let merged = path.branches[0].active_accesses.get(&200).unwrap();
+        let (merged_kind, _) = path.branches[0].active_accesses.get(&200).unwrap();
         assert_eq!(
-            *merged,
+            *merged_kind,
             AccessKind::Read,
             "WeakRead + Read should merge to Read, but got {:?}.",
-            merged
+            merged_kind
         );
     }
 
@@ -1266,15 +1273,15 @@ mod tests {
 
         path.schedule(&[0, 1], 0, 2);
 
-        path.record_access(0, 200, AccessKind::Read);
-        path.record_access(0, 200, AccessKind::Write);
+        path.record_access(0, 200, AccessKind::Read, AccessOrigin::PythonMemory);
+        path.record_access(0, 200, AccessKind::Write, AccessOrigin::PythonMemory);
 
-        let merged = path.branches[0].active_accesses.get(&200).unwrap();
+        let (merged_kind, _) = path.branches[0].active_accesses.get(&200).unwrap();
         assert_eq!(
-            *merged,
+            *merged_kind,
             AccessKind::Write,
             "Read + Write should merge to Write, but got {:?}.",
-            merged
+            merged_kind
         );
     }
 
@@ -1289,11 +1296,11 @@ mod tests {
         // --- First execution: T0 at pos 0, T1 at pos 1 ---
         path.schedule(&[0, 1], 0, 2);
         // T0 does Read + WeakRead on obj 200
-        path.record_access(0, 200, AccessKind::Read);
-        path.record_access(0, 200, AccessKind::WeakRead);
+        path.record_access(0, 200, AccessKind::Read, AccessOrigin::PythonMemory);
+        path.record_access(0, 200, AccessKind::WeakRead, AccessOrigin::PythonMemory);
 
         path.schedule(&[1], 1, 2);
-        path.record_access(1, 200, AccessKind::WeakRead); // T1 does WeakRead
+        path.record_access(1, 200, AccessKind::WeakRead, AccessOrigin::PythonMemory); // T1 does WeakRead
 
         // Add T1 to wakeup tree at pos 0 to force backtracking
         path.insert_wakeup(0, 1, None);
@@ -1304,7 +1311,7 @@ mod tests {
         // --- Second execution: T1 at pos 0 (replay), then new pos 1 ---
         let chosen = path.schedule(&[0, 1], 0, 2);
         assert_eq!(chosen, Some(1));
-        path.record_access(0, 200, AccessKind::WeakRead); // T1 WeakReads
+        path.record_access(0, 200, AccessKind::WeakRead, AccessOrigin::PythonMemory); // T1 WeakReads
 
         // New branch at pos 1: T0 chosen
         path.schedule(&[0], 0, 2);
@@ -1329,9 +1336,9 @@ mod tests {
 
         // --- First execution: T0 at pos 0, T1 at pos 1 ---
         path.schedule(&[0, 1, 2], 0, 3);
-        path.record_access(0, 100, AccessKind::Write); // T0 writes obj 100
+        path.record_access(0, 100, AccessKind::Write, AccessOrigin::PythonMemory); // T0 writes obj 100
         path.schedule(&[1, 2], 1, 3);
-        path.record_access(1, 100, AccessKind::Read); // T1 reads obj 100
+        path.record_access(1, 100, AccessKind::Read, AccessOrigin::PythonMemory); // T1 reads obj 100
 
         // Add to wakeup trees
         path.insert_wakeup(0, 2, None);
@@ -1342,7 +1349,7 @@ mod tests {
 
         // --- Second execution: replay pos 0 (T0), replay pos 1 (T2) ---
         path.schedule(&[0, 1, 2], 0, 3);
-        path.record_access(0, 100, AccessKind::Write); // T0 writes obj 100
+        path.record_access(0, 100, AccessKind::Write, AccessOrigin::PythonMemory); // T0 writes obj 100
 
         path.schedule(&[1, 2], 1, 3);
 
