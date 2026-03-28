@@ -167,18 +167,16 @@ Soundness and optimality
 Happens-before tracking
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-The engine maintains a ``dpor_vv`` vector clock per thread (``VersionVec``,
-a contiguous ``Vec<u32>`` indexed by thread ID).  Synchronization events
-update the clocks:
+The engine tracks happens-before using **vector clocks** --- one
+``VersionVec`` per thread, incremented on each scheduling step and joined
+on synchronization events (lock acquire/release, thread spawn/join).  Two
+accesses race when they are to the same object, at least one is a write,
+and their vector clocks are *concurrent* (neither dominates).
 
-- **Lock release** stores the thread's clock; **lock acquire** joins the
-  stored clock.
-- **Thread spawn** copies parent's clock to child; **thread join** joins the
-  joined thread's clock into the joiner.
-- **Scheduling** increments the thread's own component.
-
-Two accesses race when they are to the same object, at least one is a
-write, and their vector clocks are *concurrent* (neither dominates).
+Each thread actually carries three clocks: ``dpor_vv`` (lock-aware, for
+shared-memory races), ``io_vv`` (lock-oblivious, for TOCTOU/I/O races),
+and ``causality`` (general causal ordering).  See :doc:`vector-clocks` for
+the full explanation with worked examples.
 
 
 Search Strategies

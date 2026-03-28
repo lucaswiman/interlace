@@ -106,6 +106,13 @@ trace where :math:`W_1(x)` precedes :math:`W_0(x)`.
 Happens-before and vector clocks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+.. seealso::
+
+   :doc:`vector-clocks` for a comprehensive treatment including the three
+   per-thread clocks (``dpor_vv``, ``io_vv``, ``causality``), the
+   ``VersionVec`` implementation, and worked examples with and without
+   synchronization.
+
 Two operations are *concurrent* if neither `happens before
 <https://en.wikipedia.org/wiki/Happened-before>`_ the other. The happens-before
 relation :math:`\to` is the smallest partial order satisfying:
