@@ -3009,6 +3009,7 @@ class DporBytecodeRunner:
 
         if self.detect_io:
             _recorder = scheduler.trace_recorder
+            _registered_groups: set[int] = set()
 
             def _io_reporter(resource_id: str, kind: str) -> None:
                 object_key = _make_object_key(hash(resource_id), resource_id)
@@ -3019,12 +3020,13 @@ class DporBytecodeRunner:
                 # processing. This prevents backtrack explosion from intermediate
                 # operations on unrelated tables (Defect #15).
                 if resource_id.startswith("sql:"):
-                    # Extract table name: "sql:<table>:..." → "sql:<table>"
-                    _parts = resource_id.split(":")
-                    _table_group = f"sql:{_parts[1]}" if len(_parts) >= 2 else resource_id
-                    _group_key = hash(_table_group) & 0xFFFFFFFFFFFFFFFF
-                    with engine_lock:
-                        engine.register_resource_group(object_key, _group_key)
+                    parts = resource_id.split(":")
+                    table_group = f"sql:{parts[1]}" if len(parts) >= 2 else resource_id
+                    group_key = hash(table_group) & 0xFFFFFFFFFFFFFFFF
+                    if object_key not in _registered_groups:
+                        with engine_lock:
+                            engine.register_resource_group(object_key, group_key)
+                        _registered_groups.add(object_key)
                 # Record I/O event in the trace for human-readable output
                 if _recorder is not None:
                     _frame = sys._getframe(1)
