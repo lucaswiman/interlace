@@ -82,6 +82,10 @@ impl AccessKind {
             // Read subsumes WeakRead (Read ⊇ WeakRead in conflict sets)
             (AccessKind::Read, AccessKind::WeakRead)
             | (AccessKind::WeakRead, AccessKind::Read) => AccessKind::Read,
+            // WeakWrite subsumes WeakRead: WeakWrite conflicts with {Read, Write},
+            // WeakRead conflicts with {Write}. WeakWrite's conflict set is a superset.
+            (AccessKind::WeakWrite, AccessKind::WeakRead)
+            | (AccessKind::WeakRead, AccessKind::WeakWrite) => AccessKind::WeakWrite,
             // Write subsumes everything
             _ => AccessKind::Write,
         }

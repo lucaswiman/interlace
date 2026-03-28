@@ -128,8 +128,10 @@ fn accesses_are_independent(
 ) -> bool {
     // Iterate over the smaller map for efficiency
     let (smaller, larger) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    for (obj, (kind_a, _origin_a)) in smaller {
-        if let Some((kind_b, _origin_b)) = larger.get(obj) {
+    for (obj, (kind_a, origin_a)) in smaller {
+        if let Some((kind_b, origin_b)) = larger.get(obj) {
+            // Origins available for future per-origin conflict policies (Fix 6 phase 2).
+            let _ = (origin_a, origin_b);
             if access_kinds_conflict(*kind_a, *kind_b) {
                 return false;
             }
