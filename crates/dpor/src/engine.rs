@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::access::{Access, AccessKind};
+use crate::access::{Access, AccessKind, AccessOrigin};
 use crate::object::{ObjectId, ObjectState};
 use crate::path::{Path, PendingRace};
 use crate::thread::Thread;
@@ -107,6 +107,14 @@ pub struct DporEngine {
     /// Lock acquires collected during the current execution.
     /// Used to determine whether a release should trigger backtracking.
     deferred_lock_acquires: Vec<DeferredLockAcquire>,
+    /// Resource group mapping: object_id → group_id.
+    ///
+    /// Objects in the same resource group (e.g., same SQL table) are related;
+    /// objects in different groups are independent. When races are detected on
+    /// objects with resource groups, inline wakeup insertion is skipped in
+    /// favor of deferred notdep processing. This prevents backtrack explosion
+    /// from intermediate operations on unrelated tables (Defect #15).
+    resource_groups: HashMap<ObjectId, u64>,
 }
 
 impl DporEngine {
@@ -128,6 +136,7 @@ impl DporEngine {
             pending_races: Vec::new(),
             deferred_lock_releases: Vec::new(),
             deferred_lock_acquires: Vec::new(),
+            resource_groups: HashMap::new(),
         }
     }
 
@@ -190,15 +199,16 @@ impl DporEngine {
                     current_path_id,
                     thread_id,
                     race_object: Some(object_id),
+                    inline_skipped: false,
                 });
             }
         }
 
-        let access = Access::new(current_path_id, current_dpor_vv, thread_id);
+        let access = Access::new(current_path_id, current_dpor_vv, thread_id, AccessOrigin::PythonMemory);
         object_state.record_access(access, kind);
 
         // Record access for sleep set independence checks.
-        self.path.record_access(current_path_id, object_id, kind);
+        self.path.record_access(current_path_id, object_id, kind, AccessOrigin::PythonMemory);
     }
 
     /// Like [`process_access`] but uses first-access recording semantics
@@ -232,20 +242,28 @@ impl DporEngine {
                     current_path_id,
                     thread_id,
                     race_object: Some(object_id),
+                    inline_skipped: false,
                 });
             }
         }
 
-        let access = Access::new(current_path_id, current_dpor_vv, thread_id);
+        let access = Access::new(current_path_id, current_dpor_vv, thread_id, AccessOrigin::PythonMemory);
         object_state.record_io_access(access, kind);
 
-        self.path.record_access(current_path_id, object_id, kind);
+        self.path.record_access(current_path_id, object_id, kind, AccessOrigin::PythonMemory);
     }
 
     /// Like [`process_access`] but uses `dpor_vv` (lock-aware) with
     /// `record_io_access` recording semantics.  Intended for I/O
     /// operations that go through Python-level code (Redis, SQL) where
     /// Python locks are tracked by `report_sync` and should be respected.
+    ///
+    /// When the object has a registered resource group (via
+    /// [`register_resource_group`]), inline wakeup insertion is skipped.
+    /// Races are still collected as `PendingRace` entries for deferred
+    /// notdep processing at the end of the execution. This prevents
+    /// backtrack explosion from intermediate operations on unrelated
+    /// tables (Defect #15).
     pub fn process_synced_io_access(
         &mut self,
         execution: &mut Execution,
@@ -258,22 +276,42 @@ impl DporEngine {
 
         let object_state = execution.objects.entry(object_id).or_insert_with(ObjectState::new);
 
+        // Check if races on this object involve intermediate accesses
+        // from different resource groups. When true, we skip inline wakeup
+        // and rely on deferred notdep processing to provide multi-step
+        // guidance. This avoids backtrack explosion from intermediate
+        // operations on unrelated tables (Defect #15).
+        let has_group = self.has_resource_group(object_id);
+
         for prev_access in object_state.dependent_accesses(kind, thread_id) {
             if !prev_access.happens_before(&current_dpor_vv) {
-                self.path.insert_wakeup(prev_access.path_id, thread_id, Some(object_id));
+                // Check if there are intermediate accesses from different
+                // resource groups between this race pair. If so, skip inline
+                // wakeup to avoid explosion. If not (same group or no
+                // intermediates from other groups), do inline as normal.
+                let skip_inline = has_group
+                    && self.path.has_cross_group_intermediates(
+                        prev_access.path_id,
+                        current_path_id,
+                        &self.resource_groups,
+                    );
+                if !skip_inline {
+                    self.path.insert_wakeup(prev_access.path_id, thread_id, Some(object_id));
+                }
                 self.pending_races.push(PendingRace {
                     prev_path_id: prev_access.path_id,
                     current_path_id,
                     thread_id,
                     race_object: Some(object_id),
+                    inline_skipped: skip_inline,
                 });
             }
         }
 
-        let access = Access::new(current_path_id, current_dpor_vv, thread_id);
+        let access = Access::new(current_path_id, current_dpor_vv, thread_id, AccessOrigin::IoDirect);
         object_state.record_io_access(access, kind);
 
-        self.path.record_access(current_path_id, object_id, kind);
+        self.path.record_access(current_path_id, object_id, kind, AccessOrigin::IoDirect);
     }
 
     /// Like [`process_access`] but uses the thread's `io_vv` instead of
@@ -290,14 +328,14 @@ impl DporEngine {
         kind: AccessKind,
     ) {
         let current_path_id = self.path.current_position().saturating_sub(1);
-        self.process_io_access_at(execution, thread_id, object_id, kind, current_path_id);
+        self.process_io_access_at(execution, thread_id, object_id, kind, current_path_id, AccessOrigin::IoDirect);
     }
 
-    /// Like [`process_io_access`] but uses a specific `path_id` instead of
-    /// the current path position.  Used by [`process_sync`] for lock events
-    /// which must be attributed to the thread's last scheduling point, not
-    /// the live path position (which may have been advanced by another
-    /// thread on free-threaded Python).
+    /// Like [`process_io_access`] but uses a specific `path_id` and explicit
+    /// `origin` instead of the current path position.  Used by [`process_sync`]
+    /// for lock events which must be attributed to the thread's last scheduling
+    /// point, not the live path position (which may have been advanced by
+    /// another thread on free-threaded Python).
     fn process_io_access_at(
         &mut self,
         execution: &mut Execution,
@@ -305,6 +343,7 @@ impl DporEngine {
         object_id: ObjectId,
         kind: AccessKind,
         current_path_id: usize,
+        origin: AccessOrigin,
     ) {
         let current_io_vv = execution.threads[thread_id].io_vv.clone();
 
@@ -318,14 +357,15 @@ impl DporEngine {
                     current_path_id,
                     thread_id,
                     race_object: Some(object_id),
+                    inline_skipped: false,
                 });
             }
         }
 
-        let access = Access::new(current_path_id, current_io_vv, thread_id);
+        let access = Access::new(current_path_id, current_io_vv, thread_id, origin);
         object_state.record_io_access(access, kind);
 
-        self.path.record_access(current_path_id, object_id, kind);
+        self.path.record_access(current_path_id, object_id, kind, origin);
     }
 
     /// Process a synchronization event (lock acquire/release, thread spawn/join).
@@ -367,17 +407,11 @@ impl DporEngine {
                     execution.threads[thread_id].dpor_vv.join(&release_vv);
                 }
                 let lock_obj_id = lock_id ^ Self::LOCK_OBJECT_XOR;
-                if let Some(pid) = path_id {
-                    self.process_io_access_at(
-                        execution, thread_id, lock_obj_id, AccessKind::Write, pid,
-                    );
-                } else {
-                    self.process_io_access(
-                        execution, thread_id, lock_obj_id, AccessKind::Write,
-                    );
-                }
-                // Record for deferred lock release backtracking.
                 let pid = path_id.unwrap_or_else(|| self.path.current_position().saturating_sub(1));
+                self.process_io_access_at(
+                    execution, thread_id, lock_obj_id, AccessKind::Write, pid, AccessOrigin::LockSynthetic,
+                );
+                // Record for deferred lock release backtracking.
                 self.deferred_lock_acquires.push(DeferredLockAcquire {
                     thread_id,
                     path_id: pid,
@@ -512,6 +546,23 @@ impl DporEngine {
     /// Call before `next_execution()` which consumes them.
     pub fn pending_races(&self) -> &[PendingRace] {
         &self.pending_races
+    }
+
+    /// Register that `object_id` belongs to resource group `group_id`.
+    ///
+    /// Objects in the same resource group (e.g., SQL resources from the same
+    /// table) are related; objects in different groups are independent. When
+    /// a race is detected on an object with a resource group, inline wakeup
+    /// insertion is skipped in favor of deferred notdep processing. This
+    /// prevents backtrack explosion from intermediate operations on unrelated
+    /// tables (Defect #15: Operation Coalescing for Unrelated Tables).
+    pub fn register_resource_group(&mut self, object_id: ObjectId, group_id: u64) {
+        self.resource_groups.insert(object_id, group_id);
+    }
+
+    /// Check if an object has a registered resource group.
+    fn has_resource_group(&self, object_id: ObjectId) -> bool {
+        self.resource_groups.contains_key(&object_id)
     }
 }
 

@@ -186,6 +186,17 @@ impl PyDporEngine {
         self.inner.num_threads()
     }
 
+    /// Register that `object_id` belongs to resource group `group_id`.
+    ///
+    /// Objects in the same resource group (e.g., SQL resources from the same
+    /// table) are related. When a race is detected on an object with a
+    /// resource group, inline wakeup insertion is skipped in favor of
+    /// deferred notdep processing. This prevents backtrack explosion from
+    /// intermediate operations on unrelated tables (Defect #15).
+    fn register_resource_group(&mut self, object_id: u64, group_id: u64) {
+        self.inner.register_resource_group(object_id, group_id);
+    }
+
     /// Return pending races detected during the current execution.
     /// Each race is (prev_path_id, current_path_id, thread_id, race_object).
     /// Call before next_execution() which consumes them.

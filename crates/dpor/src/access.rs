@@ -7,6 +7,39 @@
 
 use crate::vv::VersionVec;
 
+/// Provenance tag indicating how an access was generated.
+///
+/// Each access is tagged with its origin so that future merge strategies
+/// can apply per-origin policies (e.g., treating I/O accesses differently
+/// from Python memory accesses during sleep-set propagation).
+///
+/// Ordering by "strength": `IoDirect` > `LockSynthetic` > `PythonMemory`.
+/// When merging two accesses with different origins, the stronger one wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessOrigin {
+    /// Access observed via Python shared-memory tracing (sys.settrace).
+    PythonMemory,
+    /// Synthetic access generated for lock acquire/release conflict tracking.
+    LockSynthetic,
+    /// Direct I/O access (file, socket, database) intercepted at the C level.
+    IoDirect,
+}
+
+impl AccessOrigin {
+    /// Merge two origins, keeping the "stronger" one.
+    /// Strength order: `IoDirect` > `LockSynthetic` > `PythonMemory`.
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            _ if self == other => self,
+            (AccessOrigin::IoDirect, _) | (_, AccessOrigin::IoDirect) => AccessOrigin::IoDirect,
+            (AccessOrigin::LockSynthetic, _) | (_, AccessOrigin::LockSynthetic) => {
+                AccessOrigin::LockSynthetic
+            }
+            _ => AccessOrigin::PythonMemory,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessKind {
     Read,
@@ -65,11 +98,12 @@ pub struct Access {
     pub path_id: usize,
     pub dpor_vv: VersionVec,
     pub thread_id: usize,
+    pub origin: AccessOrigin,
 }
 
 impl Access {
-    pub fn new(path_id: usize, dpor_vv: VersionVec, thread_id: usize) -> Self {
-        Self { path_id, dpor_vv, thread_id }
+    pub fn new(path_id: usize, dpor_vv: VersionVec, thread_id: usize, origin: AccessOrigin) -> Self {
+        Self { path_id, dpor_vv, thread_id, origin }
     }
 
     /// Check if this access happens-before the given vector clock.
