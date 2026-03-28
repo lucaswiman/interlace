@@ -109,20 +109,22 @@ class TestAsyncMarkerInLoopSkipped:
         async def task1() -> None:
             for i in range(2):
                 # frontrun: loop_marker
-                results.append(i)
+                results.append(i)  # noqa: PERF402
 
         async def task2() -> None:
             for i in range(2):
                 # frontrun: loop_marker
-                results.append(10 + i)
+                results.append(10 + i)  # noqa: PERF401
 
         # Schedule: task1 iter0, task2 iter0, task1 iter1, task2 iter1
-        schedule = Schedule([
-            Step("task1", "loop_marker"),
-            Step("task2", "loop_marker"),
-            Step("task1", "loop_marker"),
-            Step("task2", "loop_marker"),
-        ])
+        schedule = Schedule(
+            [
+                Step("task1", "loop_marker"),
+                Step("task2", "loop_marker"),
+                Step("task1", "loop_marker"),
+                Step("task2", "loop_marker"),
+            ]
+        )
 
         executor = AsyncTraceExecutor(schedule, deadlock_timeout=5.0)
         executor.run(

@@ -115,6 +115,7 @@ class AsyncTraceExecutor:
         Returns:
             A trace function suitable for sys.settrace
         """
+
         def trace_function(frame: Any, event: str, arg: Any) -> Any:
             try:
                 # Only care about 'line' events
