@@ -363,11 +363,12 @@ impl Path {
         // New branch: check wakeup subtree guidance first (Algorithm 2
         // line 17, JACM'17 p.24-25: WuT' = subtree(wut(E), p)), then
         // fall back to preferring the current thread to minimize preemptions.
+        // Within a wakeup subtree (multi-step sequence), use min_thread()
+        // to follow the sequence as constructed. The search strategy only
+        // affects the initial thread choice in step(), not subsequent guided
+        // choices within a multi-step wakeup sequence.
         let (chosen, next_subtree) = if let Some(ref subtree) = self.pending_wakeup_subtree {
-            if let Some(guided) = pick_thread_from(&self.search_strategy, self.selection_counter, subtree) {
-                if !matches!(self.search_strategy, SearchStrategy::Dfs | SearchStrategy::ConflictFirst) {
-                    self.selection_counter += 1;
-                }
+            if let Some(guided) = subtree.min_thread() {
                 if runnable.contains(&guided) {
                     let sub = subtree.subtree(guided);
                     (guided, if sub.is_empty() { None } else { Some(sub) })
@@ -613,13 +614,9 @@ impl Path {
             if active < branch.threads.len() && branch.threads[active] == ThreadStatus::Active {
                 branch.threads[active] = ThreadStatus::Visited;
                 // Save explored accesses for future sleep set propagation.
-                // These are used to check independence (E ⊢ p♦q) when
-                // propagating sleep sets across scheduling points.
-                // Paper: Algorithm 2 line 16 (JACM'17 p.24).
                 let accesses = branch.active_accesses.clone();
                 branch.explored_accesses.insert(active, accesses);
                 // Add to sleep set: this thread has been explored at this position.
-                // Paper: Algorithm 2 line 20 (JACM'17 p.25): "add p to sleep(E)"
                 if active < branch.sleep.len() {
                     branch.sleep[active] = true;
                 }
@@ -627,30 +624,57 @@ impl Path {
             }
 
             // Remove current thread from wakeup tree (already explored).
-            // Paper: Algorithm 2 line 19 (JACM'17 p.25):
-            //   "remove all sequences of form p.w from wut(E)"
             branch.wakeup.remove_branch(active);
 
             // Find next thread to explore from wakeup tree.
-            // Paper: Algorithm 2 line 15 (JACM'17 p.24):
-            //   "let p = min≺{p ∈ wut(E)}"
-            // The search strategy controls the ordering ≺ (DFS uses min
-            // thread ID; BitReversal uses a low-discrepancy permutation).
-            if let Some(next) = pick_thread_from(&self.search_strategy, self.selection_counter, &branch.wakeup) {
-                if !matches!(self.search_strategy, SearchStrategy::Dfs | SearchStrategy::ConflictFirst) {
-                    self.selection_counter += 1;
+            // The search strategy controls the sibling ordering ≺.
+            // DFS uses min_thread() (lowest ID first). Other strategies
+            // use permutations over children for exploration diversity.
+            //
+            // Note: changing the ≺ ordering affects sleep set effectiveness
+            // (Def 6.1 Property 2 depends on exploration order) but preserves
+            // soundness — every explored trace is a valid Mazurkiewicz class.
+            // The total trace count may differ from DFS (some redundant classes
+            // explored, some sleep set optimizations lost). This is the right
+            // trade-off for stop_on_first=True where finding the first bug fast
+            // matters more than minimizing total exploration.
+            let next_thread = {
+                let threads = branch.wakeup.root_threads();
+                if threads.is_empty() {
+                    None
+                } else {
+                    let mut sorted = threads;
+                    sorted.sort_unstable();
+                    let n = sorted.len();
+                    Some(match &self.search_strategy {
+                        SearchStrategy::Dfs => sorted[0],
+                        SearchStrategy::BitReversal { seed } => {
+                            let idx = bit_reversal_index(self.selection_counter, *seed, n);
+                            self.selection_counter += 1;
+                            sorted[idx]
+                        }
+                        SearchStrategy::RoundRobin { seed } => {
+                            let idx = ((self.selection_counter.wrapping_add(*seed)) % n as u64) as usize;
+                            self.selection_counter += 1;
+                            sorted[idx]
+                        }
+                        SearchStrategy::Stride { seed } => {
+                            let stride = coprime_stride(*seed, n);
+                            let idx = ((self.selection_counter.wrapping_mul(stride as u64)) % n as u64) as usize;
+                            self.selection_counter += 1;
+                            sorted[idx]
+                        }
+                        SearchStrategy::ConflictFirst => sorted[n - 1],
+                    })
                 }
-                // Extract the subtree for the chosen thread to guide
-                // multi-step wakeup sequences through scheduling.
-                // Paper: Algorithm 2 line 17 (JACM'17 p.24-25):
-                //   WuT' = subtree(wut(E), p)
+            };
+            if let Some(next) = next_thread {
                 let subtree = branch.wakeup.subtree(next);
                 self.pending_wakeup_subtree =
                     if subtree.is_empty() { None } else { Some(subtree) };
 
                 branch.threads[next] = ThreadStatus::Active;
                 branch.active_thread = next;
-                // Reset to start: stateless MC replays the full prefix from scratch.
                 self.pos = 0;
                 return true;
             }
@@ -896,43 +920,6 @@ impl Path {
     }
 }
 
-/// Pick a thread from a wakeup tree without needing &mut self.
-/// Separated from Path::pick_thread to avoid borrow conflicts when the caller
-/// already borrows other Path fields.
-fn pick_thread_from(strategy: &SearchStrategy, counter: u64, tree: &WakeupTree) -> Option<usize> {
-    let threads = tree.root_threads();
-    if threads.is_empty() {
-        return None;
-    }
-    let mut sorted = threads;
-    sorted.sort_unstable();
-    let n = sorted.len();
-
-    match strategy {
-        SearchStrategy::Dfs => Some(sorted[0]), // min thread
-        SearchStrategy::BitReversal { seed } => {
-            let idx = bit_reversal_index(counter, *seed, n);
-            Some(sorted[idx])
-        }
-        SearchStrategy::RoundRobin { seed } => {
-            let idx = ((counter.wrapping_add(*seed)) % n as u64) as usize;
-            Some(sorted[idx])
-        }
-        SearchStrategy::Stride { seed } => {
-            // Pick a stride coprime to n. For prime n any stride 1..n-1 works.
-            // For composite n, use seed to derive a coprime stride.
-            let stride = coprime_stride(*seed, n);
-            let idx = ((counter.wrapping_mul(stride as u64)) % n as u64) as usize;
-            Some(sorted[idx])
-        }
-        SearchStrategy::ConflictFirst => {
-            // Reverse of DFS: pick max thread ID. This tends to explore
-            // higher-numbered threads first, which are often the ones
-            // added later by race reversals (i.e., the "interesting" ones).
-            Some(sorted[n - 1])
-        }
-    }
-}
 
 /// Compute a stride value coprime to n, derived from the seed.
 ///
