@@ -224,7 +224,6 @@ class TestPerThreadCursorSafe:
             shared_conn.close()
 
         assert result.property_holds, (
-            f"Per-thread cursors should be safe, but DPOR found a violation: "
-            f"{result.explanation}"
+            f"Per-thread cursors should be safe, but DPOR found a violation: {result.explanation}"
         )
         assert result.num_explored >= 1

@@ -1398,6 +1398,24 @@ except ImportError:
 _IO_CLIENT_TYPES: tuple[type, ...] = tuple(_io_client_types)
 del _io_client_types
 
+# DB cursor types that should be tracked at Python object level even though
+# they are also I/O client types.  Two threads sharing a single cursor is a
+# real race (the cursor's internal result buffer is clobbered), but the
+# SQL-level reporter only tracks table/row granularity and misses it.
+# Per-thread cursors are different objects, so tracking them doesn't create
+# false conflicts.
+_db_cursor_types: list[type] = []
+try:
+    import psycopg2.extensions as _psycopg2_ext_cur  # type: ignore[import-untyped]
+
+    _db_cursor_types.append(_psycopg2_ext_cur.cursor)
+except ImportError:
+    pass
+# Also include sqlite3.Cursor — same sharing hazard.
+_db_cursor_types.append(__import__("sqlite3").Cursor)
+_DB_CURSOR_TYPES: tuple[type, ...] = tuple(_db_cursor_types)
+del _db_cursor_types
+
 # C-level methods that are read-only (don't mutate the object).
 _C_METHOD_READ_ONLY = frozenset(
     {
@@ -2425,8 +2443,12 @@ def _process_opcode(
                         # I/O wrapper and client methods are tracked via
                         # higher-level reporters; skip __cmethods__ to avoid
                         # false races from id() reuse on short-lived objects.
-                        _call_handled = True
-                        break
+                        # Exception: DB cursor types — two threads sharing a
+                        # single cursor constitutes a real conflict that the
+                        # SQL-level reporter (table/row granularity) misses.
+                        if not isinstance(self_obj, _DB_CURSOR_TYPES):
+                            _call_handled = True
+                            break
                     method_name = getattr(item, "__name__", None)
                     if method_name in _C_METHOD_READ_ONLY:
                         _report_read(engine, execution, thread_id, self_obj, "__cmethods__", elock, sids)
