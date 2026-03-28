@@ -3405,7 +3405,9 @@ def explore_dpor(
             values:
 
             - ``None`` or ``"dfs"`` — classic DFS, lowest thread ID first
-              (default, matches the paper's Algorithm 2).
+              (default, matches the paper's Algorithm 2).  **Best for
+              exhaustive exploration** (``stop_on_first=False``): produces
+              the optimal (minimum) number of executions.
             - ``"bit-reversal"`` or ``"bit-reversal:<seed>"`` — visit
               children in bit-reversal permutation order for maximal
               spread across distinct conflict points early.
@@ -3415,6 +3417,14 @@ def explore_dpor(
               sibling (s coprime to branching factor, derived from seed).
             - ``"conflict-first"`` — reverse of DFS (highest thread ID
               first), preferring threads added by race reversals.
+
+            **Use a non-DFS strategy when the trace space is large and
+            you have a limited execution budget** (``stop_on_first=True``
+            or a low ``max_executions``).  DFS explores traces in a fixed
+            order and may spend many executions on similar interleavings
+            before reaching a bug.  The alternative strategies spread
+            exploration across different conflict points earlier, finding
+            bugs faster on average.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample found.

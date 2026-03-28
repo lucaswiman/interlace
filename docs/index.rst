@@ -30,6 +30,8 @@ Four approaches, in order of decreasing interpretability:
    approaches
    dpor_guide
    dpor
+   vector-clocks
+   search
    examples
    orm_race
    sql-technical-details

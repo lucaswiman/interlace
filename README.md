@@ -158,6 +158,8 @@ Race condition found after 2 interleavings.
 
 DPOR explored exactly 2 interleavings out of the 6 possible (the other 4 are equivalent to one of the first two). For a detailed walkthrough of how this works, see the [DPOR algorithm documentation](docs/dpor.rst).
 
+**Search strategies:** The default DFS strategy is optimal for **exhaustive exploration** (`stop_on_first=False`) — it produces the minimum number of executions. When the trace space is very large and you have a limited execution budget (`stop_on_first=True` or a low `max_executions`), use a non-DFS strategy like `search="bit-reversal"` to spread exploration across diverse conflict points early, finding bugs faster on average. See [search strategy documentation](docs/search.rst) for details.
+
 **Scope and limitations:** DPOR tracks Python bytecode-level conflicts (attribute and subscript reads/writes, lock operations) plus I/O. Redis key-level conflicts are detected by intercepting redis-py's `execute_command()` (sync; active with `detect_io=True`) or via `detect_redis=True` (async). SQL conflicts are detected by intercepting DBAPI `cursor.execute()`. These key/table-level detectors are important: raw socket detection uses `host:port` as the resource ID, so every send and recv to the same server appears to conflict — without key-level or SQL-level refinement this causes a combinatorial explosion of spurious interleavings. C-extension shared state (NumPy arrays, etc.) is not tracked at all. The `frontrun` CLI adds C-level socket interception via `LD_PRELOAD` for opaque drivers, also at the coarse `host:port` level.
 
 ### 3. Bytecode Exploration

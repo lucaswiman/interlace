@@ -709,6 +709,12 @@ paper's ordering).
 Three vector clocks: ``dpor_vv``, ``io_vv``, ``causality``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+.. seealso::
+
+   :doc:`vector-clocks` for the full explanation of the ``VersionVec`` data
+   structure, all three clocks, synchronization event handling, and worked
+   examples showing exactly how races are detected or suppressed.
+
 Each thread maintains three vector clocks (``VersionVec``, indexed by
 thread ID):
 
