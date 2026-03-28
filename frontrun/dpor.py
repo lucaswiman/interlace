@@ -180,6 +180,20 @@ def _get_instructions(code: Any) -> dict[int, dis.Instruction]:
 _dpor_tls = threading.local()
 
 
+def _append_unique_lock_event(lock_events: list[Any], event: Any) -> None:
+    """Append a lock event unless it duplicates the immediately previous one."""
+    if lock_events:
+        last = lock_events[-1]
+        if (
+            last.schedule_index == event.schedule_index
+            and last.thread_id == event.thread_id
+            and last.event_type == event.event_type
+            and last.lock_id == event.lock_id
+        ):
+            return
+    lock_events.append(event)
+
+
 # ---------------------------------------------------------------------------
 # LD_PRELOAD I/O event bridge
 # ---------------------------------------------------------------------------
@@ -368,6 +382,12 @@ class DporScheduler:
         # the owning thread keeps the scheduler turn until after_io() runs.
         self._active_io_thread: int | None = None
         self._next_thread_after_io: int | None = None
+        # Like the I/O path, cooperative lock/semaphore retries need to keep
+        # the scheduler turn until the real non-blocking probe completes.
+        # Otherwise free-threaded builds turn the probe into an OS-level race
+        # between multiple awakened waiters.
+        self._active_sync_thread: int | None = None
+        self._next_thread_after_sync: int | None = None
 
         # Maps iterator id → original container object. When GET_ITER creates
         # an iterator from a mutable container, we record the mapping so that
@@ -441,6 +461,56 @@ class DporScheduler:
     def wait_for_turn(self, thread_id: int) -> bool:
         """Block until it's this thread's turn. Returns False when done."""
         return self._report_and_wait(None, thread_id)
+
+    def before_sync_retry(self, thread_id: int) -> bool:
+        """Wait for a turn and keep it through one external sync probe."""
+        from frontrun._cooperative import _scheduler_tls
+
+        with self._condition:
+            _scheduler_tls._in_dpor_machinery = True
+            try:
+                while True:
+                    if self._finished or self._error:
+                        return False
+
+                    if self._active_sync_thread is not None and self._active_sync_thread != thread_id:
+                        pass
+                    elif self._current_thread == thread_id:
+                        next_thread = self._schedule_next()
+                        _pp = self._last_scheduled_path_id
+                        if _pp is not None:
+                            _dpor_tls._last_path_id = _pp
+                        self._active_sync_thread = thread_id
+                        self._next_thread_after_sync = next_thread
+                        self._current_thread = thread_id
+                        self._condition.notify_all()
+                        return True
+
+                    if not self._condition.wait(timeout=self.deadlock_timeout):
+                        if self._current_thread in self._threads_done:
+                            next_thread = self._schedule_next()
+                            self._current_thread = next_thread
+                            if next_thread is None:
+                                self._finished = True
+                            self._condition.notify_all()
+                            continue
+                        self._error = TimeoutError(
+                            f"DPOR sync deadlock: waiting for thread {thread_id}, current is {self._current_thread}"
+                        )
+                        self._condition.notify_all()
+                        return False
+            finally:
+                _scheduler_tls._in_dpor_machinery = False
+
+    def after_sync_retry(self, thread_id: int) -> None:
+        with self._condition:
+            if self._active_sync_thread == thread_id:
+                self._active_sync_thread = None
+                self._current_thread = self._next_thread_after_sync
+                self._next_thread_after_sync = None
+                if self._current_thread is None and len(self._threads_done) >= self.num_threads:
+                    self._finished = True
+                self._condition.notify_all()
 
     def _all_other_live_threads_blocked_by_current(self, thread_id: int) -> bool:
         from frontrun._deadlock import get_wait_for_graph
@@ -2853,6 +2923,19 @@ class DporBytecodeRunner:
             if rel_key not in rmap:
                 rmap[rel_key] = f"{type_name}(id={stable_id}).release"
 
+        def _append_lock_event(schedule_index: int, event_type: str, lock_id: int) -> None:
+            if scheduler._lock_event_collector is None:
+                return
+            from frontrun._report import LockEvent as _LockEvent
+
+            event = _LockEvent(
+                schedule_index=schedule_index,
+                thread_id=thread_id,
+                event_type=event_type,
+                lock_id=lock_id,
+            )
+            _append_unique_lock_event(scheduler._lock_event_collector, event)
+
         def _sync_reporter(event: str, obj_id: int, lock_obj: object) -> None:
             from frontrun._cooperative import _scheduler_tls
 
@@ -2885,17 +2968,11 @@ class DporBytecodeRunner:
                             scheduler._deadlock_at = _trace_len_wait
                         return
                     if _trace_snap_wait is not None:
-                        from frontrun._report import LockEvent as _LockEvent
-
                         _wait_idx = next(
                             (i for i in range(len(_trace_snap_wait) - 1, -1, -1) if _trace_snap_wait[i] == thread_id),
                             max(0, len(_trace_snap_wait) - 1),
                         )
-                        scheduler._lock_event_collector.append(  # type: ignore[union-attr]
-                            _LockEvent(
-                                schedule_index=_wait_idx, thread_id=thread_id, event_type="wait", lock_id=stable_lock_id
-                            )
-                        )
+                        _append_lock_event(_wait_idx, "wait", stable_lock_id)
                     return
                 if event == "lock_acquire":
                     with engine_lock:
@@ -2919,20 +2996,11 @@ class DporBytecodeRunner:
                             scheduler._deadlock_at = _trace_len_acq
                         return
                     if _trace_snap_acq is not None:
-                        from frontrun._report import LockEvent as _LockEvent
-
                         _acq_idx = next(
                             (i for i in range(len(_trace_snap_acq) - 1, -1, -1) if _trace_snap_acq[i] == thread_id),
                             max(0, len(_trace_snap_acq) - 1),
                         )
-                        scheduler._lock_event_collector.append(  # type: ignore[union-attr]
-                            _LockEvent(
-                                schedule_index=_acq_idx,
-                                thread_id=thread_id,
-                                event_type="acquire",
-                                lock_id=stable_lock_id,
-                            )
-                        )
+                        _append_lock_event(_acq_idx, "acquire", stable_lock_id)
                     return
                 if event == "lock_release":
                     with engine_lock:
@@ -2955,20 +3023,11 @@ class DporBytecodeRunner:
                             scheduler._deadlock_at = _trace_len_rel
                         return
                     if _trace_snap_rel is not None:
-                        from frontrun._report import LockEvent as _LockEvent
-
                         _rel_idx = next(
                             (i for i in range(len(_trace_snap_rel) - 1, -1, -1) if _trace_snap_rel[i] == thread_id),
                             max(0, len(_trace_snap_rel) - 1),
                         )
-                        scheduler._lock_event_collector.append(  # type: ignore[union-attr]
-                            _LockEvent(
-                                schedule_index=_rel_idx,
-                                thread_id=thread_id,
-                                event_type="release",
-                                lock_id=stable_lock_id,
-                            )
-                        )
+                        _append_lock_event(_rel_idx, "release", stable_lock_id)
                     # Wake threads that may now be schedulable
                     with scheduler._condition:
                         scheduler._condition.notify_all()

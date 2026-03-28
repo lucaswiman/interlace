@@ -9,11 +9,12 @@ import tempfile
 from frontrun._report import (
     ExecutionRecord,
     ExplorationReport,
+    LockEvent,
     SwitchPoint,
     _safe_repr,
     generate_html_report,
 )
-from frontrun.dpor import explore_dpor
+from frontrun.dpor import _append_unique_lock_event, explore_dpor
 
 
 def test_safe_repr_truncation():
@@ -180,3 +181,17 @@ def test_explore_dpor_with_report():
         frontrun._report._global_report_path = None
         if os.path.exists(path):
             os.unlink(path)
+
+
+def test_append_unique_lock_event_deduplicates_adjacent_duplicates():
+    events: list[LockEvent] = []
+
+    first = LockEvent(schedule_index=13, thread_id=2, event_type="wait", lock_id=7)
+    duplicate = LockEvent(schedule_index=13, thread_id=2, event_type="wait", lock_id=7)
+    distinct = LockEvent(schedule_index=14, thread_id=2, event_type="wait", lock_id=7)
+
+    _append_unique_lock_event(events, first)
+    _append_unique_lock_event(events, duplicate)
+    _append_unique_lock_event(events, distinct)
+
+    assert events == [first, distinct]
