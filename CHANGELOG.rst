@@ -6,6 +6,11 @@ All releases: https://github.com/lucaswiman/frontrun/releases
 Unreleased
 ----------
 
+New changes go here
+
+0.4.0 (2026-03-28)
+------------------
+
 * **Search strategies for DPOR** — ``explore_dpor()`` accepts a new ``search``
   parameter (``SearchStrategy`` enum) to control the order in which wakeup tree
   branches are explored.  All strategies visit the same set of Mazurkiewicz
