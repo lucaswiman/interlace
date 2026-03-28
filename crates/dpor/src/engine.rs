@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use crate::access::{Access, AccessKind, AccessOrigin};
 use crate::object::{ObjectId, ObjectState};
-use crate::path::{Path, PendingRace};
+use crate::path::{Path, PendingRace, SearchStrategy};
 use crate::thread::Thread;
 use crate::vv::VersionVec;
 
@@ -126,9 +126,10 @@ impl DporEngine {
         preemption_bound: Option<u32>,
         max_branches: usize,
         max_executions: Option<u64>,
+        search_strategy: SearchStrategy,
     ) -> Self {
         Self {
-            path: Path::new(preemption_bound),
+            path: Path::new(preemption_bound, search_strategy),
             num_threads,
             max_executions,
             executions_completed: 0,
@@ -572,7 +573,7 @@ mod tests {
 
     #[test]
     fn test_two_threads_no_conflict() {
-        let mut engine = DporEngine::new(2, None, 1000, None);
+        let mut engine = DporEngine::new(2, None, 1000, None, SearchStrategy::Dfs);
         let mut execution = engine.begin_execution();
 
         let t0 = engine.schedule(&mut execution).unwrap();
@@ -591,7 +592,7 @@ mod tests {
 
     #[test]
     fn test_two_threads_write_write_conflict() {
-        let mut engine = DporEngine::new(2, None, 1000, None);
+        let mut engine = DporEngine::new(2, None, 1000, None, SearchStrategy::Dfs);
         let mut exec_count = 0;
 
         loop {
@@ -615,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_read_read_no_conflict() {
-        let mut engine = DporEngine::new(2, None, 1000, None);
+        let mut engine = DporEngine::new(2, None, 1000, None, SearchStrategy::Dfs);
         let mut execution = engine.begin_execution();
 
         let first = engine.schedule(&mut execution).unwrap();
@@ -637,7 +638,7 @@ mod tests {
             local: [i64; 2],
         }
 
-        let mut engine = DporEngine::new(2, None, 100_000, None);
+        let mut engine = DporEngine::new(2, None, 100_000, None, SearchStrategy::Dfs);
         let thread_ops = vec![
             vec![(0u64, AccessKind::Read), (0, AccessKind::Write)],
             vec![(0u64, AccessKind::Read), (0, AccessKind::Write)],
@@ -694,7 +695,7 @@ mod tests {
 
     #[test]
     fn test_independent_threads_one_execution() {
-        let mut engine = DporEngine::new(2, None, 1000, None);
+        let mut engine = DporEngine::new(2, None, 1000, None, SearchStrategy::Dfs);
         let mut execution = engine.begin_execution();
 
         let t0 = engine.schedule(&mut execution).unwrap();
@@ -715,7 +716,7 @@ mod tests {
         // Thread A's access would be overwritten by Thread B's, so the
         // conflict between A and C was never explored. The per-thread
         // map ensures all conflicts are detected.
-        let mut engine = DporEngine::new(3, None, 1000, None);
+        let mut engine = DporEngine::new(3, None, 1000, None, SearchStrategy::Dfs);
         let mut exec_count = 0;
 
         loop {
@@ -755,7 +756,7 @@ mod tests {
     /// on count_lock but B goes first on sum_lock.
     #[test]
     fn test_multi_lock_race_detected() {
-        let mut engine = DporEngine::new(2, None, 100_000, None);
+        let mut engine = DporEngine::new(2, None, 100_000, None, SearchStrategy::Dfs);
 
         // Object IDs
         const COUNT: u64 = 1;
@@ -896,7 +897,7 @@ mod tests {
     fn test_three_threads_read_write_conflict() {
         // Thread A reads, Thread B reads, Thread C writes — all same object.
         // With the old implementation, Thread A's read could be lost.
-        let mut engine = DporEngine::new(3, None, 1000, None);
+        let mut engine = DporEngine::new(3, None, 1000, None, SearchStrategy::Dfs);
         let mut exec_count = 0;
         let thread_kinds = [AccessKind::Read, AccessKind::Read, AccessKind::Write];
 
@@ -934,7 +935,7 @@ mod tests {
     /// All 4! = 24 orderings are distinct traces and must be explored.
     #[test]
     fn test_four_threads_write_conflict() {
-        let mut engine = DporEngine::new(4, None, 10000, None);
+        let mut engine = DporEngine::new(4, None, 10000, None, SearchStrategy::Dfs);
         let mut exec_count = 0;
 
         loop {
@@ -967,7 +968,7 @@ mod tests {
     /// Should explore 2 * 2 = 4 orderings (independent pairs don't cross).
     #[test]
     fn test_two_independent_pairs() {
-        let mut engine = DporEngine::new(4, None, 10000, None);
+        let mut engine = DporEngine::new(4, None, 10000, None, SearchStrategy::Dfs);
         let mut exec_count = 0;
         // T0 and T1 write object 1; T2 and T3 write object 2
         let thread_objects = [1u64, 1, 2, 2];
@@ -1010,7 +1011,7 @@ mod tests {
     /// Should find all interleavings including the deadlock-prone one.
     #[test]
     fn test_two_philosophers_all_orderings() {
-        let mut engine = DporEngine::new(2, None, 10000, None);
+        let mut engine = DporEngine::new(2, None, 10000, None, SearchStrategy::Dfs);
         let thread_ops: Vec<Vec<(u64, AccessKind)>> = vec![
             vec![(1, AccessKind::Write), (2, AccessKind::Write)],
             vec![(2, AccessKind::Write), (1, AccessKind::Write)],
@@ -1090,7 +1091,7 @@ mod tests {
     /// with n=3 has 4 source-set traces vs more for classic DPOR.
     #[test]
     fn test_writer_readers_sleep_propagation() {
-        let mut engine = DporEngine::new(3, None, 10000, None);
+        let mut engine = DporEngine::new(3, None, 10000, None, SearchStrategy::Dfs);
         let thread_kinds = [AccessKind::Write, AccessKind::Read, AccessKind::Read];
         let mut exec_count = 0;
 
@@ -1147,7 +1148,7 @@ mod tests {
     /// Paper ref: JACM'17 Table 1 (p.36), "readers" benchmark.
     #[test]
     fn test_writer_four_readers_sleep_propagation() {
-        let mut engine = DporEngine::new(5, None, 100_000, None);
+        let mut engine = DporEngine::new(5, None, 100_000, None, SearchStrategy::Dfs);
         let thread_kinds = [
             AccessKind::Write,
             AccessKind::Read,
@@ -1198,7 +1199,7 @@ mod tests {
     /// explore exactly 2! × 2! = 4 orderings with propagation enabled.
     #[test]
     fn test_independent_pairs_with_propagation() {
-        let mut engine = DporEngine::new(4, None, 10000, None);
+        let mut engine = DporEngine::new(4, None, 10000, None, SearchStrategy::Dfs);
         let thread_objects = [1u64, 1, 2, 2];
         let mut exec_count = 0;
 
@@ -1255,7 +1256,7 @@ mod tests {
     /// for this data-dependent benchmark.
     #[test]
     fn test_lastzero_three() {
-        let mut engine = DporEngine::new(4, None, 100_000, None);
+        let mut engine = DporEngine::new(4, None, 100_000, None, SearchStrategy::Dfs);
         let mut exec_count = 0;
 
         loop {
@@ -1358,7 +1359,7 @@ mod tests {
     /// Mazurkiewicz traces are {T0<T2, T2<T0} on X, with T1 anywhere.
     #[test]
     fn test_notdep_three_threads_independent_intermediate() {
-        let mut engine = DporEngine::new(3, None, 1000, None);
+        let mut engine = DporEngine::new(3, None, 1000, None, SearchStrategy::Dfs);
         // T0 writes X, T1 writes Y, T2 writes X
         let thread_objects = [1u64, 2, 1];
         let mut exec_count = 0;
@@ -1412,7 +1413,7 @@ mod tests {
     /// Should still explore exactly 2 executions with deferred detection.
     #[test]
     fn test_deferred_two_threads_write_conflict() {
-        let mut engine = DporEngine::new(2, None, 1000, None);
+        let mut engine = DporEngine::new(2, None, 1000, None, SearchStrategy::Dfs);
         let mut exec_count = 0;
 
         loop {
@@ -1443,7 +1444,7 @@ mod tests {
     /// this may be reduced. Should be ≤ 24 at most.
     #[test]
     fn test_notdep_skips_dependent_intermediate() {
-        let mut engine = DporEngine::new(3, None, 1000, None);
+        let mut engine = DporEngine::new(3, None, 1000, None, SearchStrategy::Dfs);
         let mut exec_count = 0;
 
         loop {
@@ -1598,7 +1599,7 @@ mod tests {
     #[test]
     fn test_four_philosophers_lock_only() {
         // Pure lock-ordering deadlock: acquire left, acquire right, release right, release left
-        let mut engine = DporEngine::new(4, Some(2), 100_000, Some(50000));
+        let mut engine = DporEngine::new(4, Some(2), 100_000, Some(50000), SearchStrategy::Dfs);
         let num_philosophers = 4;
 
         let thread_ops: Vec<Vec<(&str, u64)>> = (0..num_philosophers)
@@ -1630,7 +1631,7 @@ mod tests {
     #[test]
     fn test_three_philosophers_with_write() {
         // Lock + shared write: acquire left, write shared, acquire right, release right, release left
-        let mut engine = DporEngine::new(3, Some(2), 100_000, Some(50000));
+        let mut engine = DporEngine::new(3, Some(2), 100_000, Some(50000), SearchStrategy::Dfs);
         let num_philosophers = 3;
 
         let thread_ops: Vec<Vec<(&str, u64)>> = (0..num_philosophers)
