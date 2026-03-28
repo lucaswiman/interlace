@@ -240,6 +240,18 @@ pub struct Path {
     /// union may under-approximate actual future accesses.  For fixed
     /// access patterns (most concurrent programs), the cache is exact.
     prev_thread_step_future: HashMap<usize, Vec<HashMap<u64, (AccessKind, AccessOrigin)>>>,
+    /// Per-step access cache from the most recently completed execution.
+    ///
+    /// `prev_thread_steps[tid][k]` = thread `tid`'s accesses at exactly its
+    /// k-th scheduling point (NOT merged with later steps). Used for per-step
+    /// independence checking which avoids false wakeups from merge escalation.
+    ///
+    /// Example: if thread T does WeakWrite(X) at step 0 and Read(X) at step 1,
+    /// the merged suffix union is {X: Write} (merge(WeakWrite, Read) = Write),
+    /// but the per-step data preserves {X: WeakWrite} and {X: Read} separately.
+    /// This allows checking each step individually against the active thread's
+    /// accesses, avoiding false conflicts from merge escalation.
+    prev_thread_steps: HashMap<usize, Vec<HashMap<u64, (AccessKind, AccessOrigin)>>>,
     /// Wakeup subtree carried from step() to schedule() for multi-step
     /// wakeup sequence guidance.
     ///
@@ -265,6 +277,7 @@ impl Path {
             search_strategy,
             selection_counter: 0,
             prev_thread_step_future: HashMap::new(),
+            prev_thread_steps: HashMap::new(),
             pending_wakeup_subtree: None,
         }
     }
@@ -303,6 +316,37 @@ impl Path {
             // Return empty: thread has completed in the cached execution.
             Some(HashMap::new())
         }
+    }
+
+    /// Check whether a sleeping thread's remaining individual steps are ALL
+    /// independent of the active thread's accesses, using the per-step cache.
+    ///
+    /// Unlike `future_accesses_for()` which returns a merged suffix union,
+    /// this checks each step individually. This avoids false wakeups from
+    /// merge escalation (e.g., WeakWrite + Read → Write in the merged form,
+    /// but each step individually may be independent of the active accesses).
+    ///
+    /// Returns `Some(true)` if ALL remaining steps are independent,
+    /// `Some(false)` if any step conflicts, `None` if no per-step cache.
+    fn future_steps_independent_of(
+        &self,
+        tid: usize,
+        pos: usize,
+        active: &HashMap<u64, (AccessKind, AccessOrigin)>,
+    ) -> Option<bool> {
+        let steps = self.prev_thread_steps.get(&tid)?;
+        // Count how many times tid was active before position pos
+        let k = self.branches[..pos]
+            .iter()
+            .filter(|b| b.active_thread == tid)
+            .count();
+        // Check each remaining step individually
+        for step_idx in k..steps.len() {
+            if !accesses_are_independent(&steps[step_idx], active) {
+                return Some(false);
+            }
+        }
+        Some(true)
     }
 
     /// Record that an object was accessed at the given scheduling step.
@@ -485,9 +529,21 @@ impl Path {
         }
 
         // Compute which sleeping threads stay asleep at pos.
+        //
+        // Per-step independence check (Fix 6): instead of checking against the
+        // merged suffix union (which can escalate e.g. WeakWrite+Read → Write),
+        // check each remaining step individually. This avoids false wakeups
+        // when individual steps are all independent but the merge is not.
+        //
+        // Falls back to merged suffix union when no per-step cache is available
+        // (e.g., first execution).
         let mut propagated: HashMap<usize, HashMap<u64, (AccessKind, AccessOrigin)>> = HashMap::new();
         for (tid, tid_accesses) in sleeping_threads {
-            if accesses_are_independent(&tid_accesses, &prev_active_accesses) {
+            let independent = match self.future_steps_independent_of(tid, pos, &prev_active_accesses) {
+                Some(result) => result,
+                None => accesses_are_independent(&tid_accesses, &prev_active_accesses),
+            };
+            if independent {
                 propagated.insert(tid, tid_accesses);
             }
             // If dependent, the thread wakes up — it must be available for
@@ -610,6 +666,14 @@ impl Path {
             step_future.insert(*tid, futures);
         }
         self.prev_thread_step_future = step_future;
+
+        // Build per-step (non-merged) cache for per-step independence checking.
+        // Each entry is a clone of the thread's accesses at exactly that step.
+        let mut per_step: HashMap<usize, Vec<HashMap<u64, (AccessKind, AccessOrigin)>>> = HashMap::new();
+        for (tid, steps) in &per_thread_accesses {
+            per_step.insert(*tid, steps.iter().map(|s| (*s).clone()).collect());
+        }
+        self.prev_thread_steps = per_step;
 
         while let Some(branch) = self.branches.last_mut() {
             let active = branch.active_thread;
