@@ -180,6 +180,20 @@ def _get_instructions(code: Any) -> dict[int, dis.Instruction]:
 _dpor_tls = threading.local()
 
 
+def _append_unique_lock_event(lock_events: list[Any], event: Any) -> None:
+    """Append a lock event unless it duplicates the immediately previous one."""
+    if lock_events:
+        last = lock_events[-1]
+        if (
+            last.schedule_index == event.schedule_index
+            and last.thread_id == event.thread_id
+            and last.event_type == event.event_type
+            and last.lock_id == event.lock_id
+        ):
+            return
+    lock_events.append(event)
+
+
 # ---------------------------------------------------------------------------
 # LD_PRELOAD I/O event bridge
 # ---------------------------------------------------------------------------
@@ -2909,6 +2923,19 @@ class DporBytecodeRunner:
             if rel_key not in rmap:
                 rmap[rel_key] = f"{type_name}(id={stable_id}).release"
 
+        def _append_lock_event(schedule_index: int, event_type: str, lock_id: int) -> None:
+            if scheduler._lock_event_collector is None:
+                return
+            from frontrun._report import LockEvent as _LockEvent
+
+            event = _LockEvent(
+                schedule_index=schedule_index,
+                thread_id=thread_id,
+                event_type=event_type,
+                lock_id=lock_id,
+            )
+            _append_unique_lock_event(scheduler._lock_event_collector, event)
+
         def _sync_reporter(event: str, obj_id: int, lock_obj: object) -> None:
             from frontrun._cooperative import _scheduler_tls
 
@@ -2941,17 +2968,11 @@ class DporBytecodeRunner:
                             scheduler._deadlock_at = _trace_len_wait
                         return
                     if _trace_snap_wait is not None:
-                        from frontrun._report import LockEvent as _LockEvent
-
                         _wait_idx = next(
                             (i for i in range(len(_trace_snap_wait) - 1, -1, -1) if _trace_snap_wait[i] == thread_id),
                             max(0, len(_trace_snap_wait) - 1),
                         )
-                        scheduler._lock_event_collector.append(  # type: ignore[union-attr]
-                            _LockEvent(
-                                schedule_index=_wait_idx, thread_id=thread_id, event_type="wait", lock_id=stable_lock_id
-                            )
-                        )
+                        _append_lock_event(_wait_idx, "wait", stable_lock_id)
                     return
                 if event == "lock_acquire":
                     with engine_lock:
@@ -2975,20 +2996,11 @@ class DporBytecodeRunner:
                             scheduler._deadlock_at = _trace_len_acq
                         return
                     if _trace_snap_acq is not None:
-                        from frontrun._report import LockEvent as _LockEvent
-
                         _acq_idx = next(
                             (i for i in range(len(_trace_snap_acq) - 1, -1, -1) if _trace_snap_acq[i] == thread_id),
                             max(0, len(_trace_snap_acq) - 1),
                         )
-                        scheduler._lock_event_collector.append(  # type: ignore[union-attr]
-                            _LockEvent(
-                                schedule_index=_acq_idx,
-                                thread_id=thread_id,
-                                event_type="acquire",
-                                lock_id=stable_lock_id,
-                            )
-                        )
+                        _append_lock_event(_acq_idx, "acquire", stable_lock_id)
                     return
                 if event == "lock_release":
                     with engine_lock:
@@ -3011,20 +3023,11 @@ class DporBytecodeRunner:
                             scheduler._deadlock_at = _trace_len_rel
                         return
                     if _trace_snap_rel is not None:
-                        from frontrun._report import LockEvent as _LockEvent
-
                         _rel_idx = next(
                             (i for i in range(len(_trace_snap_rel) - 1, -1, -1) if _trace_snap_rel[i] == thread_id),
                             max(0, len(_trace_snap_rel) - 1),
                         )
-                        scheduler._lock_event_collector.append(  # type: ignore[union-attr]
-                            _LockEvent(
-                                schedule_index=_rel_idx,
-                                thread_id=thread_id,
-                                event_type="release",
-                                lock_id=stable_lock_id,
-                            )
-                        )
+                        _append_lock_event(_rel_idx, "release", stable_lock_id)
                     # Wake threads that may now be schedulable
                     with scheduler._condition:
                         scheduler._condition.notify_all()
