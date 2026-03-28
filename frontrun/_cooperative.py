@@ -575,23 +575,23 @@ class CooperativeSemaphore:
         scheduler, thread_id = ctx
         before_sync_retry = getattr(scheduler, "before_sync_retry", None)
         after_sync_retry = getattr(scheduler, "after_sync_retry", None)
-        while True:
-            # Aggressive error check (option 6)
-            if scheduler._error:
-                raise SchedulerAbort("scheduler aborted")
-            if scheduler._finished:
-                deadline = time.monotonic() + 1.0
-                while time.monotonic() < deadline:
-                    self._lock.acquire()
-                    if self._value > 0:
-                        self._value -= 1
+        if before_sync_retry is not None:
+            while True:
+                # Aggressive error check (option 6)
+                if scheduler._error:
+                    raise SchedulerAbort("scheduler aborted")
+                if scheduler._finished:
+                    deadline = time.monotonic() + 1.0
+                    while time.monotonic() < deadline:
+                        self._lock.acquire()
+                        if self._value > 0:
+                            self._value -= 1
+                            self._lock.release()
+                            self._report("lock_acquire")
+                            return True
                         self._lock.release()
-                        self._report("lock_acquire")
-                        return True
-                    self._lock.release()
-                    time.sleep(0.001)
-                return False
-            if before_sync_retry is not None:
+                        time.sleep(0.001)
+                    return False
                 assert after_sync_retry is not None
                 if not before_sync_retry(thread_id):
                     return False
@@ -605,9 +605,34 @@ class CooperativeSemaphore:
                 self._lock.release()
                 self._report("lock_wait")
                 after_sync_retry(thread_id)
-                continue
+        else:
+            # Bytecode scheduling relies on re-probing after each scheduler
+            # turn; reporting wait without retrying can wedge a waiter forever.
             self._report("lock_wait")
-            scheduler.wait_for_turn(thread_id)
+            while True:
+                # Aggressive error check (option 6)
+                if scheduler._error:
+                    raise SchedulerAbort("scheduler aborted")
+                self._lock.acquire()
+                if self._value > 0:
+                    self._value -= 1
+                    self._lock.release()
+                    self._report("lock_acquire")
+                    return True
+                self._lock.release()
+                if scheduler._finished:
+                    deadline = time.monotonic() + 1.0
+                    while time.monotonic() < deadline:
+                        self._lock.acquire()
+                        if self._value > 0:
+                            self._value -= 1
+                            self._lock.release()
+                            self._report("lock_acquire")
+                            return True
+                        self._lock.release()
+                        time.sleep(0.001)
+                    return False
+                scheduler.wait_for_turn(thread_id)
 
     def release(self, n: int = 1) -> None:
         if n < 1:
