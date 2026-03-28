@@ -11,6 +11,8 @@ The Rust DPOR engine has implemented:
 - Wakeup subtree guidance during replay
 - Stable object keys and per-thread step-count-indexed access caches
 - Lock-aware deferred release backtracking
+- Provenance-tagged access summaries (Fix 4: `AccessOrigin` enum)
+- Resource grouping for SQL tables (`register_resource_group()`)
 
 **Baseline result**: Dining philosophers (4 threads, preemption_bound=2) explores 4,076 executions with lock-only model. Exact Mazurkiewicz traces achieved for:
 - All shared-variable tests (2^N traces for N vars)
@@ -78,25 +80,13 @@ The wakeup tree insert checks for `w' ∼[E] w` — whether an existing branch a
 
 All shared-variable, lock-only, and independent file write tests achieve exact counts.
 
-### Fix 4: Provenance-Tagged Access Summaries
+### Fix 4: Provenance-Tagged Access Summaries ✅
 
-**Root cause**: No distinction between Python-memory, lock, and I/O accesses in the path layer. Current merge policies must be conservative for all three.
+**Status**: Complete. Implemented in `crates/dpor/src/access.rs` and threaded throughout.
 
-**Why**: Enables targeted fixes: relax Python-memory merges (Fix 6 already partially does this) while keeping I/O origins conservative if needed.
+**Implementation**: `AccessOrigin` enum with `PythonMemory`, `LockSynthetic`, `IoDirect` variants. All `active_accesses` entries are now `HashMap<u64, (AccessKind, AccessOrigin)>`. Origin is tracked through `record_access()`, `propagate_sleep()`, the future access cache, and merge logic. `AccessOrigin::merge()` preserves the strongest origin (`IoDirect` > `LockSynthetic` > `PythonMemory`).
 
-**What**: Extend `active_accesses` entries to track origin:
-```rust
-enum AccessOrigin {
-    PythonMemory,
-    LockSynthetic,
-    IoDirect,
-}
-// active_accesses: HashMap<u64, (AccessKind, AccessOrigin)>
-```
-
-**Complexity**: Low. Plumbing change in `record_access()` calls; enables cleaner policies in `propagate_sleep()` and merge logic.
-
-**Impact**: Infrastructure for safer follow-on fixes. May enable per-origin merge strategies (e.g., relax Python but stay conservative for I/O).
+**Result**: Infrastructure in place for per-origin merge strategies (Fix 6).
 
 ### Fix 5: Improve AccessKind Merge for WeakWrite + WeakRead
 
@@ -113,18 +103,18 @@ enum AccessOrigin {
 
 ### Fix 6: Per-Branch Merge Investigation
 
-**Status**: Attempted and caused a regression in `test_independent_file_writes[2]` (independent writes got 2 instead of 1).
+**Status**: Attempted and caused a regression in `test_independent_file_writes[2]` (independent writes got 2 instead of 1). Fix 4 (provenance tags), which was a prerequisite, is now complete.
 
 **Why**: Unknown. The regression needs root-cause analysis. Two possibilities:
 1. Per-branch merge interacts unexpectedly with I/O access tracking
 2. A pre-existing bug in file-I/O race detection was masked by the conservative merge
 
 **Next steps**:
-1. Add provenance tags (Fix 4) so per-branch merge can distinguish I/O accesses
+1. ~~Add provenance tags (Fix 4) so per-branch merge can distinguish I/O accesses~~ ✅ Done
 2. Selectively relax only Python-memory merges while keeping I/O conservative
 3. Investigate the file-I/O case to determine if a real bug exists
 
-**Complexity**: Medium. Requires investigation before proceeding.
+**Complexity**: Medium. Requires investigation before proceeding. Provenance tags are now available to distinguish I/O vs Python-memory accesses.
 
 **Impact**: If successful, may reduce file-I/O trace counts; if reverted, no change.
 
@@ -132,7 +122,7 @@ enum AccessOrigin {
 
 ## Defect #15: Complex SQL Race Detection
 
-**Status**: Known defect. Simple check-then-insert races are found (2 ops/thread); intermediate operations (5 ops/thread) prevent race discovery.
+**Status**: Known defect, partially mitigated. Simple check-then-insert races are found (2 ops/thread); intermediate operations (5 ops/thread) prevent race discovery. A resource grouping workaround (`register_resource_group()`) is now implemented that allows the DPOR engine to skip inline wakeups for grouped resources, reducing backtrack explosion for multi-table patterns.
 
 **Root cause**: DPOR explores all interleavings of intermediate operations on unrelated tables, causing the tree to grow too large to reach the critical interleaving where both check operations precede both insert operations.
 
@@ -179,17 +169,17 @@ enum AccessOrigin {
 
 ## Priority Ranking
 
-1. **Phase 4c (Wakeup tree equivalence)**: Low priority. Sound optimization; benefit uncertain without empirical data.
+1. **Fix 3 (Position-sensitive cache)**: ✅ Complete.
 
-2. **Fix 3 (Position-sensitive cache)**: ✅ Complete. Eliminated shared-var overcounting (2-var: 4, 3-var: 8 — exact Mazurkiewicz counts).
+2. **Fix 4 (Provenance tags)**: ✅ Complete. Infrastructure for Fix 6 and per-origin merge strategies.
 
-3. **Fix 4 (Provenance tags)**: High priority. Infrastructure for safer follow-on fixes (especially Fix 6).
+3. **Fix 6 (Per-branch merge)**: Medium priority. No longer blocked on Fix 4; needs investigation of file-I/O regression.
 
-4. **Defect #15 Approach 2 (Operation coalescing)**: Medium priority. Enables discovery of multi-table SQL races. Likely 50–80% reduction for affected patterns.
+4. **Defect #15 Approach 2 (Operation coalescing)**: Medium priority. Resource grouping workaround is in place, but proper table-level independence analysis would be more general. Likely 50–80% reduction for affected patterns.
 
-5. **Fix 6 (Per-branch merge)**: Medium priority. Blocked on provenance tags (Fix 4) and investigation. Uncertain impact.
+5. **Phase 4c (Wakeup tree equivalence)**: Low priority. Sound optimization; benefit uncertain without empirical data.
 
-6. **Fix 5 (WeakWrite merge)**: Low priority. Optimization; impact likely < 5%.
+6. **Fix 5 (WeakWrite merge)**: Low priority. Optimization; impact likely < 5%. Note: `access_kinds_conflict()` already treats WeakWrite+WeakRead as independent — only the merge function is missing the special case, which affects trace caching precision.
 
 7. **Fix 7 (Suppress redundant opcodes)**: Low priority. Optimization; no impact on trace counts.
 
