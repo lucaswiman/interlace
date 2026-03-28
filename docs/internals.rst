@@ -545,14 +545,22 @@ See ``PEP-703-REPORT.md`` for worked examples.
 
 **External server state** (e.g. a row in PostgreSQL):  The socket-level
 conflict (two threads talking to ``127.0.0.1:5432``) *is* visible to
-``LD_PRELOAD``, and DPOR explores reorderings of all database I/O
-between the two threads.  This is a coarse but useful signal --- DPOR
-can't distinguish a ``SELECT`` on table A from an ``UPDATE`` on table B,
-but it suffices to find lost-update races (see :doc:`orm_race`).  The
-underlying row-level conflict is invisible to any client-side
-instrumentation; only the database server knows which rows are being
-accessed.  For precise control over database-level races, use trace
-markers with manual scheduling.
+``LD_PRELOAD``, but DPOR also has a higher-precision layer: the SQL
+cursor interception (``_sql_cursor.py``) parses each SQL statement,
+extracts table names, row-level predicates, and access kinds, and
+reports them as fine-grained resource IDs (e.g. ``sql:users``,
+``sql:users:([('id', '1')],)``).  These table-level and row-level
+resources participate in DPOR's conflict detection directly, so DPOR
+*can* distinguish a ``SELECT`` on table A from an ``UPDATE`` on table B.
+
+When multiple tables are involved (e.g. an ORM pattern that touches
+``articles`` then ``versions``), **resource group coalescing** prevents
+backtrack explosion: each SQL resource is registered with a table-level
+resource group, and the engine skips inline wakeup insertion when
+intermediate operations on *unrelated* tables separate the racing
+accesses.  Deferred ``notdep`` processing then finds the critical
+interleaving efficiently.  See `Resource groups and operation
+coalescing`_ below.
 
 **Row-lock deadlocks** are a special case that *is* handled precisely at
 the client side, via the row-lock registry described in the next section.
@@ -740,27 +748,32 @@ tracking would miss.
 
 .. list-table::
    :header-rows: 1
-   :widths: 30 20 25 25
+   :widths: 28 16 18 18 20
 
    * - API
      - Clock used
      - Recording mode
+     - Origin tag
      - Typical use
    * - ``report_access``
      - ``dpor_vv``
      - last-write-wins
+     - ``PythonMemory``
      - Python attribute/subscript accesses
    * - ``report_first_access``
      - ``dpor_vv``
      - first-write-wins
+     - ``PythonMemory``
      - container-level keys (earliest position for wakeup insertion)
    * - ``report_synced_io_access``
      - ``dpor_vv``
      - first-write-wins
+     - ``IoDirect``
      - Python-level I/O (Redis, SQL) ordered by Python locks
    * - ``report_io_access``
      - ``io_vv``
      - first-write-wins
+     - ``IoDirect``
      - file/socket I/O (``LD_PRELOAD``, C-call detection)
 
 The "last-write-wins" recording mode (``record_access``) overwrites the
@@ -787,6 +800,29 @@ The engine tracks per-object, per-thread access history in
 per-thread-write, per-thread-weak-write, per-thread-weak-read).  When a
 new access arrives, ``dependent_accesses()`` returns all prior accesses
 from other threads that conflict with the new access's kind.
+
+Each access also carries an ``AccessOrigin`` tag indicating how it was
+generated:
+
+- ``PythonMemory`` --- observed via Python shared-memory tracing
+  (``sys.settrace`` opcode events).  Used by ``report_access`` and
+  ``report_first_access``.
+- ``LockSynthetic`` --- synthetic access for lock acquire/release conflict
+  tracking.  Generated in ``process_sync()`` for lock events.
+- ``IoDirect`` --- I/O access intercepted from database, Redis, file, or
+  socket operations.  Used by ``report_synced_io_access`` and
+  ``report_io_access``.
+
+Provenance tags are threaded through the sleep-set propagation layer
+(``active_accesses``, ``explored_accesses``, ``propagated_sleep_accesses``,
+and the step-count-indexed future access cache all carry
+``(AccessKind, AccessOrigin)`` tuples).  When merging accesses with
+different origins, the "stronger" origin wins
+(``IoDirect`` > ``LockSynthetic`` > ``PythonMemory``).  Currently
+the independence check only examines ``AccessKind`` (provenance does not
+affect conflict semantics), but the tags enable future per-origin merge
+strategies --- for example, relaxing Python-memory merges while keeping
+I/O origins conservative.
 
 **Access kinds and conflict rules:**
 
@@ -817,7 +853,10 @@ Immediately inserts the racing thread as a single-element sequence
 ``[thread_id]`` into the wakeup tree at the position of the first racing
 access (``prev_path_id``).  This guarantees that no race is dropped ---
 the racing thread is always available for exploration at the conflict
-point.
+point.  (Exception: for ``process_synced_io_access`` races with
+cross-group intermediates, inline insertion is skipped in favor of
+deferred processing --- see `Resource groups and operation coalescing`_
+below.)
 
 **Deferred ``notdep`` processing (Algorithm 2 style, JACM'17 p.24 lines
 1--6):** The race is also stored as a ``PendingRace``.  At the end of the
@@ -915,3 +954,44 @@ wakeup tree insertions that would require a preemption are deferred to an
 ancestor branch where the target thread is already active (conservative
 wakeup propagation).  This keeps exploration tractable while still
 covering most concurrency bugs, which typically require few preemptions.
+
+
+Resource groups and operation coalescing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When DPOR explores multi-table SQL patterns (e.g. django-reversion's
+``create_revision()`` which touches both ``articles`` and ``versions``
+tables), intermediate operations on unrelated tables create backtrack
+points that cause exploration to explode before reaching the critical
+interleaving.  **Resource group coalescing** addresses this.
+
+Each SQL resource reported to the engine can be registered with a
+**resource group** (typically the table name, hashed to a ``u64``).
+The Python-side ``_io_reporter`` callback in ``dpor.py`` automatically
+extracts the table name from SQL resource IDs (e.g. ``sql:versions:...``
+→ group ``hash("sql:versions")``) and calls
+``engine.register_resource_group(object_key, group_key)``.
+
+When a race is detected in ``process_synced_io_access()``, the engine
+checks whether the two racing accesses and the intermediate scheduling
+steps involve **cross-group intermediates** --- steps where the active
+thread accessed objects in a different resource group than the racing
+object.  If cross-group intermediates exist, the inline wakeup insertion
+is **skipped**.  The race is still collected as a ``PendingRace`` for
+deferred ``notdep`` processing, which computes the independent
+intermediate sequence and inserts it into the wakeup tree.
+
+The effect: DPOR no longer creates backtrack points for every pair of
+conflicting table accesses.  Instead, it lets the deferred ``notdep``
+computation find a wakeup sequence that skips the independent
+intermediate table operations and goes straight to the critical
+interleaving.  For the django-reversion pattern, this reduces exploration
+from exhausting the budget (100+ interleavings without finding the race)
+to finding it in ~2 executions.
+
+The ``has_cross_group_intermediates()`` check in ``path.rs`` iterates
+over scheduling steps between the two racing positions and checks if any
+step's ``active_accesses`` include objects from a resource group different
+from the race object's group.  This is conservative: when no resource
+groups are registered (non-SQL accesses), all races get inline wakeup
+insertion as before.
