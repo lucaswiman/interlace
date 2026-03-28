@@ -156,22 +156,23 @@ class TestSharedCursorRace:
                 max_executions=30,
                 deadlock_timeout=10.0,
                 timeout_per_run=10.0,
-                reproduce_on_failure=0,
+                reproduce_on_failure=50,
                 lock_timeout=2000,
             )
         finally:
             shared_conn.close()
 
-        # We EXPECT DPOR to find the race.  If it doesn't, the test documents
-        # the miss so we know the detection gap.
         assert not result.property_holds, (
             "DPOR should have found a schedule where the shared cursor "
             f"returns wrong results, but explored {result.num_explored} "
-            "interleavings without finding a violation.  "
-            "This indicates a detection gap in the DPOR / SQL conflict analysis."
+            "interleavings without finding a violation."
         )
         assert result.explanation is not None
         assert result.num_explored >= 2, "Must explore at least 2 interleavings"
+        assert result.reproduction_attempts == 50
+        assert result.reproduction_successes == 50, (
+            f"Expected 50/50 reproductions, got {result.reproduction_successes}/{result.reproduction_attempts}"
+        )
 
 
 # ---------------------------------------------------------------------------
