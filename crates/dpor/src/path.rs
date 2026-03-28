@@ -1617,7 +1617,7 @@ mod tests {
     #[test]
     fn test_step_future_suffix_unions() {
         use crate::access::{AccessKind, AccessOrigin};
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // Build 3 scheduling points for thread 0 (T0 runs 3 times in a row):
         //   pos 0 (T0 step 0): writes obj 10
@@ -1668,7 +1668,7 @@ mod tests {
     #[test]
     fn test_future_accesses_for_counts_thread_steps() {
         use crate::access::{AccessKind, AccessOrigin};
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // Thread 0 at pos 0 (writes obj 10), thread 1 at pos 1, thread 0 at pos 2 (writes obj 20)
         // To get T1 at pos 1, we pass current_thread=1 and runnable=[0,1].
@@ -1736,7 +1736,7 @@ mod tests {
     #[test]
     fn test_sleeping_thread_stays_asleep_when_remaining_work_independent() {
         use crate::access::{AccessKind, AccessOrigin};
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // First execution: T0 at pos 0 (writes obj 100), T0 at pos 1 (writes obj 200),
         //                  T1 at pos 2 (reads obj 300)
@@ -1777,7 +1777,7 @@ mod tests {
     #[test]
     fn test_sleeping_thread_wakes_when_remaining_work_conflicts() {
         use crate::access::{AccessKind, AccessOrigin};
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // First execution: T0 writes obj 100 at step 0, T1 writes obj 100 at step 0
         path.schedule(&[0, 1], 0, 2); // pos 0: T0
@@ -1810,7 +1810,7 @@ mod tests {
     #[test]
     fn test_position_sensitive_interleaved_threads() {
         use crate::access::{AccessKind, AccessOrigin};
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // First execution:
         //   pos 0: T0 writes obj 100 (T0 step 0)
@@ -1856,7 +1856,7 @@ mod tests {
     #[test]
     fn test_future_accesses_for_extra_steps_returns_empty() {
         use crate::access::{AccessKind, AccessOrigin};
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // First execution: T0 runs once, T1 runs once
         path.schedule(&[0, 1], 0, 2); // pos 0: T0
@@ -1886,7 +1886,7 @@ mod tests {
     #[test]
     fn test_step_future_merges_access_kinds() {
         use crate::access::{AccessKind, AccessOrigin};
-        let mut path = Path::new(None);
+        let mut path = Path::new(None, SearchStrategy::Dfs);
 
         // T0 step 0: reads obj 10
         // T0 step 1: writes obj 10

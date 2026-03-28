@@ -33,6 +33,20 @@ import pytest
 
 from frontrun.dpor import explore_dpor
 
+# All search strategies should produce the same exact Mazurkiewicz trace
+# counts. The strategies only change the *order* of exploration, not the
+# set of explored traces. See ideas/search_strategies.md.
+SEARCH_STRATEGIES = [
+    "dfs",
+    "bit-reversal",
+    "bit-reversal:42",
+    "round-robin",
+    "round-robin:7",
+    "stride",
+    "stride:3",
+    "conflict-first",
+]
+
 
 class _Slot:
     """A single mutable slot, isolated as its own Python object.
@@ -58,8 +72,9 @@ class TestIndependentState:
     Every linearization belongs to the same Mazurkiewicz trace.
     """
 
+    @pytest.mark.parametrize("search", SEARCH_STRATEGIES)
     @pytest.mark.parametrize("n", [1, 2, 3, 4, 5])
-    def test_independent_writes(self, n: int) -> None:
+    def test_independent_writes(self, n: int, search: str) -> None:
         """N threads writing to N independent slots → 1 Mazurkiewicz trace.
 
         Proof of tightness:
@@ -99,11 +114,13 @@ class TestIndependentState:
             stop_on_first=False,
             detect_io=False,
             total_timeout=60.0,
+            search=search,
         )
 
-        assert result.property_holds, f"Invariant should hold for independent writes (N={n})"
+        assert result.property_holds, f"Invariant should hold for independent writes (N={n}, search={search})"
         assert result.num_explored == 1, (
-            f"N={n}: Expected exactly 1 Mazurkiewicz trace for independent writes, got {result.num_explored}"
+            f"N={n}, search={search}: Expected exactly 1 Mazurkiewicz trace for independent writes, "
+            f"got {result.num_explored}"
         )
 
 
@@ -119,8 +136,9 @@ class TestTwoThreadsSharedState:
     performs a single write (STORE_ATTR) to each variable in sequence.
     """
 
+    @pytest.mark.parametrize("search", SEARCH_STRATEGIES)
     @pytest.mark.parametrize("n", [1, 2, 3])
-    def test_two_threads_n_shared_vars(self, n: int) -> None:
+    def test_two_threads_n_shared_vars(self, n: int, search: str) -> None:
         """Two threads writing to N shared variables → 2^N Mazurkiewicz traces.
 
         The proof below is for the intended logical event model where each
@@ -195,10 +213,12 @@ class TestTwoThreadsSharedState:
             stop_on_first=False,
             detect_io=False,
             total_timeout=60.0,
+            search=search,
         )
 
         assert result.num_explored == expected, (
-            f"N={n}: Expected exactly {expected} Mazurkiewicz traces (2^{n}), got {result.num_explored}"
+            f"N={n}, search={search}: Expected exactly {expected} Mazurkiewicz traces (2^{n}), "
+            f"got {result.num_explored}"
         )
 
 
@@ -214,8 +234,9 @@ class TestNThreadsWithLock:
     orderings produce distinct traces.
     """
 
+    @pytest.mark.parametrize("search", SEARCH_STRATEGIES)
     @pytest.mark.parametrize("n", [1, 2, 3])
-    def test_n_threads_single_lock(self, n: int) -> None:
+    def test_n_threads_single_lock(self, n: int, search: str) -> None:
         """N threads with single lock → N! Mazurkiewicz traces.
 
         Proof of tightness:
@@ -271,10 +292,11 @@ class TestNThreadsWithLock:
             stop_on_first=False,
             detect_io=False,
             total_timeout=60.0,
+            search=search,
         )
 
         assert result.num_explored == expected, (
-            f"N={n}: Expected exactly {expected} Mazurkiewicz traces ({n}!), got {result.num_explored}"
+            f"N={n}, search={search}: Expected exactly {expected} Mazurkiewicz traces ({n}!), got {result.num_explored}"
         )
 
 
@@ -290,8 +312,9 @@ class TestTwoThreadsSharedStateWithLock:
     The lock serializes the two threads completely → 2 traces.
     """
 
+    @pytest.mark.parametrize("search", SEARCH_STRATEGIES)
     @pytest.mark.parametrize("n", [1, 2, 3])
-    def test_two_threads_locked_n_vars(self, n: int) -> None:
+    def test_two_threads_locked_n_vars(self, n: int, search: str) -> None:
         """Two threads with single lock over N var writes → 2 traces.
 
         Proof of tightness:
@@ -336,10 +359,12 @@ class TestTwoThreadsSharedStateWithLock:
             stop_on_first=False,
             detect_io=False,
             total_timeout=60.0,
+            search=search,
         )
 
         assert result.num_explored == 2, (
-            f"N={n}: Expected exactly 2 Mazurkiewicz traces (lock serializes), got {result.num_explored}"
+            f"N={n}, search={search}: Expected exactly 2 Mazurkiewicz traces (lock serializes), "
+            f"got {result.num_explored}"
         )
 
 
