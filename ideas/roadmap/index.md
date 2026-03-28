@@ -28,32 +28,31 @@ only remaining work is listed here. Last reviewed: 2026-03-28.
 - ✅ **Operation coalescing for unrelated tables** (dpor-improvements: Defect #15, Approach 2) --
   `register_resource_group()` with cross-group intermediate detection. Automatic SQL table
   group registration in `frontrun/dpor.py`. Skips inline wakeup for cross-group intermediates.
+- ✅ **WeakWrite+WeakRead merge** (dpor-improvements: Fix 5) -- `merge()` now returns `WeakWrite`
+  instead of `Write`, aligning with `access_kinds_conflict()`. Origins wired through
+  `accesses_are_independent()` for future per-origin policies.
 
 ## Priority overview
 
-### P0 -- High impact, unblocks other work
-
-1. **Per-branch merge with provenance** (dpor-improvements: Fix 6) -- Now unblocked by Fix 4.
-   Selectively relax Python-memory merges while keeping I/O conservative. Needs investigation
-   of `test_independent_file_writes[2]` regression.
-
 ### P1 -- Valuable, moderate effort
 
-2. **Cross-table FK analysis** (integrations-and-detection) -- Schema introspection for foreign
+1. **Cross-table FK analysis** (integrations-and-detection) -- Schema introspection for foreign
    key dependencies. Catches referential integrity races. ~150 LOC + 25 tests.
-3. **Counterexample replay from TLC** (formal-methods: 2.1) -- TLC finds invariant violation,
+2. **Counterexample replay from TLC** (formal-methods: 2.1) -- TLC finds invariant violation,
    frontrun replays it against real Python code. Agent-driven pipeline.
-4. **Invariant assertion bridge** (formal-methods: 1.2) -- TLA+ invariants become Python
+3. **Invariant assertion bridge** (formal-methods: 1.2) -- TLA+ invariants become Python
    assertions checked after every DPOR step.
-5. **Hybrid marker + bytecode exploration** (testing-strategies: Extension 3) -- Two-level
+4. **Hybrid marker + bytecode exploration** (testing-strategies: Extension 3) -- Two-level
    search: coarse markers + fine bytecode within each window.
-6. **Randomized wakeup tree ordering** (random_dpor.md: Proposal A) -- Different seeds explore
+5. **Randomized wakeup tree ordering** (random_dpor.md: Proposal A) -- Different seeds explore
    different trace space regions. Low effort, high value for `stop_on_first=True` use cases.
 
 ### P2 -- Nice to have, lower effort
 
-7. **Wakeup tree equivalence checking** (dpor-improvements: Phase 4c) -- Sound optimization;
+6. **Wakeup tree equivalence checking** (dpor-improvements: Phase 4c) -- Sound optimization;
     benefit depends on workload.
+7. **Per-branch merge with provenance** (dpor-improvements: Fix 6) -- Infrastructure ready
+    (Fix 4 + Fix 5 done). Needs concrete use case for per-origin conflict relaxation.
 8. **RETURNING clause injection** (integrations-and-detection) -- Captures autoincrement IDs
     from PostgreSQL INSERTs.
 9. **sys.addaudithook integration** (integrations-and-detection) -- Zero-config I/O safety net.

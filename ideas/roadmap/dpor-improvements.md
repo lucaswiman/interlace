@@ -89,31 +89,22 @@ All shared-variable, lock-only, and independent file write tests achieve exact c
 
 **Result**: Infrastructure in place for per-origin merge strategies (Fix 6).
 
-### Fix 5: Improve AccessKind Merge for WeakWrite + WeakRead
+### Fix 5: Improve AccessKind Merge for WeakWrite + WeakRead ✅
 
-**Root cause**: `WeakWrite` conflicts with `{Read, Write}` while `WeakRead` conflicts with `{Write}`. When both occur on the same object, merging to `Write` (full conflict) is too conservative.
-
-**What**: Extend `AccessKind::merge()` to handle:
-```
-(WeakWrite, WeakRead) | (WeakRead, WeakWrite) => WeakWrite
-```
-
-**Complexity**: Trivial. One line in `merge()`.
-
-**Impact**: Low. Only applies when both WeakWrite and WeakRead occur on the same object across different scheduling points of the same thread. Optimization (reduces false wakeups in edge cases).
+**Status**: Complete. `AccessKind::merge()` now returns `WeakWrite` for `(WeakWrite, WeakRead)`,
+aligning the merge with `access_kinds_conflict()` which already treats them as independent.
 
 ### Fix 6: Per-Branch Merge Investigation
 
-**Status**: Attempted and caused a regression in `test_independent_file_writes[2]` (independent writes got 2 instead of 1). Fix 4 (provenance tags), which was a prerequisite, is now complete.
+**Status**: Fix 5 (merge improvement) and Fix 4 (provenance tags) are both complete. Origin
+variables are wired through `accesses_are_independent()` but currently unused. The previous
+regression in `test_independent_file_writes[2]` could not have been caused by the merge rule
+alone (the test uses disjoint objects), suggesting the original attempt included additional
+changes that caused the regression.
 
-**Why**: Unknown. The regression needs root-cause analysis. Two possibilities:
-1. Per-branch merge interacts unexpectedly with I/O access tracking
-2. A pre-existing bug in file-I/O race detection was masked by the conservative merge
-
-**Next steps**:
-1. ~~Add provenance tags (Fix 4) so per-branch merge can distinguish I/O accesses~~ ✅ Done
-2. Selectively relax only Python-memory merges while keeping I/O conservative
-3. Investigate the file-I/O case to determine if a real bug exists
+**Remaining**: Per-origin conflict policies in `accesses_are_independent()` — e.g., relaxing
+`PythonMemory` merges while keeping `IoDirect` conservative. This is now infrastructure-ready
+but needs a concrete use case that demonstrates benefit.
 
 **Complexity**: Medium. Requires investigation before proceeding. Provenance tags are now available to distinguish I/O vs Python-memory accesses.
 
@@ -174,13 +165,13 @@ All shared-variable, lock-only, and independent file write tests achieve exact c
 
 2. **Fix 4 (Provenance tags)**: ✅ Complete. Infrastructure for Fix 6 and per-origin merge strategies.
 
-3. **Fix 6 (Per-branch merge)**: Medium priority. No longer blocked on Fix 4; needs investigation of file-I/O regression.
+3. **Fix 5 (WeakWrite merge)**: ✅ Complete. `merge(WeakWrite, WeakRead) → WeakWrite`.
 
-4. **Defect #15 Approach 2 (Operation coalescing)**: Medium priority. Resource grouping workaround is in place, but proper table-level independence analysis would be more general. Likely 50–80% reduction for affected patterns.
+4. **Defect #15 Approach 2 (Operation coalescing)**: ✅ Complete. Resource grouping via `register_resource_group()`.
 
-5. **Phase 4c (Wakeup tree equivalence)**: Low priority. Sound optimization; benefit uncertain without empirical data.
+5. **Fix 6 (Per-branch merge)**: Low priority. Infrastructure ready (Fix 4 + Fix 5). Needs a concrete use case demonstrating benefit of per-origin conflict relaxation.
 
-6. **Fix 5 (WeakWrite merge)**: Low priority. Optimization; impact likely < 5%. Note: `access_kinds_conflict()` already treats WeakWrite+WeakRead as independent — only the merge function is missing the special case, which affects trace caching precision.
+6. **Phase 4c (Wakeup tree equivalence)**: Low priority. Sound optimization; benefit uncertain without empirical data.
 
 7. **Fix 7 (Suppress redundant opcodes)**: Low priority. Optimization; no impact on trace counts.
 
