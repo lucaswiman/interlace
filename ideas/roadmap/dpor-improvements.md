@@ -66,25 +66,17 @@ The wakeup tree insert checks for `w' ∼[E] w` — whether an existing branch a
 
 ## Proposed Trace Cache Refinements
 
-### Fix 3: Position-Sensitive Future Access Cache
+### Fix 3: Position-Sensitive Future Access Cache ✅
 
-**Root cause**: `prev_thread_all_accesses` union (Fix 9) is sound but very coarse. A thread that touched object X at any point in the prior execution makes X appear "in scope" for the sleeping thread's entire future, creating false wakeups.
+**Status**: Complete. Implemented in `crates/dpor/src/path.rs`.
 
-**Why**: Current cache prevents advanced understanding of when a thread's future work truly touches a specific object. Makes the sleep set more conservative than necessary.
+**Implementation**: `prev_thread_step_future: HashMap<usize, Vec<HashMap<u64, AccessKind>>>` — per-thread suffix union cache indexed by the thread's own step count. Built in `step()` by iterating each thread's scheduling points in reverse, accumulating accesses. Consumed by `future_accesses_for()` which counts how many times a thread was active before a given position to determine the correct suffix index. Used by `propagate_sleep()` for both locally-sleeping and propagated-sleeping threads.
 
-**What**: Replace `prev_thread_all_accesses` with `prev_thread_step_future`, indexed by the thread's own step count within a path position:
-```
-prev_thread_step_future[(pos, tid)][k] = union of tid's accesses from its k-th scheduling point onward
-```
+**Result**: Eliminated the predicted overcounting. Shared-variable tests now achieve exact Mazurkiewicz trace counts:
+- 2-var: 4 traces (2^2, was predicted 6 → 4)
+- 3-var: 8 traces (2^3, was predicted 18 → 8)
 
-**Soundness**: Remains conservative as long as each cached summary is a superset of what the thread can still do from that replay position.
-
-**Complexity**: Medium. Requires:
-- 2D indexing: (path_position, thread_step) → access_union
-- Tracking thread step counts separately per position
-- Careful replay semantics to ensure the cache remains valid
-
-**Impact**: Best candidate for eliminating remaining 2-var (6 → 4?) and 3-var (18 → 8?) overcounting in shared-var tests. Likely 10–20% reduction in dining philosophers benchmark.
+All shared-variable, lock-only, and independent file write tests achieve exact counts.
 
 ### Fix 4: Provenance-Tagged Access Summaries
 
@@ -189,7 +181,7 @@ enum AccessOrigin {
 
 1. **Phase 4c (Wakeup tree equivalence)**: Low priority. Sound optimization; benefit uncertain without empirical data.
 
-2. **Fix 3 (Position-sensitive cache)**: High priority. Best candidate for eliminating shared-var overcounting. Estimated 10–20% reduction in complex benchmarks.
+2. **Fix 3 (Position-sensitive cache)**: ✅ Complete. Eliminated shared-var overcounting (2-var: 4, 3-var: 8 — exact Mazurkiewicz counts).
 
 3. **Fix 4 (Provenance tags)**: High priority. Infrastructure for safer follow-on fixes (especially Fix 6).
 
