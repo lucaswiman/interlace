@@ -1,5 +1,9 @@
 # Search Strategies for DPOR Wakeup Tree Exploration
 
+**Status:** ✅ Implemented. All 5 strategies (DFS, bit-reversal, round-robin, stride, conflict-first)
+are in `crates/dpor/src/path.rs`, exposed via `DporEngine(..., search="bit-reversal:42")`.
+Tests in `tests/test_search_strategies.py`.
+
 ## Background
 
 The optimal DPOR algorithm (Abdulla et al., JACM 2017) uses **wakeup trees** to

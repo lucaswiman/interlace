@@ -169,32 +169,11 @@ When using `marker_schedule_strategy()` with Hypothesis, we could measure:
 
 ## Extension 6: Async/Await Marker Support
 
-**Status:** Not implemented
+**Status:** ✅ Implemented
 **Complexity:** Medium
 
-Extend marker-based scheduling to async code (coroutines, tasks, etc.).
-
-### Current state
-- Only works with threading (synchronous code with `sys.settrace`)
-- `explore_interleavings` has async variants, but markers don't
-
-### Idea
-1. Add marker detection for async code
-2. Use async-aware tracing to intercept at marker points
-3. Create async equivalents of `TraceExecutor` and `explore_marker_interleavings`
-
-### Implementation approach
-```python
-async def async_marker_executor(...):
-    """Async version of TraceExecutor."""
-
-async def explore_async_marker_interleavings(...):
-    """Exhaustive async marker exploration."""
-```
-
-### Value
-- Covers an increasingly important concurrency model
-- Could find bugs in async concurrent code (e.g., race conditions in asyncio event loop interactions)
+Full `AsyncTraceExecutor` implemented in `frontrun/async_trace_markers.py` with `sys.settrace`-based
+marker detection for async code. Tests in `tests/test_async_trace_markers.py`.
 
 ---
 
@@ -331,7 +310,7 @@ compare(result_markers, result_bytecode)
 | Hybrid marker + bytecode | Not done | Medium | Medium |
 | Schedule filtering/constraints | Not done | Low-Medium | Low |
 | Distribution analysis | Not done | Low | Low |
-| Async/await support | Not done | Medium | Medium |
+| Async/await support | ✅ Done | Medium | — |
 | Multi-level markers | Not done | Medium | Low |
 | Coverage & regression tracking | Not done | Low | High |
 | pytest plugin integration | Not done | Low | High |

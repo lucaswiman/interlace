@@ -1,6 +1,7 @@
 # DPOR Improvements Roadmap
 
-Consolidated view of remaining work for the optimal DPOR implementation. Items marked ✅ are complete; this document focuses only on unfinished work.
+Consolidated view of remaining work for the optimal DPOR implementation. Items marked ✅ are
+complete; this document focuses only on unfinished work. Last reviewed: 2026-03-28.
 
 ## Overview
 
