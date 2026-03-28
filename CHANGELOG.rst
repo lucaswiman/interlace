@@ -6,6 +6,16 @@ All releases: https://github.com/lucaswiman/frontrun/releases
 Unreleased
 ----------
 
+* **Search strategies for DPOR** — ``explore_dpor()`` accepts a new ``search``
+  parameter (``SearchStrategy`` enum) to control the order in which wakeup tree
+  branches are explored.  Five strategies are available: **DFS** (default,
+  optimal for exhaustive runs), **bit-reversal** (van der Corput
+  low-discrepancy sequence for maximal early spread), **round-robin**,
+  **stride** (coprime-stride permutation), and **conflict-first** (prefers
+  threads added by race reversals).  All strategies visit the same set of
+  Mazurkiewicz trace equivalence classes; only the exploration order differs.
+  Non-DFS strategies can find bugs 30–35% faster when using
+  ``stop_on_first=True``.
 * **Marker-level exhaustive exploration** — new ``explore_marker_interleavings()``, ``all_marker_schedules()``, and ``marker_schedule_strategy()`` provide completeness guarantees at trace-marker granularity.
 * Fixed multiple DPOR correctness bugs: ``BoundedSemaphore.release()`` missing ``_report()``, ``Condition.notify(1)`` waking all waiters instead of one, false deadlock detection in async DPOR, lock over-exploration, and ``record_access()`` unconditionally upgrading ``AccessKind`` to ``Write``.
 * Fixed SQL parsing of quoted schema-qualified table names and Redis blocking-pop classification and reproduction issues.
