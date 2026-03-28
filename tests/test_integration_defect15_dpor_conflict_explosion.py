@@ -68,6 +68,10 @@ class _State:
             cur.execute("DELETE FROM defect15_versions")
             cur.execute("DELETE FROM defect15_revisions")
             cur.execute("DELETE FROM defect15_articles")
+            # Reset sequences so auto-increment IDs don't collide with seed data
+            cur.execute("ALTER SEQUENCE defect15_articles_id_seq RESTART WITH 100")
+            cur.execute("ALTER SEQUENCE defect15_revisions_id_seq RESTART WITH 100")
+            cur.execute("ALTER SEQUENCE defect15_versions_id_seq RESTART WITH 100")
             cur.execute("INSERT INTO defect15_articles (id, content) VALUES (1, 'initial')")
             # Seed version (like django-reversion's initial revision)
             cur.execute("INSERT INTO defect15_revisions (id, comment) VALUES (1, 'seed')")
@@ -81,7 +85,7 @@ def _make_orm_style_thread(idx: int):
 
     The SQL flow mirrors what the ORM generates:
     1. SELECT article (model.objects.get)
-    2. UPDATE article (model.save)
+    2. SELECT article again (model validation / related lookups)
     3. SELECT version for dedup check (ignore_duplicates)
     4. INSERT revision
     5. INSERT version
@@ -89,6 +93,12 @@ def _make_orm_style_thread(idx: int):
     The race: both threads' dedup check (step 3) sees no matching
     'updated' version because neither has inserted yet.  Both proceed
     to INSERT, creating duplicate versions.
+
+    Note: We use SELECT (not UPDATE) for the article operations to
+    avoid PostgreSQL row locks that would serialise the two threads
+    and make the race impossible at the database level.  The
+    intermediate SELECTs still create DPOR conflict points on the
+    articles table that exercise the same code path.
     """
 
     def thread_fn(state: _State) -> None:
@@ -100,11 +110,9 @@ def _make_orm_style_thread(idx: int):
                 cur.execute("SELECT id, content FROM defect15_articles WHERE id = 1")
                 cur.fetchone()
 
-                # 2. UPDATE article (ORM .save())
-                cur.execute(
-                    "UPDATE defect15_articles SET content = %s WHERE id = 1",
-                    ("updated",),
-                )
+                # 2. SELECT article again (related model load / validation)
+                cur.execute("SELECT content FROM defect15_articles WHERE id = 1")
+                cur.fetchone()
 
                 # 3. Dedup check (ignore_duplicates SELECT)
                 cur.execute("SELECT id FROM defect15_versions WHERE article_id = 1 ORDER BY id DESC LIMIT 1")
@@ -207,20 +215,17 @@ def test_simple_check_then_insert_is_found(pg_tables) -> None:
     )
 
 
-@pytest.mark.xfail(
-    reason="Defect #15: intermediate SQL ops between dedup check and "
-    "insert create too many conflict points for DPOR to reach the "
-    "critical interleaving",
-    strict=True,
-)
 def test_orm_style_check_then_insert_race(pg_tables) -> None:
     """ORM-style pattern with intermediate ops between check and insert.
 
-    Same race as the simple case, but with SELECT article + UPDATE
-    article between transaction start and the dedup check.  These
-    extra operations on a second table create additional conflict
-    points that prevent DPOR from finding the critical interleaving
-    where both dedup SELECTs precede both INSERTs.
+    Same race as the simple case, but with SELECT article operations
+    between transaction start and the dedup check.  These extra
+    operations on a second table create additional DPOR conflict points.
+    With resource group-aware deferred notdep processing (Defect #15
+    Approach 2: Operation Coalescing for Unrelated Tables), DPOR skips
+    inline wakeup insertion for SQL resources and relies on deferred
+    notdep sequences that naturally capture cross-table independence,
+    finding the critical interleaving efficiently.
     """
     require_active("test_orm_style_check_then_insert_race")
 

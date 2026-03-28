@@ -45,6 +45,11 @@ pub struct PendingRace {
     pub thread_id: usize,
     /// The shared object involved in the race.
     pub race_object: Option<u64>,
+    /// Whether inline wakeup insertion was skipped for this race.
+    /// When true, deferred processing must handle single-thread notdep
+    /// sequences (len == 1) that would normally be covered by inline
+    /// insertion. Set for races on objects with resource groups (Defect #15).
+    pub inline_skipped: bool,
 }
 
 /// Check whether two access kinds conflict (i.e., are dependent).
@@ -605,6 +610,49 @@ impl Path {
         false
     }
 
+    /// Check if there are intermediate scheduling steps between `e_pos` and
+    /// `e_prime_pos` that access objects from a different resource group than
+    /// the racing object's group. This indicates cross-table interference
+    /// that would cause backtrack explosion if handled with inline wakeup.
+    pub fn has_cross_group_intermediates(
+        &self,
+        e_pos: usize,
+        e_prime_pos: usize,
+        resource_groups: &HashMap<u64, u64>,
+    ) -> bool {
+        if e_pos >= self.branches.len() {
+            return false;
+        }
+        // Collect groups of the racing event's accesses
+        let e_groups: std::collections::HashSet<u64> = self.branches[e_pos]
+            .active_accesses
+            .keys()
+            .filter_map(|obj| resource_groups.get(obj).copied())
+            .collect();
+        if e_groups.is_empty() {
+            return false;
+        }
+
+        for pos in (e_pos + 1)..e_prime_pos {
+            if pos >= self.branches.len() {
+                break;
+            }
+            let step = &self.branches[pos];
+            // Skip same-thread events
+            if step.active_thread == self.branches[e_pos].active_thread {
+                continue;
+            }
+            for obj_id in step.active_accesses.keys() {
+                if let Some(&group) = resource_groups.get(obj_id) {
+                    if !e_groups.contains(&group) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Compute the notdep sequence for a race between events at positions
     /// `e_pos` and `e_prime_pos`, where `e_prime_thread` performed e'.
     ///
@@ -656,6 +704,7 @@ impl Path {
         }
         // Append e' thread — the thread whose execution reverses the race
         sequence.push(e_prime_thread);
+
         sequence
     }
 
@@ -702,14 +751,17 @@ impl Path {
     ///   if sleep(E') ∩ WI[E'](v) = ∅ then      — not sleep-set blocked
     ///     wut(E') := insert[E'](v, wut(E'))    — add to wakeup tree
     ///
-    /// **Hybrid semantics**: Since the engine also performs inline `insert_wakeup()`
-    /// for the racing thread (Algorithm 1 style), the deferred processing here
-    /// only adds value when the notdep sequence has independent intermediates
-    /// (i.e., starts with a different thread than the racing thread). When
-    /// `notdep = [thread_id]` (no intermediates), the inline `insert_wakeup()` has
-    /// already handled it. When `notdep = [T_indep, ..., thread_id]`, we insert
-    /// the full sequence for multi-step guidance — but only if this doesn't
-    /// disrupt exploration order (the first thread must be feasible).
+    /// **Hybrid semantics**: The engine may perform inline `insert_wakeup()`
+    /// for the racing thread (Algorithm 1 style) during execution. For
+    /// objects without resource groups, single-thread notdep sequences
+    /// (len == 1) are already covered by inline insertion. For objects
+    /// with resource groups (Defect #15), inline insertion is skipped,
+    /// so deferred processing must handle all notdep lengths.
+    ///
+    /// When `notdep = [thread_id]` (no intermediates), we fall back to
+    /// `insert_wakeup()` which deduplicates against existing entries.
+    /// When `notdep = [T_indep, ..., thread_id]`, we insert the full
+    /// sequence for multi-step guidance.
     fn process_one_deferred_race(&mut self, race: &PendingRace) {
         let path_id = race.prev_path_id;
         if path_id >= self.branches.len() {
@@ -718,9 +770,17 @@ impl Path {
 
         let notdep = self.compute_notdep(path_id, race.current_path_id, race.thread_id);
 
-        // Skip if notdep has no independent intermediates — the inline
-        // insert_wakeup() already inserted [thread_id] for this race.
+        if notdep.is_empty() {
+            return;
+        }
+
+        // For races where inline insertion was skipped (resource-grouped
+        // objects, Defect #15), single-thread notdep must be handled here.
+        // For races with inline insertion, len==1 is already covered.
         if notdep.len() <= 1 {
+            if race.inline_skipped && notdep.len() == 1 {
+                self.insert_wakeup(path_id, notdep[0], race.race_object);
+            }
             return;
         }
 
@@ -1200,6 +1260,7 @@ mod tests {
             current_path_id: 2,
             thread_id: 2,
             race_object: Some(1),
+            inline_skipped: false,
         };
 
         path.process_deferred_races(&[race]);

@@ -107,6 +107,14 @@ pub struct DporEngine {
     /// Lock acquires collected during the current execution.
     /// Used to determine whether a release should trigger backtracking.
     deferred_lock_acquires: Vec<DeferredLockAcquire>,
+    /// Resource group mapping: object_id → group_id.
+    ///
+    /// Objects in the same resource group (e.g., same SQL table) are related;
+    /// objects in different groups are independent. When races are detected on
+    /// objects with resource groups, inline wakeup insertion is skipped in
+    /// favor of deferred notdep processing. This prevents backtrack explosion
+    /// from intermediate operations on unrelated tables (Defect #15).
+    resource_groups: HashMap<ObjectId, u64>,
 }
 
 impl DporEngine {
@@ -128,6 +136,7 @@ impl DporEngine {
             pending_races: Vec::new(),
             deferred_lock_releases: Vec::new(),
             deferred_lock_acquires: Vec::new(),
+            resource_groups: HashMap::new(),
         }
     }
 
@@ -190,6 +199,7 @@ impl DporEngine {
                     current_path_id,
                     thread_id,
                     race_object: Some(object_id),
+                    inline_skipped: false,
                 });
             }
         }
@@ -232,6 +242,7 @@ impl DporEngine {
                     current_path_id,
                     thread_id,
                     race_object: Some(object_id),
+                    inline_skipped: false,
                 });
             }
         }
@@ -246,6 +257,13 @@ impl DporEngine {
     /// `record_io_access` recording semantics.  Intended for I/O
     /// operations that go through Python-level code (Redis, SQL) where
     /// Python locks are tracked by `report_sync` and should be respected.
+    ///
+    /// When the object has a registered resource group (via
+    /// [`register_resource_group`]), inline wakeup insertion is skipped.
+    /// Races are still collected as `PendingRace` entries for deferred
+    /// notdep processing at the end of the execution. This prevents
+    /// backtrack explosion from intermediate operations on unrelated
+    /// tables (Defect #15).
     pub fn process_synced_io_access(
         &mut self,
         execution: &mut Execution,
@@ -258,14 +276,34 @@ impl DporEngine {
 
         let object_state = execution.objects.entry(object_id).or_insert_with(ObjectState::new);
 
+        // Check if races on this object involve intermediate accesses
+        // from different resource groups. When true, we skip inline wakeup
+        // and rely on deferred notdep processing to provide multi-step
+        // guidance. This avoids backtrack explosion from intermediate
+        // operations on unrelated tables (Defect #15).
+        let has_group = self.has_resource_group(object_id);
+
         for prev_access in object_state.dependent_accesses(kind, thread_id) {
             if !prev_access.happens_before(&current_dpor_vv) {
-                self.path.insert_wakeup(prev_access.path_id, thread_id, Some(object_id));
+                // Check if there are intermediate accesses from different
+                // resource groups between this race pair. If so, skip inline
+                // wakeup to avoid explosion. If not (same group or no
+                // intermediates from other groups), do inline as normal.
+                let skip_inline = has_group
+                    && self.path.has_cross_group_intermediates(
+                        prev_access.path_id,
+                        current_path_id,
+                        &self.resource_groups,
+                    );
+                if !skip_inline {
+                    self.path.insert_wakeup(prev_access.path_id, thread_id, Some(object_id));
+                }
                 self.pending_races.push(PendingRace {
                     prev_path_id: prev_access.path_id,
                     current_path_id,
                     thread_id,
                     race_object: Some(object_id),
+                    inline_skipped: skip_inline,
                 });
             }
         }
@@ -319,6 +357,7 @@ impl DporEngine {
                     current_path_id,
                     thread_id,
                     race_object: Some(object_id),
+                    inline_skipped: false,
                 });
             }
         }
@@ -507,6 +546,23 @@ impl DporEngine {
     /// Call before `next_execution()` which consumes them.
     pub fn pending_races(&self) -> &[PendingRace] {
         &self.pending_races
+    }
+
+    /// Register that `object_id` belongs to resource group `group_id`.
+    ///
+    /// Objects in the same resource group (e.g., SQL resources from the same
+    /// table) are related; objects in different groups are independent. When
+    /// a race is detected on an object with a resource group, inline wakeup
+    /// insertion is skipped in favor of deferred notdep processing. This
+    /// prevents backtrack explosion from intermediate operations on unrelated
+    /// tables (Defect #15: Operation Coalescing for Unrelated Tables).
+    pub fn register_resource_group(&mut self, object_id: ObjectId, group_id: u64) {
+        self.resource_groups.insert(object_id, group_id);
+    }
+
+    /// Check if an object has a registered resource group.
+    fn has_resource_group(&self, object_id: ObjectId) -> bool {
+        self.resource_groups.contains_key(&object_id)
     }
 }
 

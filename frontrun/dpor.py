@@ -1024,6 +1024,9 @@ class _ReplayEngine:
     ) -> None:
         return None
 
+    def register_resource_group(self, object_id: int, group_id: int) -> None:
+        return None
+
 
 class _ReplayExecution:
     """Minimal execution object for DporBytecodeRunner TLS plumbing."""
@@ -3011,6 +3014,17 @@ class DporBytecodeRunner:
                 object_key = _make_object_key(hash(resource_id), resource_id)
                 pending: list[tuple[int, str, bool]] = _dpor_tls.pending_io
                 pending.append((object_key, kind, True))  # synced=True: Python-level I/O respects locks
+                # Register resource group for SQL resources so the DPOR engine
+                # can skip inline wakeup insertion and rely on deferred notdep
+                # processing. This prevents backtrack explosion from intermediate
+                # operations on unrelated tables (Defect #15).
+                if resource_id.startswith("sql:"):
+                    # Extract table name: "sql:<table>:..." → "sql:<table>"
+                    _parts = resource_id.split(":")
+                    _table_group = f"sql:{_parts[1]}" if len(_parts) >= 2 else resource_id
+                    _group_key = hash(_table_group) & 0xFFFFFFFFFFFFFFFF
+                    with engine_lock:
+                        engine.register_resource_group(object_key, _group_key)
                 # Record I/O event in the trace for human-readable output
                 if _recorder is not None:
                     _frame = sys._getframe(1)
