@@ -112,7 +112,7 @@ class TestStampedeReproduction:
         )
 
         assert not result.property_holds, (
-            f"DPOR should detect cache stampede race (explored {result.interleavings_explored} interleavings)"
+            f"DPOR should detect cache stampede race (explored {result.num_explored} interleavings)"
         )
         assert result.reproduction_successes > 0, (
             f"Simple stampede should reproduce (defect #9 fix) but got "
@@ -221,7 +221,7 @@ class TestStampedeReproduction:
         )
 
         assert not result.property_holds, (
-            f"DPOR should detect pipeline-based stampede (explored {result.interleavings_explored} interleavings)"
+            f"DPOR should detect pipeline-based stampede (explored {result.num_explored} interleavings)"
         )
         assert result.reproduction_successes > 0, (
             f"Pipeline stampede should reproduce after defect #10 fix but got "
@@ -287,7 +287,7 @@ class TestStampedeReproduction:
         )
 
         assert not result.property_holds, (
-            f"DPOR should detect memoize stampede (explored {result.interleavings_explored} interleavings)"
+            f"DPOR should detect memoize stampede (explored {result.num_explored} interleavings)"
         )
         assert result.reproduction_successes > 0, (
             f"Memoize stampede should reproduce after defect #10 fix but got "
