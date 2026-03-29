@@ -5,7 +5,6 @@ Each test is written to fail before the fix and pass after.
 
 from __future__ import annotations
 
-
 # === Bug 1: _redis_parsing.py LMPOP/ZMPOP/BZMPOP should be read+write ===
 # Pop commands both read and remove elements, like BLPOP/BRPOP.
 # Currently classified as write-only, missing read conflicts.
@@ -98,7 +97,7 @@ class TestSqlAlchemyConnectionLeak:
         import pytest
 
         try:
-            from frontrun.contrib.sqlalchemy._sync import sqlalchemy_dpor
+            import sqlalchemy  # noqa: F401
         except ImportError:
             pytest.skip("sqlalchemy not installed")
 
@@ -114,15 +113,7 @@ class TestSqlAlchemyConnectionLeak:
         mock_engine = MagicMock()
         mock_engine.connect.return_value = mock_conn_ctx
 
-        # Build wrapper by calling sqlalchemy_dpor internals.
-        # We call the wrap_thread closure directly.
-        import types
-
-        # Get the wrap_thread closure from sqlalchemy_dpor source.
-        # Since we can't easily extract it, test the pattern directly:
-        # simulate what wrap_thread does with the mock engine.
-        from frontrun._cooperative import suppress_sync_reporting, unsuppress_sync_reporting
-
+        # Simulate what wrap_thread does with the mock engine.
         conn_ctx = mock_engine.connect()
         conn = conn_ctx.__enter__()
         try:

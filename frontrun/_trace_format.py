@@ -517,11 +517,13 @@ def _collapse_runs(lines: list[SourceLineEvent], *, max_lines: int) -> list[Sour
             result.append(CollapsedRun(count=len(run) - 2, thread_id=tid))
             result.append(run[-1])
 
-    # Final cap: if still too long, take first half + last half
+    # Final cap: if still too long, take first half + last half.
+    # Account for the CollapsedRun placeholder taking one slot.
     if len(result) > max_lines:
-        half = max_lines // 2
-        omitted = len(result) - max_lines
-        result = result[:half] + [CollapsedRun(count=omitted, thread_id=-1)] + result[-half:]
+        first_half = max_lines // 2
+        second_half = max_lines - first_half - 1  # -1 for the CollapsedRun
+        omitted = len(result) - first_half - second_half
+        result = result[:first_half] + [CollapsedRun(count=omitted, thread_id=-1)] + result[-second_half:]
 
     return result
 

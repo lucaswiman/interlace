@@ -261,22 +261,24 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
         )
 
     # LMPOP / ZMPOP — numkeys key [key ...] LEFT|RIGHT [COUNT count]
+    # These pop elements: read the value + remove it (write), like BLPOP/BRPOP.
     if upper in ("LMPOP", "ZMPOP") and len(cmd_args) >= 2:
         try:
             numkeys = int(str(cmd_args[0]))
         except (ValueError, TypeError):
             numkeys = 1
         keys = [str(cmd_args[1 + i]) for i in range(min(numkeys, len(cmd_args) - 1))]
-        return RedisAccessResult(read_keys=[], write_keys=keys, is_transaction_control=False)
+        return RedisAccessResult(read_keys=keys, write_keys=keys, is_transaction_control=False)
 
     # BZMPOP — timeout numkeys key [key ...] MIN|MAX [COUNT count]
+    # Blocking pop: read the value + remove it (write), like BLPOP/BRPOP.
     if upper == "BZMPOP" and len(cmd_args) >= 3:
         try:
             numkeys = int(str(cmd_args[1]))
         except (ValueError, TypeError):
             numkeys = 1
         keys = [str(cmd_args[2 + i]) for i in range(min(numkeys, len(cmd_args) - 2))]
-        return RedisAccessResult(read_keys=[], write_keys=keys, is_transaction_control=False)
+        return RedisAccessResult(read_keys=keys, write_keys=keys, is_transaction_control=False)
 
     # Blocking pop commands — first arg(s) are keys, last is timeout.
     # These are read+write: they return the popped value (read) and remove

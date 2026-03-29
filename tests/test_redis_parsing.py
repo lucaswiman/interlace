@@ -158,11 +158,12 @@ class TestListCommands:
         """LMPOP numkeys key [key ...] LEFT|RIGHT — first arg is numkeys, not a key."""
         result = parse_redis_access("LMPOP", (2, "list1", "list2", "LEFT"))
         assert result.write_keys == ["list1", "list2"]
-        assert result.read_keys == []
+        assert result.read_keys == ["list1", "list2"]
 
     def test_lmpop_single_key(self) -> None:
         result = parse_redis_access("LMPOP", (1, "mylist", "LEFT"))
         assert result.write_keys == ["mylist"]
+        assert result.read_keys == ["mylist"]
 
     def test_blpop_is_read_write(self) -> None:
         """BLPOP pops (removes) and returns the value — both read and write."""
@@ -246,13 +247,13 @@ class TestSortedSetCommands:
         """ZMPOP numkeys key [key ...] MIN|MAX — first arg is numkeys."""
         result = parse_redis_access("ZMPOP", (2, "zset1", "zset2", "MIN"))
         assert result.write_keys == ["zset1", "zset2"]
-        assert result.read_keys == []
+        assert result.read_keys == ["zset1", "zset2"]
 
     def test_bzmpop_uses_numkeys(self) -> None:
         """BZMPOP timeout numkeys key [key ...] MIN|MAX — second arg is numkeys."""
         result = parse_redis_access("BZMPOP", (0, 2, "zset1", "zset2", "MIN"))
         assert result.write_keys == ["zset1", "zset2"]
-        assert result.read_keys == []
+        assert result.read_keys == ["zset1", "zset2"]
 
     def test_bzpopmin_is_read_write(self) -> None:
         """BZPOPMIN pops (removes) and returns the min element — both read and write."""
