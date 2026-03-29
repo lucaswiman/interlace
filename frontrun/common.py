@@ -93,7 +93,7 @@ class InterleavingResult:
     """
 
     property_holds: bool
-    counterexample: list[int] | None = None
+    counterexample: list[int] | Schedule | None = None
     num_explored: int = 0
     unique_interleavings: int = 0
     failures: list[tuple[int, list[int]]] = field(default_factory=list)
