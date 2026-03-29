@@ -699,7 +699,7 @@ def explore_marker_interleavings(
             if stop_on_first:
                 return InterleavingResult(
                     property_holds=False,
-                    counterexample=schedule,  # type: ignore[arg-type]
+                    counterexample=schedule,
                     num_explored=num_explored,
                     unique_interleavings=num_explored,
                 )
@@ -707,7 +707,7 @@ def explore_marker_interleavings(
     if failures:
         return InterleavingResult(
             property_holds=False,
-            counterexample=failures[0][1],  # type: ignore[arg-type]
+            counterexample=failures[0][1],
             num_explored=num_explored,
             unique_interleavings=num_explored,
             failures=failures,  # type: ignore[arg-type]
