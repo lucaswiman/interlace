@@ -104,7 +104,7 @@ class InterleavingResult:
 
     def __repr__(self) -> str:
         ce = self.counterexample
-        if ce is not None and len(ce) > 10:
+        if ce is not None and isinstance(ce, list) and len(ce) > 10:
             ce_repr = f"[{', '.join(map(str, ce[:5]))}, ...({len(ce)} steps)]"
         else:
             ce_repr = repr(ce)
