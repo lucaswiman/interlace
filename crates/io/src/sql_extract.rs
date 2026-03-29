@@ -11,7 +11,9 @@ pub fn extract_pg_query(buf: &[u8]) -> Option<&str> {
                 return None;
             }
             let len = i32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-            if buf.len() < 1 + len {
+            // len includes the 4-byte length field itself + SQL + null terminator,
+            // so minimum valid len is 5 (4 + 1 null byte for empty SQL).
+            if len < 5 || buf.len() < 1 + len {
                 return None;
             }
             let sql_bytes = &buf[5..1 + len - 1]; // exclude null terminator
@@ -115,6 +117,28 @@ mod tests {
     fn test_simple_query_truncated_body() {
         // Header says len=9, but total buffer is only 6 bytes (needs 1+9=10)
         let buf = vec![b'Q', 0, 0, 0, 9, b'S'];
+        assert_eq!(extract_pg_query(&buf), None);
+    }
+
+    #[test]
+    fn test_simple_query_malformed_short_len() {
+        // 'Q' message with len=4 (too short — no room for null terminator).
+        // Previously panicked with slice start > end: buf[5..4].
+        let buf = vec![b'Q', 0, 0, 0, 4, b'X', b'Y'];
+        assert_eq!(extract_pg_query(&buf), None);
+    }
+
+    #[test]
+    fn test_simple_query_len_zero() {
+        // 'Q' message with len=0 (clearly malformed).
+        let buf = vec![b'Q', 0, 0, 0, 0, b'X', b'Y'];
+        assert_eq!(extract_pg_query(&buf), None);
+    }
+
+    #[test]
+    fn test_simple_query_len_one() {
+        // 'Q' message with len=1 (malformed).
+        let buf = vec![b'Q', 0, 0, 0, 1, b'X', b'Y'];
         assert_eq!(extract_pg_query(&buf), None);
     }
 

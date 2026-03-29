@@ -87,10 +87,22 @@ def sqlalchemy_dpor(
             try:
                 conn_ctx = engine.connect()
                 conn = conn_ctx.__enter__()
+            except BaseException:
+                unsuppress_sync_reporting()
+                raise
+            # conn_ctx is now entered — guarantee __exit__ via outer finally.
+            try:
                 if lock_timeout is not None:
                     conn.exec_driver_sql(f"SET lock_timeout = '{int(lock_timeout)}ms'")
-            finally:
+            except BaseException:
                 unsuppress_sync_reporting()
+                suppress_sync_reporting()
+                try:
+                    conn_ctx.__exit__(None, None, None)
+                finally:
+                    unsuppress_sync_reporting()
+                raise
+            unsuppress_sync_reporting()
             # Wrap SA Connection methods that trigger internal locks.
             # conn.execute() acquires statement compilation locks.
             # conn.commit()/rollback() acquires transaction state locks.
