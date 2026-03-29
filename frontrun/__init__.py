@@ -1,15 +1,17 @@
 """
 Frontrun: Deterministic concurrency testing for Python.
 
-Trace markers::
+Trace markers (sync)::
 
     from frontrun.common import Schedule, Step
     from frontrun import TraceExecutor
 
-Async trace markers::
+Async trace markers (pass a dict of task names to coroutines)::
 
     from frontrun import TraceExecutor
     from frontrun.common import Schedule, Step
+    executor = TraceExecutor(schedule)
+    executor.run({"task1": coro_factory1, "task2": coro_factory2})
 
 DPOR (Dynamic Partial Order Reduction) systematic exploration::
 
