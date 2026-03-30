@@ -142,21 +142,18 @@ class TraceRecorder:
         with self._lock:
             step = self._step
             self._step += 1
-
-        ev = TraceEvent(
-            step_index=step,
-            thread_id=thread_id,
-            filename=code.co_filename,
-            lineno=frame.f_lineno,
-            function_name=code.co_name,
-            opcode=opcode or "",
-            access_type=access_type,
-            attr_name=attr_name,
-            obj_type_name=obj_type_name,
-            call_chain=call_chain,
-        )
-        # Append under the recorder lock for ordering consistency
-        with self._lock:
+            ev = TraceEvent(
+                step_index=step,
+                thread_id=thread_id,
+                filename=code.co_filename,
+                lineno=frame.f_lineno,
+                function_name=code.co_name,
+                opcode=opcode or "",
+                access_type=access_type,
+                attr_name=attr_name,
+                obj_type_name=obj_type_name,
+                call_chain=call_chain,
+            )
             self.events.append(ev)
 
     def record_io(
@@ -174,20 +171,19 @@ class TraceRecorder:
         with self._lock:
             step = self._step
             self._step += 1
-        ev = TraceEvent(
-            step_index=step,
-            thread_id=thread_id,
-            filename="<C extension>",
-            lineno=0,
-            function_name="",
-            opcode="IO",
-            access_type=kind,
-            attr_name=resource_id,
-            obj_type_name="IO",
-            call_chain=call_chain,
-            detail=detail,
-        )
-        with self._lock:
+            ev = TraceEvent(
+                step_index=step,
+                thread_id=thread_id,
+                filename="<C extension>",
+                lineno=0,
+                function_name="",
+                opcode="IO",
+                access_type=kind,
+                attr_name=resource_id,
+                obj_type_name="IO",
+                call_chain=call_chain,
+                detail=detail,
+            )
             self.events.append(ev)
 
     def record_from_opcode(

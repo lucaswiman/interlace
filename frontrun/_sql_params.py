@@ -106,6 +106,8 @@ def _resolve_numeric(sql: str, parameters: Any, pattern: re.Pattern[str]) -> str
 
     def replacer(m: re.Match[str]) -> str:
         idx = int(m.group(1)) - 1
+        if idx < 0:
+            raise IndexError("placeholder index must be >= 1")
         return _python_to_sql_literal(params[idx])
 
     return pattern.sub(replacer, sql)
