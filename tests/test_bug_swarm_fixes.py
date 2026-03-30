@@ -191,9 +191,7 @@ class TestDeadlockCyclePath:
         cycle = g.add_waiting(1, 1)
         assert cycle is not None, "Should detect a deadlock cycle"
         # The cycle should form a complete ring: first node == last node
-        assert cycle[0] == cycle[-1], (
-            f"Cycle should be a complete ring (first==last), got: {cycle}"
-        )
+        assert cycle[0] == cycle[-1], f"Cycle should be a complete ring (first==last), got: {cycle}"
 
 
 # === Bug 7: _trace_format.py record() event ordering race ===
@@ -212,7 +210,7 @@ class TestTraceRecorderOrdering:
         barrier = threading.Barrier(4)
 
         class FakeFrame:
-            class f_code:
+            class f_code:  # noqa: N801
                 co_filename = "test.py"
                 co_name = "test_fn"
 
@@ -253,9 +251,7 @@ class TestCliUsageOutput:
 
         assert ret == 1
         # Nothing should go to stdout — all usage text should be on stderr
-        assert fake_stdout.getvalue() == "", (
-            f"Usage text leaked to stdout: {fake_stdout.getvalue()!r}"
-        )
+        assert fake_stdout.getvalue() == "", f"Usage text leaked to stdout: {fake_stdout.getvalue()!r}"
 
 
 # === Bug 9: _sql_anomaly.py edge_to not cleared between DFS iterations ===
@@ -282,6 +278,4 @@ class TestSqlAnomalyCycleDetection:
         assert result is not None, "Should find the cycle in component 2"
         # All edges in the cycle should be from component 2
         for frm, to, _etype, _res in result:
-            assert frm in {3, 4, 5} and to in {3, 4, 5}, (
-                f"Cycle edge ({frm}, {to}) contains nodes outside component 2"
-            )
+            assert frm in {3, 4, 5} and to in {3, 4, 5}, f"Cycle edge ({frm}, {to}) contains nodes outside component 2"

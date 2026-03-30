@@ -180,7 +180,7 @@ class WaitForGraph:
 
         for neighbor in self._edges.get(start, ()):
             if dfs(neighbor):
-                return [start, *path]
+                return [start, *path, start]
         return None
 
 

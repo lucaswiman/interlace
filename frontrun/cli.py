@@ -139,17 +139,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if not argv:
         print("Usage: frontrun <command> [args...]", file=sys.stderr)
-        print()
-        print("Run a command with frontrun I/O interception enabled.")
-        print()
-        print("Examples:")
-        print("  frontrun pytest -vv tests/")
-        print("  frontrun python -c \"import requests; requests.get('http://example.com')\"")
-        print("  frontrun uvicorn myapp:app")
-        print()
-        print("Environment variables:")
-        print(f"  {FRONTRUN_ACTIVE_ENV}=1       Set automatically; signals frontrun is active")
-        print(f"  {FRONTRUN_PRELOAD_LIB_ENV}  Override path to libfrontrun_io.so/.dylib")
+        print(file=sys.stderr)
+        print("Run a command with frontrun I/O interception enabled.", file=sys.stderr)
+        print(file=sys.stderr)
+        print("Examples:", file=sys.stderr)
+        print("  frontrun pytest -vv tests/", file=sys.stderr)
+        print("  frontrun python -c \"import requests; requests.get('http://example.com')\"", file=sys.stderr)
+        print("  frontrun uvicorn myapp:app", file=sys.stderr)
+        print(file=sys.stderr)
+        print("Environment variables:", file=sys.stderr)
+        print(f"  {FRONTRUN_ACTIVE_ENV}=1       Set automatically; signals frontrun is active", file=sys.stderr)
+        print(f"  {FRONTRUN_PRELOAD_LIB_ENV}  Override path to libfrontrun_io.so/.dylib", file=sys.stderr)
         return 1
 
     preload_lib = _find_preload_library()
