@@ -279,3 +279,181 @@ class TestSqlAnomalyCycleDetection:
         # All edges in the cycle should be from component 2
         for frm, to, _etype, _res in result:
             assert frm in {3, 4, 5} and to in {3, 4, 5}, f"Cycle edge ({frm}, {to}) contains nodes outside component 2"
+
+
+# === Bug 10: _trace_format._collapse_runs off-by-one when second_half == 0 ===
+# When max_lines <= 2, second_half = max_lines - first_half - 1 can be 0.
+# Python's result[-0:] == result[0:] (the entire list), so the output
+# far exceeds the requested cap.
+
+
+class TestCollapseRunsSmallMaxLines:
+    def test_max_lines_1_respects_cap(self):
+        """With max_lines=1, output should have at most 1 entry."""
+        from frontrun._trace_format import SourceLineEvent, _collapse_runs
+
+        events = [
+            SourceLineEvent(thread_id=i % 2, filename="f.py", lineno=i, function_name="f", source_line=f"line {i}")
+            for i in range(20)
+        ]
+        result = _collapse_runs(events, max_lines=1)
+        assert len(result) <= 1, f"Expected at most 1 entry, got {len(result)}"
+
+    def test_max_lines_2_respects_cap(self):
+        """With max_lines=2, output should have at most 2 entries."""
+        from frontrun._trace_format import SourceLineEvent, _collapse_runs
+
+        events = [
+            SourceLineEvent(thread_id=i % 2, filename="f.py", lineno=i, function_name="f", source_line=f"line {i}")
+            for i in range(20)
+        ]
+        result = _collapse_runs(events, max_lines=2)
+        assert len(result) <= 2, f"Expected at most 2 entries, got {len(result)}"
+
+
+# === Bug 11: dpor._IOAnchoredReplayScheduler.after_io() missing _finished ===
+# Parent DporScheduler.after_io() sets _finished when _current_thread is None
+# and all threads are done. The override omits this check.
+
+
+class TestIOAnchoredReplayAfterIoFinished:
+    def test_after_io_sets_finished_when_all_done(self):
+        """after_io() should set _finished when all threads are done."""
+        import threading
+
+        from frontrun.dpor import _IOAnchoredReplayScheduler
+
+        sched = object.__new__(_IOAnchoredReplayScheduler)
+        sched._condition = threading.Condition(threading.Lock())
+        sched._finished = False
+        sched._error = None
+        sched._active_io_thread = 42
+        sched._next_thread_after_io = None
+        sched._current_thread = None
+        sched._threads_done = {0, 1, 42}
+        sched.num_threads = 3
+        sched._io_trace = []
+
+        sched.after_io(42, "redis://cmd")
+
+        assert sched._finished is True, "_finished should be True when all threads are done after IO"
+
+
+# === Bug 12: _sql_cursor_async.py asyncpg executemany missing row locks ===
+# _patched_executemany doesn't call _acquire_pending_row_locks() or
+# _release_dpor_row_locks() on exception, unlike all other async patches.
+
+
+class TestAsyncpgExecutemanyRowLocks:
+    def test_executemany_calls_acquire_pending_row_locks(self):
+        """asyncpg executemany should call _acquire_pending_row_locks."""
+        import ast
+        import inspect
+
+        from frontrun import _sql_cursor_async
+
+        source = inspect.getsource(_sql_cursor_async)
+        tree = ast.parse(source)
+
+        found_acquire = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_patched_executemany":
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Call):
+                        func = child.func
+                        if isinstance(func, ast.Name) and func.id == "_acquire_pending_row_locks":
+                            found_acquire = True
+                            break
+        assert found_acquire, "_patched_executemany should call _acquire_pending_row_locks()"
+
+    def test_executemany_releases_row_locks_on_exception(self):
+        """asyncpg executemany should release row locks on exception."""
+        import ast
+        import inspect
+
+        from frontrun import _sql_cursor_async
+
+        source = inspect.getsource(_sql_cursor_async)
+        tree = ast.parse(source)
+
+        found_release = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_patched_executemany":
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Call):
+                        func = child.func
+                        if isinstance(func, ast.Name) and func.id == "_release_dpor_row_locks":
+                            found_release = True
+                            break
+        assert found_release, "_patched_executemany should call _release_dpor_row_locks() in except handler"
+
+
+# === Bug 13: _deadlock.format_cycle() mislabels row_lock as "lock" ===
+# When kind == "row_lock" but ident is not in lock_names, the else branch
+# formats it as "lock 0x..." instead of "row_lock 0x...".
+
+
+class TestFormatCycleRowLockLabel:
+    def test_row_lock_without_name_uses_row_lock_prefix(self):
+        """row_lock nodes without a name should be labeled 'row_lock', not 'lock'."""
+        from frontrun._deadlock import format_cycle
+
+        cycle = [("thread", 1), ("row_lock", 0xABC), ("thread", 2), ("row_lock", 0xDEF)]
+        result = format_cycle(cycle)
+        assert "row_lock 0xabc" in result, f"Expected 'row_lock 0xabc' in output, got: {result}"
+        assert result.count("lock") == result.count("row_lock"), (
+            f"All lock references should be 'row_lock', not bare 'lock': {result}"
+        )
+
+
+# === Bug 14: dpor.py + async_dpor.py trace filter unconditionally cleared ===
+# The finally block calls _set_active_trace_filter(None) even when
+# trace_packages=None, clobbering any pre-existing trace filter.
+
+
+class TestTraceFilterNotClobbered:
+    def test_sync_dpor_finally_is_conditional(self):
+        """explore_dpor should only clear trace filter if it set one."""
+        import ast
+        import inspect
+
+        from frontrun import dpor
+
+        source = inspect.getsource(dpor.explore_dpor)
+        tree = ast.parse(source)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try) and node.finalbody:
+                for stmt in node.finalbody:
+                    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                        func = stmt.value.func
+                        if isinstance(func, ast.Name) and func.id == "_set_active_trace_filter":
+                            args = stmt.value.args
+                            if len(args) == 1 and isinstance(args[0], ast.Constant) and args[0].value is None:
+                                raise AssertionError(
+                                    "explore_dpor unconditionally calls _set_active_trace_filter(None) "
+                                    "in finally — this clobbers any pre-existing trace filter"
+                                )
+
+    def test_async_dpor_finally_is_conditional(self):
+        """explore_async_dpor should only clear trace filter if it set one."""
+        import ast
+        import inspect
+
+        from frontrun import async_dpor
+
+        source = inspect.getsource(async_dpor.explore_async_dpor)
+        tree = ast.parse(source)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try) and node.finalbody:
+                for stmt in node.finalbody:
+                    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                        func = stmt.value.func
+                        if isinstance(func, ast.Name) and func.id == "_set_active_trace_filter":
+                            args = stmt.value.args
+                            if len(args) == 1 and isinstance(args[0], ast.Constant) and args[0].value is None:
+                                raise AssertionError(
+                                    "explore_async_dpor unconditionally calls _set_active_trace_filter(None) "
+                                    "in finally — this clobbers any pre-existing trace filter"
+                                )
