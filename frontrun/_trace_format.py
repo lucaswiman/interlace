@@ -519,7 +519,8 @@ def _collapse_runs(lines: list[SourceLineEvent], *, max_lines: int) -> list[Sour
         first_half = max_lines // 2
         second_half = max_lines - first_half - 1  # -1 for the CollapsedRun
         omitted = len(result) - first_half - second_half
-        result = result[:first_half] + [CollapsedRun(count=omitted, thread_id=-1)] + result[-second_half:]
+        tail = result[-second_half:] if second_half > 0 else []
+        result = result[:first_half] + [CollapsedRun(count=omitted, thread_id=-1)] + tail
 
     return result
 

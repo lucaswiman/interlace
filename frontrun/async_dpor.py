@@ -1333,7 +1333,8 @@ async def explore_async_dpor(
             if not engine.next_execution():
                 break
     finally:
-        _set_active_trace_filter(None)
+        if trace_packages is not None:
+            _set_active_trace_filter(None)
         set_lock_timeout(prev_lock_timeout)
         _unpatch_asyncio_lock()
         if detect_sql and _sql_async_available:

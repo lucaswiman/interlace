@@ -325,10 +325,15 @@ def _patch_asyncpg() -> None:
 
             async def _patched_executemany(self: Any, command: Any, args: Any, **kwargs: Any) -> Any:
                 reported = _report_sql_access(command, None, is_executemany=True, paramstyle="dollar")
-                if reported:
-                    with _suppress_endpoint_io():
-                        return await orig_em(self, command, args, **kwargs)
-                return await orig_em(self, command, args, **kwargs)
+                _acquire_pending_row_locks()
+                try:
+                    if reported:
+                        with _suppress_endpoint_io():
+                            return await orig_em(self, command, args, **kwargs)
+                    return await orig_em(self, command, args, **kwargs)
+                except Exception:
+                    _release_dpor_row_locks()
+                    raise
 
             _patched_executemany.__name__ = "executemany"
             _patched_executemany.__qualname__ = orig_em.__qualname__

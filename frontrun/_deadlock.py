@@ -202,6 +202,8 @@ def format_cycle(
             parts.append(f"thread {ident}")
         elif kind == "row_lock" and lock_names and ident in lock_names:
             parts.append(f"row_lock {lock_names[ident]}")
+        elif kind == "row_lock":
+            parts.append(f"row_lock 0x{ident:x}")
         elif kind == "lock" and lock_id_map and ident in lock_id_map:
             parts.append(f"lock {lock_id_map[ident]}")
         else:

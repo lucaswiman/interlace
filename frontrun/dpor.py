@@ -1338,6 +1338,8 @@ class _IOAnchoredReplayScheduler(DporScheduler):
                     self._active_io_thread = None
                     self._current_thread = self._next_thread_after_io
                     self._next_thread_after_io = None
+                    if self._current_thread is None and len(self._threads_done) >= self.num_threads:
+                        self._finished = True
                 self._condition.notify_all()
             finally:
                 _scheduler_tls._in_dpor_machinery = False
@@ -3831,7 +3833,8 @@ def explore_dpor(
                 if not engine.next_execution():
                     break
     finally:
-        _set_active_trace_filter(None)
+        if trace_packages is not None:
+            _set_active_trace_filter(None)
         set_lock_timeout(prev_lock_timeout)
         if preload_dispatcher is not None:
             preload_dispatcher.stop()
