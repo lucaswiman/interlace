@@ -8,7 +8,7 @@ Unreleased
 
 New changes go here
 
-0.4.0 (2026-04-01)
+0.4.1 (2026-04-01)
 ------------------
 
 * Misc bug fixes
