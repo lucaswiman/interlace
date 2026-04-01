@@ -625,7 +625,7 @@ def _report_sql_access(
                     pred_rows = rows
                     has_row_level = True
 
-            lock_update = access.lock_intent is LockIntent.UPDATE
+            lock_update = access.lock_intent in (LockIntent.UPDATE, LockIntent.UPDATE_SKIP_LOCKED)
 
             # Track which tables already reported their bridge resource in this op.
             reported_bridges: set[str] = set()

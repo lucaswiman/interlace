@@ -310,8 +310,8 @@ def classify_sql_anomaly(events: list[TraceEvent]) -> SqlAnomaly | None:
                 threads=cycle_threads,
             )
 
-        # Write skew: RW-only cycle across different tables
-        if cycle_etypes == {"RW"} and len(cycle_tables) >= 2:
+        # Write skew: RW-only cycle (may span one or more tables)
+        if cycle_etypes == {"RW"}:
             tbls = ", ".join(f"'{t}'" for t in sorted(cycle_tables))
             return SqlAnomaly(
                 kind="write_skew",

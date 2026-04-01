@@ -180,3 +180,47 @@ def test_sqlalchemy_dpor_toctou_race(engine) -> None:
     # The key assertion: the exploration completes without deadlocking.
     # Whether DPOR detects the race depends on conflict analysis.
     assert result.num_explored >= 1, "Expected at least 1 interleaving explored"
+
+
+def test_sqlalchemy_setup_failure_closes_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    from frontrun.contrib import sqlalchemy as sa_helper
+
+    mock_conn = MagicMock()
+    mock_conn.exec_driver_sql.side_effect = RuntimeError("SET lock_timeout failed")
+
+    mock_conn_ctx = MagicMock()
+    mock_conn_ctx.__enter__ = MagicMock(return_value=mock_conn)
+    mock_conn_ctx.__exit__ = MagicMock(return_value=False)
+
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value = mock_conn_ctx
+    mock_engine.dispose = MagicMock()
+
+    def _setup() -> object:
+        return object()
+
+    def _thread_fn(_state: object) -> None:
+        raise AssertionError("thread should not run after setup failure")
+
+    def _explore_dpor(*, setup, threads, invariant, detect_io, lock_timeout, **kwargs):  # type: ignore[no-untyped-def]
+        with pytest.raises(RuntimeError, match="SET lock_timeout failed"):
+            wrapped_setup = setup()
+            threads[0](wrapped_setup)
+        return object()
+
+    monkeypatch.setattr("frontrun.dpor.explore_dpor", _explore_dpor)
+
+    try:
+        sa_helper.sqlalchemy_dpor(
+            engine=mock_engine,
+            setup=_setup,
+            threads=[_thread_fn],
+            invariant=lambda s: True,
+            lock_timeout=5000,
+        )
+    except RuntimeError:
+        pass
+
+    assert mock_conn_ctx.__exit__.called

@@ -262,6 +262,44 @@ async def test_executemany() -> None:
     assert any(r.startswith("sql:users") and k == "write" for r, k in log.events)
 
 
+class TestExecutemanyPatching:
+    def test_patched_executemany_acquires_pending_row_locks(self) -> None:
+        import ast
+        import inspect
+
+        source = inspect.getsource(sql_cursor_async_mod)
+        tree = ast.parse(source)
+
+        found_acquire = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_patched_executemany":
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Call):
+                        func = child.func
+                        if isinstance(func, ast.Name) and func.id == "_acquire_pending_row_locks":
+                            found_acquire = True
+                            break
+        assert found_acquire
+
+    def test_patched_executemany_releases_row_locks_on_exception(self) -> None:
+        import ast
+        import inspect
+
+        source = inspect.getsource(sql_cursor_async_mod)
+        tree = ast.parse(source)
+
+        found_release = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_patched_executemany":
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Call):
+                        func = child.func
+                        if isinstance(func, ast.Name) and func.id == "_release_dpor_row_locks":
+                            found_release = True
+                            break
+        assert found_release
+
+
 # ---------------------------------------------------------------------------
 # 3. Cursor-level interception
 # ---------------------------------------------------------------------------
