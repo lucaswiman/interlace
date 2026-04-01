@@ -9,13 +9,16 @@ breeds false confidence. Frontrun replaces timing-dependent thread interleaving
 with deterministic scheduling, so race conditions either always happen or
 never happen.
 
-Three approaches, in order of decreasing interpretability:
+Four approaches, in order of decreasing interpretability:
 
 1. **DPOR** --- systematic exploration of every meaningfully different
    interleaving, with causal conflict analysis.
 2. **Bytecode exploration** --- random opcode-level schedules that often find
    races very efficiently, including races invisible to DPOR.
-3. **Trace markers** --- comment-based synchronization points for reproducing
+3. **Marker schedule exploration** --- exhaustive exploration of all
+   interleavings at the ``# frontrun:`` marker level.  Much smaller search
+   space than bytecode exploration, with completeness guarantees.
+4. **Trace markers** --- comment-based synchronization points for reproducing
    a known race window.
 
 .. toctree::
@@ -27,6 +30,8 @@ Three approaches, in order of decreasing interpretability:
    approaches
    dpor_guide
    dpor
+   vector-clocks
+   search
    examples
    orm_race
    sql-technical-details

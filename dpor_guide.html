@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="DPOR: Dynamic Partial Order Reduction" href="dpor.html"><link rel="prev" title="How Frontrun Works" href="approaches.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>DPOR in Practice - Frontrun 0.3.0 documentation</title>
+        <title>DPOR in Practice - Frontrun 0.4.1 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">Frontrun 0.3.0 documentation</div></a>
+      <a href="index.html"><div class="brand">Frontrun 0.4.1 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">Frontrun 0.3.0 documentation</span>
+  <span class="sidebar-brand-text">Frontrun 0.4.1 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -198,6 +198,8 @@
 <li class="toctree-l1"><a class="reference internal" href="approaches.html">How Frontrun Works</a></li>
 <li class="toctree-l1 current current-page"><a class="current reference internal" href="#">DPOR in Practice</a></li>
 <li class="toctree-l1"><a class="reference internal" href="dpor.html">DPOR: Dynamic Partial Order Reduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="vector-clocks.html">Vector Clocks and Happens-Before</a></li>
+<li class="toctree-l1"><a class="reference internal" href="search.html">Search Page</a></li>
 <li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
 <li class="toctree-l1"><a class="reference internal" href="orm_race.html">SQLAlchemy Lost-Update Race Condition</a></li>
 <li class="toctree-l1"><a class="reference internal" href="sql-technical-details.html">SQL Conflict Detection – Technical Details</a></li>
@@ -387,7 +389,7 @@ will interfere with the next.</p>
 </pre></div>
 </div>
 <p><strong>Parameters:</strong></p>
-<dl class="simple">
+<dl>
 <dt><code class="docutils literal notranslate"><span class="pre">setup</span></code></dt><dd><p>A callable that creates fresh shared state. Called once per execution so
 that each interleaving starts from a clean slate.</p>
 </dd>
@@ -404,8 +406,16 @@ thread) per execution. A bound of 2 catches the vast majority of real
 bugs. Set to <code class="docutils literal notranslate"><span class="pre">None</span></code> for unbounded exploration, but be aware that
 this can be exponentially slower.</p>
 </dd>
+<dt><code class="docutils literal notranslate"><span class="pre">stop_on_first</span></code> <em>(default: True)</em></dt><dd><p>If <code class="docutils literal notranslate"><span class="pre">True</span></code>, stop exploring as soon as the first invariant violation
+is found.  Set to <code class="docutils literal notranslate"><span class="pre">False</span></code> to continue exploring and collect all
+failing interleavings.  Use <code class="docutils literal notranslate"><span class="pre">False</span></code> when you want an exhaustive
+census of every distinct race in the program.</p>
+</dd>
 <dt><code class="docutils literal notranslate"><span class="pre">max_executions</span></code> <em>(default: None)</em></dt><dd><p>Safety cap on total executions. Useful for CI where you want a time
-bound.</p>
+bound.  When the total number of Mazurkiewicz traces is very large
+(thousands or more), set this to a reasonable budget and use a
+non-DFS search strategy (see <code class="docutils literal notranslate"><span class="pre">search</span></code> below) to maximize the
+chance of finding a bug within the budget.</p>
 </dd>
 <dt><code class="docutils literal notranslate"><span class="pre">max_branches</span></code> <em>(default: 100,000)</em></dt><dd><p>Maximum scheduling points per execution. Prevents runaway on programs
 with very long traces.</p>
@@ -416,6 +426,38 @@ with very long traces.</p>
 times to measure how reproducible the failure is. The reproduction
 count and percentage appear in <code class="docutils literal notranslate"><span class="pre">result.explanation</span></code>. Set to 0 to
 skip.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">search</span></code> <em>(default: None)</em></dt><dd><p>Controls the order in which wakeup-tree branches are explored.
+All strategies visit the same set of Mazurkiewicz trace equivalence
+classes; only the <em>order</em> differs.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">None</span></code> or <code class="docutils literal notranslate"><span class="pre">&quot;dfs&quot;</span></code> — classic depth-first search, always picking
+the lowest thread ID.  <strong>Use DFS when the goal is exhaustive
+exploration</strong> (<code class="docutils literal notranslate"><span class="pre">stop_on_first=False</span></code>): it produces the optimal
+(minimum) number of executions because the sleep-set pruning is
+maximally effective under this ordering.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&quot;bit-reversal&quot;</span></code> or <code class="docutils literal notranslate"><span class="pre">&quot;bit-reversal:&lt;seed&gt;&quot;</span></code> — visit siblings
+in a low-discrepancy bit-reversal permutation.  Maximally spreads
+exploration across diverse conflict points early.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&quot;round-robin&quot;</span></code> or <code class="docutils literal notranslate"><span class="pre">&quot;round-robin:&lt;seed&gt;&quot;</span></code> — cycle through
+available threads in rotating order.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&quot;stride&quot;</span></code> or <code class="docutils literal notranslate"><span class="pre">&quot;stride:&lt;seed&gt;&quot;</span></code> — visit every <em>s</em>-th sibling
+(<em>s</em> coprime to the branching factor, derived from the seed).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&quot;conflict-first&quot;</span></code> — reverse of DFS (highest thread ID first).</p></li>
+</ul>
+<p><strong>Use a non-DFS strategy when the trace space is large and you have
+a limited execution budget</strong> (<code class="docutils literal notranslate"><span class="pre">stop_on_first=True</span></code>, or a low
+<code class="docutils literal notranslate"><span class="pre">max_executions</span></code>).  DFS explores traces in a fixed order determined
+by thread IDs, so it may spend many executions on “similar”
+interleavings before reaching the one that triggers a bug.  The
+alternative strategies spread exploration across different conflict
+points earlier, finding bugs faster on average.</p>
+<p>The trade-off: non-DFS strategies may explore a small number of
+redundant trace classes (~5% overhead on complex lock patterns like
+dining philosophers) because changing the sibling ordering can reduce
+sleep-set effectiveness.  For exhaustive exploration where minimizing
+total executions matters, DFS is the best choice.</p>
+<p>See <a class="reference internal" href="search.html"><span class="doc">Search Strategies</span></a> for a detailed comparison of all strategies.</p>
 </dd>
 </dl>
 </section>
@@ -818,7 +860,7 @@ key-level semantics.</p></li>
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=e259d695"></script>
+</div><script src="_static/documentation_options.js?v=c87aa342"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>

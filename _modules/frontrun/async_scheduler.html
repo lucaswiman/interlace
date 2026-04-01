@@ -5,7 +5,7 @@
     <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../genindex.html"><link rel="search" title="Search" href="../../search.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>frontrun.async_scheduler - Frontrun 0.3.0 documentation</title>
+        <title>frontrun.async_scheduler - Frontrun 0.4.1 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -161,7 +161,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="../../index.html"><div class="brand">Frontrun 0.3.0 documentation</div></a>
+      <a href="../../index.html"><div class="brand">Frontrun 0.4.1 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -182,7 +182,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="../../index.html">
   
-  <span class="sidebar-brand-text">Frontrun 0.3.0 documentation</span>
+  <span class="sidebar-brand-text">Frontrun 0.4.1 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="../../search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -197,6 +197,8 @@
 <li class="toctree-l1"><a class="reference internal" href="../../approaches.html">How Frontrun Works</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../dpor_guide.html">DPOR in Practice</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../dpor.html">DPOR: Dynamic Partial Order Reduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../vector-clocks.html">Vector Clocks and Happens-Before</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../search.html">Search Page</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../examples.html">Examples</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../orm_race.html">SQLAlchemy Lost-Update Race Condition</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../sql-technical-details.html">SQL Conflict Detection – Technical Details</a></li>
@@ -383,30 +385,43 @@
 <span class="sd">            marker: Optional scheduling context.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">async</span> <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="p">:</span>
-            <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
-                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error</span><span class="p">:</span>
+            <span class="c1"># First check before entering the waiting state.</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error</span><span class="p">:</span>
+                <span class="k">return</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">should_proceed</span><span class="p">(</span><span class="n">task_id</span><span class="p">,</span> <span class="n">marker</span><span class="p">):</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">on_proceed</span><span class="p">(</span><span class="n">task_id</span><span class="p">,</span> <span class="n">marker</span><span class="p">)</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                <span class="k">return</span>
+
+            <span class="c1"># Enter waiting state: increment _waiting_count ONCE and keep</span>
+            <span class="c1"># it incremented for the entire time this task is blocked.</span>
+            <span class="c1"># This avoids a false-positive deadlock when multiple tasks</span>
+            <span class="c1"># wake from condition.wait() simultaneously: the first to</span>
+            <span class="c1"># reacquire the lock would decrement-then-re-increment before</span>
+            <span class="c1"># the second can decrement, making _waiting_count transiently</span>
+            <span class="c1"># equal to alive even though the second task CAN proceed.</span>
+            <span class="n">alive</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_num_tasks</span> <span class="o">-</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_tasks_done</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_waiting_count</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_waiting_count</span> <span class="o">&gt;=</span> <span class="n">alive</span> <span class="ow">and</span> <span class="n">alive</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_handle_all_waiting_deadlock</span><span class="p">(</span><span class="n">task_id</span><span class="p">,</span> <span class="n">marker</span><span class="p">)</span>
                     <span class="k">return</span>
 
-                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">should_proceed</span><span class="p">(</span><span class="n">task_id</span><span class="p">,</span> <span class="n">marker</span><span class="p">):</span>
-                    <span class="bp">self</span><span class="o">.</span><span class="n">on_proceed</span><span class="p">(</span><span class="n">task_id</span><span class="p">,</span> <span class="n">marker</span><span class="p">)</span>
-                    <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
-                    <span class="k">return</span>
-
-                <span class="c1"># All-tasks-waiting detection</span>
-                <span class="n">alive</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_num_tasks</span> <span class="o">-</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_tasks_done</span><span class="p">)</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">_waiting_count</span> <span class="o">+=</span> <span class="mi">1</span>
-                <span class="k">try</span><span class="p">:</span>
-                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_waiting_count</span> <span class="o">&gt;=</span> <span class="n">alive</span> <span class="ow">and</span> <span class="n">alive</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
-                        <span class="bp">self</span><span class="o">.</span><span class="n">_handle_all_waiting_deadlock</span><span class="p">(</span><span class="n">task_id</span><span class="p">,</span> <span class="n">marker</span><span class="p">)</span>
-                        <span class="k">return</span>
-
+                <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
                     <span class="k">try</span><span class="p">:</span>
                         <span class="k">await</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">wait_for</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">wait</span><span class="p">(),</span> <span class="n">timeout</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">deadlock_timeout</span><span class="p">)</span>
                     <span class="k">except</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">TimeoutError</span><span class="p">:</span>
                         <span class="bp">self</span><span class="o">.</span><span class="n">_handle_timeout</span><span class="p">(</span><span class="n">task_id</span><span class="p">,</span> <span class="n">marker</span><span class="p">)</span>
                         <span class="k">return</span>
-                <span class="k">finally</span><span class="p">:</span>
-                    <span class="bp">self</span><span class="o">.</span><span class="n">_waiting_count</span> <span class="o">-=</span> <span class="mi">1</span></div>
+
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error</span><span class="p">:</span>
+                        <span class="k">return</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">should_proceed</span><span class="p">(</span><span class="n">task_id</span><span class="p">,</span> <span class="n">marker</span><span class="p">):</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">on_proceed</span><span class="p">(</span><span class="n">task_id</span><span class="p">,</span> <span class="n">marker</span><span class="p">)</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                        <span class="k">return</span>
+            <span class="k">finally</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_waiting_count</span> <span class="o">-=</span> <span class="mi">1</span></div>
 
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_handle_timeout</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">task_id</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">marker</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
@@ -535,7 +550,7 @@
       
     </aside>
   </div>
-</div><script src="../../_static/documentation_options.js?v=e259d695"></script>
+</div><script src="../../_static/documentation_options.js?v=c87aa342"></script>
     <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../../_static/scripts/furo.js?v=46bd48cc"></script>

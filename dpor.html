@@ -3,10 +3,10 @@
   <head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Examples" href="examples.html"><link rel="prev" title="DPOR in Practice" href="dpor_guide.html">
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Vector Clocks and Happens-Before" href="vector-clocks.html"><link rel="prev" title="DPOR in Practice" href="dpor_guide.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>DPOR: Dynamic Partial Order Reduction - Frontrun 0.3.0 documentation</title>
+        <title>DPOR: Dynamic Partial Order Reduction - Frontrun 0.4.1 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">Frontrun 0.3.0 documentation</div></a>
+      <a href="index.html"><div class="brand">Frontrun 0.4.1 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">Frontrun 0.3.0 documentation</span>
+  <span class="sidebar-brand-text">Frontrun 0.4.1 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -198,6 +198,8 @@
 <li class="toctree-l1"><a class="reference internal" href="approaches.html">How Frontrun Works</a></li>
 <li class="toctree-l1"><a class="reference internal" href="dpor_guide.html">DPOR in Practice</a></li>
 <li class="toctree-l1 current current-page"><a class="current reference internal" href="#">DPOR: Dynamic Partial Order Reduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="vector-clocks.html">Vector Clocks and Happens-Before</a></li>
+<li class="toctree-l1"><a class="reference internal" href="search.html">Search Page</a></li>
 <li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
 <li class="toctree-l1"><a class="reference internal" href="orm_race.html">SQLAlchemy Lost-Update Race Condition</a></li>
 <li class="toctree-l1"><a class="reference internal" href="sql-technical-details.html">SQL Conflict Detection – Technical Details</a></li>
@@ -331,6 +333,13 @@ trace where <span class="math notranslate nohighlight">\(W_1(x)\)</span> precede
 </section>
 <section id="happens-before-and-vector-clocks">
 <span id="dpor-happens-before"></span><h3>Happens-before and vector clocks<a class="headerlink" href="#happens-before-and-vector-clocks" title="Link to this heading">¶</a></h3>
+<div class="admonition seealso">
+<p class="admonition-title">See also</p>
+<p><a class="reference internal" href="vector-clocks.html"><span class="doc">Vector Clocks and Happens-Before</span></a> for a comprehensive treatment including the three
+per-thread clocks (<code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code>, <code class="docutils literal notranslate"><span class="pre">io_vv</span></code>, <code class="docutils literal notranslate"><span class="pre">causality</span></code>), the
+<code class="docutils literal notranslate"><span class="pre">VersionVec</span></code> implementation, and worked examples with and without
+synchronization.</p>
+</div>
 <p>Two operations are <em>concurrent</em> if neither <a class="reference external" href="https://en.wikipedia.org/wiki/Happened-before">happens before</a> the other. The happens-before
 relation <span class="math notranslate nohighlight">\(\to\)</span> is the smallest partial order satisfying:</p>
 <div class="math-wrapper docutils container">
@@ -626,6 +635,33 @@ instead of <span class="math notranslate nohighlight">\((N+1)!\)</span>.</p>
 DPOR so that only branches with genuine conflicts are explored, and further
 reduced by sleep sets so that equivalent orderings of independent actions are
 not re-explored.</p>
+</section>
+<section id="search-strategies">
+<h3>Search strategies<a class="headerlink" href="#search-strategies" title="Link to this heading">¶</a></h3>
+<p>The default exploration order is DFS (always pick the lowest thread ID at each
+wakeup-tree node).  This matches the paper’s Algorithm 2 and produces the
+<strong>optimal</strong> number of executions — exactly one per Mazurkiewicz trace
+equivalence class — because the sleep-set pruning is maximally effective
+under this ordering.</p>
+<p>When the trace space is very large and you have a limited execution budget
+(<code class="docutils literal notranslate"><span class="pre">stop_on_first=True</span></code>, or a low <code class="docutils literal notranslate"><span class="pre">max_executions</span></code>), alternative strategies
+can find bugs significantly faster by spreading exploration across diverse
+conflict points early.  These strategies — <strong>bit-reversal</strong>, <strong>round-robin</strong>,
+<strong>stride</strong>, and <strong>conflict-first</strong> — visit the same set of trace equivalence
+classes but in a different order.  The trade-off is that non-DFS orderings may
+explore a small number of redundant trace classes (typically ~5% on complex
+lock patterns) because changing the sibling ordering can reduce sleep-set
+effectiveness.</p>
+<p><strong>Rule of thumb:</strong></p>
+<ul class="simple">
+<li><p><strong>Exhaustive exploration</strong> (<code class="docutils literal notranslate"><span class="pre">stop_on_first=False</span></code>): use <strong>DFS</strong> (the default)
+to minimize total executions.</p></li>
+<li><p><strong>Bug-finding with a budget</strong> (<code class="docutils literal notranslate"><span class="pre">stop_on_first=True</span></code> or low
+<code class="docutils literal notranslate"><span class="pre">max_executions</span></code>): use <strong>bit-reversal</strong> or <strong>round-robin</strong> to maximize
+diversity early.</p></li>
+</ul>
+<p>See <a class="reference internal" href="search.html"><span class="doc">Search Strategies</span></a> for a detailed comparison of all strategies and the
+theoretical basis for the optimality trade-off.</p>
 </section>
 </section>
 <section id="id1">
@@ -961,12 +997,12 @@ library that inspired this implementation.</p></li>
       <footer>
         
         <div class="related-pages">
-          <a class="next-page" href="examples.html">
+          <a class="next-page" href="vector-clocks.html">
               <div class="page-info">
                 <div class="context">
                   <span>Next</span>
                 </div>
-                <div class="title">Examples</div>
+                <div class="title">Vector Clocks and Happens-Before</div>
               </div>
               <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
             </a>
@@ -1025,6 +1061,7 @@ library that inspired this implementation.</p></li>
 <li><a class="reference internal" href="#scheduling">Scheduling</a></li>
 <li><a class="reference internal" href="#backtracking-and-wakeup-sequence-insertion">Backtracking and wakeup sequence insertion</a></li>
 <li><a class="reference internal" href="#sleep-set-propagation">Sleep set propagation</a></li>
+<li><a class="reference internal" href="#search-strategies">Search strategies</a></li>
 </ul>
 </li>
 <li><a class="reference internal" href="#id1">Preemption bounding</a></li>
@@ -1051,7 +1088,7 @@ library that inspired this implementation.</p></li>
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=e259d695"></script>
+</div><script src="_static/documentation_options.js?v=c87aa342"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>

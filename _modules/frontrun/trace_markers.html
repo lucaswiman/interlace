@@ -5,7 +5,7 @@
     <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../genindex.html"><link rel="search" title="Search" href="../../search.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>frontrun.trace_markers - Frontrun 0.3.0 documentation</title>
+        <title>frontrun.trace_markers - Frontrun 0.4.1 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -161,7 +161,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="../../index.html"><div class="brand">Frontrun 0.3.0 documentation</div></a>
+      <a href="../../index.html"><div class="brand">Frontrun 0.4.1 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -182,7 +182,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="../../index.html">
   
-  <span class="sidebar-brand-text">Frontrun 0.3.0 documentation</span>
+  <span class="sidebar-brand-text">Frontrun 0.4.1 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="../../search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -197,6 +197,8 @@
 <li class="toctree-l1"><a class="reference internal" href="../../approaches.html">How Frontrun Works</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../dpor_guide.html">DPOR in Practice</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../dpor.html">DPOR: Dynamic Partial Order Reduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../vector-clocks.html">Vector Clocks and Happens-Before</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../search.html">Search Page</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../examples.html">Examples</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../orm_race.html">SQLAlchemy Lost-Update Race Condition</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../sql-technical-details.html">SQL Conflict Detection – Technical Details</a></li>
@@ -276,7 +278,7 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span>
 
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._cooperative</span><span class="w"> </span><span class="kn">import</span> <span class="n">real_condition</span><span class="p">,</span> <span class="n">real_lock</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.common</span><span class="w"> </span><span class="kn">import</span> <span class="n">Schedule</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.common</span><span class="w"> </span><span class="kn">import</span> <span class="n">InterleavingResult</span><span class="p">,</span> <span class="n">Schedule</span><span class="p">,</span> <span class="n">Step</span>
 
 <span class="n">MARKER_PATTERN</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;#\s*frontrun:\s*(\w+)&quot;</span><span class="p">)</span>
 
@@ -798,6 +800,211 @@
     <span class="n">executor</span><span class="o">.</span><span class="n">wait</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
     <span class="k">return</span> <span class="n">executor</span></div>
 
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># Property-based marker schedule generation</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+
+<div class="viewcode-block" id="marker_schedule_strategy">
+<a class="viewcode-back" href="../../api_reference.html#frontrun.trace_markers.marker_schedule_strategy">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">marker_schedule_strategy</span><span class="p">(</span>
+    <span class="n">threads</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]],</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Hypothesis strategy that generates valid marker-level Schedule objects.</span>
+
+<span class="sd">    A valid schedule interleaves each thread&#39;s markers while preserving</span>
+<span class="sd">    their relative order within each thread.  This provides a much smaller</span>
+<span class="sd">    search space than opcode-level exploration while still covering all</span>
+<span class="sd">    meaningful interleavings at the marker granularity.</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        threads: Mapping from thread/execution names to their ordered list</span>
+<span class="sd">            of marker names.  Example::</span>
+
+<span class="sd">                {&quot;t1&quot;: [&quot;read&quot;, &quot;write&quot;], &quot;t2&quot;: [&quot;read&quot;, &quot;write&quot;]}</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        A Hypothesis strategy producing :class:`Schedule` objects.</span>
+
+<span class="sd">    Example::</span>
+
+<span class="sd">        from hypothesis import given</span>
+<span class="sd">        from frontrun.trace_markers import marker_schedule_strategy</span>
+
+<span class="sd">        @given(schedule=marker_schedule_strategy(</span>
+<span class="sd">            threads={&quot;w1&quot;: [&quot;read&quot;, &quot;write&quot;], &quot;w2&quot;: [&quot;read&quot;, &quot;write&quot;]},</span>
+<span class="sd">        ))</span>
+<span class="sd">        def test_no_lost_update(schedule):</span>
+<span class="sd">            ...</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">hypothesis</span><span class="w"> </span><span class="kn">import</span> <span class="n">strategies</span> <span class="k">as</span> <span class="n">st</span>
+
+    <span class="n">thread_items</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">threads</span><span class="o">.</span><span class="n">items</span><span class="p">())</span>
+
+    <span class="nd">@st</span><span class="o">.</span><span class="n">composite</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">gen</span><span class="p">(</span><span class="n">draw</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Schedule</span><span class="p">:</span>
+        <span class="n">remaining</span> <span class="o">=</span> <span class="p">{</span><span class="n">name</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="n">markers</span><span class="p">)</span> <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">markers</span> <span class="ow">in</span> <span class="n">thread_items</span><span class="p">}</span>
+        <span class="n">steps</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Step</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+
+        <span class="k">while</span> <span class="nb">any</span><span class="p">(</span><span class="n">remaining</span><span class="o">.</span><span class="n">values</span><span class="p">()):</span>
+            <span class="n">available</span> <span class="o">=</span> <span class="p">[</span><span class="n">name</span> <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">m</span> <span class="ow">in</span> <span class="n">remaining</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">m</span><span class="p">]</span>
+            <span class="n">thread_name</span> <span class="o">=</span> <span class="n">draw</span><span class="p">(</span><span class="n">st</span><span class="o">.</span><span class="n">sampled_from</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="n">available</span><span class="p">)))</span>
+            <span class="n">marker</span> <span class="o">=</span> <span class="n">remaining</span><span class="p">[</span><span class="n">thread_name</span><span class="p">]</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+            <span class="n">steps</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">Step</span><span class="p">(</span><span class="n">thread_name</span><span class="p">,</span> <span class="n">marker</span><span class="p">))</span>
+
+        <span class="k">return</span> <span class="n">Schedule</span><span class="p">(</span><span class="n">steps</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">gen</span><span class="p">()</span></div>
+
+
+
+<div class="viewcode-block" id="all_marker_schedules">
+<a class="viewcode-back" href="../../api_reference.html#frontrun.trace_markers.all_marker_schedules">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">all_marker_schedules</span><span class="p">(</span>
+    <span class="n">threads</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]],</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">Schedule</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Enumerate ALL valid interleavings of thread markers.</span>
+
+<span class="sd">    A valid interleaving places every thread&#39;s markers in the schedule</span>
+<span class="sd">    while preserving their relative order within each thread.</span>
+
+<span class="sd">    For *N* threads with marker counts *k1, k2, ..., kN*, the total</span>
+<span class="sd">    number of valid interleavings is the multinomial coefficient::</span>
+
+<span class="sd">        (k1 + k2 + ... + kN)! / (k1! * k2! * ... * kN!)</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        threads: Mapping from thread/execution names to their ordered list</span>
+<span class="sd">            of marker names.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        A list of :class:`Schedule` objects covering every valid interleaving.</span>
+
+<span class="sd">    Example::</span>
+
+<span class="sd">        schedules = all_marker_schedules(</span>
+<span class="sd">            threads={&quot;t1&quot;: [&quot;a&quot;, &quot;b&quot;], &quot;t2&quot;: [&quot;x&quot;, &quot;y&quot;]},</span>
+<span class="sd">        )</span>
+<span class="sd">        assert len(schedules) == 6  # C(4,2)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">thread_items</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">threads</span><span class="o">.</span><span class="n">items</span><span class="p">())</span>  <span class="c1"># deterministic order</span>
+    <span class="n">schedules</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Schedule</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_recurse</span><span class="p">(</span>
+        <span class="n">remaining</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]],</span>
+        <span class="n">path</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Step</span><span class="p">],</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">available</span> <span class="o">=</span> <span class="p">[</span><span class="n">name</span> <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">markers</span> <span class="ow">in</span> <span class="n">remaining</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">markers</span><span class="p">]</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">available</span><span class="p">:</span>
+            <span class="n">schedules</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">Schedule</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="n">path</span><span class="p">)))</span>
+            <span class="k">return</span>
+
+        <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">available</span><span class="p">:</span>
+            <span class="n">marker</span> <span class="o">=</span> <span class="n">remaining</span><span class="p">[</span><span class="n">name</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
+            <span class="c1"># Pop first marker, recurse, restore</span>
+            <span class="n">remaining</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">remaining</span><span class="p">[</span><span class="n">name</span><span class="p">][</span><span class="mi">1</span><span class="p">:]</span>
+            <span class="n">path</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">Step</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">marker</span><span class="p">))</span>
+            <span class="n">_recurse</span><span class="p">(</span><span class="n">remaining</span><span class="p">,</span> <span class="n">path</span><span class="p">)</span>
+            <span class="n">path</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span>
+            <span class="n">remaining</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="n">marker</span><span class="p">,</span> <span class="o">*</span><span class="n">remaining</span><span class="p">[</span><span class="n">name</span><span class="p">]]</span>
+
+    <span class="n">initial</span> <span class="o">=</span> <span class="p">{</span><span class="n">name</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="n">markers</span><span class="p">)</span> <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">markers</span> <span class="ow">in</span> <span class="n">thread_items</span><span class="p">}</span>
+    <span class="n">_recurse</span><span class="p">(</span><span class="n">initial</span><span class="p">,</span> <span class="p">[])</span>
+    <span class="k">return</span> <span class="n">schedules</span></div>
+
+
+
+<div class="viewcode-block" id="explore_marker_interleavings">
+<a class="viewcode-back" href="../../api_reference.html#frontrun.trace_markers.explore_marker_interleavings">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">explore_marker_interleavings</span><span class="p">(</span>
+    <span class="n">setup</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="n">Any</span><span class="p">],</span>
+    <span class="n">threads</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">Callable</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="kc">None</span><span class="p">],</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]]],</span>
+    <span class="n">invariant</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="nb">bool</span><span class="p">],</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">stop_on_first</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="n">deadlock_timeout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">5.0</span><span class="p">,</span>
+    <span class="n">timeout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="mf">10.0</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">InterleavingResult</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Explore all marker-level interleavings and check an invariant.</span>
+
+<span class="sd">    Generates every valid interleaving of the declared markers (preserving</span>
+<span class="sd">    per-thread order), runs each one against real code via :class:`TraceExecutor`,</span>
+<span class="sd">    and checks the invariant after each execution.</span>
+
+<span class="sd">    This sits between manual trace markers (exact schedule, one interleaving)</span>
+<span class="sd">    and bytecode exploration (random, enormous search space).  For *N* threads</span>
+<span class="sd">    with a few markers each, the search space is small enough to explore</span>
+<span class="sd">    exhaustively — giving completeness guarantees at the marker granularity.</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        setup: Factory producing fresh shared state for each execution.</span>
+<span class="sd">        threads: Mapping from execution name to ``(target_fn, markers)`` where</span>
+<span class="sd">            *target_fn* takes the setup result and *markers* is the ordered</span>
+<span class="sd">            list of ``# frontrun:`` marker names that *target_fn* hits.</span>
+<span class="sd">        invariant: Predicate on the shared state; returns True if correct.</span>
+<span class="sd">        stop_on_first: Stop after finding the first invariant violation</span>
+<span class="sd">            (default True).</span>
+<span class="sd">        deadlock_timeout: Per-schedule deadlock detection timeout.</span>
+<span class="sd">        timeout: Per-schedule join timeout.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        An :class:`~frontrun.common.InterleavingResult`.  The ``counterexample``</span>
+<span class="sd">        field is a :class:`Schedule` (not a list of ints) when a violation is</span>
+<span class="sd">        found.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">marker_decl</span> <span class="o">=</span> <span class="p">{</span><span class="n">name</span><span class="p">:</span> <span class="n">markers</span> <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="p">(</span><span class="n">_</span><span class="p">,</span> <span class="n">markers</span><span class="p">)</span> <span class="ow">in</span> <span class="n">threads</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+    <span class="n">schedules</span> <span class="o">=</span> <span class="n">all_marker_schedules</span><span class="p">(</span><span class="n">marker_decl</span><span class="p">)</span>
+
+    <span class="n">num_explored</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="n">failures</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="n">Schedule</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">schedule</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">schedules</span><span class="p">):</span>
+        <span class="n">state</span> <span class="o">=</span> <span class="n">setup</span><span class="p">()</span>
+        <span class="n">executor</span> <span class="o">=</span> <span class="n">TraceExecutor</span><span class="p">(</span><span class="n">schedule</span><span class="p">,</span> <span class="n">deadlock_timeout</span><span class="o">=</span><span class="n">deadlock_timeout</span><span class="p">)</span>
+
+        <span class="k">for</span> <span class="n">exec_name</span><span class="p">,</span> <span class="p">(</span><span class="n">target_fn</span><span class="p">,</span> <span class="n">_markers</span><span class="p">)</span> <span class="ow">in</span> <span class="n">threads</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+
+            <span class="k">def</span><span class="w"> </span><span class="nf">_make_runner</span><span class="p">(</span><span class="n">s</span><span class="p">:</span> <span class="n">Any</span> <span class="o">=</span> <span class="n">state</span><span class="p">,</span> <span class="n">fn</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="kc">None</span><span class="p">]</span> <span class="o">=</span> <span class="n">target_fn</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">fn</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+
+            <span class="n">executor</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">exec_name</span><span class="p">,</span> <span class="n">_make_runner</span><span class="p">)</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">executor</span><span class="o">.</span><span class="n">wait</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
+        <span class="k">except</span> <span class="p">(</span><span class="ne">TimeoutError</span><span class="p">,</span> <span class="ne">Exception</span><span class="p">):</span>
+            <span class="c1"># Schedule stall or thread error — treat as non-violation and skip</span>
+            <span class="n">num_explored</span> <span class="o">+=</span> <span class="mi">1</span>
+            <span class="k">continue</span>
+
+        <span class="n">num_explored</span> <span class="o">+=</span> <span class="mi">1</span>
+
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">invariant</span><span class="p">(</span><span class="n">state</span><span class="p">):</span>
+            <span class="n">failures</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">i</span><span class="p">,</span> <span class="n">schedule</span><span class="p">))</span>
+            <span class="k">if</span> <span class="n">stop_on_first</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">InterleavingResult</span><span class="p">(</span>
+                    <span class="n">property_holds</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+                    <span class="n">counterexample</span><span class="o">=</span><span class="n">schedule</span><span class="p">,</span>
+                    <span class="n">num_explored</span><span class="o">=</span><span class="n">num_explored</span><span class="p">,</span>
+                    <span class="n">unique_interleavings</span><span class="o">=</span><span class="n">num_explored</span><span class="p">,</span>
+                <span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">failures</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">InterleavingResult</span><span class="p">(</span>
+            <span class="n">property_holds</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+            <span class="n">counterexample</span><span class="o">=</span><span class="n">failures</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">1</span><span class="p">],</span>
+            <span class="n">num_explored</span><span class="o">=</span><span class="n">num_explored</span><span class="p">,</span>
+            <span class="n">unique_interleavings</span><span class="o">=</span><span class="n">num_explored</span><span class="p">,</span>
+            <span class="n">failures</span><span class="o">=</span><span class="n">failures</span><span class="p">,</span>  <span class="c1"># type: ignore[arg-type]</span>
+        <span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">InterleavingResult</span><span class="p">(</span>
+        <span class="n">property_holds</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+        <span class="n">num_explored</span><span class="o">=</span><span class="n">num_explored</span><span class="p">,</span>
+        <span class="n">unique_interleavings</span><span class="o">=</span><span class="n">num_explored</span><span class="p">,</span>
+    <span class="p">)</span></div>
+
 </pre></div>
         </article>
       </div>
@@ -830,7 +1037,7 @@
       
     </aside>
   </div>
-</div><script src="../../_static/documentation_options.js?v=e259d695"></script>
+</div><script src="../../_static/documentation_options.js?v=c87aa342"></script>
     <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../../_static/scripts/furo.js?v=46bd48cc"></script>

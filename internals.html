@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="API Reference" href="api_reference.html"><link rel="prev" title="Trace Filtering" href="trace_filtering.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>How It Works Under the Hood - Frontrun 0.3.0 documentation</title>
+        <title>How It Works Under the Hood - Frontrun 0.4.1 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">Frontrun 0.3.0 documentation</div></a>
+      <a href="index.html"><div class="brand">Frontrun 0.4.1 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">Frontrun 0.3.0 documentation</span>
+  <span class="sidebar-brand-text">Frontrun 0.4.1 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -198,6 +198,8 @@
 <li class="toctree-l1"><a class="reference internal" href="approaches.html">How Frontrun Works</a></li>
 <li class="toctree-l1"><a class="reference internal" href="dpor_guide.html">DPOR in Practice</a></li>
 <li class="toctree-l1"><a class="reference internal" href="dpor.html">DPOR: Dynamic Partial Order Reduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="vector-clocks.html">Vector Clocks and Happens-Before</a></li>
+<li class="toctree-l1"><a class="reference internal" href="search.html">Search Page</a></li>
 <li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
 <li class="toctree-l1"><a class="reference internal" href="orm_race.html">SQLAlchemy Lost-Update Race Condition</a></li>
 <li class="toctree-l1"><a class="reference internal" href="sql-technical-details.html">SQL Conflict Detection – Technical Details</a></li>
@@ -524,14 +526,16 @@ High overhead, but complete control over interleaving.</p>
 <p><strong>DPOR</strong> uses the same opcode-level <code class="docutils literal notranslate"><span class="pre">sys.settrace</span></code> and cooperative
 primitives as bytecode exploration.  The difference is the scheduling
 policy: DPOR uses a Rust engine (<code class="docutils literal notranslate"><span class="pre">crates/dpor/</span></code>) that tracks
-shared-memory accesses via vector clocks and only explores alternative
-orderings at conflict points.  The engine implements a hybrid of classic
-and Optimal DPOR (Abdulla et al., JACM 2017): wakeup trees guide
-exploration order, sleep set propagation with trace caching eliminates
-equivalent interleavings of independent operations, and deferred race
-detection computes <code class="docutils literal notranslate"><span class="pre">notdep</span></code> wakeup sequences for better coverage.
-Optionally adds <code class="docutils literal notranslate"><span class="pre">sys.setprofile</span></code> for C-call detection and
-monkey-patched I/O.</p>
+shared-memory accesses via dual vector clocks (<code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code> for
+lock-aware happens-before, <code class="docutils literal notranslate"><span class="pre">io_vv</span></code> for lock-oblivious I/O tracking)
+and only explores alternative orderings at conflict points.  The engine
+implements a hybrid of classic and Optimal DPOR (Abdulla et al., JACM
+2017): wakeup trees guide exploration order, sleep set propagation with
+step-count-indexed trace caching eliminates equivalent interleavings of
+independent operations, and deferred race detection computes <code class="docutils literal notranslate"><span class="pre">notdep</span></code>
+wakeup sequences for better coverage.  Optionally adds
+<code class="docutils literal notranslate"><span class="pre">sys.setprofile</span></code> for C-call detection and monkey-patched I/O.  See
+<a class="reference internal" href="#the-dpor-algorithm-in-detail">The DPOR algorithm in detail</a> below for the full description.</p>
 <p><strong>Async shuffler</strong> does <em>not</em> use opcode tracing.  It stays entirely in a
 single asyncio event loop and uses <code class="docutils literal notranslate"><span class="pre">InterleavedLoop</span></code> plus
 <code class="docutils literal notranslate"><span class="pre">contextvars</span></code> to control tasks at natural coroutine suspension points.
@@ -760,14 +764,21 @@ no bytecode-level tool can expose the interleaving.  This affects
 See <code class="docutils literal notranslate"><span class="pre">PEP-703-REPORT.md</span></code> for worked examples.</p>
 <p><strong>External server state</strong> (e.g. a row in PostgreSQL):  The socket-level
 conflict (two threads talking to <code class="docutils literal notranslate"><span class="pre">127.0.0.1:5432</span></code>) <em>is</em> visible to
-<code class="docutils literal notranslate"><span class="pre">LD_PRELOAD</span></code>, and DPOR explores reorderings of all database I/O
-between the two threads.  This is a coarse but useful signal — DPOR
-can’t distinguish a <code class="docutils literal notranslate"><span class="pre">SELECT</span></code> on table A from an <code class="docutils literal notranslate"><span class="pre">UPDATE</span></code> on table B,
-but it suffices to find lost-update races (see <a class="reference internal" href="orm_race.html"><span class="doc">SQLAlchemy Lost-Update Race Condition</span></a>).  The
-underlying row-level conflict is invisible to any client-side
-instrumentation; only the database server knows which rows are being
-accessed.  For precise control over database-level races, use trace
-markers with manual scheduling.</p>
+<code class="docutils literal notranslate"><span class="pre">LD_PRELOAD</span></code>, but DPOR also has a higher-precision layer: the SQL
+cursor interception (<code class="docutils literal notranslate"><span class="pre">_sql_cursor.py</span></code>) parses each SQL statement,
+extracts table names, row-level predicates, and access kinds, and
+reports them as fine-grained resource IDs (e.g. <code class="docutils literal notranslate"><span class="pre">sql:users</span></code>,
+<code class="docutils literal notranslate"><span class="pre">sql:users:([('id',</span> <span class="pre">'1')],)</span></code>).  These table-level and row-level
+resources participate in DPOR’s conflict detection directly, so DPOR
+<em>can</em> distinguish a <code class="docutils literal notranslate"><span class="pre">SELECT</span></code> on table A from an <code class="docutils literal notranslate"><span class="pre">UPDATE</span></code> on table B.</p>
+<p>When multiple tables are involved (e.g. an ORM pattern that touches
+<code class="docutils literal notranslate"><span class="pre">articles</span></code> then <code class="docutils literal notranslate"><span class="pre">versions</span></code>), <strong>resource group coalescing</strong> prevents
+backtrack explosion: each SQL resource is registered with a table-level
+resource group, and the engine skips inline wakeup insertion when
+intermediate operations on <em>unrelated</em> tables separate the racing
+accesses.  Deferred <code class="docutils literal notranslate"><span class="pre">notdep</span></code> processing then finds the critical
+interleaving efficiently.  See <a class="reference internal" href="#resource-groups-and-operation-coalescing">Resource groups and operation
+coalescing</a> below.</p>
 <p><strong>Row-lock deadlocks</strong> are a special case that <em>is</em> handled precisely at
 the client side, via the row-lock registry described in the next section.</p>
 </section>
@@ -843,6 +854,330 @@ connection object, which is unsupported anyway).</p></li>
 <code class="docutils literal notranslate"><span class="pre">SELECT</span> <span class="pre">FOR</span> <span class="pre">SHARE</span></code> row locks are intercepted by the SQL cursor layer.</p></li>
 </ul>
 </section>
+<section id="the-dpor-algorithm-in-detail">
+<h2>The DPOR algorithm in detail<a class="headerlink" href="#the-dpor-algorithm-in-detail" title="Link to this heading">¶</a></h2>
+<p>This section describes the Rust DPOR engine (<code class="docutils literal notranslate"><span class="pre">crates/dpor/</span></code>) and how it
+interacts with the Python scheduler to systematically explore thread
+interleavings.  The implementation is a hybrid of Algorithms 1 and 2 from
+Abdulla et al., “Source Sets: A Foundation for Optimal Dynamic Partial
+Order Reduction” (JACM 2017), augmented with a dual vector clock scheme
+for I/O conflict detection.</p>
+<section id="rust-engine-python-scheduler-interaction">
+<h3>Rust engine / Python scheduler interaction<a class="headerlink" href="#rust-engine-python-scheduler-interaction" title="Link to this heading">¶</a></h3>
+<p>The Rust extension exposes two PyO3 classes: <code class="docutils literal notranslate"><span class="pre">DporEngine</span></code> (persistent
+across executions) and <code class="docutils literal notranslate"><span class="pre">Execution</span></code> (per-execution state).  The Python
+scheduler drives exploration via a loop:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>engine = DporEngine(num_threads, preemption_bound, max_branches)
+while True:
+    execution = engine.begin_execution()
+    # ... start threads ...
+    while True:
+        thread_id = engine.schedule(execution)      # pick next thread
+        if thread_id is None:
+            break                                   # deadlock or all done
+        # ... run thread until next scheduling point ...
+        # opcode tracing reports accesses:
+        engine.report_access(execution, tid, obj_id, &quot;read&quot;|&quot;write&quot;|...)
+        engine.report_io_access(execution, tid, obj_id, &quot;write&quot;)
+        engine.report_sync(execution, tid, &quot;lock_acquire&quot;, lock_id)
+        # ... etc. ...
+    # check invariant, record result
+    if not engine.next_execution():
+        break                                       # exploration complete
+</pre></div>
+</div>
+<p>Each <code class="docutils literal notranslate"><span class="pre">schedule()</span></code> call advances the path position, increments both
+vector clocks for the chosen thread, records the scheduling trace, and
+returns the thread to run.  During replay (re-executing a prefix), the
+engine follows the recorded path; at new branches, it consults the wakeup
+tree or defaults to the current thread to minimize preemptions.</p>
+<p><code class="docutils literal notranslate"><span class="pre">next_execution()</span></code> processes deferred races (computing <code class="docutils literal notranslate"><span class="pre">notdep</span></code>
+sequences), handles deferred lock-release backtracking, then calls
+<code class="docutils literal notranslate"><span class="pre">step()</span></code> to find the next unexplored path in the exploration tree.
+<code class="docutils literal notranslate"><span class="pre">step()</span></code> walks backward through the branch stack, marks explored threads
+as <code class="docutils literal notranslate"><span class="pre">Visited</span></code>, adds them to sleep sets, and picks the next thread from
+the wakeup tree (minimum thread ID as a deterministic proxy for the
+paper’s ordering).</p>
+</section>
+<section id="three-vector-clocks-dpor-vv-io-vv-causality">
+<h3>Three vector clocks: <code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code>, <code class="docutils literal notranslate"><span class="pre">io_vv</span></code>, <code class="docutils literal notranslate"><span class="pre">causality</span></code><a class="headerlink" href="#three-vector-clocks-dpor-vv-io-vv-causality" title="Link to this heading">¶</a></h3>
+<div class="admonition seealso">
+<p class="admonition-title">See also</p>
+<p><a class="reference internal" href="vector-clocks.html"><span class="doc">Vector Clocks and Happens-Before</span></a> for the full explanation of the <code class="docutils literal notranslate"><span class="pre">VersionVec</span></code> data
+structure, all three clocks, synchronization event handling, and worked
+examples showing exactly how races are detected or suppressed.</p>
+</div>
+<p>Each thread maintains three vector clocks (<code class="docutils literal notranslate"><span class="pre">VersionVec</span></code>, indexed by
+thread ID):</p>
+<p><strong>``dpor_vv``</strong> — the primary happens-before clock.  Incremented on
+each scheduling step and joined on synchronization events (lock
+acquire, lock release, thread spawn, thread join).  Used by
+<code class="docutils literal notranslate"><span class="pre">process_access()</span></code> and <code class="docutils literal notranslate"><span class="pre">process_synced_io_access()</span></code> to detect races
+between shared-memory accesses.  Two accesses race when their
+<code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code> values are <em>incomparable</em> (neither is component-wise less
+than or equal to the other).  Because <code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code> includes lock edges,
+two accesses protected by the same lock will appear ordered and will
+<em>not</em> be reported as a race.</p>
+<p><strong>``io_vv``</strong> — the I/O-specific clock.  Incremented on each scheduling
+step (same as <code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code>) and joined on thread spawn/join, but
+<strong>not</strong> joined on lock acquire/release.  Used by <code class="docutils literal notranslate"><span class="pre">process_io_access()</span></code>
+for file and socket operations (<code class="docutils literal notranslate"><span class="pre">LD_PRELOAD</span></code> events, C-call profiling).
+Because <code class="docutils literal notranslate"><span class="pre">io_vv</span></code> omits lock edges, I/O accesses from different threads
+<em>always</em> appear potentially concurrent — even when they occur inside
+separate critical sections of the same lock.  This conservative treatment
+ensures DPOR explores interleavings around I/O operations and catches
+TOCTOU races that lock-aware tracking would suppress.</p>
+<p><strong>``causality``</strong> — a general causal ordering clock.  Joined on lock
+acquire, thread spawn, and thread join (same events as <code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code>).
+It is not incremented on scheduling steps.  It serves as a shared
+clock for propagating causal information across synchronization points.</p>
+<p>The dual-clock design is a pragmatic extension not in the original paper.
+The paper’s Algorithms 3–4 (JACM’17 p.27–28) handle locks by tracking
+enabled/disabled threads.  Frontrun instead uses the separate <code class="docutils literal notranslate"><span class="pre">io_vv</span></code>
+without lock edges to force exploration at lock boundaries — conservative
+(may over-explore) but catches multi-lock races that pure happens-before
+tracking would miss.</p>
+<p><strong>How each access API uses the clocks:</strong></p>
+<div class="table-wrapper colwidths-given docutils container">
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 28.0%" />
+<col style="width: 16.0%" />
+<col style="width: 18.0%" />
+<col style="width: 18.0%" />
+<col style="width: 20.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>API</p></th>
+<th class="head"><p>Clock used</p></th>
+<th class="head"><p>Recording mode</p></th>
+<th class="head"><p>Origin tag</p></th>
+<th class="head"><p>Typical use</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">report_access</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code></p></td>
+<td><p>last-write-wins</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">PythonMemory</span></code></p></td>
+<td><p>Python attribute/subscript accesses</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">report_first_access</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code></p></td>
+<td><p>first-write-wins</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">PythonMemory</span></code></p></td>
+<td><p>container-level keys (earliest position for wakeup insertion)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">report_synced_io_access</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code></p></td>
+<td><p>first-write-wins</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">IoDirect</span></code></p></td>
+<td><p>Python-level I/O (Redis, SQL) ordered by Python locks</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">report_io_access</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">io_vv</span></code></p></td>
+<td><p>first-write-wins</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">IoDirect</span></code></p></td>
+<td><p>file/socket I/O (<code class="docutils literal notranslate"><span class="pre">LD_PRELOAD</span></code>, C-call detection)</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The “last-write-wins” recording mode (<code class="docutils literal notranslate"><span class="pre">record_access</span></code>) overwrites the
+per-thread access entry with the latest access, so the race check always
+considers the most recent access to each object.  The “first-write-wins”
+mode (<code class="docutils literal notranslate"><span class="pre">record_io_access</span></code>) keeps the earliest access per thread, enabling
+wakeup tree insertion at the earliest point — for example, between a
+<code class="docutils literal notranslate"><span class="pre">SELECT</span></code> and <code class="docutils literal notranslate"><span class="pre">UPDATE</span></code> in a database transaction.</p>
+</section>
+<section id="conflict-detection-and-race-checking">
+<h3>Conflict detection and race checking<a class="headerlink" href="#conflict-detection-and-race-checking" title="Link to this heading">¶</a></h3>
+<p>Two accesses to the same shared object form a <strong>race</strong> (JACM’17 Def 3.3)
+when:</p>
+<ol class="arabic simple">
+<li><p>They are from different threads.</p></li>
+<li><p>At least one is a write (or a weak-write conflicting with a
+non-weak access — see below).</p></li>
+<li><p>Their vector clocks are incomparable (neither happens-before the other).</p></li>
+</ol>
+<p>The engine tracks per-object, per-thread access history in
+<code class="docutils literal notranslate"><span class="pre">ObjectState</span></code>.  Each object maintains four maps (per-thread-read,
+per-thread-write, per-thread-weak-write, per-thread-weak-read).  When a
+new access arrives, <code class="docutils literal notranslate"><span class="pre">dependent_accesses()</span></code> returns all prior accesses
+from other threads that conflict with the new access’s kind.</p>
+<p>Each access also carries an <code class="docutils literal notranslate"><span class="pre">AccessOrigin</span></code> tag indicating how it was
+generated:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">PythonMemory</span></code> — observed via Python shared-memory tracing
+(<code class="docutils literal notranslate"><span class="pre">sys.settrace</span></code> opcode events).  Used by <code class="docutils literal notranslate"><span class="pre">report_access</span></code> and
+<code class="docutils literal notranslate"><span class="pre">report_first_access</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">LockSynthetic</span></code> — synthetic access for lock acquire/release conflict
+tracking.  Generated in <code class="docutils literal notranslate"><span class="pre">process_sync()</span></code> for lock events.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">IoDirect</span></code> — I/O access intercepted from database, Redis, file, or
+socket operations.  Used by <code class="docutils literal notranslate"><span class="pre">report_synced_io_access</span></code> and
+<code class="docutils literal notranslate"><span class="pre">report_io_access</span></code>.</p></li>
+</ul>
+<p>Provenance tags are threaded through the sleep-set propagation layer
+(<code class="docutils literal notranslate"><span class="pre">active_accesses</span></code>, <code class="docutils literal notranslate"><span class="pre">explored_accesses</span></code>, <code class="docutils literal notranslate"><span class="pre">propagated_sleep_accesses</span></code>,
+and the step-count-indexed future access cache all carry
+<code class="docutils literal notranslate"><span class="pre">(AccessKind,</span> <span class="pre">AccessOrigin)</span></code> tuples).  When merging accesses with
+different origins, the “stronger” origin wins
+(<code class="docutils literal notranslate"><span class="pre">IoDirect</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">LockSynthetic</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">PythonMemory</span></code>).  Currently
+the independence check only examines <code class="docutils literal notranslate"><span class="pre">AccessKind</span></code> (provenance does not
+affect conflict semantics), but the tags enable future per-origin merge
+strategies — for example, relaxing Python-memory merges while keeping
+I/O origins conservative.</p>
+<p><strong>Access kinds and conflict rules:</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">Write</span></code> conflicts with everything (Read, Write, WeakWrite, WeakRead).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Read</span></code> conflicts with Write and WeakWrite.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">WeakWrite</span></code> conflicts with Read and Write, but <em>not</em> with other
+WeakWrites or WeakReads.  Used for container subscript writes
+(<code class="docutils literal notranslate"><span class="pre">STORE_SUBSCR</span></code>): two writes to different keys of the same dict should
+not conflict.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">WeakRead</span></code> conflicts only with Write.  Used for <code class="docutils literal notranslate"><span class="pre">LOAD_ATTR</span></code> on
+mutable containers: loading a container to subscript it should not
+conflict with subscript writes on disjoint keys.</p></li>
+</ul>
+<p>For each conflicting prior access, the engine checks
+<code class="docutils literal notranslate"><span class="pre">prev_access.dpor_vv</span> <span class="pre">&lt;=</span> <span class="pre">current_dpor_vv</span></code> (or <code class="docutils literal notranslate"><span class="pre">io_vv</span></code> for I/O
+accesses).  If the check fails, the two accesses are concurrent and a
+race is detected.</p>
+</section>
+<section id="backtracking-wakeup-trees-and-deferred-races">
+<h3>Backtracking: wakeup trees and deferred races<a class="headerlink" href="#backtracking-wakeup-trees-and-deferred-races" title="Link to this heading">¶</a></h3>
+<p>When a race is detected, the engine responds in two ways (hybrid
+approach):</p>
+<p><strong>Inline insertion (Algorithm 1 style, JACM’17 p.16 lines 5–9):</strong>
+Immediately inserts the racing thread as a single-element sequence
+<code class="docutils literal notranslate"><span class="pre">[thread_id]</span></code> into the wakeup tree at the position of the first racing
+access (<code class="docutils literal notranslate"><span class="pre">prev_path_id</span></code>).  This guarantees that no race is dropped —
+the racing thread is always available for exploration at the conflict
+point.  (Exception: for <code class="docutils literal notranslate"><span class="pre">process_synced_io_access</span></code> races with
+cross-group intermediates, inline insertion is skipped in favor of
+deferred processing — see <a class="reference internal" href="#resource-groups-and-operation-coalescing">Resource groups and operation coalescing</a>
+below.)</p>
+<p><strong>Deferred ``notdep`` processing (Algorithm 2 style, JACM’17 p.24 lines
+1–6):</strong> The race is also stored as a <code class="docutils literal notranslate"><span class="pre">PendingRace</span></code>.  At the end of the
+execution (in <code class="docutils literal notranslate"><span class="pre">next_execution()</span></code>), each pending race is processed by
+computing a <code class="docutils literal notranslate"><span class="pre">notdep</span></code> sequence: the threads of events between the two
+racing accesses that are <em>independent</em> of the first access.  An event is
+independent if it is by a different thread AND its recorded accesses do
+not conflict with the first event’s accesses on any shared object.  The
+resulting sequence (independent prefix + racing thread) is inserted into
+the wakeup tree, providing a multi-step wakeup path that guides
+exploration through independent intermediates.</p>
+<p><strong>Deferred lock-release backtracking:</strong> For multi-lock atomicity bugs,
+the engine collects all lock acquire and release events during
+execution.  At the end (in <code class="docutils literal notranslate"><span class="pre">next_execution()</span></code>), for each lock release
+by thread T where T later acquires another lock, backtrack opportunities
+are inserted at the release position for all other threads.  This allows
+another thread to interleave between T’s two critical sections.  For
+single-lock programs, no thread does acquire-after-release, so no
+backtracks are inserted — giving exact trace counts.</p>
+</section>
+<section id="wakeup-trees">
+<h3>Wakeup trees<a class="headerlink" href="#wakeup-trees" title="Link to this heading">¶</a></h3>
+<p>A wakeup tree (JACM’17 Def 6.1) is an ordered tree of thread-ID
+sequences at each scheduling point.  Each root-to-leaf path represents a
+wakeup sequence — an initial fragment of an execution that reverses a
+detected race.</p>
+<p>Insertion merges shared prefixes (if thread 0 already exists as a child,
+descend into it) and adds new branches at the rightmost position.  The
+current implementation uses exact prefix matching rather than the paper’s
+equivalence checking (<code class="docutils literal notranslate"><span class="pre">v</span> <span class="pre">~</span> <span class="pre">w</span></code>, Lemma 6.2), which is sound but may keep
+redundant branches.</p>
+<p>When <code class="docutils literal notranslate"><span class="pre">step()</span></code> backtracks, it picks the minimum thread ID from the
+wakeup tree (deterministic proxy for the paper’s ordering), extracts
+the subtree for that thread, and stores it as
+<code class="docutils literal notranslate"><span class="pre">pending_wakeup_subtree</span></code>.  During the next execution’s scheduling, this
+subtree guides thread choices at new branches beyond the replay prefix,
+ensuring multi-step wakeup sequences are followed correctly.</p>
+</section>
+<section id="sleep-sets-and-trace-caching">
+<h3>Sleep sets and trace caching<a class="headerlink" href="#sleep-sets-and-trace-caching" title="Link to this heading">¶</a></h3>
+<p>Sleep sets prevent re-exploration of equivalent interleavings.  At each
+scheduling point, after a thread is explored it is marked <code class="docutils literal notranslate"><span class="pre">Visited</span></code>
+and added to the local sleep set.  A thread in the sleep set is skipped
+during wakeup tree insertion — it will not be re-explored at this
+position.</p>
+<p>Sleep sets propagate across scheduling points via the independence
+relation (JACM’17 Def 3.3): a sleeping thread q stays asleep at position
+i+1 if q’s recorded accesses are independent of the chosen thread p’s
+accesses at position i.  Independence means that for every shared object
+accessed by both threads, the access kinds are non-conflicting.</p>
+<p>To make this precise across executions, the engine maintains a
+<strong>step-count-indexed future access cache</strong>.  After each completed
+execution, <code class="docutils literal notranslate"><span class="pre">step()</span></code> computes per-thread suffix unions:
+<code class="docutils literal notranslate"><span class="pre">future[tid][k]</span></code> is the union of thread <code class="docutils literal notranslate"><span class="pre">tid</span></code>’s accesses from its
+k-th scheduling step onward.  During the next execution, a sleeping
+thread that has completed k steps only needs to check its remaining work
+(steps k, k+1, …) against the active thread’s accesses.  This prevents
+false wakeups when a thread has already finished its conflicting work at
+earlier steps.</p>
+</section>
+<section id="exploration-structure">
+<h3>Exploration structure<a class="headerlink" href="#exploration-structure" title="Link to this heading">¶</a></h3>
+<p>The exploration tree is a stack of <code class="docutils literal notranslate"><span class="pre">Branch</span></code> nodes (one per scheduling
+point).  Each branch records:</p>
+<ul class="simple">
+<li><p>Thread statuses (Disabled, Pending, Active, Visited, Blocked, Yield)</p></li>
+<li><p>The active (chosen) thread</p></li>
+<li><p>The wakeup tree for this position</p></li>
+<li><p>The sleep set (local + propagated)</p></li>
+<li><p>Per-thread access records for independence checks</p></li>
+<li><p>Preemption count (for bounded exploration)</p></li>
+</ul>
+<p>Exploration proceeds as depth-first search.  <code class="docutils literal notranslate"><span class="pre">step()</span></code> walks backward
+through the stack: at each branch, it marks the current thread as Visited,
+removes it from the wakeup tree, and looks for the next unexplored thread.
+If the wakeup tree has more branches, it picks the minimum thread and
+resets <code class="docutils literal notranslate"><span class="pre">pos</span></code> to 0 for a full replay from scratch (stateless model
+checking).  If the wakeup tree is empty, it pops the branch and continues
+backtracking.</p>
+<p>A <strong>preemption bound</strong> limits how many times the scheduler forces a
+context switch away from a runnable thread.  When the bound is reached,
+wakeup tree insertions that would require a preemption are deferred to an
+ancestor branch where the target thread is already active (conservative
+wakeup propagation).  This keeps exploration tractable while still
+covering most concurrency bugs, which typically require few preemptions.</p>
+</section>
+<section id="resource-groups-and-operation-coalescing">
+<h3>Resource groups and operation coalescing<a class="headerlink" href="#resource-groups-and-operation-coalescing" title="Link to this heading">¶</a></h3>
+<p>When DPOR explores multi-table SQL patterns (e.g. django-reversion’s
+<code class="docutils literal notranslate"><span class="pre">create_revision()</span></code> which touches both <code class="docutils literal notranslate"><span class="pre">articles</span></code> and <code class="docutils literal notranslate"><span class="pre">versions</span></code>
+tables), intermediate operations on unrelated tables create backtrack
+points that cause exploration to explode before reaching the critical
+interleaving.  <strong>Resource group coalescing</strong> addresses this.</p>
+<p>Each SQL resource reported to the engine can be registered with a
+<strong>resource group</strong> (typically the table name, hashed to a <code class="docutils literal notranslate"><span class="pre">u64</span></code>).
+The Python-side <code class="docutils literal notranslate"><span class="pre">_io_reporter</span></code> callback in <code class="docutils literal notranslate"><span class="pre">dpor.py</span></code> automatically
+extracts the table name from SQL resource IDs (e.g. <code class="docutils literal notranslate"><span class="pre">sql:versions:...</span></code>
+→ group <code class="docutils literal notranslate"><span class="pre">hash(&quot;sql:versions&quot;)</span></code>) and calls
+<code class="docutils literal notranslate"><span class="pre">engine.register_resource_group(object_key,</span> <span class="pre">group_key)</span></code>.</p>
+<p>When a race is detected in <code class="docutils literal notranslate"><span class="pre">process_synced_io_access()</span></code>, the engine
+checks whether the two racing accesses and the intermediate scheduling
+steps involve <strong>cross-group intermediates</strong> — steps where the active
+thread accessed objects in a different resource group than the racing
+object.  If cross-group intermediates exist, the inline wakeup insertion
+is <strong>skipped</strong>.  The race is still collected as a <code class="docutils literal notranslate"><span class="pre">PendingRace</span></code> for
+deferred <code class="docutils literal notranslate"><span class="pre">notdep</span></code> processing, which computes the independent
+intermediate sequence and inserts it into the wakeup tree.</p>
+<p>The effect: DPOR no longer creates backtrack points for every pair of
+conflicting table accesses.  Instead, it lets the deferred <code class="docutils literal notranslate"><span class="pre">notdep</span></code>
+computation find a wakeup sequence that skips the independent
+intermediate table operations and goes straight to the critical
+interleaving.  For the django-reversion pattern, this reduces exploration
+from exhausting the budget (100+ interleavings without finding the race)
+to finding it in ~2 executions.</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">has_cross_group_intermediates()</span></code> check in <code class="docutils literal notranslate"><span class="pre">path.rs</span></code> iterates
+over scheduling steps between the two racing positions and checks if any
+step’s <code class="docutils literal notranslate"><span class="pre">active_accesses</span></code> include objects from a resource group different
+from the race object’s group.  This is conservative: when no resource
+groups are registered (non-SQL accesses), all races get inline wakeup
+insertion as before.</p>
+</section>
+</section>
 </section>
 
         </article>
@@ -912,6 +1247,17 @@ connection object, which is unsupported anyway).</p></li>
 </ul>
 </li>
 <li><a class="reference internal" href="#deadlock-detection">Deadlock detection</a></li>
+<li><a class="reference internal" href="#the-dpor-algorithm-in-detail">The DPOR algorithm in detail</a><ul>
+<li><a class="reference internal" href="#rust-engine-python-scheduler-interaction">Rust engine / Python scheduler interaction</a></li>
+<li><a class="reference internal" href="#three-vector-clocks-dpor-vv-io-vv-causality">Three vector clocks: <code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code>, <code class="docutils literal notranslate"><span class="pre">io_vv</span></code>, <code class="docutils literal notranslate"><span class="pre">causality</span></code></a></li>
+<li><a class="reference internal" href="#conflict-detection-and-race-checking">Conflict detection and race checking</a></li>
+<li><a class="reference internal" href="#backtracking-wakeup-trees-and-deferred-races">Backtracking: wakeup trees and deferred races</a></li>
+<li><a class="reference internal" href="#wakeup-trees">Wakeup trees</a></li>
+<li><a class="reference internal" href="#sleep-sets-and-trace-caching">Sleep sets and trace caching</a></li>
+<li><a class="reference internal" href="#exploration-structure">Exploration structure</a></li>
+<li><a class="reference internal" href="#resource-groups-and-operation-coalescing">Resource groups and operation coalescing</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -923,7 +1269,7 @@ connection object, which is unsupported anyway).</p></li>
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=e259d695"></script>
+</div><script src="_static/documentation_options.js?v=c87aa342"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>

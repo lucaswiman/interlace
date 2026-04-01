@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="DPOR in Practice" href="dpor_guide.html"><link rel="prev" title="Quick Start" href="quickstart.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>How Frontrun Works - Frontrun 0.3.0 documentation</title>
+        <title>How Frontrun Works - Frontrun 0.4.1 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">Frontrun 0.3.0 documentation</div></a>
+      <a href="index.html"><div class="brand">Frontrun 0.4.1 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">Frontrun 0.3.0 documentation</span>
+  <span class="sidebar-brand-text">Frontrun 0.4.1 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -198,6 +198,8 @@
 <li class="toctree-l1 current current-page"><a class="current reference internal" href="#">How Frontrun Works</a></li>
 <li class="toctree-l1"><a class="reference internal" href="dpor_guide.html">DPOR in Practice</a></li>
 <li class="toctree-l1"><a class="reference internal" href="dpor.html">DPOR: Dynamic Partial Order Reduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="vector-clocks.html">Vector Clocks and Happens-Before</a></li>
+<li class="toctree-l1"><a class="reference internal" href="search.html">Search Page</a></li>
 <li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
 <li class="toctree-l1"><a class="reference internal" href="orm_race.html">SQLAlchemy Lost-Update Race Condition</a></li>
 <li class="toctree-l1"><a class="reference internal" href="sql-technical-details.html">SQL Conflict Detection – Technical Details</a></li>
@@ -250,7 +252,7 @@
         <article role="main" id="furo-main-content">
           <section id="how-frontrun-works">
 <h1>How Frontrun Works<a class="headerlink" href="#how-frontrun-works" title="Link to this heading">¶</a></h1>
-<p>Frontrun provides three approaches for controlling thread interleaving. They
+<p>Frontrun provides four approaches for controlling thread interleaving. They
 operate at different levels of granularity and make different trade-offs between
 interpretability, coverage, and the kinds of bugs they can find.</p>
 <section id="dpor-systematic-exploration">
@@ -457,6 +459,115 @@ placed to gate the <code class="docutils literal notranslate"><span class="pre">
 </pre></div>
 </div>
 </section>
+<section id="marker-schedule-exploration">
+<h2>Marker Schedule Exploration<a class="headerlink" href="#marker-schedule-exploration" title="Link to this heading">¶</a></h2>
+<p>Marker schedule exploration bridges the gap between manual trace markers
+(which require knowing the bug-triggering interleaving in advance) and
+bytecode exploration (which searches an enormous opcode-level space).  It
+uses <code class="docutils literal notranslate"><span class="pre">#</span> <span class="pre">frontrun:</span></code> comments as the vocabulary for schedule generation,
+then systematically or randomly explores all valid orderings.</p>
+<p><strong>Search space comparison:</strong></p>
+<div class="table-wrapper colwidths-given docutils container">
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 30.0%" />
+<col style="width: 35.0%" />
+<col style="width: 35.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Approach</p></th>
+<th class="head"><p>2 threads, 100 opcodes each</p></th>
+<th class="head"><p>2 threads, 5 markers each</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Bytecode</p></td>
+<td><p>2<sup>200</sup> ≈ 10<sup>60</sup></p></td>
+<td><p>—</p></td>
+</tr>
+<tr class="row-odd"><td><p>Markers</p></td>
+<td><p>—</p></td>
+<td><p>C(10, 5) = 252</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>For two threads with five markers each, the marker-level search space is
+just 252 valid orderings — small enough to explore exhaustively with
+completeness guarantees.</p>
+<p><strong>Exhaustive exploration:</strong></p>
+<p><code class="docutils literal notranslate"><span class="pre">explore_marker_interleavings()</span></code> generates every valid interleaving of
+thread markers (preserving per-thread order), runs each one against real code
+via <code class="docutils literal notranslate"><span class="pre">TraceExecutor</span></code>, and checks an invariant.  When it passes, the
+invariant is proven correct for all marker-level interleavings.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.trace_markers</span><span class="w"> </span><span class="kn">import</span> <span class="n">explore_marker_interleavings</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">Counter</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="mi">0</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">increment</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="n">temp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">value</span>  <span class="c1"># frontrun: read_value</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="n">temp</span> <span class="o">+</span> <span class="mi">1</span>  <span class="c1"># frontrun: write_value</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">explore_marker_interleavings</span><span class="p">(</span>
+    <span class="n">setup</span><span class="o">=</span><span class="n">Counter</span><span class="p">,</span>
+    <span class="n">threads</span><span class="o">=</span><span class="p">{</span>
+        <span class="s2">&quot;t1&quot;</span><span class="p">:</span> <span class="p">(</span><span class="k">lambda</span> <span class="n">c</span><span class="p">:</span> <span class="n">c</span><span class="o">.</span><span class="n">increment</span><span class="p">(),</span> <span class="p">[</span><span class="s2">&quot;read_value&quot;</span><span class="p">,</span> <span class="s2">&quot;write_value&quot;</span><span class="p">]),</span>
+        <span class="s2">&quot;t2&quot;</span><span class="p">:</span> <span class="p">(</span><span class="k">lambda</span> <span class="n">c</span><span class="p">:</span> <span class="n">c</span><span class="o">.</span><span class="n">increment</span><span class="p">(),</span> <span class="p">[</span><span class="s2">&quot;read_value&quot;</span><span class="p">,</span> <span class="s2">&quot;write_value&quot;</span><span class="p">]),</span>
+    <span class="p">},</span>
+    <span class="n">invariant</span><span class="o">=</span><span class="k">lambda</span> <span class="n">c</span><span class="p">:</span> <span class="n">c</span><span class="o">.</span><span class="n">value</span> <span class="o">==</span> <span class="mi">2</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="c1"># result.property_holds is False — the lost-update race is found</span>
+<span class="c1"># result.counterexample is a Schedule that reproduces the bug</span>
+</pre></div>
+</div>
+<p>When a violation is found, <code class="docutils literal notranslate"><span class="pre">result.counterexample</span></code> is a <code class="docutils literal notranslate"><span class="pre">Schedule</span></code>
+object that can be replayed directly with <code class="docutils literal notranslate"><span class="pre">TraceExecutor</span></code> for
+deterministic reproduction.</p>
+<p><strong>Hypothesis integration:</strong></p>
+<p><code class="docutils literal notranslate"><span class="pre">marker_schedule_strategy()</span></code> is a Hypothesis strategy that generates
+valid <code class="docutils literal notranslate"><span class="pre">Schedule</span></code> objects.  It integrates with Hypothesis’s shrinking to
+produce minimal counterexamples:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">hypothesis</span><span class="w"> </span><span class="kn">import</span> <span class="n">given</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.trace_markers</span><span class="w"> </span><span class="kn">import</span> <span class="n">marker_schedule_strategy</span><span class="p">,</span> <span class="n">TraceExecutor</span>
+
+<span class="nd">@given</span><span class="p">(</span><span class="n">schedule</span><span class="o">=</span><span class="n">marker_schedule_strategy</span><span class="p">(</span>
+    <span class="n">threads</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;t1&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;read_value&quot;</span><span class="p">,</span> <span class="s2">&quot;write_value&quot;</span><span class="p">],</span>
+             <span class="s2">&quot;t2&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;read_value&quot;</span><span class="p">,</span> <span class="s2">&quot;write_value&quot;</span><span class="p">]},</span>
+<span class="p">))</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">test_counter_is_atomic</span><span class="p">(</span><span class="n">schedule</span><span class="p">):</span>
+    <span class="n">counter</span> <span class="o">=</span> <span class="n">Counter</span><span class="p">()</span>
+    <span class="n">executor</span> <span class="o">=</span> <span class="n">TraceExecutor</span><span class="p">(</span><span class="n">schedule</span><span class="p">)</span>
+    <span class="n">executor</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="s2">&quot;t1&quot;</span><span class="p">,</span> <span class="n">counter</span><span class="o">.</span><span class="n">increment</span><span class="p">)</span>
+    <span class="n">executor</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="s2">&quot;t2&quot;</span><span class="p">,</span> <span class="n">counter</span><span class="o">.</span><span class="n">increment</span><span class="p">)</span>
+    <span class="n">executor</span><span class="o">.</span><span class="n">wait</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="mf">5.0</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="n">counter</span><span class="o">.</span><span class="n">value</span> <span class="o">==</span> <span class="mi">2</span>
+</pre></div>
+</div>
+<p><strong>Enumeration:</strong></p>
+<p><code class="docutils literal notranslate"><span class="pre">all_marker_schedules()</span></code> returns all valid interleavings as a list of
+<code class="docutils literal notranslate"><span class="pre">Schedule</span></code> objects.  The count equals the multinomial coefficient
+<code class="docutils literal notranslate"><span class="pre">(k₁</span> <span class="pre">+</span> <span class="pre">k₂</span> <span class="pre">+</span> <span class="pre">…</span> <span class="pre">+</span> <span class="pre">kₙ)!</span> <span class="pre">/</span> <span class="pre">(k₁!</span> <span class="pre">·</span> <span class="pre">k₂!</span> <span class="pre">·</span> <span class="pre">…</span> <span class="pre">·</span> <span class="pre">kₙ!)</span></code> where each <em>kᵢ</em> is
+the number of markers for thread <em>i</em>.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.trace_markers</span><span class="w"> </span><span class="kn">import</span> <span class="n">all_marker_schedules</span>
+
+<span class="n">schedules</span> <span class="o">=</span> <span class="n">all_marker_schedules</span><span class="p">(</span>
+    <span class="n">threads</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;t1&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;a&quot;</span><span class="p">,</span> <span class="s2">&quot;b&quot;</span><span class="p">],</span> <span class="s2">&quot;t2&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;x&quot;</span><span class="p">,</span> <span class="s2">&quot;y&quot;</span><span class="p">]},</span>
+<span class="p">)</span>
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">schedules</span><span class="p">)</span> <span class="o">==</span> <span class="mi">6</span>  <span class="c1"># C(4,2) = 4! / (2! · 2!)</span>
+</pre></div>
+</div>
+<p><strong>Complementary workflow:</strong></p>
+<p>The three marker-level tools are complementary:</p>
+<ol class="arabic simple">
+<li><p>Use <strong>bytecode exploration</strong> or <strong>DPOR</strong> to discover a race automatically.</p></li>
+<li><p>Add <code class="docutils literal notranslate"><span class="pre">#</span> <span class="pre">frontrun:</span></code> markers at the identified race window for regression
+testing.</p></li>
+<li><p>Use <code class="docutils literal notranslate"><span class="pre">explore_marker_interleavings()</span></code> to verify the fix eliminates
+<strong>all</strong> problematic interleavings, not just the one counterexample.</p></li>
+</ol>
+</section>
 <section id="automatic-i-o-detection">
 <h2>Automatic I/O Detection<a class="headerlink" href="#automatic-i-o-detection" title="Link to this heading">¶</a></h2>
 <p>Both the bytecode explorer and DPOR automatically detect socket and file
@@ -567,6 +678,7 @@ frontrun<span class="w"> </span>python<span class="w"> </span>examples/orm_race.
 <li><a class="reference internal" href="#dpor-systematic-exploration">DPOR (Systematic Exploration)</a></li>
 <li><a class="reference internal" href="#bytecode-instrumentation">Bytecode Instrumentation</a></li>
 <li><a class="reference internal" href="#trace-markers">Trace Markers</a></li>
+<li><a class="reference internal" href="#marker-schedule-exploration">Marker Schedule Exploration</a></li>
 <li><a class="reference internal" href="#automatic-i-o-detection">Automatic I/O Detection</a><ul>
 <li><a class="reference internal" href="#c-level-i-o-interception">C-Level I/O Interception</a></li>
 </ul>
@@ -582,7 +694,7 @@ frontrun<span class="w"> </span>python<span class="w"> </span>examples/orm_race.
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=e259d695"></script>
+</div><script src="_static/documentation_options.js?v=c87aa342"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>

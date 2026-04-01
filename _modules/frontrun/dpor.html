@@ -5,7 +5,7 @@
     <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../genindex.html"><link rel="search" title="Search" href="../../search.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>frontrun.dpor - Frontrun 0.3.0 documentation</title>
+        <title>frontrun.dpor - Frontrun 0.4.1 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -161,7 +161,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="../../index.html"><div class="brand">Frontrun 0.3.0 documentation</div></a>
+      <a href="../../index.html"><div class="brand">Frontrun 0.4.1 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -182,7 +182,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="../../index.html">
   
-  <span class="sidebar-brand-text">Frontrun 0.3.0 documentation</span>
+  <span class="sidebar-brand-text">Frontrun 0.4.1 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="../../search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -197,6 +197,8 @@
 <li class="toctree-l1"><a class="reference internal" href="../../approaches.html">How Frontrun Works</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../dpor_guide.html">DPOR in Practice</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../dpor.html">DPOR: Dynamic Partial Order Reduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../vector-clocks.html">Vector Clocks and Happens-Before</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../search.html">Search Page</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../examples.html">Examples</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../orm_race.html">SQLAlchemy Lost-Update Race Condition</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../sql-technical-details.html">SQL Conflict Detection – Technical Details</a></li>
@@ -241,8 +243,9 @@
 <span></span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">Bytecode-tracing DPOR (Dynamic Partial Order Reduction) for frontrun.</span>
 
-<span class="sd">This module implements systematic interleaving exploration using DPOR,</span>
-<span class="sd">completely separate from the existing bytecode.py random exploration.</span>
+<span class="sd">This module implements systematic interleaving exploration using DPOR.</span>
+<span class="sd">Shares cooperative threading primitives and shadow-stack infrastructure</span>
+<span class="sd">with bytecode.py (random exploration).</span>
 
 <span class="sd">The approach:</span>
 <span class="sd">1. A Rust DPOR engine (frontrun._dpor) manages the exploration tree,</span>
@@ -308,6 +311,7 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._sql_cursor</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">clear_sql_metadata</span><span class="p">,</span>
     <span class="n">get_active_sql_io_context</span><span class="p">,</span>
+    <span class="n">is_sql_endpoint_suppressed</span><span class="p">,</span>
     <span class="n">is_tid_suppressed</span><span class="p">,</span>
     <span class="n">patch_sql</span><span class="p">,</span>
     <span class="n">unpatch_sql</span><span class="p">,</span>
@@ -418,6 +422,20 @@
 <span class="n">_dpor_tls</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">local</span><span class="p">()</span>
 
 
+<span class="k">def</span><span class="w"> </span><span class="nf">_append_unique_lock_event</span><span class="p">(</span><span class="n">lock_events</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span> <span class="n">event</span><span class="p">:</span> <span class="n">Any</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Append a lock event unless it duplicates the immediately previous one.&quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">lock_events</span><span class="p">:</span>
+        <span class="n">last</span> <span class="o">=</span> <span class="n">lock_events</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+        <span class="k">if</span> <span class="p">(</span>
+            <span class="n">last</span><span class="o">.</span><span class="n">schedule_index</span> <span class="o">==</span> <span class="n">event</span><span class="o">.</span><span class="n">schedule_index</span>
+            <span class="ow">and</span> <span class="n">last</span><span class="o">.</span><span class="n">thread_id</span> <span class="o">==</span> <span class="n">event</span><span class="o">.</span><span class="n">thread_id</span>
+            <span class="ow">and</span> <span class="n">last</span><span class="o">.</span><span class="n">event_type</span> <span class="o">==</span> <span class="n">event</span><span class="o">.</span><span class="n">event_type</span>
+            <span class="ow">and</span> <span class="n">last</span><span class="o">.</span><span class="n">lock_id</span> <span class="o">==</span> <span class="n">event</span><span class="o">.</span><span class="n">lock_id</span>
+        <span class="p">):</span>
+            <span class="k">return</span>
+    <span class="n">lock_events</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">event</span><span class="p">)</span>
+
+
 <span class="c1"># ---------------------------------------------------------------------------</span>
 <span class="c1"># LD_PRELOAD I/O event bridge</span>
 <span class="c1"># ---------------------------------------------------------------------------</span>
@@ -473,8 +491,18 @@
         <span class="c1"># force DPOR to explore uninteresting interleavings first.</span>
         <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">kind</span> <span class="o">==</span> <span class="s2">&quot;close&quot;</span><span class="p">:</span>
             <span class="k">return</span>
-        <span class="c1"># Skip if this thread&#39;s cursor.execute() or Redis client already reported at a higher level</span>
-        <span class="k">if</span> <span class="n">is_tid_suppressed</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">tid</span><span class="p">)</span> <span class="ow">or</span> <span class="n">is_redis_tid_suppressed</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">tid</span><span class="p">):</span>
+        <span class="c1"># Skip events to known SQL/Redis socket endpoints — the cursor/client</span>
+        <span class="c1"># layer already reports at a higher granularity (table/row/key level).</span>
+        <span class="c1"># Also skip socket events from permanently-suppressed SQL threads (covers</span>
+        <span class="c1"># the race window where connect() events arrive before the endpoint is</span>
+        <span class="c1"># registered).  Non-socket events (file I/O) always pass through even</span>
+        <span class="c1"># for SQL threads, so DPOR can detect non-SQL conflicts.</span>
+        <span class="n">is_socket</span> <span class="o">=</span> <span class="n">event</span><span class="o">.</span><span class="n">resource_id</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;socket:&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">is_sql_endpoint_suppressed</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">resource_id</span><span class="p">):</span>
+            <span class="k">return</span>
+        <span class="k">if</span> <span class="n">is_socket</span> <span class="ow">and</span> <span class="n">is_tid_suppressed</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">tid</span><span class="p">):</span>
+            <span class="k">return</span>
+        <span class="k">if</span> <span class="n">is_redis_tid_suppressed</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">tid</span><span class="p">):</span>
             <span class="k">return</span>
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
             <span class="n">dpor_id</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_tid_to_dpor</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">tid</span><span class="p">)</span>
@@ -584,10 +612,24 @@
         <span class="c1"># Per-thread deferred I/O buffers. Lists are shared with thread-local</span>
         <span class="c1"># storage so other threads can flush deferred I/O when they reach a</span>
         <span class="c1"># real competing I/O boundary.</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">,</span> <span class="nb">bool</span><span class="p">]]]</span> <span class="o">=</span> <span class="p">{}</span>
         <span class="c1"># Per-thread lock nesting depth mirrored from TLS for cross-thread</span>
         <span class="c1"># deferred-I/O flush decisions.</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+
+        <span class="c1"># IO trace: records (thread_id, resource_id) in IO execution order.</span>
+        <span class="c1"># Populated by after_io() under the condition lock.  See defect #16.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io_trace</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="c1"># Explicit Python-level I/O boundary currently in progress. While set,</span>
+        <span class="c1"># the owning thread keeps the scheduler turn until after_io() runs.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_active_io_thread</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_next_thread_after_io</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="c1"># Like the I/O path, cooperative lock/semaphore retries need to keep</span>
+        <span class="c1"># the scheduler turn until the real non-blocking probe completes.</span>
+        <span class="c1"># Otherwise free-threaded builds turn the probe into an OS-level race</span>
+        <span class="c1"># between multiple awakened waiters.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_active_sync_thread</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_next_thread_after_sync</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
 
         <span class="c1"># Maps iterator id → original container object. When GET_ITER creates</span>
         <span class="c1"># an iterator from a mutable container, we record the mapping so that</span>
@@ -662,6 +704,56 @@
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Block until it&#39;s this thread&#39;s turn. Returns False when done.&quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_report_and_wait</span><span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">)</span>
 
+    <span class="k">def</span><span class="w"> </span><span class="nf">before_sync_retry</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Wait for a turn and keep it through one external sync probe.&quot;&quot;&quot;</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._cooperative</span><span class="w"> </span><span class="kn">import</span> <span class="n">_scheduler_tls</span>
+
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="p">:</span>
+            <span class="n">_scheduler_tls</span><span class="o">.</span><span class="n">_in_dpor_machinery</span> <span class="o">=</span> <span class="kc">True</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error</span><span class="p">:</span>
+                        <span class="k">return</span> <span class="kc">False</span>
+
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_active_sync_thread</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_active_sync_thread</span> <span class="o">!=</span> <span class="n">thread_id</span><span class="p">:</span>
+                        <span class="k">pass</span>
+                    <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">:</span>
+                        <span class="n">next_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_schedule_next</span><span class="p">()</span>
+                        <span class="n">_pp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_last_scheduled_path_id</span>
+                        <span class="k">if</span> <span class="n">_pp</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                            <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">_last_path_id</span> <span class="o">=</span> <span class="n">_pp</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_active_sync_thread</span> <span class="o">=</span> <span class="n">thread_id</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_next_thread_after_sync</span> <span class="o">=</span> <span class="n">next_thread</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="n">thread_id</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                        <span class="k">return</span> <span class="kc">True</span>
+
+                    <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">wait</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">deadlock_timeout</span><span class="p">):</span>
+                        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">:</span>
+                            <span class="n">next_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_schedule_next</span><span class="p">()</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="n">next_thread</span>
+                            <span class="k">if</span> <span class="n">next_thread</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                                <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="o">=</span> <span class="kc">True</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                            <span class="k">continue</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_error</span> <span class="o">=</span> <span class="ne">TimeoutError</span><span class="p">(</span>
+                            <span class="sa">f</span><span class="s2">&quot;DPOR sync deadlock: waiting for thread </span><span class="si">{</span><span class="n">thread_id</span><span class="si">}</span><span class="s2">, current is </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span><span class="si">}</span><span class="s2">&quot;</span>
+                        <span class="p">)</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                        <span class="k">return</span> <span class="kc">False</span>
+            <span class="k">finally</span><span class="p">:</span>
+                <span class="n">_scheduler_tls</span><span class="o">.</span><span class="n">_in_dpor_machinery</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">after_sync_retry</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="p">:</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_active_sync_thread</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_active_sync_thread</span> <span class="o">=</span> <span class="kc">None</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_next_thread_after_sync</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_next_thread_after_sync</span> <span class="o">=</span> <span class="kc">None</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">num_threads</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="o">=</span> <span class="kc">True</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+
     <span class="k">def</span><span class="w"> </span><span class="nf">_all_other_live_threads_blocked_by_current</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
         <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._deadlock</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_wait_for_graph</span>
 
@@ -687,6 +779,51 @@
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_report_and_wait</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">)</span>
 
+    <span class="k">def</span><span class="w"> </span><span class="nf">_flush_pending_io_for_unlocked</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">flush_thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">allow_inside_lock</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">pending_io</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">flush_thread_id</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">pending_io</span><span class="p">:</span>
+            <span class="k">return</span>
+        <span class="n">inside_lock</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">flush_thread_id</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">allow_inside_lock</span> <span class="ow">and</span> <span class="n">inside_lock</span><span class="p">:</span>
+            <span class="c1"># Even though we defer most events, synced events</span>
+            <span class="c1"># (Python-level Redis/SQL) can be flushed now — they use</span>
+            <span class="c1"># dpor_vv which respects lock HB, so recording them at</span>
+            <span class="c1"># the in-lock path_id is correct and avoids position</span>
+            <span class="c1"># misattribution from deferred flushing.</span>
+            <span class="n">engine</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">engine</span>
+            <span class="n">execution</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">execution</span>
+            <span class="n">remaining</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">,</span> <span class="nb">bool</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
+            <span class="k">for</span> <span class="n">obj_key</span><span class="p">,</span> <span class="n">io_kind</span><span class="p">,</span> <span class="n">synced</span> <span class="ow">in</span> <span class="n">pending_io</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">synced</span><span class="p">:</span>
+                    <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine_lock</span><span class="p">:</span>
+                        <span class="n">engine</span><span class="o">.</span><span class="n">report_synced_io_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">flush_thread_id</span><span class="p">,</span> <span class="n">obj_key</span><span class="p">,</span> <span class="n">io_kind</span><span class="p">)</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="n">remaining</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">obj_key</span><span class="p">,</span> <span class="n">io_kind</span><span class="p">,</span> <span class="n">synced</span><span class="p">))</span>
+            <span class="n">pending_io</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+            <span class="n">pending_io</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">remaining</span><span class="p">)</span>
+            <span class="k">return</span>
+        <span class="n">engine</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">engine</span>
+        <span class="n">execution</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">execution</span>
+        <span class="k">for</span> <span class="n">obj_key</span><span class="p">,</span> <span class="n">io_kind</span><span class="p">,</span> <span class="n">synced</span> <span class="ow">in</span> <span class="n">pending_io</span><span class="p">:</span>
+            <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine_lock</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">synced</span><span class="p">:</span>
+                    <span class="n">engine</span><span class="o">.</span><span class="n">report_synced_io_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">flush_thread_id</span><span class="p">,</span> <span class="n">obj_key</span><span class="p">,</span> <span class="n">io_kind</span><span class="p">)</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="n">engine</span><span class="o">.</span><span class="n">report_io_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">flush_thread_id</span><span class="p">,</span> <span class="n">obj_key</span><span class="p">,</span> <span class="n">io_kind</span><span class="p">)</span>
+        <span class="n">pending_io</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_flush_other_pending_io_for_current_io_unlocked</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">current_pending</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">current_pending</span><span class="p">:</span>
+            <span class="k">return</span>
+        <span class="k">for</span> <span class="n">other_thread_id</span><span class="p">,</span> <span class="n">pending_io</span> <span class="ow">in</span> <span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="o">.</span><span class="n">items</span><span class="p">()):</span>
+            <span class="k">if</span> <span class="n">other_thread_id</span> <span class="o">==</span> <span class="n">thread_id</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">pending_io</span><span class="p">:</span>
+                <span class="k">continue</span>
+            <span class="c1"># Another thread reached a real I/O boundary, so any</span>
+            <span class="c1"># deferred I/O from this thread is now part of a real</span>
+            <span class="c1"># race window and must become visible to the engine.</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_flush_pending_io_for_unlocked</span><span class="p">(</span><span class="n">other_thread_id</span><span class="p">,</span> <span class="n">allow_inside_lock</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
     <span class="k">def</span><span class="w"> </span><span class="nf">_report_and_wait</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">frame</span><span class="p">:</span> <span class="n">Any</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
         <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._cooperative</span><span class="w"> </span><span class="kn">import</span> <span class="n">_scheduler_tls</span>
 
@@ -696,39 +833,25 @@
             <span class="c1"># See defect #7.</span>
             <span class="n">_scheduler_tls</span><span class="o">.</span><span class="n">_in_dpor_machinery</span> <span class="o">=</span> <span class="kc">True</span>
             <span class="k">try</span><span class="p">:</span>
-
-                <span class="k">def</span><span class="w"> </span><span class="nf">_flush_pending_io_for</span><span class="p">(</span><span class="n">flush_thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">allow_inside_lock</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-                    <span class="n">pending_io</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">flush_thread_id</span><span class="p">)</span>
-                    <span class="k">if</span> <span class="ow">not</span> <span class="n">pending_io</span><span class="p">:</span>
-                        <span class="k">return</span>
-                    <span class="k">if</span> <span class="ow">not</span> <span class="n">allow_inside_lock</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">flush_thread_id</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
-                        <span class="k">return</span>
-                    <span class="n">engine</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">engine</span>
-                    <span class="n">execution</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">execution</span>
-                    <span class="k">for</span> <span class="n">obj_key</span><span class="p">,</span> <span class="n">io_kind</span> <span class="ow">in</span> <span class="n">pending_io</span><span class="p">:</span>
-                        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_engine_lock</span><span class="p">:</span>
-                            <span class="n">engine</span><span class="o">.</span><span class="n">report_io_access</span><span class="p">(</span><span class="n">execution</span><span class="p">,</span> <span class="n">flush_thread_id</span><span class="p">,</span> <span class="n">obj_key</span><span class="p">,</span> <span class="n">io_kind</span><span class="p">)</span>
-                    <span class="n">pending_io</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
-
-                <span class="k">def</span><span class="w"> </span><span class="nf">_flush_other_pending_io_for_current_io</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-                    <span class="n">current_pending</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
-                    <span class="k">if</span> <span class="ow">not</span> <span class="n">current_pending</span><span class="p">:</span>
-                        <span class="k">return</span>
-                    <span class="k">for</span> <span class="n">other_thread_id</span><span class="p">,</span> <span class="n">pending_io</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
-                        <span class="k">if</span> <span class="n">other_thread_id</span> <span class="o">==</span> <span class="n">thread_id</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">pending_io</span><span class="p">:</span>
-                            <span class="k">continue</span>
-                        <span class="c1"># Another thread reached a real I/O boundary, so any</span>
-                        <span class="c1"># deferred I/O from this thread is now part of a real</span>
-                        <span class="c1"># race window and must become visible to the engine.</span>
-                        <span class="n">_flush_pending_io_for</span><span class="p">(</span><span class="n">other_thread_id</span><span class="p">,</span> <span class="n">allow_inside_lock</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-
                 <span class="c1"># Merge LD_PRELOAD I/O events (C-level send/recv from e.g.</span>
                 <span class="c1"># psycopg2) into the thread&#39;s pending_io list.  The preload</span>
                 <span class="c1"># bridge buffers events from the pipe reader thread, keyed by</span>
                 <span class="c1"># DPOR thread ID.</span>
-                <span class="n">_pending_io</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;pending_io&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                <span class="n">_pending_io</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">,</span> <span class="nb">bool</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;pending_io&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
                 <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_preload_bridge</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
                     <span class="n">_preload_events</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_preload_bridge</span><span class="o">.</span><span class="n">drain</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+                    <span class="c1"># Drop events for known SQL/Redis endpoints that raced past</span>
+                    <span class="c1"># the listener() check due to async pipe delivery.</span>
+                    <span class="c1"># Also drop socket events from permanently-suppressed SQL</span>
+                    <span class="c1"># threads (belt-and-suspenders for connect-time race).</span>
+                    <span class="n">_is_sql_tid</span> <span class="o">=</span> <span class="n">is_tid_suppressed</span><span class="p">(</span><span class="n">threading</span><span class="o">.</span><span class="n">get_native_id</span><span class="p">())</span>
+                    <span class="k">if</span> <span class="n">_preload_events</span><span class="p">:</span>
+                        <span class="n">_preload_events</span> <span class="o">=</span> <span class="p">[</span>
+                            <span class="n">ev</span>
+                            <span class="k">for</span> <span class="n">ev</span> <span class="ow">in</span> <span class="n">_preload_events</span>
+                            <span class="k">if</span> <span class="ow">not</span> <span class="n">is_sql_endpoint_suppressed</span><span class="p">(</span><span class="n">ev</span><span class="p">[</span><span class="mi">2</span><span class="p">])</span>
+                            <span class="ow">and</span> <span class="ow">not</span> <span class="p">(</span><span class="n">_is_sql_tid</span> <span class="ow">and</span> <span class="n">ev</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;socket:&quot;</span><span class="p">))</span>
+                        <span class="p">]</span>
                     <span class="k">if</span> <span class="n">_preload_events</span><span class="p">:</span>
                         <span class="c1"># Record into trace for human-readable output.  These events</span>
                         <span class="c1"># come from C extensions (e.g. libpq) with no Python frame.</span>
@@ -742,8 +865,11 @@
                                     <span class="n">call_chain</span><span class="o">=</span><span class="n">_call_chain</span><span class="p">,</span>
                                     <span class="n">detail</span><span class="o">=</span><span class="n">_detail</span><span class="p">,</span>
                                 <span class="p">)</span>
-                        <span class="c1"># Convert 3-tuples to 2-tuples for the pending list</span>
-                        <span class="n">_io_pairs</span> <span class="o">=</span> <span class="p">[(</span><span class="n">_key</span><span class="p">,</span> <span class="n">_kind</span><span class="p">)</span> <span class="k">for</span> <span class="n">_key</span><span class="p">,</span> <span class="n">_kind</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="ow">in</span> <span class="n">_preload_events</span><span class="p">]</span>
+                        <span class="c1"># LD_PRELOAD events inside a Python lock should respect lock HB</span>
+                        <span class="c1"># (synced=True uses dpor_vv).  Events outside locks use io_vv</span>
+                        <span class="c1"># for TOCTOU detection.</span>
+                        <span class="n">_inside_lock</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">thread_id</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span>
+                        <span class="n">_io_pairs</span> <span class="o">=</span> <span class="p">[(</span><span class="n">_key</span><span class="p">,</span> <span class="n">_kind</span><span class="p">,</span> <span class="n">_inside_lock</span><span class="p">)</span> <span class="k">for</span> <span class="n">_key</span><span class="p">,</span> <span class="n">_kind</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="ow">in</span> <span class="n">_preload_events</span><span class="p">]</span>
                         <span class="k">if</span> <span class="n">_pending_io</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
                             <span class="n">_pending_io</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">_io_pairs</span><span class="p">)</span>
                         <span class="k">else</span><span class="p">:</span>
@@ -767,14 +893,18 @@
                             <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">thread_id</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span>
                             <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_all_other_live_threads_blocked_by_current</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
                         <span class="p">):</span>
+                            <span class="c1"># Flush synced IO events even when skipping the</span>
+                            <span class="c1"># scheduling point — they use dpor_vv and should</span>
+                            <span class="c1"># be recorded at the correct in-lock position.</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_flush_pending_io_for_unlocked</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
                             <span class="k">return</span> <span class="kc">True</span>
-                        <span class="n">_flush_other_pending_io_for_current_io</span><span class="p">()</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_flush_other_pending_io_for_current_io_unlocked</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
                         <span class="c1"># Flush deferred I/O only once this thread actually owns</span>
                         <span class="c1"># the current DPOR step. On free-threaded Python a thread</span>
                         <span class="c1"># can reach report_and_wait while another thread still owns</span>
                         <span class="c1"># the step; flushing earlier stamps the access onto the</span>
                         <span class="c1"># wrong path_id and can hide the wakeup tree insertion point.</span>
-                        <span class="n">_flush_pending_io_for</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_flush_pending_io_for_unlocked</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
                         <span class="c1"># Process opcode accesses only when it&#39;s our turn.</span>
                         <span class="c1"># Deferring this until the thread is scheduled ensures</span>
                         <span class="c1"># that accesses are recorded at the correct path_id</span>
@@ -842,6 +972,84 @@
                         <span class="k">return</span> <span class="kc">False</span>
             <span class="k">finally</span><span class="p">:</span>
                 <span class="n">_scheduler_tls</span><span class="o">.</span><span class="n">_in_dpor_machinery</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">before_io</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">resource_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Enter an explicit Python-level I/O boundary.</span>
+
+<span class="sd">        Unlike wait_for_turn(), this does not release the scheduler turn</span>
+<span class="sd">        immediately. The current thread keeps running until after_io()</span>
+<span class="sd">        records completion and hands off to the precomputed next thread.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._cooperative</span><span class="w"> </span><span class="kn">import</span> <span class="n">_scheduler_tls</span>
+
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="p">:</span>
+            <span class="n">_scheduler_tls</span><span class="o">.</span><span class="n">_in_dpor_machinery</span> <span class="o">=</span> <span class="kc">True</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error</span><span class="p">:</span>
+                        <span class="k">return</span>
+
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_active_io_thread</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_active_io_thread</span> <span class="o">!=</span> <span class="n">thread_id</span><span class="p">:</span>
+                        <span class="k">pass</span>
+                    <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">:</span>
+                        <span class="n">current_pending</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+                        <span class="k">if</span> <span class="p">(</span>
+                            <span class="n">current_pending</span>
+                            <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">thread_id</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span>
+                            <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_all_other_live_threads_blocked_by_current</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+                        <span class="p">):</span>
+                            <span class="c1"># Keep ownership of the turn and avoid forcing a</span>
+                            <span class="c1"># preemption inside a lock-held deadlock-avoidance path.</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_flush_pending_io_for_unlocked</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_active_io_thread</span> <span class="o">=</span> <span class="n">thread_id</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_next_thread_after_io</span> <span class="o">=</span> <span class="n">thread_id</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                            <span class="k">return</span>
+
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_flush_other_pending_io_for_current_io_unlocked</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_flush_pending_io_for_unlocked</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+                        <span class="n">next_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_schedule_next</span><span class="p">()</span>
+                        <span class="n">_pp</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_last_scheduled_path_id</span>
+                        <span class="k">if</span> <span class="n">_pp</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                            <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">_last_path_id</span> <span class="o">=</span> <span class="n">_pp</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_active_io_thread</span> <span class="o">=</span> <span class="n">thread_id</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_next_thread_after_io</span> <span class="o">=</span> <span class="n">next_thread</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="n">thread_id</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                        <span class="k">return</span>
+
+                    <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">wait</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">deadlock_timeout</span><span class="p">):</span>
+                        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">:</span>
+                            <span class="n">next_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_schedule_next</span><span class="p">()</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="n">next_thread</span>
+                            <span class="k">if</span> <span class="n">next_thread</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                                <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="o">=</span> <span class="kc">True</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                            <span class="k">continue</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_error</span> <span class="o">=</span> <span class="ne">TimeoutError</span><span class="p">(</span>
+                            <span class="sa">f</span><span class="s2">&quot;DPOR I/O deadlock before </span><span class="si">{</span><span class="n">resource_id</span><span class="si">}</span><span class="s2">: waiting for thread </span><span class="si">{</span><span class="n">thread_id</span><span class="si">}</span><span class="s2">, &quot;</span>
+                            <span class="sa">f</span><span class="s2">&quot;current is </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span><span class="si">}</span><span class="s2">&quot;</span>
+                        <span class="p">)</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                        <span class="k">return</span>
+            <span class="k">finally</span><span class="p">:</span>
+                <span class="n">_scheduler_tls</span><span class="o">.</span><span class="n">_in_dpor_machinery</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">after_io</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">resource_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Called immediately after an IO command completes.</span>
+
+<span class="sd">        During exploration, records the IO event and releases the turn to</span>
+<span class="sd">        the next thread chosen at before_io().</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_io_trace</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">thread_id</span><span class="p">,</span> <span class="n">resource_id</span><span class="p">))</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_active_io_thread</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_active_io_thread</span> <span class="o">=</span> <span class="kc">None</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_next_thread_after_io</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_next_thread_after_io</span> <span class="o">=</span> <span class="kc">None</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">num_threads</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="o">=</span> <span class="kc">True</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">mark_done</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="p">:</span>
@@ -1071,6 +1279,13 @@
                 <span class="bp">self</span><span class="o">.</span><span class="n">_thread_row_locks</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="n">thread_id</span><span class="p">,</span> <span class="nb">set</span><span class="p">())</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">res_id</span><span class="p">)</span>
                 <span class="k">if</span> <span class="n">graph</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
                     <span class="n">graph</span><span class="o">.</span><span class="n">add_holding</span><span class="p">(</span><span class="n">thread_id</span><span class="p">,</span> <span class="n">lock_int_id</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;row_lock&quot;</span><span class="p">)</span>
+                <span class="c1"># Report row-lock acquire to the DPOR engine so vector clocks</span>
+                <span class="c1"># reflect the serialization from database row locking.</span>
+                <span class="n">_elock</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;_engine_lock&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                <span class="k">if</span> <span class="n">_elock</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="n">_saved_path_id</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;_last_path_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                    <span class="k">with</span> <span class="n">_elock</span><span class="p">:</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="s2">&quot;lock_acquire&quot;</span><span class="p">,</span> <span class="n">lock_int_id</span><span class="p">,</span> <span class="n">_saved_path_id</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_release_row_locks_unlocked</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Remove row locks for *thread_id*. Caller must hold ``self._condition``.&quot;&quot;&quot;</span>
@@ -1082,10 +1297,16 @@
         <span class="n">graph</span> <span class="o">=</span> <span class="n">get_wait_for_graph</span><span class="p">()</span>
         <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">held</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_active_row_locks</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">r</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-            <span class="k">if</span> <span class="n">graph</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-                <span class="n">lid</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_row_lock_ids</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">r</span><span class="p">)</span>
-                <span class="k">if</span> <span class="n">lid</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-                    <span class="n">graph</span><span class="o">.</span><span class="n">remove_holding</span><span class="p">(</span><span class="n">thread_id</span><span class="p">,</span> <span class="n">lid</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;row_lock&quot;</span><span class="p">)</span>
+            <span class="n">lid</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_row_lock_ids</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">r</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">graph</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">lid</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">graph</span><span class="o">.</span><span class="n">remove_holding</span><span class="p">(</span><span class="n">thread_id</span><span class="p">,</span> <span class="n">lid</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;row_lock&quot;</span><span class="p">)</span>
+            <span class="c1"># Report row-lock release to the DPOR engine so vector clocks</span>
+            <span class="c1"># reflect the serialization from database row locking.</span>
+            <span class="n">_elock</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;_engine_lock&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">lid</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">_elock</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="n">_saved_path_id</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;_last_path_id&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+                <span class="k">with</span> <span class="n">_elock</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">engine</span><span class="o">.</span><span class="n">report_sync</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="s2">&quot;lock_release&quot;</span><span class="p">,</span> <span class="n">lid</span><span class="p">,</span> <span class="n">_saved_path_id</span><span class="p">)</span>
         <span class="k">return</span> <span class="kc">True</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">release_row_locks</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
@@ -1107,9 +1328,15 @@
     <span class="k">def</span><span class="w"> </span><span class="nf">report_io_access</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">execution</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">object_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">kind</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">return</span> <span class="kc">None</span>
 
+    <span class="k">def</span><span class="w"> </span><span class="nf">report_synced_io_access</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">execution</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">object_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">kind</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">None</span>
+
     <span class="k">def</span><span class="w"> </span><span class="nf">report_sync</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span> <span class="n">execution</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">event_type</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">sync_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">path_id</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
     <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">None</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">register_resource_group</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">object_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">group_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
         <span class="k">return</span> <span class="kc">None</span>
 
 
@@ -1174,6 +1401,13 @@
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_wait_for_turn</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">report_and_wait</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">frame</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="c1"># Process the opcode to keep the shadow stack in sync with</span>
+        <span class="c1"># exploration.  Without this, _call_might_report_access sees an</span>
+        <span class="c1"># empty shadow stack during replay and skips CALL scheduling</span>
+        <span class="c1"># points that existed during exploration, desynchronising the</span>
+        <span class="c1"># schedule and preventing reproduction.</span>
+        <span class="k">if</span> <span class="n">frame</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">_process_opcode</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span> <span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">)</span>
         <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_wait_for_turn</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">_wait_for_turn</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
@@ -1210,6 +1444,184 @@
                     <span class="k">return</span> <span class="kc">False</span>
 
 
+<span class="k">class</span><span class="w"> </span><span class="nc">_IOAnchoredReplayScheduler</span><span class="p">(</span><span class="n">DporScheduler</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Replay using only IO boundaries as schedule anchors (defect #16).</span>
+
+<span class="sd">    When detect_io=True, every CALL opcode is a scheduling point. If the code</span>
+<span class="sd">    under test has state-dependent paths (e.g., early returns that skip Redis</span>
+<span class="sd">    operations), the number of opcode-level scheduling points can change</span>
+<span class="sd">    between exploration and replay, desynchronising the schedule.</span>
+
+<span class="sd">    This scheduler uses a two-phase IO protocol:</span>
+
+<span class="sd">    1. ``before_io(tid, resource_id)`` checks the next recorded anchor and</span>
+<span class="sd">       blocks if it&#39;s not this thread&#39;s turn.</span>
+
+<span class="sd">    2. ``after_io(tid, resource_id)`` (post-IO hook): called from the Redis</span>
+<span class="sd">       interception layer *after* the command completes, inside the</span>
+<span class="sd">       scheduler&#39;s condition lock.  Atomically records the IO event and</span>
+<span class="sd">       switches ``current_thread`` to the next IO schedule entry.</span>
+
+<span class="sd">    Between IO boundaries, one thread runs exclusively (enforced by opcode-</span>
+<span class="sd">    level ``report_and_wait(frame, tid)`` blocking on ``current_thread``).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">io_schedule</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">]],</span>
+        <span class="n">num_threads</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">deadlock_timeout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">5.0</span><span class="p">,</span>
+        <span class="n">trace_recorder</span><span class="p">:</span> <span class="n">TraceRecorder</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">detect_io</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io_schedule</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">io_schedule</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io_index</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span>
+            <span class="n">_ReplayEngine</span><span class="p">(),</span>  <span class="c1"># type: ignore[arg-type]</span>
+            <span class="n">_ReplayExecution</span><span class="p">(),</span>  <span class="c1"># type: ignore[arg-type]</span>
+            <span class="n">num_threads</span><span class="p">,</span>
+            <span class="n">deadlock_timeout</span><span class="o">=</span><span class="n">deadlock_timeout</span><span class="p">,</span>
+            <span class="n">trace_recorder</span><span class="o">=</span><span class="n">trace_recorder</span><span class="p">,</span>
+            <span class="n">detect_io</span><span class="o">=</span><span class="n">detect_io</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="c1"># _schedule_next() in super().__init__ consumed an entry.</span>
+        <span class="c1"># Reset so the first IO scheduling point matches entry 0.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io_index</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="c1"># Set initial current_thread to the first IO schedule entry.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="n">io_schedule</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="n">io_schedule</span> <span class="k">else</span> <span class="mi">0</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_schedule_next</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Override to use IO schedule instead of DPOR engine.&quot;&quot;&quot;</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io_index</span> <span class="o">&gt;=</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_io_schedule</span><span class="p">):</span>
+            <span class="n">active</span> <span class="o">=</span> <span class="p">[</span><span class="n">t</span> <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">num_threads</span><span class="p">)</span> <span class="k">if</span> <span class="n">t</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">]</span>
+            <span class="k">return</span> <span class="n">active</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="k">if</span> <span class="n">active</span> <span class="k">else</span> <span class="kc">None</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io_schedule</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_io_index</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">wait_for_turn</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_wait_for_turn</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">report_and_wait</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">frame</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">frame</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">_process_opcode</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span> <span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_wait_for_turn</span><span class="p">(</span><span class="n">thread_id</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">before_io</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">resource_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._cooperative</span><span class="w"> </span><span class="kn">import</span> <span class="n">_scheduler_tls</span>
+
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="p">:</span>
+            <span class="n">_scheduler_tls</span><span class="o">.</span><span class="n">_in_dpor_machinery</span> <span class="o">=</span> <span class="kc">True</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error</span><span class="p">:</span>
+                        <span class="k">return</span>
+
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">:</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_schedule_next</span><span class="p">()</span>
+                        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">num_threads</span><span class="p">:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="o">=</span> <span class="kc">True</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                            <span class="k">return</span>
+
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_active_io_thread</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_active_io_thread</span> <span class="o">!=</span> <span class="n">thread_id</span><span class="p">:</span>
+                        <span class="k">pass</span>
+                    <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">:</span>
+                        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io_index</span> <span class="o">&gt;=</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_io_schedule</span><span class="p">):</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_error</span> <span class="o">=</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                                <span class="s2">&quot;DPOR IO-anchored replay desynchronised: &quot;</span>
+                                <span class="sa">f</span><span class="s2">&quot;unexpected extra I/O anchor </span><span class="si">{</span><span class="p">(</span><span class="n">thread_id</span><span class="p">,</span><span class="w"> </span><span class="n">resource_id</span><span class="p">)</span><span class="si">!r}</span><span class="s2">&quot;</span>
+                            <span class="p">)</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                            <span class="k">return</span>
+
+                        <span class="n">expected_tid</span><span class="p">,</span> <span class="n">expected_resource_id</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io_schedule</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_io_index</span><span class="p">]</span>
+                        <span class="k">if</span> <span class="n">expected_tid</span> <span class="o">!=</span> <span class="n">thread_id</span> <span class="ow">or</span> <span class="n">expected_resource_id</span> <span class="o">!=</span> <span class="n">resource_id</span><span class="p">:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_error</span> <span class="o">=</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                                <span class="s2">&quot;DPOR IO-anchored replay desynchronised: &quot;</span>
+                                <span class="sa">f</span><span class="s2">&quot;expected </span><span class="si">{</span><span class="p">(</span><span class="n">expected_tid</span><span class="p">,</span><span class="w"> </span><span class="n">expected_resource_id</span><span class="p">)</span><span class="si">!r}</span><span class="s2">, &quot;</span>
+                                <span class="sa">f</span><span class="s2">&quot;got </span><span class="si">{</span><span class="p">(</span><span class="n">thread_id</span><span class="p">,</span><span class="w"> </span><span class="n">resource_id</span><span class="p">)</span><span class="si">!r}</span><span class="s2">&quot;</span>
+                            <span class="p">)</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                            <span class="k">return</span>
+
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_io_index</span> <span class="o">+=</span> <span class="mi">1</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_active_io_thread</span> <span class="o">=</span> <span class="n">thread_id</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_next_thread_after_io</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_schedule_next</span><span class="p">()</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="n">thread_id</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                        <span class="k">return</span>
+
+                    <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">wait</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">deadlock_timeout</span><span class="p">):</span>
+                        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_schedule_next</span><span class="p">()</span>
+                            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">num_threads</span><span class="p">:</span>
+                                <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="o">=</span> <span class="kc">True</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                            <span class="k">continue</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_error</span> <span class="o">=</span> <span class="ne">TimeoutError</span><span class="p">(</span>
+                            <span class="sa">f</span><span class="s2">&quot;DPOR IO-anchored replay deadlock before </span><span class="si">{</span><span class="n">resource_id</span><span class="si">}</span><span class="s2">: &quot;</span>
+                            <span class="sa">f</span><span class="s2">&quot;waiting for thread </span><span class="si">{</span><span class="n">thread_id</span><span class="si">}</span><span class="s2">, current is </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span><span class="si">}</span><span class="s2">, &quot;</span>
+                            <span class="sa">f</span><span class="s2">&quot;io_index=</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_io_index</span><span class="si">}</span><span class="s2">&quot;</span>
+                        <span class="p">)</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                        <span class="k">return</span>
+            <span class="k">finally</span><span class="p">:</span>
+                <span class="n">_scheduler_tls</span><span class="o">.</span><span class="n">_in_dpor_machinery</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">after_io</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">resource_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._cooperative</span><span class="w"> </span><span class="kn">import</span> <span class="n">_scheduler_tls</span>
+
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="p">:</span>
+            <span class="n">_scheduler_tls</span><span class="o">.</span><span class="n">_in_dpor_machinery</span> <span class="o">=</span> <span class="kc">True</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error</span><span class="p">:</span>
+                    <span class="k">return</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_active_io_thread</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_active_io_thread</span> <span class="o">=</span> <span class="kc">None</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_next_thread_after_io</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_next_thread_after_io</span> <span class="o">=</span> <span class="kc">None</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">num_threads</span><span class="p">:</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="o">=</span> <span class="kc">True</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+            <span class="k">finally</span><span class="p">:</span>
+                <span class="n">_scheduler_tls</span><span class="o">.</span><span class="n">_in_dpor_machinery</span> <span class="o">=</span> <span class="kc">False</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_wait_for_turn</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="p">:</span>
+            <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_error</span><span class="p">:</span>
+                    <span class="k">return</span> <span class="kc">False</span>
+
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_schedule_next</span><span class="p">()</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">num_threads</span><span class="p">:</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="o">=</span> <span class="kc">True</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                        <span class="k">return</span> <span class="kc">False</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                    <span class="k">continue</span>
+
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_active_io_thread</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">:</span>
+                    <span class="k">return</span> <span class="kc">True</span>
+
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">:</span>
+                    <span class="k">return</span> <span class="kc">True</span>
+
+                <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">wait</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">deadlock_timeout</span><span class="p">):</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">:</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_schedule_next</span><span class="p">()</span>
+                        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_threads_done</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">num_threads</span><span class="p">:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_finished</span> <span class="o">=</span> <span class="kc">True</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                        <span class="k">continue</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_error</span> <span class="o">=</span> <span class="ne">TimeoutError</span><span class="p">(</span>
+                        <span class="sa">f</span><span class="s2">&quot;DPOR IO-anchored replay deadlock: waiting for thread </span><span class="si">{</span><span class="n">thread_id</span><span class="si">}</span><span class="s2">, &quot;</span>
+                        <span class="sa">f</span><span class="s2">&quot;current is </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_current_thread</span><span class="si">}</span><span class="s2">, io_index=</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_io_index</span><span class="si">}</span><span class="s2">&quot;</span>
+                    <span class="p">)</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
+                    <span class="k">return</span> <span class="kc">False</span>
+
+
 <span class="c1"># ---------------------------------------------------------------------------</span>
 <span class="c1"># Opcode trace callback with shadow stack access detection</span>
 <span class="c1"># ---------------------------------------------------------------------------</span>
@@ -1231,6 +1643,82 @@
 <span class="n">_METHOD_WRAPPER_TYPE</span> <span class="o">=</span> <span class="nb">type</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="o">.</span><span class="fm">__str__</span><span class="p">)</span>  <span class="c1"># method-wrapper</span>
 
 <span class="n">_IMMUTABLE_TYPES</span> <span class="o">=</span> <span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="nb">bytes</span><span class="p">,</span> <span class="nb">int</span><span class="p">,</span> <span class="nb">float</span><span class="p">,</span> <span class="nb">bool</span><span class="p">,</span> <span class="nb">complex</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">,</span> <span class="nb">frozenset</span><span class="p">,</span> <span class="nb">type</span><span class="p">(</span><span class="kc">None</span><span class="p">),</span> <span class="n">types</span><span class="o">.</span><span class="n">ModuleType</span><span class="p">)</span>
+
+<span class="c1"># File-backed I/O types whose conflicts are tracked by the I/O detection layer</span>
+<span class="c1"># (LD_PRELOAD + _traced_open) keyed by file path.  DPOR skips Python-level</span>
+<span class="c1"># tracking on these because: (1) each thread typically creates its own handle,</span>
+<span class="c1"># (2) id() reuse can cause stable_id collisions between short-lived instances,</span>
+<span class="c1"># and (3) the real conflicts are captured at the file-path level.</span>
+<span class="c1">#</span>
+<span class="c1"># NOTE: StringIO and BytesIO are intentionally EXCLUDED — they are in-memory</span>
+<span class="c1"># buffers with no file path, so LD_PRELOAD never sees them.  When shared</span>
+<span class="c1"># between threads they need normal Python-level conflict tracking.</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">_io</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_io_module</span>
+
+<span class="n">_IO_WRAPPER_TYPES</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">type</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">_io_module</span><span class="o">.</span><span class="n">TextIOWrapper</span><span class="p">,</span>
+    <span class="n">_io_module</span><span class="o">.</span><span class="n">BufferedWriter</span><span class="p">,</span>
+    <span class="n">_io_module</span><span class="o">.</span><span class="n">BufferedReader</span><span class="p">,</span>
+    <span class="n">_io_module</span><span class="o">.</span><span class="n">BufferedRandom</span><span class="p">,</span>
+    <span class="n">_io_module</span><span class="o">.</span><span class="n">BufferedRWPair</span><span class="p">,</span>
+    <span class="n">_io_module</span><span class="o">.</span><span class="n">FileIO</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># Types whose real I/O conflicts are tracked by a higher-level reporter</span>
+<span class="c1"># (Redis key-level, SQL table-level).  Python-level attribute/method</span>
+<span class="c1"># tracking on these objects creates false races due to id() reuse on</span>
+<span class="c1"># short-lived per-thread instances (same issue as _IO_WRAPPER_TYPES).</span>
+<span class="c1"># Also suppress cooperative lock wrapper — its synchronization semantics</span>
+<span class="c1"># are fully captured by report_sync(); Python-level attribute writes</span>
+<span class="c1"># (_owner_thread_id) are redundant and create false wakeups.</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._cooperative</span><span class="w"> </span><span class="kn">import</span> <span class="n">CooperativeLock</span> <span class="k">as</span> <span class="n">_CooperativeLock</span>
+
+<span class="n">_io_client_types</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">type</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="c1"># socket objects: per-connection, tracked by I/O detection layer</span>
+    <span class="nb">__import__</span><span class="p">(</span><span class="s2">&quot;socket&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">socket</span><span class="p">,</span>
+    <span class="c1"># Cooperative lock: tracked by report_sync, not Python attributes</span>
+    <span class="n">_CooperativeLock</span><span class="p">,</span>
+<span class="p">]</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">redis</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_redis_module</span>  <span class="c1"># type: ignore[import-untyped]</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">redis.asyncio</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_aioredis_module</span>  <span class="c1"># type: ignore[import-untyped]</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">redis.connection</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_redis_conn_module</span>  <span class="c1"># type: ignore[import-untyped]</span>
+
+    <span class="n">_io_client_types</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span>
+        <span class="p">[</span>
+            <span class="n">_redis_module</span><span class="o">.</span><span class="n">Redis</span><span class="p">,</span>
+            <span class="n">_redis_module</span><span class="o">.</span><span class="n">StrictRedis</span><span class="p">,</span>
+            <span class="n">_aioredis_module</span><span class="o">.</span><span class="n">Redis</span><span class="p">,</span>
+            <span class="n">_redis_conn_module</span><span class="o">.</span><span class="n">ConnectionPool</span><span class="p">,</span>
+            <span class="n">_redis_conn_module</span><span class="o">.</span><span class="n">Connection</span><span class="p">,</span>
+        <span class="p">]</span>
+    <span class="p">)</span>
+<span class="k">except</span> <span class="ne">ImportError</span><span class="p">:</span>
+    <span class="k">pass</span>
+<span class="n">_db_cursor_types</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">type</span><span class="p">]</span> <span class="o">=</span> <span class="p">[</span><span class="nb">__import__</span><span class="p">(</span><span class="s2">&quot;sqlite3&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">Cursor</span><span class="p">]</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">psycopg2.extensions</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_psycopg2_ext</span>  <span class="c1"># type: ignore[import-untyped]</span>
+
+    <span class="n">_io_client_types</span><span class="o">.</span><span class="n">extend</span><span class="p">([</span><span class="n">_psycopg2_ext</span><span class="o">.</span><span class="n">connection</span><span class="p">,</span> <span class="n">_psycopg2_ext</span><span class="o">.</span><span class="n">cursor</span><span class="p">])</span>
+    <span class="n">_db_cursor_types</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">_psycopg2_ext</span><span class="o">.</span><span class="n">cursor</span><span class="p">)</span>
+<span class="k">except</span> <span class="ne">ImportError</span><span class="p">:</span>
+    <span class="k">pass</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="kn">import</span><span class="w"> </span><span class="nn">sqlalchemy.engine</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">_sa_engine</span>  <span class="c1"># type: ignore[import-untyped]</span>
+
+    <span class="n">_io_client_types</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">_sa_engine</span><span class="o">.</span><span class="n">Connection</span><span class="p">)</span>
+<span class="k">except</span> <span class="ne">ImportError</span><span class="p">:</span>
+    <span class="k">pass</span>
+<span class="n">_IO_CLIENT_TYPES</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">type</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">_io_client_types</span><span class="p">)</span>
+<span class="k">del</span> <span class="n">_io_client_types</span>
+
+<span class="c1"># DB cursor types: tracked at Python object level even though they are also</span>
+<span class="c1"># I/O client types.  Two threads sharing a single cursor is a real race</span>
+<span class="c1"># (the cursor&#39;s internal result buffer is clobbered), but the SQL-level</span>
+<span class="c1"># reporter only tracks table/row granularity and misses it.  Per-thread</span>
+<span class="c1"># cursors are different objects, so tracking them doesn&#39;t false-conflict.</span>
+<span class="n">_DB_CURSOR_TYPES</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">type</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">_db_cursor_types</span><span class="p">)</span>
+<span class="k">del</span> <span class="n">_db_cursor_types</span>
 
 <span class="c1"># C-level methods that are read-only (don&#39;t mutate the object).</span>
 <span class="n">_C_METHOD_READ_ONLY</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">(</span>
@@ -1847,7 +2335,11 @@
     <span class="k">elif</span> <span class="n">op</span> <span class="o">==</span> <span class="s2">&quot;LOAD_ATTR&quot;</span><span class="p">:</span>
         <span class="n">obj</span> <span class="o">=</span> <span class="n">shadow</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span>
         <span class="n">attr</span> <span class="o">=</span> <span class="n">instr</span><span class="o">.</span><span class="n">argval</span>
-        <span class="n">_report_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
+        <span class="c1"># Skip I/O wrapper and client types — their conflicts are tracked by</span>
+        <span class="c1"># higher-level reporters (file path, Redis key, SQL table), not by</span>
+        <span class="c1"># Python object identity.</span>
+        <span class="k">if</span> <span class="n">obj</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">obj</span><span class="p">,</span> <span class="p">(</span><span class="n">_IO_WRAPPER_TYPES</span> <span class="o">+</span> <span class="n">_IO_CLIENT_TYPES</span><span class="p">)):</span>
+            <span class="n">_report_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
         <span class="c1"># Also report on obj.__dict__ so LOAD_ATTR conflicts with</span>
         <span class="c1"># STORE_SUBSCR on the same __dict__ (cross-path detection).</span>
         <span class="c1"># Off by default: doubles wakeup tree insertions for rare benefit.</span>
@@ -1876,7 +2368,7 @@
                 <span class="c1">#</span>
                 <span class="c1"># We skip bound methods (loading .append is not a container</span>
                 <span class="c1"># read) and immutable types (no mutation possible).</span>
-                <span class="k">if</span> <span class="n">val</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">type</span><span class="p">(</span><span class="n">val</span><span class="p">)</span> <span class="ow">is</span> <span class="ow">not</span> <span class="n">_BUILTIN_METHOD_TYPE</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">val</span><span class="p">,</span> <span class="n">_IMMUTABLE_TYPES</span><span class="p">):</span>
+                <span class="k">if</span> <span class="n">val</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">type</span><span class="p">(</span><span class="n">val</span><span class="p">)</span> <span class="ow">is</span> <span class="ow">not</span> <span class="n">_BUILTIN_METHOD_TYPE</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">val</span><span class="p">,</span> <span class="p">(</span><span class="nb">list</span><span class="p">,</span> <span class="nb">dict</span><span class="p">,</span> <span class="nb">set</span><span class="p">)):</span>
                     <span class="n">_report_weak_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">val</span><span class="p">,</span> <span class="s2">&quot;__cmethods__&quot;</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
             <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
                 <span class="n">shadow</span><span class="o">.</span><span class="n">push</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
@@ -1892,7 +2384,10 @@
     <span class="k">elif</span> <span class="n">op</span> <span class="o">==</span> <span class="s2">&quot;STORE_ATTR&quot;</span><span class="p">:</span>
         <span class="n">obj</span> <span class="o">=</span> <span class="n">shadow</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span>  <span class="c1"># TOS = object</span>
         <span class="n">_val</span> <span class="o">=</span> <span class="n">shadow</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span>  <span class="c1"># TOS1 = value</span>
-        <span class="n">_report_write</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">instr</span><span class="o">.</span><span class="n">argval</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
+        <span class="c1"># Skip I/O wrapper and client types — their conflicts are tracked by</span>
+        <span class="c1"># higher-level reporters, not by Python object identity.</span>
+        <span class="k">if</span> <span class="n">obj</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">obj</span><span class="p">,</span> <span class="p">(</span><span class="n">_IO_WRAPPER_TYPES</span> <span class="o">+</span> <span class="n">_IO_CLIENT_TYPES</span><span class="p">)):</span>
+            <span class="n">_report_write</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">instr</span><span class="o">.</span><span class="n">argval</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
         <span class="c1"># Also report on obj.__dict__ so STORE_ATTR conflicts with</span>
         <span class="c1"># STORE_SUBSCR on the same __dict__ (cross-path detection).</span>
         <span class="c1"># Off by default: doubles wakeup tree insertions for rare benefit.</span>
@@ -1937,7 +2432,9 @@
         <span class="n">_arg</span> <span class="o">=</span> <span class="n">instr</span><span class="o">.</span><span class="n">arg</span> <span class="k">if</span> <span class="n">instr</span><span class="o">.</span><span class="n">arg</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="o">-</span><span class="mi">1</span>
         <span class="n">attr</span> <span class="o">=</span> <span class="n">_special_names</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">_arg</span><span class="p">,</span> <span class="sa">f</span><span class="s2">&quot;__special_</span><span class="si">{</span><span class="n">_arg</span><span class="si">}</span><span class="s2">__&quot;</span><span class="p">)</span>
         <span class="n">obj</span> <span class="o">=</span> <span class="n">shadow</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span>
-        <span class="n">_report_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
+        <span class="c1"># Skip I/O wrapper and client types (same as LOAD_ATTR).</span>
+        <span class="k">if</span> <span class="n">obj</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">obj</span><span class="p">,</span> <span class="p">(</span><span class="n">_IO_WRAPPER_TYPES</span> <span class="o">+</span> <span class="n">_IO_CLIENT_TYPES</span><span class="p">)):</span>
+            <span class="n">_report_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">obj</span><span class="p">,</span> <span class="n">attr</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
         <span class="k">if</span> <span class="n">obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">try</span><span class="p">:</span>
                 <span class="n">val</span> <span class="o">=</span> <span class="n">_safe_getattr</span><span class="p">(</span><span class="n">obj</span><span class="p">,</span> <span class="n">attr</span><span class="p">)</span>
@@ -2141,7 +2638,7 @@
             <span class="c1"># see the __iter_source__ marker.  The read here ensures the</span>
             <span class="c1"># conflict with STORE_SUBSCR weak-writes is recorded in the</span>
             <span class="c1"># current frame before the iterator crosses frame boundaries.</span>
-            <span class="n">_report_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">iterable</span><span class="p">,</span> <span class="s2">&quot;__cmethods__&quot;</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
+            <span class="n">_report_first_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">iterable</span><span class="p">,</span> <span class="s2">&quot;__cmethods__&quot;</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="n">shadow</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span>
             <span class="n">shadow</span><span class="o">.</span><span class="n">push</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
@@ -2160,13 +2657,14 @@
                 <span class="c1"># Per-element read using the iteration counter as the key.</span>
                 <span class="c1"># For lists, counter 0, 1, 2... matches STORE_SUBSCR keys &quot;0&quot;, &quot;1&quot;, &quot;2&quot;...</span>
                 <span class="c1"># This creates per-element conflicts enabling fine-grained interleaving.</span>
-                <span class="n">_report_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">_iter_container</span><span class="p">,</span> <span class="nb">repr</span><span class="p">(</span><span class="n">_iter_counter</span><span class="p">),</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
+                <span class="n">_report_first_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">_iter_container</span><span class="p">,</span> <span class="nb">repr</span><span class="p">(</span><span class="n">_iter_counter</span><span class="p">),</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
                 <span class="c1"># Coarse-grained read for conflict with C-method writes (append,</span>
-                <span class="c1"># insert, etc.) and other container-level operations.  Uses regular</span>
-                <span class="c1"># (last-access) semantics: each iteration overwrites the previous read</span>
-                <span class="c1"># position.  This means wakeup tree entries target the LAST iteration, which</span>
-                <span class="c1"># allows the other thread to interleave after some elements have</span>
-                <span class="c1"># already been read — catching mid-iteration mutation races.</span>
+                <span class="c1"># insert, etc.) and other container-level operations.  Uses last-access</span>
+                <span class="c1"># (regular) semantics: each iteration overwrites the previous read</span>
+                <span class="c1"># position.  This means wakeup tree entries target the LAST iteration,</span>
+                <span class="c1"># which allows the other thread to interleave after some elements have</span>
+                <span class="c1"># already been read — catching mid-iteration mutation races (e.g.</span>
+                <span class="c1"># enumerate + insert).</span>
                 <span class="n">_report_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">_iter_container</span><span class="p">,</span> <span class="s2">&quot;__cmethods__&quot;</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
             <span class="c1"># Increment counter for next iteration (mutable list, in-place update).</span>
             <span class="n">top</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="n">_iter_counter</span> <span class="o">+</span> <span class="mi">1</span>
@@ -2245,6 +2743,16 @@
             <span class="k">if</span> <span class="n">item_type</span> <span class="ow">is</span> <span class="n">_BUILTIN_METHOD_TYPE</span> <span class="ow">or</span> <span class="n">item_type</span> <span class="ow">is</span> <span class="n">_METHOD_WRAPPER_TYPE</span><span class="p">:</span>
                 <span class="n">self_obj</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="s2">&quot;__self__&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
                 <span class="k">if</span> <span class="n">self_obj</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">self_obj</span><span class="p">,</span> <span class="n">_IMMUTABLE_TYPES</span><span class="p">):</span>
+                    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">self_obj</span><span class="p">,</span> <span class="p">(</span><span class="n">_IO_WRAPPER_TYPES</span> <span class="o">+</span> <span class="n">_IO_CLIENT_TYPES</span><span class="p">)):</span>
+                        <span class="c1"># I/O wrapper and client methods are tracked via</span>
+                        <span class="c1"># higher-level reporters; skip __cmethods__ to avoid</span>
+                        <span class="c1"># false races from id() reuse on short-lived objects.</span>
+                        <span class="c1"># Exception: DB cursor types — two threads sharing a</span>
+                        <span class="c1"># single cursor constitutes a real conflict that the</span>
+                        <span class="c1"># SQL-level reporter (table/row granularity) misses.</span>
+                        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">self_obj</span><span class="p">,</span> <span class="n">_DB_CURSOR_TYPES</span><span class="p">):</span>
+                            <span class="n">_call_handled</span> <span class="o">=</span> <span class="kc">True</span>
+                            <span class="k">break</span>
                     <span class="n">method_name</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="s2">&quot;__name__&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
                     <span class="k">if</span> <span class="n">method_name</span> <span class="ow">in</span> <span class="n">_C_METHOD_READ_ONLY</span><span class="p">:</span>
                         <span class="n">_report_read</span><span class="p">(</span><span class="n">engine</span><span class="p">,</span> <span class="n">execution</span><span class="p">,</span> <span class="n">thread_id</span><span class="p">,</span> <span class="n">self_obj</span><span class="p">,</span> <span class="s2">&quot;__cmethods__&quot;</span><span class="p">,</span> <span class="n">elock</span><span class="p">,</span> <span class="n">sids</span><span class="p">)</span>
@@ -2659,6 +3167,19 @@
             <span class="k">if</span> <span class="n">rel_key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">rmap</span><span class="p">:</span>
                 <span class="n">rmap</span><span class="p">[</span><span class="n">rel_key</span><span class="p">]</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">type_name</span><span class="si">}</span><span class="s2">(id=</span><span class="si">{</span><span class="n">stable_id</span><span class="si">}</span><span class="s2">).release&quot;</span>
 
+        <span class="k">def</span><span class="w"> </span><span class="nf">_append_lock_event</span><span class="p">(</span><span class="n">schedule_index</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">event_type</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">lock_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">return</span>
+            <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._report</span><span class="w"> </span><span class="kn">import</span> <span class="n">LockEvent</span> <span class="k">as</span> <span class="n">_LockEvent</span>
+
+            <span class="n">event</span> <span class="o">=</span> <span class="n">_LockEvent</span><span class="p">(</span>
+                <span class="n">schedule_index</span><span class="o">=</span><span class="n">schedule_index</span><span class="p">,</span>
+                <span class="n">thread_id</span><span class="o">=</span><span class="n">thread_id</span><span class="p">,</span>
+                <span class="n">event_type</span><span class="o">=</span><span class="n">event_type</span><span class="p">,</span>
+                <span class="n">lock_id</span><span class="o">=</span><span class="n">lock_id</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="n">_append_unique_lock_event</span><span class="p">(</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span><span class="p">,</span> <span class="n">event</span><span class="p">)</span>
+
         <span class="k">def</span><span class="w"> </span><span class="nf">_sync_reporter</span><span class="p">(</span><span class="n">event</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">obj_id</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">lock_obj</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
             <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._cooperative</span><span class="w"> </span><span class="kn">import</span> <span class="n">_scheduler_tls</span>
 
@@ -2691,17 +3212,11 @@
                             <span class="n">scheduler</span><span class="o">.</span><span class="n">_deadlock_at</span> <span class="o">=</span> <span class="n">_trace_len_wait</span>
                         <span class="k">return</span>
                     <span class="k">if</span> <span class="n">_trace_snap_wait</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-                        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._report</span><span class="w"> </span><span class="kn">import</span> <span class="n">LockEvent</span> <span class="k">as</span> <span class="n">_LockEvent</span>
-
                         <span class="n">_wait_idx</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span>
                             <span class="p">(</span><span class="n">i</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">_trace_snap_wait</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">if</span> <span class="n">_trace_snap_wait</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">),</span>
                             <span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">_trace_snap_wait</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">),</span>
                         <span class="p">)</span>
-                        <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>  <span class="c1"># type: ignore[union-attr]</span>
-                            <span class="n">_LockEvent</span><span class="p">(</span>
-                                <span class="n">schedule_index</span><span class="o">=</span><span class="n">_wait_idx</span><span class="p">,</span> <span class="n">thread_id</span><span class="o">=</span><span class="n">thread_id</span><span class="p">,</span> <span class="n">event_type</span><span class="o">=</span><span class="s2">&quot;wait&quot;</span><span class="p">,</span> <span class="n">lock_id</span><span class="o">=</span><span class="n">stable_lock_id</span>
-                            <span class="p">)</span>
-                        <span class="p">)</span>
+                        <span class="n">_append_lock_event</span><span class="p">(</span><span class="n">_wait_idx</span><span class="p">,</span> <span class="s2">&quot;wait&quot;</span><span class="p">,</span> <span class="n">stable_lock_id</span><span class="p">)</span>
                     <span class="k">return</span>
                 <span class="k">if</span> <span class="n">event</span> <span class="o">==</span> <span class="s2">&quot;lock_acquire&quot;</span><span class="p">:</span>
                     <span class="k">with</span> <span class="n">engine_lock</span><span class="p">:</span>
@@ -2725,20 +3240,11 @@
                             <span class="n">scheduler</span><span class="o">.</span><span class="n">_deadlock_at</span> <span class="o">=</span> <span class="n">_trace_len_acq</span>
                         <span class="k">return</span>
                     <span class="k">if</span> <span class="n">_trace_snap_acq</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-                        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._report</span><span class="w"> </span><span class="kn">import</span> <span class="n">LockEvent</span> <span class="k">as</span> <span class="n">_LockEvent</span>
-
                         <span class="n">_acq_idx</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span>
                             <span class="p">(</span><span class="n">i</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">_trace_snap_acq</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">if</span> <span class="n">_trace_snap_acq</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">),</span>
                             <span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">_trace_snap_acq</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">),</span>
                         <span class="p">)</span>
-                        <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>  <span class="c1"># type: ignore[union-attr]</span>
-                            <span class="n">_LockEvent</span><span class="p">(</span>
-                                <span class="n">schedule_index</span><span class="o">=</span><span class="n">_acq_idx</span><span class="p">,</span>
-                                <span class="n">thread_id</span><span class="o">=</span><span class="n">thread_id</span><span class="p">,</span>
-                                <span class="n">event_type</span><span class="o">=</span><span class="s2">&quot;acquire&quot;</span><span class="p">,</span>
-                                <span class="n">lock_id</span><span class="o">=</span><span class="n">stable_lock_id</span><span class="p">,</span>
-                            <span class="p">)</span>
-                        <span class="p">)</span>
+                        <span class="n">_append_lock_event</span><span class="p">(</span><span class="n">_acq_idx</span><span class="p">,</span> <span class="s2">&quot;acquire&quot;</span><span class="p">,</span> <span class="n">stable_lock_id</span><span class="p">)</span>
                     <span class="k">return</span>
                 <span class="k">if</span> <span class="n">event</span> <span class="o">==</span> <span class="s2">&quot;lock_release&quot;</span><span class="p">:</span>
                     <span class="k">with</span> <span class="n">engine_lock</span><span class="p">:</span>
@@ -2761,20 +3267,11 @@
                             <span class="n">scheduler</span><span class="o">.</span><span class="n">_deadlock_at</span> <span class="o">=</span> <span class="n">_trace_len_rel</span>
                         <span class="k">return</span>
                     <span class="k">if</span> <span class="n">_trace_snap_rel</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-                        <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._report</span><span class="w"> </span><span class="kn">import</span> <span class="n">LockEvent</span> <span class="k">as</span> <span class="n">_LockEvent</span>
-
                         <span class="n">_rel_idx</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span>
                             <span class="p">(</span><span class="n">i</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">_trace_snap_rel</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="k">if</span> <span class="n">_trace_snap_rel</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">==</span> <span class="n">thread_id</span><span class="p">),</span>
                             <span class="nb">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">_trace_snap_rel</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">),</span>
                         <span class="p">)</span>
-                        <span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_event_collector</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>  <span class="c1"># type: ignore[union-attr]</span>
-                            <span class="n">_LockEvent</span><span class="p">(</span>
-                                <span class="n">schedule_index</span><span class="o">=</span><span class="n">_rel_idx</span><span class="p">,</span>
-                                <span class="n">thread_id</span><span class="o">=</span><span class="n">thread_id</span><span class="p">,</span>
-                                <span class="n">event_type</span><span class="o">=</span><span class="s2">&quot;release&quot;</span><span class="p">,</span>
-                                <span class="n">lock_id</span><span class="o">=</span><span class="n">stable_lock_id</span><span class="p">,</span>
-                            <span class="p">)</span>
-                        <span class="p">)</span>
+                        <span class="n">_append_lock_event</span><span class="p">(</span><span class="n">_rel_idx</span><span class="p">,</span> <span class="s2">&quot;release&quot;</span><span class="p">,</span> <span class="n">stable_lock_id</span><span class="p">)</span>
                     <span class="c1"># Wake threads that may now be schedulable</span>
                     <span class="k">with</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_condition</span><span class="p">:</span>
                         <span class="n">scheduler</span><span class="o">.</span><span class="n">_condition</span><span class="o">.</span><span class="n">notify_all</span><span class="p">()</span>
@@ -2800,7 +3297,7 @@
         <span class="c1"># only block on the same lock.</span>
         <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">lock_depth</span> <span class="o">=</span> <span class="mi">0</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_lock_depth_by_thread</span><span class="p">[</span><span class="n">thread_id</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
-        <span class="n">pending_io</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">pending_io</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">,</span> <span class="nb">bool</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
         <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">pending_io</span> <span class="o">=</span> <span class="n">pending_io</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_pending_io_by_thread</span><span class="p">[</span><span class="n">thread_id</span><span class="p">]</span> <span class="o">=</span> <span class="n">pending_io</span>
 
@@ -2815,11 +3312,24 @@
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">detect_io</span><span class="p">:</span>
             <span class="n">_recorder</span> <span class="o">=</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">trace_recorder</span>
+            <span class="n">_registered_groups</span><span class="p">:</span> <span class="nb">set</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="nb">set</span><span class="p">()</span>
 
             <span class="k">def</span><span class="w"> </span><span class="nf">_io_reporter</span><span class="p">(</span><span class="n">resource_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">kind</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
                 <span class="n">object_key</span> <span class="o">=</span> <span class="n">_make_object_key</span><span class="p">(</span><span class="nb">hash</span><span class="p">(</span><span class="n">resource_id</span><span class="p">),</span> <span class="n">resource_id</span><span class="p">)</span>
-                <span class="n">pending</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">pending_io</span>
-                <span class="n">pending</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">object_key</span><span class="p">,</span> <span class="n">kind</span><span class="p">))</span>
+                <span class="n">pending</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">,</span> <span class="nb">bool</span><span class="p">]]</span> <span class="o">=</span> <span class="n">_dpor_tls</span><span class="o">.</span><span class="n">pending_io</span>
+                <span class="n">pending</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">object_key</span><span class="p">,</span> <span class="n">kind</span><span class="p">,</span> <span class="kc">True</span><span class="p">))</span>  <span class="c1"># synced=True: Python-level I/O respects locks</span>
+                <span class="c1"># Register resource group for SQL resources so the DPOR engine</span>
+                <span class="c1"># can skip inline wakeup insertion and rely on deferred notdep</span>
+                <span class="c1"># processing. This prevents backtrack explosion from intermediate</span>
+                <span class="c1"># operations on unrelated tables (Defect #15).</span>
+                <span class="k">if</span> <span class="n">resource_id</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;sql:&quot;</span><span class="p">):</span>
+                    <span class="n">parts</span> <span class="o">=</span> <span class="n">resource_id</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;:&quot;</span><span class="p">)</span>
+                    <span class="n">table_group</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;sql:</span><span class="si">{</span><span class="n">parts</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">parts</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="mi">2</span> <span class="k">else</span> <span class="n">resource_id</span>
+                    <span class="n">group_key</span> <span class="o">=</span> <span class="nb">hash</span><span class="p">(</span><span class="n">table_group</span><span class="p">)</span> <span class="o">&amp;</span> <span class="mh">0xFFFFFFFFFFFFFFFF</span>
+                    <span class="k">if</span> <span class="n">object_key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">_registered_groups</span><span class="p">:</span>
+                        <span class="k">with</span> <span class="n">engine_lock</span><span class="p">:</span>
+                            <span class="n">engine</span><span class="o">.</span><span class="n">register_resource_group</span><span class="p">(</span><span class="n">object_key</span><span class="p">,</span> <span class="n">group_key</span><span class="p">)</span>
+                        <span class="n">_registered_groups</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">object_key</span><span class="p">)</span>
                 <span class="c1"># Record I/O event in the trace for human-readable output</span>
                 <span class="k">if</span> <span class="n">_recorder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
                     <span class="n">_frame</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">_getframe</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
@@ -2859,9 +3369,12 @@
             <span class="n">_execution</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">_dpor_tls</span><span class="p">,</span> <span class="s2">&quot;execution&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
             <span class="k">if</span> <span class="n">_tid</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">_engine</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">_execution</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
                 <span class="n">_elock</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_engine_lock</span>
-                <span class="k">for</span> <span class="n">_obj_key</span><span class="p">,</span> <span class="n">_io_kind</span> <span class="ow">in</span> <span class="n">_pending</span><span class="p">:</span>
+                <span class="k">for</span> <span class="n">_obj_key</span><span class="p">,</span> <span class="n">_io_kind</span><span class="p">,</span> <span class="n">_synced</span> <span class="ow">in</span> <span class="n">_pending</span><span class="p">:</span>
                     <span class="k">with</span> <span class="n">_elock</span><span class="p">:</span>
-                        <span class="n">_engine</span><span class="o">.</span><span class="n">report_io_access</span><span class="p">(</span><span class="n">_execution</span><span class="p">,</span> <span class="n">_tid</span><span class="p">,</span> <span class="n">_obj_key</span><span class="p">,</span> <span class="n">_io_kind</span><span class="p">)</span>
+                        <span class="k">if</span> <span class="n">_synced</span><span class="p">:</span>
+                            <span class="n">_engine</span><span class="o">.</span><span class="n">report_synced_io_access</span><span class="p">(</span><span class="n">_execution</span><span class="p">,</span> <span class="n">_tid</span><span class="p">,</span> <span class="n">_obj_key</span><span class="p">,</span> <span class="n">_io_kind</span><span class="p">)</span>
+                        <span class="k">else</span><span class="p">:</span>
+                            <span class="n">_engine</span><span class="o">.</span><span class="n">report_io_access</span><span class="p">(</span><span class="n">_execution</span><span class="p">,</span> <span class="n">_tid</span><span class="p">,</span> <span class="n">_obj_key</span><span class="p">,</span> <span class="n">_io_kind</span><span class="p">)</span>
                 <span class="n">_pending</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">detect_io</span><span class="p">:</span>
@@ -2993,15 +3506,31 @@
     <span class="n">detect_io</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
     <span class="n">deadlock_timeout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">5.0</span><span class="p">,</span>
     <span class="n">trace_recorder</span><span class="p">:</span> <span class="n">TraceRecorder</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">io_schedule</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">T</span><span class="p">:</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;Replay a DPOR schedule using the DPOR runner rather than OpcodeScheduler.&quot;&quot;&quot;</span>
-    <span class="n">scheduler</span> <span class="o">=</span> <span class="n">_ReplayDporScheduler</span><span class="p">(</span>
-        <span class="n">schedule</span><span class="p">,</span>
-        <span class="nb">len</span><span class="p">(</span><span class="n">threads</span><span class="p">),</span>
-        <span class="n">deadlock_timeout</span><span class="o">=</span><span class="n">deadlock_timeout</span><span class="p">,</span>
-        <span class="n">trace_recorder</span><span class="o">=</span><span class="n">trace_recorder</span><span class="p">,</span>
-        <span class="n">detect_io</span><span class="o">=</span><span class="n">detect_io</span><span class="p">,</span>
-    <span class="p">)</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Replay a DPOR schedule using the DPOR runner rather than OpcodeScheduler.</span>
+
+<span class="sd">    When *io_schedule* is provided and *detect_io* is True, uses the</span>
+<span class="sd">    IO-anchored replay scheduler (defect #16) which only enforces the</span>
+<span class="sd">    schedule at IO boundaries, tolerating state-dependent changes in</span>
+<span class="sd">    opcode-level scheduling points.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">io_schedule</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">detect_io</span><span class="p">:</span>
+        <span class="n">scheduler</span><span class="p">:</span> <span class="n">DporScheduler</span> <span class="o">=</span> <span class="n">_IOAnchoredReplayScheduler</span><span class="p">(</span>
+            <span class="n">io_schedule</span><span class="p">,</span>
+            <span class="nb">len</span><span class="p">(</span><span class="n">threads</span><span class="p">),</span>
+            <span class="n">deadlock_timeout</span><span class="o">=</span><span class="n">deadlock_timeout</span><span class="p">,</span>
+            <span class="n">trace_recorder</span><span class="o">=</span><span class="n">trace_recorder</span><span class="p">,</span>
+            <span class="n">detect_io</span><span class="o">=</span><span class="n">detect_io</span><span class="p">,</span>
+        <span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">scheduler</span> <span class="o">=</span> <span class="n">_ReplayDporScheduler</span><span class="p">(</span>
+            <span class="n">schedule</span><span class="p">,</span>
+            <span class="nb">len</span><span class="p">(</span><span class="n">threads</span><span class="p">),</span>
+            <span class="n">deadlock_timeout</span><span class="o">=</span><span class="n">deadlock_timeout</span><span class="p">,</span>
+            <span class="n">trace_recorder</span><span class="o">=</span><span class="n">trace_recorder</span><span class="p">,</span>
+            <span class="n">detect_io</span><span class="o">=</span><span class="n">detect_io</span><span class="p">,</span>
+        <span class="p">)</span>
     <span class="n">runner</span> <span class="o">=</span> <span class="n">DporBytecodeRunner</span><span class="p">(</span><span class="n">scheduler</span><span class="p">,</span> <span class="n">detect_io</span><span class="o">=</span><span class="n">detect_io</span><span class="p">)</span>
 
     <span class="n">runner</span><span class="o">.</span><span class="n">_patch_locks</span><span class="p">()</span>
@@ -3039,12 +3568,17 @@
     <span class="n">lock_timeout</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
     <span class="n">invariant</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">T</span><span class="p">],</span> <span class="nb">bool</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="n">detect_io</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="n">io_schedule</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">]:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Measure how often a DPOR counterexample reproduces under the DPOR runner.</span>
 
 <span class="sd">    Reproduction runs with the same IO interception (SQL, Redis) as</span>
 <span class="sd">    exploration so that the replay scheduler can enforce interleavings at</span>
 <span class="sd">    IO boundaries, not just bytecode boundaries.</span>
+
+<span class="sd">    When *io_schedule* is provided, replay is anchored to explicit I/O</span>
+<span class="sd">    boundaries (defect #16) so state-dependent opcode paths do not</span>
+<span class="sd">    desynchronise the schedule.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._preload_io</span><span class="w"> </span><span class="kn">import</span> <span class="n">_set_preload_pipe_fd</span>
     <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._redis_client</span><span class="w"> </span><span class="kn">import</span> <span class="n">patch_redis</span><span class="p">,</span> <span class="n">set_redis_replay_mode</span><span class="p">,</span> <span class="n">unpatch_redis</span>
@@ -3071,6 +3605,7 @@
                     <span class="n">timeout</span><span class="o">=</span><span class="n">timeout_per_run</span><span class="p">,</span>
                     <span class="n">detect_io</span><span class="o">=</span><span class="n">detect_io</span><span class="p">,</span>
                     <span class="n">deadlock_timeout</span><span class="o">=</span><span class="n">deadlock_timeout</span><span class="p">,</span>
+                    <span class="n">io_schedule</span><span class="o">=</span><span class="n">io_schedule</span><span class="p">,</span>
                 <span class="p">)</span>
                 <span class="k">if</span> <span class="n">invariant</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">invariant</span><span class="p">(</span><span class="n">replay_state</span><span class="p">):</span>
                     <span class="n">successes</span> <span class="o">+=</span> <span class="mi">1</span>
@@ -3079,6 +3614,7 @@
                     <span class="n">successes</span> <span class="o">+=</span> <span class="mi">1</span>
             <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
                 <span class="k">pass</span>  <span class="c1"># timeout / crash during replay — not a reproduction</span>
+
     <span class="k">finally</span><span class="p">:</span>
         <span class="n">set_redis_replay_mode</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
         <span class="n">unpatch_redis</span><span class="p">()</span>
@@ -3111,6 +3647,7 @@
     <span class="n">lock_timeout</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="n">trace_packages</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
     <span class="n">track_dunder_dict_accesses</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">search</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">InterleavingResult</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Systematically explore interleavings using DPOR.</span>
 
@@ -3167,6 +3704,32 @@
 <span class="sd">            uses ``self.__dict__[&#39;x&#39;] = v``, but doubles wakeup tree</span>
 <span class="sd">            insertions and can cause combinatorial explosion.  Default</span>
 <span class="sd">            False.</span>
+<span class="sd">        search: Controls the order in which wakeup tree branches are</span>
+<span class="sd">            explored.  All strategies visit the same set of Mazurkiewicz</span>
+<span class="sd">            trace equivalence classes; only the order differs.  Accepted</span>
+<span class="sd">            values:</span>
+
+<span class="sd">            - ``None`` or ``&quot;dfs&quot;`` — classic DFS, lowest thread ID first</span>
+<span class="sd">              (default, matches the paper&#39;s Algorithm 2).  **Best for</span>
+<span class="sd">              exhaustive exploration** (``stop_on_first=False``): produces</span>
+<span class="sd">              the optimal (minimum) number of executions.</span>
+<span class="sd">            - ``&quot;bit-reversal&quot;`` or ``&quot;bit-reversal:&lt;seed&gt;&quot;`` — visit</span>
+<span class="sd">              children in bit-reversal permutation order for maximal</span>
+<span class="sd">              spread across distinct conflict points early.</span>
+<span class="sd">            - ``&quot;round-robin&quot;`` or ``&quot;round-robin:&lt;seed&gt;&quot;`` — cycle</span>
+<span class="sd">              through available threads in rotating order.</span>
+<span class="sd">            - ``&quot;stride&quot;`` or ``&quot;stride:&lt;seed&gt;&quot;`` — visit every s-th</span>
+<span class="sd">              sibling (s coprime to branching factor, derived from seed).</span>
+<span class="sd">            - ``&quot;conflict-first&quot;`` — reverse of DFS (highest thread ID</span>
+<span class="sd">              first), preferring threads added by race reversals.</span>
+
+<span class="sd">            **Use a non-DFS strategy when the trace space is large and</span>
+<span class="sd">            you have a limited execution budget** (``stop_on_first=True``</span>
+<span class="sd">            or a low ``max_executions``).  DFS explores traces in a fixed</span>
+<span class="sd">            order and may spend many executions on similar interleavings</span>
+<span class="sd">            before reaching a bug.  The alternative strategies spread</span>
+<span class="sd">            exploration across different conflict points earlier, finding</span>
+<span class="sd">            bugs faster on average.</span>
 
 <span class="sd">    Returns:</span>
 <span class="sd">        InterleavingResult with exploration statistics and any counterexample found.</span>
@@ -3182,13 +3745,12 @@
     <span class="k">if</span> <span class="n">trace_packages</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
         <span class="n">_set_active_trace_filter</span><span class="p">(</span><span class="n">_TraceFilter</span><span class="p">(</span><span class="n">trace_packages</span><span class="p">))</span>
     <span class="n">num_threads</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">threads</span><span class="p">)</span>
-    <span class="n">pb</span> <span class="o">=</span> <span class="kc">None</span> <span class="k">if</span> <span class="n">preemption_bound</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">preemption_bound</span>
-    <span class="n">me</span> <span class="o">=</span> <span class="kc">None</span> <span class="k">if</span> <span class="n">max_executions</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">max_executions</span>
     <span class="n">engine</span> <span class="o">=</span> <span class="n">PyDporEngine</span><span class="p">(</span>
         <span class="n">num_threads</span><span class="o">=</span><span class="n">num_threads</span><span class="p">,</span>
-        <span class="n">preemption_bound</span><span class="o">=</span><span class="n">pb</span><span class="p">,</span>
+        <span class="n">preemption_bound</span><span class="o">=</span><span class="n">preemption_bound</span><span class="p">,</span>
         <span class="n">max_branches</span><span class="o">=</span><span class="n">max_branches</span><span class="p">,</span>
-        <span class="n">max_executions</span><span class="o">=</span><span class="n">me</span><span class="p">,</span>
+        <span class="n">max_executions</span><span class="o">=</span><span class="n">max_executions</span><span class="p">,</span>
+        <span class="n">search</span><span class="o">=</span><span class="n">search</span><span class="p">,</span>
     <span class="p">)</span>
 
     <span class="n">result</span> <span class="o">=</span> <span class="n">InterleavingResult</span><span class="p">(</span><span class="n">property_holds</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
@@ -3298,9 +3860,13 @@
             <span class="c1"># Clear bridge state for this new execution.</span>
             <span class="k">if</span> <span class="n">preload_bridge</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
                 <span class="n">preload_bridge</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+            <span class="c1"># Clear persistent SQL suppression flags from previous execution.</span>
+            <span class="kn">from</span><span class="w"> </span><span class="nn">frontrun._sql_cursor</span><span class="w"> </span><span class="kn">import</span> <span class="n">clear_permanent_suppressions</span>
+
+            <span class="n">clear_permanent_suppressions</span><span class="p">()</span>
             <span class="c1"># Set up switch point collection for the report</span>
             <span class="n">_collecting_report</span> <span class="o">=</span> <span class="n">report</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">report</span><span class="o">.</span><span class="n">executions</span><span class="p">)</span> <span class="o">&lt;</span> <span class="n">_MAX_RECORDED_EXECUTIONS</span>
-            <span class="n">switch_points</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span> <span class="k">if</span> <span class="n">_collecting_report</span> <span class="k">else</span> <span class="p">[]</span>
+            <span class="n">switch_points</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
             <span class="n">scheduler</span> <span class="o">=</span> <span class="n">DporScheduler</span><span class="p">(</span>
                 <span class="n">engine</span><span class="p">,</span>
                 <span class="n">execution</span><span class="p">,</span>
@@ -3367,6 +3933,7 @@
                         <span class="n">lock_timeout</span><span class="o">=</span><span class="n">lock_timeout</span><span class="p">,</span>
                         <span class="n">invariant</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
                         <span class="n">detect_io</span><span class="o">=</span><span class="n">detect_io</span><span class="p">,</span>
+                        <span class="n">io_schedule</span><span class="o">=</span><span class="nb">list</span><span class="p">(</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_io_trace</span><span class="p">)</span> <span class="k">if</span> <span class="n">detect_io</span> <span class="ow">and</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_io_trace</span> <span class="k">else</span> <span class="kc">None</span><span class="p">,</span>
                     <span class="p">)</span>
                     <span class="n">result</span><span class="o">.</span><span class="n">reproduction_attempts</span> <span class="o">=</span> <span class="n">attempts</span>
                     <span class="n">result</span><span class="o">.</span><span class="n">reproduction_successes</span> <span class="o">=</span> <span class="n">successes</span>
@@ -3427,6 +3994,7 @@
                         <span class="n">lock_timeout</span><span class="o">=</span><span class="n">lock_timeout</span><span class="p">,</span>
                         <span class="n">invariant</span><span class="o">=</span><span class="n">invariant</span><span class="p">,</span>
                         <span class="n">detect_io</span><span class="o">=</span><span class="n">detect_io</span><span class="p">,</span>
+                        <span class="n">io_schedule</span><span class="o">=</span><span class="nb">list</span><span class="p">(</span><span class="n">scheduler</span><span class="o">.</span><span class="n">_io_trace</span><span class="p">)</span> <span class="k">if</span> <span class="n">detect_io</span> <span class="ow">and</span> <span class="n">scheduler</span><span class="o">.</span><span class="n">_io_trace</span> <span class="k">else</span> <span class="kc">None</span><span class="p">,</span>
                     <span class="p">)</span>
                     <span class="n">result</span><span class="o">.</span><span class="n">reproduction_attempts</span> <span class="o">=</span> <span class="n">attempts</span>
                     <span class="n">result</span><span class="o">.</span><span class="n">reproduction_successes</span> <span class="o">=</span> <span class="n">successes</span>
@@ -3509,7 +4077,8 @@
                 <span class="k">if</span> <span class="ow">not</span> <span class="n">engine</span><span class="o">.</span><span class="n">next_execution</span><span class="p">():</span>
                     <span class="k">break</span>
     <span class="k">finally</span><span class="p">:</span>
-        <span class="n">_set_active_trace_filter</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">trace_packages</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">_set_active_trace_filter</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
         <span class="n">set_lock_timeout</span><span class="p">(</span><span class="n">prev_lock_timeout</span><span class="p">)</span>
         <span class="k">if</span> <span class="n">preload_dispatcher</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">preload_dispatcher</span><span class="o">.</span><span class="n">stop</span><span class="p">()</span>
@@ -3553,7 +4122,7 @@
       
     </aside>
   </div>
-</div><script src="../../_static/documentation_options.js?v=e259d695"></script>
+</div><script src="../../_static/documentation_options.js?v=c87aa342"></script>
     <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../../_static/scripts/furo.js?v=46bd48cc"></script>

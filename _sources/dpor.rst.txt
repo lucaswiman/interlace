@@ -106,6 +106,13 @@ trace where :math:`W_1(x)` precedes :math:`W_0(x)`.
 Happens-before and vector clocks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+.. seealso::
+
+   :doc:`vector-clocks` for a comprehensive treatment including the three
+   per-thread clocks (``dpor_vv``, ``io_vv``, ``causality``), the
+   ``VersionVec`` implementation, and worked examples with and without
+   synchronization.
+
 Two operations are *concurrent* if neither `happens before
 <https://en.wikipedia.org/wiki/Happened-before>`_ the other. The happens-before
 relation :math:`\to` is the smallest partial order satisfying:
@@ -435,6 +442,37 @@ This is a depth-first search over the tree of scheduling choices, pruned by
 DPOR so that only branches with genuine conflicts are explored, and further
 reduced by sleep sets so that equivalent orderings of independent actions are
 not re-explored.
+
+
+Search strategies
+~~~~~~~~~~~~~~~~~~
+
+The default exploration order is DFS (always pick the lowest thread ID at each
+wakeup-tree node).  This matches the paper's Algorithm 2 and produces the
+**optimal** number of executions --- exactly one per Mazurkiewicz trace
+equivalence class --- because the sleep-set pruning is maximally effective
+under this ordering.
+
+When the trace space is very large and you have a limited execution budget
+(``stop_on_first=True``, or a low ``max_executions``), alternative strategies
+can find bugs significantly faster by spreading exploration across diverse
+conflict points early.  These strategies --- **bit-reversal**, **round-robin**,
+**stride**, and **conflict-first** --- visit the same set of trace equivalence
+classes but in a different order.  The trade-off is that non-DFS orderings may
+explore a small number of redundant trace classes (typically ~5% on complex
+lock patterns) because changing the sibling ordering can reduce sleep-set
+effectiveness.
+
+**Rule of thumb:**
+
+- **Exhaustive exploration** (``stop_on_first=False``): use **DFS** (the default)
+  to minimize total executions.
+- **Bug-finding with a budget** (``stop_on_first=True`` or low
+  ``max_executions``): use **bit-reversal** or **round-robin** to maximize
+  diversity early.
+
+See :doc:`search` for a detailed comparison of all strategies and the
+theoretical basis for the optimality trade-off.
 
 
 Preemption bounding

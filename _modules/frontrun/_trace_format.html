@@ -5,7 +5,7 @@
     <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../genindex.html"><link rel="search" title="Search" href="../../search.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>frontrun._trace_format - Frontrun 0.3.0 documentation</title>
+        <title>frontrun._trace_format - Frontrun 0.4.1 documentation</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="../../_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -161,7 +161,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="../../index.html"><div class="brand">Frontrun 0.3.0 documentation</div></a>
+      <a href="../../index.html"><div class="brand">Frontrun 0.4.1 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -182,7 +182,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="../../index.html">
   
-  <span class="sidebar-brand-text">Frontrun 0.3.0 documentation</span>
+  <span class="sidebar-brand-text">Frontrun 0.4.1 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="../../search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -197,6 +197,8 @@
 <li class="toctree-l1"><a class="reference internal" href="../../approaches.html">How Frontrun Works</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../dpor_guide.html">DPOR in Practice</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../dpor.html">DPOR: Dynamic Partial Order Reduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../vector-clocks.html">Vector Clocks and Happens-Before</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../search.html">Search Page</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../examples.html">Examples</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../orm_race.html">SQLAlchemy Lost-Update Race Condition</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../sql-technical-details.html">SQL Conflict Detection – Technical Details</a></li>
@@ -398,21 +400,18 @@
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
             <span class="n">step</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_step</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_step</span> <span class="o">+=</span> <span class="mi">1</span>
-
-        <span class="n">ev</span> <span class="o">=</span> <span class="n">TraceEvent</span><span class="p">(</span>
-            <span class="n">step_index</span><span class="o">=</span><span class="n">step</span><span class="p">,</span>
-            <span class="n">thread_id</span><span class="o">=</span><span class="n">thread_id</span><span class="p">,</span>
-            <span class="n">filename</span><span class="o">=</span><span class="n">code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">,</span>
-            <span class="n">lineno</span><span class="o">=</span><span class="n">frame</span><span class="o">.</span><span class="n">f_lineno</span><span class="p">,</span>
-            <span class="n">function_name</span><span class="o">=</span><span class="n">code</span><span class="o">.</span><span class="n">co_name</span><span class="p">,</span>
-            <span class="n">opcode</span><span class="o">=</span><span class="n">opcode</span> <span class="ow">or</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
-            <span class="n">access_type</span><span class="o">=</span><span class="n">access_type</span><span class="p">,</span>
-            <span class="n">attr_name</span><span class="o">=</span><span class="n">attr_name</span><span class="p">,</span>
-            <span class="n">obj_type_name</span><span class="o">=</span><span class="n">obj_type_name</span><span class="p">,</span>
-            <span class="n">call_chain</span><span class="o">=</span><span class="n">call_chain</span><span class="p">,</span>
-        <span class="p">)</span>
-        <span class="c1"># Append under the recorder lock for ordering consistency</span>
-        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
+            <span class="n">ev</span> <span class="o">=</span> <span class="n">TraceEvent</span><span class="p">(</span>
+                <span class="n">step_index</span><span class="o">=</span><span class="n">step</span><span class="p">,</span>
+                <span class="n">thread_id</span><span class="o">=</span><span class="n">thread_id</span><span class="p">,</span>
+                <span class="n">filename</span><span class="o">=</span><span class="n">code</span><span class="o">.</span><span class="n">co_filename</span><span class="p">,</span>
+                <span class="n">lineno</span><span class="o">=</span><span class="n">frame</span><span class="o">.</span><span class="n">f_lineno</span><span class="p">,</span>
+                <span class="n">function_name</span><span class="o">=</span><span class="n">code</span><span class="o">.</span><span class="n">co_name</span><span class="p">,</span>
+                <span class="n">opcode</span><span class="o">=</span><span class="n">opcode</span> <span class="ow">or</span> <span class="s2">&quot;&quot;</span><span class="p">,</span>
+                <span class="n">access_type</span><span class="o">=</span><span class="n">access_type</span><span class="p">,</span>
+                <span class="n">attr_name</span><span class="o">=</span><span class="n">attr_name</span><span class="p">,</span>
+                <span class="n">obj_type_name</span><span class="o">=</span><span class="n">obj_type_name</span><span class="p">,</span>
+                <span class="n">call_chain</span><span class="o">=</span><span class="n">call_chain</span><span class="p">,</span>
+            <span class="p">)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">events</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">ev</span><span class="p">)</span></div>
 
 
@@ -433,20 +432,19 @@
         <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
             <span class="n">step</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_step</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_step</span> <span class="o">+=</span> <span class="mi">1</span>
-        <span class="n">ev</span> <span class="o">=</span> <span class="n">TraceEvent</span><span class="p">(</span>
-            <span class="n">step_index</span><span class="o">=</span><span class="n">step</span><span class="p">,</span>
-            <span class="n">thread_id</span><span class="o">=</span><span class="n">thread_id</span><span class="p">,</span>
-            <span class="n">filename</span><span class="o">=</span><span class="s2">&quot;&lt;C extension&gt;&quot;</span><span class="p">,</span>
-            <span class="n">lineno</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span>
-            <span class="n">function_name</span><span class="o">=</span><span class="s2">&quot;&quot;</span><span class="p">,</span>
-            <span class="n">opcode</span><span class="o">=</span><span class="s2">&quot;IO&quot;</span><span class="p">,</span>
-            <span class="n">access_type</span><span class="o">=</span><span class="n">kind</span><span class="p">,</span>
-            <span class="n">attr_name</span><span class="o">=</span><span class="n">resource_id</span><span class="p">,</span>
-            <span class="n">obj_type_name</span><span class="o">=</span><span class="s2">&quot;IO&quot;</span><span class="p">,</span>
-            <span class="n">call_chain</span><span class="o">=</span><span class="n">call_chain</span><span class="p">,</span>
-            <span class="n">detail</span><span class="o">=</span><span class="n">detail</span><span class="p">,</span>
-        <span class="p">)</span>
-        <span class="k">with</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lock</span><span class="p">:</span>
+            <span class="n">ev</span> <span class="o">=</span> <span class="n">TraceEvent</span><span class="p">(</span>
+                <span class="n">step_index</span><span class="o">=</span><span class="n">step</span><span class="p">,</span>
+                <span class="n">thread_id</span><span class="o">=</span><span class="n">thread_id</span><span class="p">,</span>
+                <span class="n">filename</span><span class="o">=</span><span class="s2">&quot;&lt;C extension&gt;&quot;</span><span class="p">,</span>
+                <span class="n">lineno</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span>
+                <span class="n">function_name</span><span class="o">=</span><span class="s2">&quot;&quot;</span><span class="p">,</span>
+                <span class="n">opcode</span><span class="o">=</span><span class="s2">&quot;IO&quot;</span><span class="p">,</span>
+                <span class="n">access_type</span><span class="o">=</span><span class="n">kind</span><span class="p">,</span>
+                <span class="n">attr_name</span><span class="o">=</span><span class="n">resource_id</span><span class="p">,</span>
+                <span class="n">obj_type_name</span><span class="o">=</span><span class="s2">&quot;IO&quot;</span><span class="p">,</span>
+                <span class="n">call_chain</span><span class="o">=</span><span class="n">call_chain</span><span class="p">,</span>
+                <span class="n">detail</span><span class="o">=</span><span class="n">detail</span><span class="p">,</span>
+            <span class="p">)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">events</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">ev</span><span class="p">)</span></div>
 
 
@@ -506,13 +504,17 @@
 
 
 
-<span class="c1"># Lightweight instruction cache (separate from DPOR&#39;s to avoid cross-module coupling)</span>
-<span class="n">_instr_cache</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="n">dis</span><span class="o">.</span><span class="n">Instruction</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="c1"># Lightweight instruction cache (separate from DPOR&#39;s to avoid cross-module coupling).</span>
+<span class="c1">#</span>
+<span class="c1"># Keyed by the code object itself (not ``id(code)``).  Using the code object as</span>
+<span class="c1"># the dict key keeps a strong reference, which prevents the object from being</span>
+<span class="c1"># garbage-collected while cached.  This eliminates the stale-cache bug where a</span>
+<span class="c1"># GC&#39;d code object&#39;s id was reused by a new one.</span>
+<span class="n">_instr_cache</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="n">Any</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="n">dis</span><span class="o">.</span><span class="n">Instruction</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
 
 
 <span class="k">def</span><span class="w"> </span><span class="nf">_get_instruction</span><span class="p">(</span><span class="n">code</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span> <span class="n">offset</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">dis</span><span class="o">.</span><span class="n">Instruction</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
-    <span class="n">code_id</span> <span class="o">=</span> <span class="nb">id</span><span class="p">(</span><span class="n">code</span><span class="p">)</span>
-    <span class="n">mapping</span> <span class="o">=</span> <span class="n">_instr_cache</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">code_id</span><span class="p">)</span>
+    <span class="n">mapping</span> <span class="o">=</span> <span class="n">_instr_cache</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">code</span><span class="p">)</span>
     <span class="k">if</span> <span class="n">mapping</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
         <span class="n">mapping</span> <span class="o">=</span> <span class="p">{}</span>
         <span class="k">if</span> <span class="n">_PY_VERSION</span> <span class="o">&gt;=</span> <span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="mi">11</span><span class="p">):</span>
@@ -521,7 +523,7 @@
             <span class="n">instructions</span> <span class="o">=</span> <span class="n">dis</span><span class="o">.</span><span class="n">get_instructions</span><span class="p">(</span><span class="n">code</span><span class="p">)</span>
         <span class="k">for</span> <span class="n">inst</span> <span class="ow">in</span> <span class="n">instructions</span><span class="p">:</span>
             <span class="n">mapping</span><span class="p">[</span><span class="n">inst</span><span class="o">.</span><span class="n">offset</span><span class="p">]</span> <span class="o">=</span> <span class="n">inst</span>
-        <span class="n">_instr_cache</span><span class="p">[</span><span class="n">code_id</span><span class="p">]</span> <span class="o">=</span> <span class="n">mapping</span>
+        <span class="n">_instr_cache</span><span class="p">[</span><span class="n">code</span><span class="p">]</span> <span class="o">=</span> <span class="n">mapping</span>
     <span class="k">return</span> <span class="n">mapping</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">offset</span><span class="p">)</span>
 
 
@@ -792,11 +794,14 @@
             <span class="n">result</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">CollapsedRun</span><span class="p">(</span><span class="n">count</span><span class="o">=</span><span class="nb">len</span><span class="p">(</span><span class="n">run</span><span class="p">)</span> <span class="o">-</span> <span class="mi">2</span><span class="p">,</span> <span class="n">thread_id</span><span class="o">=</span><span class="n">tid</span><span class="p">))</span>
             <span class="n">result</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">run</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span>
 
-    <span class="c1"># Final cap: if still too long, take first half + last half</span>
+    <span class="c1"># Final cap: if still too long, take first half + last half.</span>
+    <span class="c1"># Account for the CollapsedRun placeholder taking one slot.</span>
     <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">result</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">max_lines</span><span class="p">:</span>
-        <span class="n">half</span> <span class="o">=</span> <span class="n">max_lines</span> <span class="o">//</span> <span class="mi">2</span>
-        <span class="n">omitted</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">result</span><span class="p">)</span> <span class="o">-</span> <span class="n">max_lines</span>
-        <span class="n">result</span> <span class="o">=</span> <span class="n">result</span><span class="p">[:</span><span class="n">half</span><span class="p">]</span> <span class="o">+</span> <span class="p">[</span><span class="n">CollapsedRun</span><span class="p">(</span><span class="n">count</span><span class="o">=</span><span class="n">omitted</span><span class="p">,</span> <span class="n">thread_id</span><span class="o">=-</span><span class="mi">1</span><span class="p">)]</span> <span class="o">+</span> <span class="n">result</span><span class="p">[</span><span class="o">-</span><span class="n">half</span><span class="p">:]</span>
+        <span class="n">first_half</span> <span class="o">=</span> <span class="n">max_lines</span> <span class="o">//</span> <span class="mi">2</span>
+        <span class="n">second_half</span> <span class="o">=</span> <span class="n">max_lines</span> <span class="o">-</span> <span class="n">first_half</span> <span class="o">-</span> <span class="mi">1</span>  <span class="c1"># -1 for the CollapsedRun</span>
+        <span class="n">omitted</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">result</span><span class="p">)</span> <span class="o">-</span> <span class="n">first_half</span> <span class="o">-</span> <span class="n">second_half</span>
+        <span class="n">tail</span> <span class="o">=</span> <span class="n">result</span><span class="p">[</span><span class="o">-</span><span class="n">second_half</span><span class="p">:]</span> <span class="k">if</span> <span class="n">second_half</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="k">else</span> <span class="p">[]</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">result</span><span class="p">[:</span><span class="n">first_half</span><span class="p">]</span> <span class="o">+</span> <span class="p">[</span><span class="n">CollapsedRun</span><span class="p">(</span><span class="n">count</span><span class="o">=</span><span class="n">omitted</span><span class="p">,</span> <span class="n">thread_id</span><span class="o">=-</span><span class="mi">1</span><span class="p">)]</span> <span class="o">+</span> <span class="n">tail</span>
 
     <span class="k">return</span> <span class="n">result</span>
 
@@ -1044,7 +1049,7 @@
       
     </aside>
   </div>
-</div><script src="../../_static/documentation_options.js?v=e259d695"></script>
+</div><script src="../../_static/documentation_options.js?v=c87aa342"></script>
     <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../../_static/scripts/furo.js?v=46bd48cc"></script>

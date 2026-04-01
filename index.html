@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Installation" href="installation.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>Frontrun 0.3.0 documentation</title>
+        <title>Frontrun 0.4.1 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="#"><div class="brand">Frontrun 0.3.0 documentation</div></a>
+      <a href="#"><div class="brand">Frontrun 0.4.1 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="#">
   
-  <span class="sidebar-brand-text">Frontrun 0.3.0 documentation</span>
+  <span class="sidebar-brand-text">Frontrun 0.4.1 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -198,6 +198,8 @@
 <li class="toctree-l1"><a class="reference internal" href="approaches.html">How Frontrun Works</a></li>
 <li class="toctree-l1"><a class="reference internal" href="dpor_guide.html">DPOR in Practice</a></li>
 <li class="toctree-l1"><a class="reference internal" href="dpor.html">DPOR: Dynamic Partial Order Reduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="vector-clocks.html">Vector Clocks and Happens-Before</a></li>
+<li class="toctree-l1"><a class="reference internal" href="search.html">Search Page</a></li>
 <li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
 <li class="toctree-l1"><a class="reference internal" href="orm_race.html">SQLAlchemy Lost-Update Race Condition</a></li>
 <li class="toctree-l1"><a class="reference internal" href="sql-technical-details.html">SQL Conflict Detection – Technical Details</a></li>
@@ -256,12 +258,15 @@ passes 95% of the time is worse than a test that always fails, because it
 breeds false confidence. Frontrun replaces timing-dependent thread interleaving
 with deterministic scheduling, so race conditions either always happen or
 never happen.</p>
-<p>Three approaches, in order of decreasing interpretability:</p>
+<p>Four approaches, in order of decreasing interpretability:</p>
 <ol class="arabic simple">
 <li><p><strong>DPOR</strong> — systematic exploration of every meaningfully different
 interleaving, with causal conflict analysis.</p></li>
 <li><p><strong>Bytecode exploration</strong> — random opcode-level schedules that often find
 races very efficiently, including races invisible to DPOR.</p></li>
+<li><p><strong>Marker schedule exploration</strong> — exhaustive exploration of all
+interleavings at the <code class="docutils literal notranslate"><span class="pre">#</span> <span class="pre">frontrun:</span></code> marker level.  Much smaller search
+space than bytecode exploration, with completeness guarantees.</p></li>
 <li><p><strong>Trace markers</strong> — comment-based synchronization points for reproducing
 a known race window.</p></li>
 </ol>
@@ -285,6 +290,7 @@ a known race window.</p></li>
 <li class="toctree-l2"><a class="reference internal" href="approaches.html#dpor-systematic-exploration">DPOR (Systematic Exploration)</a></li>
 <li class="toctree-l2"><a class="reference internal" href="approaches.html#bytecode-instrumentation">Bytecode Instrumentation</a></li>
 <li class="toctree-l2"><a class="reference internal" href="approaches.html#trace-markers">Trace Markers</a></li>
+<li class="toctree-l2"><a class="reference internal" href="approaches.html#marker-schedule-exploration">Marker Schedule Exploration</a></li>
 <li class="toctree-l2"><a class="reference internal" href="approaches.html#automatic-i-o-detection">Automatic I/O Detection</a></li>
 </ul>
 </li>
@@ -313,6 +319,18 @@ a known race window.</p></li>
 <li class="toctree-l2"><a class="reference internal" href="dpor.html#further-reading">Further reading</a></li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="vector-clocks.html">Vector Clocks and Happens-Before</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="vector-clocks.html#the-happens-before-relation">The happens-before relation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="vector-clocks.html#the-versionvec-data-structure">The <code class="docutils literal notranslate"><span class="pre">VersionVec</span></code> data structure</a></li>
+<li class="toctree-l2"><a class="reference internal" href="vector-clocks.html#three-clocks-per-thread">Three clocks per thread</a></li>
+<li class="toctree-l2"><a class="reference internal" href="vector-clocks.html#synchronization-events-and-clock-updates">Synchronization events and clock updates</a></li>
+<li class="toctree-l2"><a class="reference internal" href="vector-clocks.html#worked-examples">Worked examples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="vector-clocks.html#how-race-detection-drives-dpor">How race detection drives DPOR</a></li>
+<li class="toctree-l2"><a class="reference internal" href="vector-clocks.html#complexity">Complexity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="vector-clocks.html#further-reading">Further reading</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="search.html">Search Page</a></li>
 <li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="examples.html#bank-account-transfer-lost-update">Bank Account Transfer (Lost Update)</a></li>
 <li class="toctree-l2"><a class="reference internal" href="examples.html#correct-synchronization-with-locks">Correct Synchronization with Locks</a></li>
@@ -372,6 +390,7 @@ a known race window.</p></li>
 <li class="toctree-l2"><a class="reference internal" href="internals.html#putting-the-layers-together">Putting the layers together</a></li>
 <li class="toctree-l2"><a class="reference internal" href="internals.html#what-each-layer-can-and-cannot-see">What each layer can and cannot see</a></li>
 <li class="toctree-l2"><a class="reference internal" href="internals.html#deadlock-detection">Deadlock detection</a></li>
+<li class="toctree-l2"><a class="reference internal" href="internals.html#the-dpor-algorithm-in-detail">The DPOR algorithm in detail</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="api_reference.html">API Reference</a><ul>
@@ -379,6 +398,7 @@ a known race window.</p></li>
 <li class="toctree-l2"><a class="reference internal" href="api_reference.html#module-frontrun.dpor">DPOR (Systematic Exploration)</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api_reference.html#module-frontrun.bytecode">Bytecode Instrumentation</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api_reference.html#module-frontrun.trace_markers">Trace Markers</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api_reference.html#marker-schedule-exploration">Marker Schedule Exploration</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api_reference.html#module-frontrun.async_trace_markers">Async Trace Markers</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api_reference.html#module-frontrun.async_shuffler">Async Bytecode Instrumentation</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api_reference.html#module-frontrun._trace_format">Trace Formatting</a></li>
@@ -448,7 +468,7 @@ or <a class="reference internal" href="approaches.html"><span class="doc">How Fr
 <ul class="simple">
 <li><p><a class="reference internal" href="genindex.html"><span class="std std-ref">Index</span></a></p></li>
 <li><p><a class="reference internal" href="py-modindex.html"><span class="std std-ref">Module Index</span></a></p></li>
-<li><p><a class="reference internal" href="search.html"><span class="std std-ref">Search Page</span></a></p></li>
+<li><p><span class="xref std std-ref">search</span></p></li>
 </ul>
 </section>
 
@@ -511,7 +531,7 @@ or <a class="reference internal" href="approaches.html"><span class="doc">How Fr
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=e259d695"></script>
+</div><script src="_static/documentation_options.js?v=c87aa342"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>

@@ -1,0 +1,813 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="./">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Search Strategies" href="search.html"><link rel="prev" title="DPOR: Dynamic Partial Order Reduction" href="dpor.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Vector Clocks and Happens-Before - Frontrun 0.4.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="_static/custom.css?v=58a6b0e8" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="index.html"><div class="brand">Frontrun 0.4.1 documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
+  
+  <span class="sidebar-brand-text">Frontrun 0.4.1 documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start</a></li>
+<li class="toctree-l1"><a class="reference internal" href="approaches.html">How Frontrun Works</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dpor_guide.html">DPOR in Practice</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dpor.html">DPOR: Dynamic Partial Order Reduction</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Vector Clocks and Happens-Before</a></li>
+<li class="toctree-l1"><a class="reference internal" href="search.html">Search Page</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="orm_race.html">SQLAlchemy Lost-Update Race Condition</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sql-technical-details.html">SQL Conflict Detection – Technical Details</a></li>
+<li class="toctree-l1"><a class="reference internal" href="redis.html">Redis Conflict Detection – Technical Details</a></li>
+<li class="toctree-l1"><a class="reference internal" href="trace_filtering.html">Trace Filtering</a></li>
+<li class="toctree-l1"><a class="reference internal" href="internals.html">How It Works Under the Hood</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api_reference.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="CASE_STUDIES.html">Frontrun Case Studies: Concurrency Bug Detection</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="https://github.com/lucaswiman/frontrun/blob/main/docs/vector-clocks.rst?plain=true" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div><div class="edit-this-page">
+  <a class="muted-link" href="https://github.com/lucaswiman/frontrun/edit/main/docs/vector-clocks.rst" rel="edit" title="Edit this page">
+    <svg><use href="#svg-pencil"></use></svg>
+    <span class="visually-hidden">Edit this page</span>
+  </a>
+</div><div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="vector-clocks-and-happens-before">
+<h1>Vector Clocks and Happens-Before<a class="headerlink" href="#vector-clocks-and-happens-before" title="Link to this heading">¶</a></h1>
+<p>This page gives a self-contained explanation of the <strong>vector clock</strong>
+mechanism that underpins Frontrun’s DPOR race detection.  It covers the
+theory (the happens-before partial order), the data structure
+(<code class="docutils literal notranslate"><span class="pre">VersionVec</span></code>), the three per-thread clocks and why each exists, and
+worked examples showing exactly how races are detected — or suppressed
+— by synchronization.</p>
+<nav class="contents local" id="contents">
+<p class="topic-title">Contents</p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#the-happens-before-relation" id="id1">The happens-before relation</a></p></li>
+<li><p><a class="reference internal" href="#the-versionvec-data-structure" id="id2">The <code class="docutils literal notranslate"><span class="pre">VersionVec</span></code> data structure</a></p></li>
+<li><p><a class="reference internal" href="#three-clocks-per-thread" id="id3">Three clocks per thread</a></p>
+<ul>
+<li><p><a class="reference internal" href="#why-two-happens-before-clocks" id="id4">Why two happens-before clocks?</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#synchronization-events-and-clock-updates" id="id5">Synchronization events and clock updates</a></p>
+<ul>
+<li><p><a class="reference internal" href="#lock-release" id="id6">Lock release</a></p></li>
+<li><p><a class="reference internal" href="#lock-acquire" id="id7">Lock acquire</a></p></li>
+<li><p><a class="reference internal" href="#thread-spawn" id="id8">Thread spawn</a></p></li>
+<li><p><a class="reference internal" href="#thread-join" id="id9">Thread join</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#worked-examples" id="id10">Worked examples</a></p>
+<ul>
+<li><p><a class="reference internal" href="#example-1-unsynchronized-access-race-detected" id="id11">Example 1: unsynchronized access (race detected)</a></p></li>
+<li><p><a class="reference internal" href="#example-2-lock-synchronized-access-no-race" id="id12">Example 2: lock-synchronized access (no race)</a></p></li>
+<li><p><a class="reference internal" href="#example-3-lock-synchronized-i-o-toctou-race-detected" id="id13">Example 3: lock-synchronized I/O (TOCTOU race detected)</a></p></li>
+<li><p><a class="reference internal" href="#example-4-thread-spawn-establishes-ordering" id="id14">Example 4: thread spawn establishes ordering</a></p></li>
+<li><p><a class="reference internal" href="#example-5-concurrent-access-after-spawn-race-detected" id="id15">Example 5: concurrent access after spawn (race detected)</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#how-race-detection-drives-dpor" id="id16">How race detection drives DPOR</a></p></li>
+<li><p><a class="reference internal" href="#complexity" id="id17">Complexity</a></p></li>
+<li><p><a class="reference internal" href="#further-reading" id="id18">Further reading</a></p></li>
+</ul>
+</nav>
+<section id="the-happens-before-relation">
+<h2><a class="toc-backref" href="#id1" role="doc-backlink">The happens-before relation</a><a class="headerlink" href="#the-happens-before-relation" title="Link to this heading">¶</a></h2>
+<p>Two concurrent operations can only be a <strong>race</strong> if neither is guaranteed
+to execute before the other.  The <a class="reference external" href="https://en.wikipedia.org/wiki/Happened-before">happens-before relation</a>
+<span class="math notranslate nohighlight">\(\to\)</span> formalizes this guarantee as the smallest partial order
+satisfying:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[\begin{split}\text{(program order)} \quad &amp; e_i \to e_j
+  \text{ if } e_i \text{ and } e_j \text{ are by the same thread and }
+  i &lt; j \\[4pt]
+\text{(lock synchronization)} \quad &amp; \text{release}(l) \to
+  \text{acquire}(l) \text{ for any lock } l \\[4pt]
+\text{(spawn)} \quad &amp; \text{spawn}(t) \to e
+  \text{ for the first event } e \text{ of thread } t \\[4pt]
+\text{(join)} \quad &amp; e \to \text{join}(t)
+  \text{ for the last event } e \text{ of thread } t \\[4pt]
+\text{(transitivity)} \quad &amp; e_i \to e_k
+  \text{ if } e_i \to e_j \text{ and } e_j \to e_k\end{split}\]</div>
+</div>
+<p>Two events <span class="math notranslate nohighlight">\(e_i\)</span> and <span class="math notranslate nohighlight">\(e_j\)</span> are <strong>concurrent</strong> (written
+<span class="math notranslate nohighlight">\(e_i \| e_j\)</span>) when neither happens-before the other:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[e_i \| e_j \;\iff\; e_i \not\to e_j \;\wedge\; e_j \not\to e_i\]</div>
+</div>
+<p>A <strong>race</strong> is a pair of concurrent events that access the same shared
+object with at least one write (JACM’17 Def 3.3, p.13).  Only races need
+alternative scheduling — events that are happens-before ordered will
+always execute in that order regardless of the schedule.</p>
+</section>
+<section id="the-versionvec-data-structure">
+<h2><a class="toc-backref" href="#id2" role="doc-backlink">The <code class="docutils literal notranslate"><span class="pre">VersionVec</span></code> data structure</a><a class="headerlink" href="#the-versionvec-data-structure" title="Link to this heading">¶</a></h2>
+<p>A <a class="reference external" href="https://en.wikipedia.org/wiki/Vector_clock">vector clock</a> is an array
+of counters with one entry per thread:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V : \text{ThreadId} \to \mathbb{N}\]</div>
+</div>
+<p>Frontrun implements this as <code class="docutils literal notranslate"><span class="pre">VersionVec</span></code> (<code class="docutils literal notranslate"><span class="pre">crates/dpor/src/vv.rs</span></code>), a
+contiguous <code class="docutils literal notranslate"><span class="pre">Vec&lt;u32&gt;</span></code> indexed by thread ID.  The four key operations are:</p>
+<dl>
+<dt><code class="docutils literal notranslate"><span class="pre">increment(thread_id)</span></code></dt><dd><p>Advance the local component:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V[t] \leftarrow V[t] + 1\]</div>
+</div>
+<p>Called each time a thread is scheduled (each scheduling point).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">join(other)</span></code></dt><dd><p>Point-wise maximum:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V[i] \leftarrow \max(V[i], V'[i]) \quad \forall\, i\]</div>
+</div>
+<p>Used when a synchronization event transfers causal knowledge between
+threads — lock acquire joins the releasing thread’s clock, thread
+join joins the joined thread’s clock, etc.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">partial_le(other)</span></code></dt><dd><p>Returns <code class="docutils literal notranslate"><span class="pre">true</span></code> if <span class="math notranslate nohighlight">\(V[i] \le V'[i]\)</span> for every component.  This
+is the <strong>happens-before test</strong>:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V \le V' \;\iff\; \forall\, i : V[i] \le V'[i]\]</div>
+</div>
+<p>If <code class="docutils literal notranslate"><span class="pre">a.partial_le(b)</span></code> is true, then the event that produced clock <em>a</em>
+happens-before the event that produced clock <em>b</em>.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">concurrent_with(other)</span></code></dt><dd><p>Returns <code class="docutils literal notranslate"><span class="pre">true</span></code> when neither clock dominates the other:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V \| V' \;\iff\; V \not\le V' \;\wedge\; V' \not\le V\]</div>
+</div>
+<p>Concurrent events are potential races if they also conflict on a shared
+object.</p>
+</dd>
+</dl>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">VersionVec</span></code> implementation automatically extends the internal
+<code class="docutils literal notranslate"><span class="pre">Vec</span></code> when a thread ID exceeds its length (padding with zeros).
+This means thread IDs need not be known up front.</p>
+</div>
+</section>
+<section id="three-clocks-per-thread">
+<h2><a class="toc-backref" href="#id3" role="doc-backlink">Three clocks per thread</a><a class="headerlink" href="#three-clocks-per-thread" title="Link to this heading">¶</a></h2>
+<p>Each thread in the DPOR engine maintains <strong>three</strong> vector clocks:</p>
+<div class="table-wrapper colwidths-given docutils container">
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 18.0%" />
+<col style="width: 20.0%" />
+<col style="width: 20.0%" />
+<col style="width: 42.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Clock</p></th>
+<th class="head"><p>Incremented on</p></th>
+<th class="head"><p>Joined on</p></th>
+<th class="head"><p>Purpose</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code></p></td>
+<td><p>Every scheduling step</p></td>
+<td><p>Lock acquire, lock release, thread spawn, thread join</p></td>
+<td><p>Primary race detection for shared-memory accesses. Includes lock
+edges, so accesses protected by the same lock appear ordered (no
+false race).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">io_vv</span></code></p></td>
+<td><p>Every scheduling step</p></td>
+<td><p>Thread spawn, thread join (<strong>not</strong> lock acquire/release)</p></td>
+<td><p>I/O race detection (files, sockets, databases via <code class="docutils literal notranslate"><span class="pre">LD_PRELOAD</span></code>).
+Omits lock edges so I/O accesses from different threads <em>always</em>
+appear potentially concurrent — catches TOCTOU races that
+lock-aware tracking would suppress.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">causality</span></code></p></td>
+<td><p><em>Not</em> incremented on scheduling steps</p></td>
+<td><p>Lock acquire, thread spawn, thread join</p></td>
+<td><p>General causal ordering. Propagates synchronization knowledge without
+conflating it with scheduling steps.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="why-two-happens-before-clocks">
+<h3><a class="toc-backref" href="#id4" role="doc-backlink">Why two happens-before clocks?</a><a class="headerlink" href="#why-two-happens-before-clocks" title="Link to this heading">¶</a></h3>
+<p>Consider a program where two threads access a shared file, protected by a
+Python lock:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">lock</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Lock</span><span class="p">()</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">thread_0</span><span class="p">():</span>
+    <span class="k">with</span> <span class="n">lock</span><span class="p">:</span>
+        <span class="n">f</span> <span class="o">=</span> <span class="nb">open</span><span class="p">(</span><span class="s2">&quot;/tmp/data&quot;</span><span class="p">,</span> <span class="s2">&quot;w&quot;</span><span class="p">)</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;hello&quot;</span><span class="p">)</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">thread_1</span><span class="p">():</span>
+    <span class="k">with</span> <span class="n">lock</span><span class="p">:</span>
+        <span class="n">f</span> <span class="o">=</span> <span class="nb">open</span><span class="p">(</span><span class="s2">&quot;/tmp/data&quot;</span><span class="p">,</span> <span class="s2">&quot;r&quot;</span><span class="p">)</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</pre></div>
+</div>
+<p>From Python’s perspective, the lock makes these accesses ordered — T0’s
+critical section happens-before T1’s (or vice versa).  The <code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code>
+clock reflects this ordering, so <code class="docutils literal notranslate"><span class="pre">process_access()</span></code> would <strong>not</strong> report
+a race on the Python attribute accesses.</p>
+<p>But the <em>file system</em> doesn’t know about the Python lock.  If the program
+has a bug where the lock is sometimes missing, or a different code path
+accesses the file without the lock, the file-level access is still a
+potential TOCTOU (time-of-check-to-time-of-use) race.</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">io_vv</span></code> clock solves this by <strong>not joining on lock events</strong>.  Two
+I/O accesses by different threads always have concurrent <code class="docutils literal notranslate"><span class="pre">io_vv</span></code> values
+(assuming no thread spawn/join ordering), so <code class="docutils literal notranslate"><span class="pre">process_io_access()</span></code> will
+flag them as races and explore alternative interleavings around the I/O.
+This is conservative (may over-explore) but catches real bugs.</p>
+</section>
+</section>
+<section id="synchronization-events-and-clock-updates">
+<h2><a class="toc-backref" href="#id5" role="doc-backlink">Synchronization events and clock updates</a><a class="headerlink" href="#synchronization-events-and-clock-updates" title="Link to this heading">¶</a></h2>
+<p>The engine processes four synchronization events, each updating the clocks:</p>
+<section id="lock-release">
+<h3><a class="toc-backref" href="#id6" role="doc-backlink">Lock release</a><a class="headerlink" href="#lock-release" title="Link to this heading">¶</a></h3>
+<p>The releasing thread’s <code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code> (and <code class="docutils literal notranslate"><span class="pre">causality</span></code>) clock is stored on
+the lock:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V_{\text{lock}} \leftarrow V_t\]</div>
+</div>
+<p>This snapshot captures everything the releasing thread “knows about” —
+its own operations and everything it learned from prior synchronization.</p>
+</section>
+<section id="lock-acquire">
+<h3><a class="toc-backref" href="#id7" role="doc-backlink">Lock acquire</a><a class="headerlink" href="#lock-acquire" title="Link to this heading">¶</a></h3>
+<p>The acquiring thread joins the stored clock:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V_t \leftarrow V_t \sqcup V_{\text{lock}}\]</div>
+</div>
+<p>where <span class="math notranslate nohighlight">\(\sqcup\)</span> is the component-wise maximum (the <code class="docutils literal notranslate"><span class="pre">join</span></code>
+operation).  After this, the acquirer’s clock dominates the releaser’s,
+establishing that the acquire happens-after the release.</p>
+<p><strong>Critically</strong>, the <code class="docutils literal notranslate"><span class="pre">io_vv</span></code> clock is <strong>not</strong> updated on lock
+acquire/release.  This is the mechanism that keeps I/O accesses
+“concurrent” even when protected by Python locks.</p>
+</section>
+<section id="thread-spawn">
+<h3><a class="toc-backref" href="#id8" role="doc-backlink">Thread spawn</a><a class="headerlink" href="#thread-spawn" title="Link to this heading">¶</a></h3>
+<p>The child thread inherits the parent’s clocks:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V_{\text{child}} \leftarrow V_{\text{child}} \sqcup V_{\text{parent}}\]</div>
+</div>
+<p>This applies to all three clocks (<code class="docutils literal notranslate"><span class="pre">dpor_vv</span></code>, <code class="docutils literal notranslate"><span class="pre">io_vv</span></code>, <code class="docutils literal notranslate"><span class="pre">causality</span></code>).
+All of the parent’s operations before the spawn happen-before the child’s
+first operation.</p>
+</section>
+<section id="thread-join">
+<h3><a class="toc-backref" href="#id9" role="doc-backlink">Thread join</a><a class="headerlink" href="#thread-join" title="Link to this heading">¶</a></h3>
+<p>The joining thread absorbs the joined thread’s clocks:</p>
+<div class="math-wrapper docutils container">
+<div class="math notranslate nohighlight">
+\[V_t \leftarrow V_t \sqcup V_{t'}\]</div>
+</div>
+<p>Again, all three clocks are updated.  Everything the joined thread did
+now happens-before the joiner’s subsequent operations.</p>
+</section>
+</section>
+<section id="worked-examples">
+<h2><a class="toc-backref" href="#id10" role="doc-backlink">Worked examples</a><a class="headerlink" href="#worked-examples" title="Link to this heading">¶</a></h2>
+<p>These examples trace the vector clock values step by step to show how races
+are detected or suppressed.</p>
+<section id="example-1-unsynchronized-access-race-detected">
+<h3><a class="toc-backref" href="#id11" role="doc-backlink">Example 1: unsynchronized access (race detected)</a><a class="headerlink" href="#example-1-unsynchronized-access-race-detected" title="Link to this heading">¶</a></h3>
+<p>Two threads write to the same shared object with no synchronization:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">shared</span> <span class="o">=</span> <span class="n">Container</span><span class="p">()</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">thread_0</span><span class="p">():</span>
+    <span class="n">shared</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="mi">1</span>    <span class="c1"># W_0(shared)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">thread_1</span><span class="p">():</span>
+    <span class="n">shared</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="mi">2</span>    <span class="c1"># W_1(shared)</span>
+</pre></div>
+</div>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>Step 0: schedule T0     → T0.dpor_vv = [1, 0]
+        W_0(shared): no prior access → no conflict
+
+Step 1: schedule T1     → T1.dpor_vv = [0, 1]
+        W_1(shared): prior write by T0 at step 0 with vv [1, 0]
+        Check: [1, 0] ≤ [0, 1]?
+          Component 0: 1 ≤ 0?  NO
+        Check: [0, 1] ≤ [1, 0]?
+          Component 1: 1 ≤ 0?  NO
+        → CONCURRENT → RACE DETECTED
+        → Insert T1 into wakeup tree at branch 0
+</pre></div>
+</div>
+<p>T0’s clock has component 0 ahead; T1’s has component 1 ahead.  Neither
+dominates, so the accesses are concurrent.  DPOR will explore the
+alternative ordering (T1 before T0).</p>
+</section>
+<section id="example-2-lock-synchronized-access-no-race">
+<h3><a class="toc-backref" href="#id12" role="doc-backlink">Example 2: lock-synchronized access (no race)</a><a class="headerlink" href="#example-2-lock-synchronized-access-no-race" title="Link to this heading">¶</a></h3>
+<p>The same program, but with a lock protecting the shared object:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">lock</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Lock</span><span class="p">()</span>
+<span class="n">shared</span> <span class="o">=</span> <span class="n">Container</span><span class="p">()</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">thread_0</span><span class="p">():</span>
+    <span class="k">with</span> <span class="n">lock</span><span class="p">:</span>
+        <span class="n">shared</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="mi">1</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">thread_1</span><span class="p">():</span>
+    <span class="k">with</span> <span class="n">lock</span><span class="p">:</span>
+        <span class="n">shared</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="mi">2</span>
+</pre></div>
+</div>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>Step 0: schedule T0         → T0.dpor_vv = [1, 0]
+        T0 acquires lock    → no prior release, clock unchanged
+        W_0(shared): no prior access → no conflict
+        T0 releases lock    → store T0.dpor_vv [1, 0] on lock
+
+Step 1: schedule T1         → T1.dpor_vv = [0, 1]
+        T1 acquires lock    → join with stored [1, 0]
+                               T1.dpor_vv = max([0, 1], [1, 0]) = [1, 1]
+        W_1(shared): prior write by T0 at step 0 with vv [1, 0]
+        Check: [1, 0] ≤ [1, 1]?
+          Component 0: 1 ≤ 1?  YES
+          Component 1: 0 ≤ 1?  YES
+        → HAPPENS-BEFORE → no race
+</pre></div>
+</div>
+<p>The lock acquire joined T0’s clock into T1, making T0’s write
+happen-before T1’s write.  No alternative ordering is explored.</p>
+</section>
+<section id="example-3-lock-synchronized-i-o-toctou-race-detected">
+<h3><a class="toc-backref" href="#id13" role="doc-backlink">Example 3: lock-synchronized I/O (TOCTOU race detected)</a><a class="headerlink" href="#example-3-lock-synchronized-i-o-toctou-race-detected" title="Link to this heading">¶</a></h3>
+<p>Same lock-protected code, but now the accesses are file I/O reported via
+<code class="docutils literal notranslate"><span class="pre">LD_PRELOAD</span></code> (using <code class="docutils literal notranslate"><span class="pre">io_vv</span></code>):</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">lock</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Lock</span><span class="p">()</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">thread_0</span><span class="p">():</span>
+    <span class="k">with</span> <span class="n">lock</span><span class="p">:</span>
+        <span class="nb">open</span><span class="p">(</span><span class="s2">&quot;/tmp/data&quot;</span><span class="p">,</span> <span class="s2">&quot;w&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;hello&quot;</span><span class="p">)</span>  <span class="c1"># I/O write</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">thread_1</span><span class="p">():</span>
+    <span class="k">with</span> <span class="n">lock</span><span class="p">:</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="nb">open</span><span class="p">(</span><span class="s2">&quot;/tmp/data&quot;</span><span class="p">,</span> <span class="s2">&quot;r&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>    <span class="c1"># I/O read</span>
+</pre></div>
+</div>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>Step 0: schedule T0         → T0.io_vv = [1, 0]
+        T0 acquires lock    → io_vv NOT joined (lock events skipped)
+        I/O write to /tmp/data: no prior I/O access → no conflict
+        T0 releases lock    → io_vv NOT updated
+
+Step 1: schedule T1         → T1.io_vv = [0, 1]
+        T1 acquires lock    → io_vv NOT joined
+        I/O read from /tmp/data: prior I/O write by T0 with io_vv [1, 0]
+        Check: [1, 0] ≤ [0, 1]?
+          Component 0: 1 ≤ 0?  NO
+        → CONCURRENT under io_vv → RACE DETECTED
+</pre></div>
+</div>
+<p>Even though the Python lock orders the operations, the <code class="docutils literal notranslate"><span class="pre">io_vv</span></code> clock
+ignores the lock, so the I/O accesses appear concurrent.  DPOR will
+explore the alternative ordering.  This catches bugs where:</p>
+<ul class="simple">
+<li><p>The lock is sometimes missing on a different code path</p></li>
+<li><p>A third thread accesses the file without the lock</p></li>
+<li><p>The program relies on file-system state that isn’t actually protected</p></li>
+</ul>
+</section>
+<section id="example-4-thread-spawn-establishes-ordering">
+<h3><a class="toc-backref" href="#id14" role="doc-backlink">Example 4: thread spawn establishes ordering</a><a class="headerlink" href="#example-4-thread-spawn-establishes-ordering" title="Link to this heading">¶</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">shared</span> <span class="o">=</span> <span class="n">Container</span><span class="p">()</span>
+<span class="n">shared</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="mi">0</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">parent</span><span class="p">():</span>
+    <span class="n">shared</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="mi">1</span>          <span class="c1"># W_parent(shared)</span>
+    <span class="n">t</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Thread</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">child</span><span class="p">)</span>
+    <span class="n">t</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>                 <span class="c1"># spawn</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">child</span><span class="p">():</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="n">shared</span><span class="o">.</span><span class="n">value</span>          <span class="c1"># R_child(shared)</span>
+</pre></div>
+</div>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>Step 0: schedule parent   → parent.dpor_vv = [1, 0]
+        W_parent(shared): no prior access → no conflict
+
+Step 1: spawn child       → child.dpor_vv = join([0, 0], [1, 0]) = [1, 0]
+
+Step 2: schedule child    → child.dpor_vv = [1, 1]
+        R_child(shared): prior write by parent at step 0 with vv [1, 0]
+        Check: [1, 0] ≤ [1, 1]?
+          Component 0: 1 ≤ 1?  YES
+          Component 1: 0 ≤ 1?  YES
+        → HAPPENS-BEFORE → no race
+</pre></div>
+</div>
+<p>The spawn transfers the parent’s clock to the child, so the parent’s write
+is ordered before the child’s read.</p>
+</section>
+<section id="example-5-concurrent-access-after-spawn-race-detected">
+<h3><a class="toc-backref" href="#id15" role="doc-backlink">Example 5: concurrent access after spawn (race detected)</a><a class="headerlink" href="#example-5-concurrent-access-after-spawn-race-detected" title="Link to this heading">¶</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">shared</span> <span class="o">=</span> <span class="n">Container</span><span class="p">()</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">parent</span><span class="p">():</span>
+    <span class="n">t</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Thread</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">child</span><span class="p">)</span>
+    <span class="n">t</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+    <span class="n">shared</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="mi">1</span>          <span class="c1"># W_parent(shared) — AFTER spawn</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">child</span><span class="p">():</span>
+    <span class="n">shared</span><span class="o">.</span><span class="n">value</span> <span class="o">=</span> <span class="mi">2</span>          <span class="c1"># W_child(shared)</span>
+</pre></div>
+</div>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>Step 0: schedule parent   → parent.dpor_vv = [1, 0]
+        spawn child       → child.dpor_vv = join([0, 0], [1, 0]) = [1, 0]
+
+Step 1: schedule parent   → parent.dpor_vv = [2, 0]
+        W_parent(shared): no prior access → no conflict
+
+Step 2: schedule child    → child.dpor_vv = [1, 1]
+        W_child(shared): prior write by parent at step 1 with vv [2, 0]
+        Check: [2, 0] ≤ [1, 1]?
+          Component 0: 2 ≤ 1?  NO
+        → CONCURRENT → RACE DETECTED
+</pre></div>
+</div>
+<p>The parent wrote <em>after</em> the spawn, so the spawn’s clock transfer doesn’t
+cover it.  The parent’s post-spawn write and the child’s write are
+genuinely concurrent.</p>
+</section>
+</section>
+<section id="how-race-detection-drives-dpor">
+<h2><a class="toc-backref" href="#id16" role="doc-backlink">How race detection drives DPOR</a><a class="headerlink" href="#how-race-detection-drives-dpor" title="Link to this heading">¶</a></h2>
+<p>When a race is detected, the engine performs two actions:</p>
+<ol class="arabic simple">
+<li><p><strong>Inline insertion</strong>: insert a single-element wakeup sequence
+<code class="docutils literal notranslate"><span class="pre">[racing_thread]</span></code> into the wakeup tree at the branch where the first
+racing access occurred.  This guarantees the race is never lost.</p></li>
+<li><p><strong>Deferred notdep processing</strong>: store the race as a <code class="docutils literal notranslate"><span class="pre">PendingRace</span></code>.
+At the end of the execution, compute the <strong>notdep sequence</strong> —
+threads between the two racing accesses whose work is independent of
+the first access — and insert the full multi-step sequence.  This
+guides future exploration through independent intermediates, reducing
+unnecessary branching.</p></li>
+</ol>
+<p>The vector clock comparison (<code class="docutils literal notranslate"><span class="pre">partial_le</span></code> / <code class="docutils literal notranslate"><span class="pre">concurrent_with</span></code>) is the
+<em>sole decision point</em> for whether a race exists.  Everything else in the
+DPOR algorithm — wakeup trees, sleep sets, notdep sequences — flows
+from this check.  See <a class="reference internal" href="dpor.html"><span class="doc">DPOR: Dynamic Partial Order Reduction</span></a> for the full algorithm description and
+<a class="reference internal" href="search.html"><span class="doc">Search Strategies</span></a> for how search strategies affect exploration order.</p>
+</section>
+<section id="complexity">
+<h2><a class="toc-backref" href="#id17" role="doc-backlink">Complexity</a><a class="headerlink" href="#complexity" title="Link to this heading">¶</a></h2>
+<p><strong>Per scheduling point</strong>: <span class="math notranslate nohighlight">\(O(T)\)</span> where <span class="math notranslate nohighlight">\(T\)</span> is the number of
+threads, dominated by the vector-clock comparison (one <code class="docutils literal notranslate"><span class="pre">partial_le</span></code> call
+iterates over all components).</p>
+<p><strong>Per synchronization event</strong>: <span class="math notranslate nohighlight">\(O(T)\)</span> for the <code class="docutils literal notranslate"><span class="pre">join</span></code> operation
+(component-wise maximum of two vectors).</p>
+<p><strong>Space per thread</strong>: <span class="math notranslate nohighlight">\(O(T)\)</span> for each of the three vector clocks
+(three <code class="docutils literal notranslate"><span class="pre">Vec&lt;u32&gt;</span></code> of length <span class="math notranslate nohighlight">\(T\)</span>).</p>
+<p>For programs with many threads, the per-access cost scales linearly.  In
+practice, concurrency tests rarely exceed ~10 threads, making the overhead
+negligible compared to Python interpretation costs.</p>
+</section>
+<section id="further-reading">
+<h2><a class="toc-backref" href="#id18" role="doc-backlink">Further reading</a><a class="headerlink" href="#further-reading" title="Link to this heading">¶</a></h2>
+<ul class="simple">
+<li><p><a class="reference external" href="https://en.wikipedia.org/wiki/Vector_clock">Vector clock (Wikipedia)</a></p></li>
+<li><p><a class="reference external" href="https://en.wikipedia.org/wiki/Happened-before">Happened-before (Wikipedia)</a></p></li>
+<li><p>Abdulla et al., <a class="reference external" href="https://doi.org/10.1145/3073408">“Source Sets: A Foundation for Optimal Dynamic Partial
+Order Reduction”</a>, JACM 2017 —
+Def 3.2 (happens-before, p.12–13), Section 10 (implementation with
+vector clocks, p.34–35).</p></li>
+<li><p>See <a class="reference internal" href="dpor.html"><span class="doc">DPOR: Dynamic Partial Order Reduction</span></a> for the full DPOR algorithm, <a class="reference internal" href="search.html"><span class="doc">Search Strategies</span></a> for search
+strategies, and <a class="reference internal" href="internals.html"><span class="doc">How It Works Under the Hood</span></a> for how the engine integrates with
+Python tracing.</p></li>
+</ul>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="search.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Search Strategies</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="dpor.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">DPOR: Dynamic Partial Order Reduction</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, Lucas Wiman
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Vector Clocks and Happens-Before</a><ul>
+<li><a class="reference internal" href="#the-happens-before-relation">The happens-before relation</a></li>
+<li><a class="reference internal" href="#the-versionvec-data-structure">The <code class="docutils literal notranslate"><span class="pre">VersionVec</span></code> data structure</a></li>
+<li><a class="reference internal" href="#three-clocks-per-thread">Three clocks per thread</a><ul>
+<li><a class="reference internal" href="#why-two-happens-before-clocks">Why two happens-before clocks?</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#synchronization-events-and-clock-updates">Synchronization events and clock updates</a><ul>
+<li><a class="reference internal" href="#lock-release">Lock release</a></li>
+<li><a class="reference internal" href="#lock-acquire">Lock acquire</a></li>
+<li><a class="reference internal" href="#thread-spawn">Thread spawn</a></li>
+<li><a class="reference internal" href="#thread-join">Thread join</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#worked-examples">Worked examples</a><ul>
+<li><a class="reference internal" href="#example-1-unsynchronized-access-race-detected">Example 1: unsynchronized access (race detected)</a></li>
+<li><a class="reference internal" href="#example-2-lock-synchronized-access-no-race">Example 2: lock-synchronized access (no race)</a></li>
+<li><a class="reference internal" href="#example-3-lock-synchronized-i-o-toctou-race-detected">Example 3: lock-synchronized I/O (TOCTOU race detected)</a></li>
+<li><a class="reference internal" href="#example-4-thread-spawn-establishes-ordering">Example 4: thread spawn establishes ordering</a></li>
+<li><a class="reference internal" href="#example-5-concurrent-access-after-spawn-race-detected">Example 5: concurrent access after spawn (race detected)</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#how-race-detection-drives-dpor">How race detection drives DPOR</a></li>
+<li><a class="reference internal" href="#complexity">Complexity</a></li>
+<li><a class="reference internal" href="#further-reading">Further reading</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="_static/documentation_options.js?v=c87aa342"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/scripts/furo.js?v=46bd48cc"></script>
+    <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+    </body>
+</html>

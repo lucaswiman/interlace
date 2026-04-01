@@ -6,7 +6,7 @@
 <link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Frontrun Case Studies: Concurrency Bug Detection" href="CASE_STUDIES.html"><link rel="prev" title="How It Works Under the Hood" href="internals.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>API Reference - Frontrun 0.3.0 documentation</title>
+        <title>API Reference - Frontrun 0.4.1 documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -162,7 +162,7 @@
       </label>
     </div>
     <div class="header-center">
-      <a href="index.html"><div class="brand">Frontrun 0.3.0 documentation</div></a>
+      <a href="index.html"><div class="brand">Frontrun 0.4.1 documentation</div></a>
     </div>
     <div class="header-right">
       <div class="theme-toggle-container theme-toggle-header">
@@ -183,7 +183,7 @@
       
       <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
   
-  <span class="sidebar-brand-text">Frontrun 0.3.0 documentation</span>
+  <span class="sidebar-brand-text">Frontrun 0.4.1 documentation</span>
   
 </a><form class="sidebar-search-container" method="get" action="search.html" role="search">
   <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
@@ -198,6 +198,8 @@
 <li class="toctree-l1"><a class="reference internal" href="approaches.html">How Frontrun Works</a></li>
 <li class="toctree-l1"><a class="reference internal" href="dpor_guide.html">DPOR in Practice</a></li>
 <li class="toctree-l1"><a class="reference internal" href="dpor.html">DPOR: Dynamic Partial Order Reduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="vector-clocks.html">Vector Clocks and Happens-Before</a></li>
+<li class="toctree-l1"><a class="reference internal" href="search.html">Search Page</a></li>
 <li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
 <li class="toctree-l1"><a class="reference internal" href="orm_race.html">SQLAlchemy Lost-Update Race Condition</a></li>
 <li class="toctree-l1"><a class="reference internal" href="sql-technical-details.html">SQL Conflict Detection – Technical Details</a></li>
@@ -350,7 +352,7 @@ execute which marker in order.</p>
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>property_holds</strong> (<em>bool</em>)</p></li>
-<li><p><strong>counterexample</strong> (<em>list</em><em>[</em><em>int</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>counterexample</strong> (<em>list</em><em>[</em><em>int</em><em>] </em><em>| </em><a class="reference internal" href="#frontrun.common.Schedule" title="frontrun.common.Schedule"><em>Schedule</em></a><em> | </em><em>None</em>)</p></li>
 <li><p><strong>num_explored</strong> (<em>int</em>)</p></li>
 <li><p><strong>unique_interleavings</strong> (<em>int</em>)</p></li>
 <li><p><strong>failures</strong> (<em>list</em><em>[</em><em>tuple</em><em>[</em><em>int</em><em>, </em><em>list</em><em>[</em><em>int</em><em>]</em><em>]</em><em>]</em>)</p></li>
@@ -378,7 +380,7 @@ execute which marker in order.</p>
 <dd><p>First schedule that violated the invariant (if any).</p>
 <dl class="field-list simple">
 <dt class="field-odd">Type<span class="colon">:</span></dt>
-<dd class="field-odd"><p>list[int] | None</p>
+<dd class="field-odd"><p>list[int] | <a class="reference internal" href="#frontrun.common.Schedule" title="frontrun.common.Schedule">Schedule</a> | None</p>
 </dd>
 </dl>
 </dd></dl>
@@ -477,7 +479,7 @@ instance, or None if the failure did not involve SQL.</p>
 
 <dl class="py attribute">
 <dt class="sig sig-object py" id="id3">
-<span class="sig-name descname"><span class="pre">counterexample</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#id3" title="Link to this definition">¶</a></dt>
+<span class="sig-name descname"><span class="pre">counterexample</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference internal" href="#frontrun.common.Schedule" title="frontrun.common.Schedule"><span class="pre">Schedule</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#id3" title="Link to this definition">¶</a></dt>
 <dd></dd></dl>
 
 <dl class="py attribute">
@@ -521,8 +523,9 @@ instance, or None if the failure did not involve SQL.</p>
 <section id="module-frontrun.dpor">
 <span id="dpor-systematic-exploration"></span><h2>DPOR (Systematic Exploration)<a class="headerlink" href="#module-frontrun.dpor" title="Link to this heading">¶</a></h2>
 <p>Bytecode-tracing DPOR (Dynamic Partial Order Reduction) for frontrun.</p>
-<p>This module implements systematic interleaving exploration using DPOR,
-completely separate from the existing bytecode.py random exploration.</p>
+<p>This module implements systematic interleaving exploration using DPOR.
+Shares cooperative threading primitives and shadow-stack infrastructure
+with bytecode.py (random exploration).</p>
 <p>The approach:
 1. A Rust DPOR engine (frontrun._dpor) manages the exploration tree,</p>
 <blockquote>
@@ -556,7 +559,7 @@ events for happens-before tracking.</p></li>
 </div>
 <dl class="py function">
 <dt class="sig sig-object py" id="frontrun.dpor.explore_dpor">
-<span class="sig-prename descclassname"><span class="pre">frontrun.dpor.</span></span><span class="sig-name descname"><span class="pre">explore_dpor</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">setup</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">threads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">invariant</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_executions</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">preemption_bound</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_branches</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">100000</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout_per_run</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stop_on_first</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">detect_io</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">deadlock_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reproduce_on_failure</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">total_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">warn_nondeterministic_sql</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lock_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trace_packages</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">track_dunder_dict_accesses</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/frontrun/dpor.html#explore_dpor"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#frontrun.dpor.explore_dpor" title="Link to this definition">¶</a></dt>
+<span class="sig-prename descclassname"><span class="pre">frontrun.dpor.</span></span><span class="sig-name descname"><span class="pre">explore_dpor</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">setup</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">threads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">invariant</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_executions</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">preemption_bound</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_branches</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">100000</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout_per_run</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stop_on_first</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">detect_io</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">deadlock_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reproduce_on_failure</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">total_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">warn_nondeterministic_sql</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lock_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trace_packages</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">track_dunder_dict_accesses</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">search</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/frontrun/dpor.html#explore_dpor"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#frontrun.dpor.explore_dpor" title="Link to this definition">¶</a></dt>
 <dd><p>Systematically explore interleavings using DPOR.</p>
 <p>This is the DPOR replacement for <code class="docutils literal notranslate"><span class="pre">explore_interleavings()</span></code>. Instead of
 random sampling, it uses the DPOR algorithm to explore only distinct
@@ -612,6 +615,33 @@ rare case where one thread uses <code class="docutils literal notranslate"><span
 uses <code class="docutils literal notranslate"><span class="pre">self.__dict__['x']</span> <span class="pre">=</span> <span class="pre">v</span></code>, but doubles wakeup tree
 insertions and can cause combinatorial explosion.  Default
 False.</p></li>
+<li><p><strong>search</strong> (<em>str</em><em> | </em><em>None</em>) – <p>Controls the order in which wakeup tree branches are
+explored.  All strategies visit the same set of Mazurkiewicz
+trace equivalence classes; only the order differs.  Accepted
+values:</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">None</span></code> or <code class="docutils literal notranslate"><span class="pre">&quot;dfs&quot;</span></code> — classic DFS, lowest thread ID first
+(default, matches the paper’s Algorithm 2).  <strong>Best for
+exhaustive exploration</strong> (<code class="docutils literal notranslate"><span class="pre">stop_on_first=False</span></code>): produces
+the optimal (minimum) number of executions.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&quot;bit-reversal&quot;</span></code> or <code class="docutils literal notranslate"><span class="pre">&quot;bit-reversal:&lt;seed&gt;&quot;</span></code> — visit
+children in bit-reversal permutation order for maximal
+spread across distinct conflict points early.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&quot;round-robin&quot;</span></code> or <code class="docutils literal notranslate"><span class="pre">&quot;round-robin:&lt;seed&gt;&quot;</span></code> — cycle
+through available threads in rotating order.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&quot;stride&quot;</span></code> or <code class="docutils literal notranslate"><span class="pre">&quot;stride:&lt;seed&gt;&quot;</span></code> — visit every s-th
+sibling (s coprime to branching factor, derived from seed).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&quot;conflict-first&quot;</span></code> — reverse of DFS (highest thread ID
+first), preferring threads added by race reversals.</p></li>
+</ul>
+<p><strong>Use a non-DFS strategy when the trace space is large and
+you have a limited execution budget</strong> (<code class="docutils literal notranslate"><span class="pre">stop_on_first=True</span></code>
+or a low <code class="docutils literal notranslate"><span class="pre">max_executions</span></code>).  DFS explores traces in a fixed
+order and may spend many executions on similar interleavings
+before reaching a bug.  The alternative strategies spread
+exploration across different conflict points earlier, finding
+bugs faster on average.</p>
+</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -982,6 +1012,219 @@ threads={“t1”: worker_func, “t2”: worker_func},</p>
 <section id="id23">
 <h3>)<a class="headerlink" href="#id23" title="Link to this heading">¶</a></h3>
 </section>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="frontrun.trace_markers.marker_schedule_strategy">
+<span class="sig-prename descclassname"><span class="pre">frontrun.trace_markers.</span></span><span class="sig-name descname"><span class="pre">marker_schedule_strategy</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">threads</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/frontrun/trace_markers.html#marker_schedule_strategy"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#frontrun.trace_markers.marker_schedule_strategy" title="Link to this definition">¶</a></dt>
+<dd><p>Hypothesis strategy that generates valid marker-level Schedule objects.</p>
+<p>A valid schedule interleaves each thread’s markers while preserving
+their relative order within each thread.  This provides a much smaller
+search space than opcode-level exploration while still covering all
+meaningful interleavings at the marker granularity.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>threads</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>list</em><em>[</em><em>str</em><em>]</em><em>]</em>) – <p>Mapping from thread/execution names to their ordered list
+of marker names.  Example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="p">{</span><span class="s2">&quot;t1&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;read&quot;</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">],</span> <span class="s2">&quot;t2&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;read&quot;</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">]}</span>
+</pre></div>
+</div>
+</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A Hypothesis strategy producing <code class="xref py py-class docutils literal notranslate"><span class="pre">Schedule</span></code> objects.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Any</em></p>
+</dd>
+</dl>
+<p>Example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">hypothesis</span><span class="w"> </span><span class="kn">import</span> <span class="n">given</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.trace_markers</span><span class="w"> </span><span class="kn">import</span> <span class="n">marker_schedule_strategy</span>
+
+<span class="nd">@given</span><span class="p">(</span><span class="n">schedule</span><span class="o">=</span><span class="n">marker_schedule_strategy</span><span class="p">(</span>
+    <span class="n">threads</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;w1&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;read&quot;</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">],</span> <span class="s2">&quot;w2&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;read&quot;</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">]},</span>
+<span class="p">))</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">test_no_lost_update</span><span class="p">(</span><span class="n">schedule</span><span class="p">):</span>
+    <span class="o">...</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="frontrun.trace_markers.all_marker_schedules">
+<span class="sig-prename descclassname"><span class="pre">frontrun.trace_markers.</span></span><span class="sig-name descname"><span class="pre">all_marker_schedules</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">threads</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/frontrun/trace_markers.html#all_marker_schedules"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#frontrun.trace_markers.all_marker_schedules" title="Link to this definition">¶</a></dt>
+<dd><p>Enumerate ALL valid interleavings of thread markers.</p>
+<p>A valid interleaving places every thread’s markers in the schedule
+while preserving their relative order within each thread.</p>
+<p>For <em>N</em> threads with marker counts <em>k1, k2, …, kN</em>, the total
+number of valid interleavings is the multinomial coefficient:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>(k1 + k2 + ... + kN)! / (k1! * k2! * ... * kN!)
+</pre></div>
+</div>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>threads</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>list</em><em>[</em><em>str</em><em>]</em><em>]</em>) – Mapping from thread/execution names to their ordered list
+of marker names.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A list of <code class="xref py py-class docutils literal notranslate"><span class="pre">Schedule</span></code> objects covering every valid interleaving.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>list[<a class="reference internal" href="#frontrun.common.Schedule" title="frontrun.common.Schedule"><em>Schedule</em></a>]</p>
+</dd>
+</dl>
+<p>Example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">schedules</span> <span class="o">=</span> <span class="n">all_marker_schedules</span><span class="p">(</span>
+    <span class="n">threads</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;t1&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;a&quot;</span><span class="p">,</span> <span class="s2">&quot;b&quot;</span><span class="p">],</span> <span class="s2">&quot;t2&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;x&quot;</span><span class="p">,</span> <span class="s2">&quot;y&quot;</span><span class="p">]},</span>
+<span class="p">)</span>
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">schedules</span><span class="p">)</span> <span class="o">==</span> <span class="mi">6</span>  <span class="c1"># C(4,2)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="frontrun.trace_markers.explore_marker_interleavings">
+<span class="sig-prename descclassname"><span class="pre">frontrun.trace_markers.</span></span><span class="sig-name descname"><span class="pre">explore_marker_interleavings</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">setup</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">threads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">invariant</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">stop_on_first</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">deadlock_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10.0</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/frontrun/trace_markers.html#explore_marker_interleavings"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#frontrun.trace_markers.explore_marker_interleavings" title="Link to this definition">¶</a></dt>
+<dd><p>Explore all marker-level interleavings and check an invariant.</p>
+<p>Generates every valid interleaving of the declared markers (preserving
+per-thread order), runs each one against real code via <a class="reference internal" href="#frontrun.trace_markers.TraceExecutor" title="frontrun.trace_markers.TraceExecutor"><code class="xref py py-class docutils literal notranslate"><span class="pre">TraceExecutor</span></code></a>,
+and checks the invariant after each execution.</p>
+<p>This sits between manual trace markers (exact schedule, one interleaving)
+and bytecode exploration (random, enormous search space).  For <em>N</em> threads
+with a few markers each, the search space is small enough to explore
+exhaustively — giving completeness guarantees at the marker granularity.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>setup</strong> (<em>Callable</em><em>[</em><em>[</em><em>...</em><em>]</em><em>, </em><em>Any</em><em>]</em>) – Factory producing fresh shared state for each execution.</p></li>
+<li><p><strong>threads</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>tuple</em><em>[</em><em>Callable</em><em>[</em><em>[</em><em>...</em><em>]</em><em>, </em><em>None</em><em>]</em><em>, </em><em>list</em><em>[</em><em>str</em><em>]</em><em>]</em><em>]</em>) – Mapping from execution name to <code class="docutils literal notranslate"><span class="pre">(target_fn,</span> <span class="pre">markers)</span></code> where
+<em>target_fn</em> takes the setup result and <em>markers</em> is the ordered
+list of <code class="docutils literal notranslate"><span class="pre">#</span> <span class="pre">frontrun:</span></code> marker names that <em>target_fn</em> hits.</p></li>
+<li><p><strong>invariant</strong> (<em>Callable</em><em>[</em><em>[</em><em>...</em><em>]</em><em>, </em><em>bool</em><em>]</em>) – Predicate on the shared state; returns True if correct.</p></li>
+<li><p><strong>stop_on_first</strong> (<em>bool</em>) – Stop after finding the first invariant violation
+(default True).</p></li>
+<li><p><strong>deadlock_timeout</strong> (<em>float</em>) – Per-schedule deadlock detection timeout.</p></li>
+<li><p><strong>timeout</strong> (<em>float</em><em> | </em><em>None</em>) – Per-schedule join timeout.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>An <a class="reference internal" href="#frontrun.common.InterleavingResult" title="frontrun.common.InterleavingResult"><code class="xref py py-class docutils literal notranslate"><span class="pre">InterleavingResult</span></code></a>.  The <code class="docutils literal notranslate"><span class="pre">counterexample</span></code>
+field is a <code class="xref py py-class docutils literal notranslate"><span class="pre">Schedule</span></code> (not a list of ints) when a violation is
+found.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#frontrun.common.InterleavingResult" title="frontrun.common.InterleavingResult"><em>InterleavingResult</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+<section id="marker-schedule-exploration">
+<h2>Marker Schedule Exploration<a class="headerlink" href="#marker-schedule-exploration" title="Link to this heading">¶</a></h2>
+<dl class="py function">
+<dt class="sig sig-object py" id="id24">
+<span class="sig-prename descclassname"><span class="pre">frontrun.trace_markers.</span></span><span class="sig-name descname"><span class="pre">marker_schedule_strategy</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">threads</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/frontrun/trace_markers.html#marker_schedule_strategy"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#id24" title="Link to this definition">¶</a></dt>
+<dd><p>Hypothesis strategy that generates valid marker-level Schedule objects.</p>
+<p>A valid schedule interleaves each thread’s markers while preserving
+their relative order within each thread.  This provides a much smaller
+search space than opcode-level exploration while still covering all
+meaningful interleavings at the marker granularity.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>threads</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>list</em><em>[</em><em>str</em><em>]</em><em>]</em>) – <p>Mapping from thread/execution names to their ordered list
+of marker names.  Example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="p">{</span><span class="s2">&quot;t1&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;read&quot;</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">],</span> <span class="s2">&quot;t2&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;read&quot;</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">]}</span>
+</pre></div>
+</div>
+</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A Hypothesis strategy producing <code class="xref py py-class docutils literal notranslate"><span class="pre">Schedule</span></code> objects.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Any</em></p>
+</dd>
+</dl>
+<p>Example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">hypothesis</span><span class="w"> </span><span class="kn">import</span> <span class="n">given</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">frontrun.trace_markers</span><span class="w"> </span><span class="kn">import</span> <span class="n">marker_schedule_strategy</span>
+
+<span class="nd">@given</span><span class="p">(</span><span class="n">schedule</span><span class="o">=</span><span class="n">marker_schedule_strategy</span><span class="p">(</span>
+    <span class="n">threads</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;w1&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;read&quot;</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">],</span> <span class="s2">&quot;w2&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;read&quot;</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">]},</span>
+<span class="p">))</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">test_no_lost_update</span><span class="p">(</span><span class="n">schedule</span><span class="p">):</span>
+    <span class="o">...</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="id25">
+<span class="sig-prename descclassname"><span class="pre">frontrun.trace_markers.</span></span><span class="sig-name descname"><span class="pre">all_marker_schedules</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">threads</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/frontrun/trace_markers.html#all_marker_schedules"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#id25" title="Link to this definition">¶</a></dt>
+<dd><p>Enumerate ALL valid interleavings of thread markers.</p>
+<p>A valid interleaving places every thread’s markers in the schedule
+while preserving their relative order within each thread.</p>
+<p>For <em>N</em> threads with marker counts <em>k1, k2, …, kN</em>, the total
+number of valid interleavings is the multinomial coefficient:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>(k1 + k2 + ... + kN)! / (k1! * k2! * ... * kN!)
+</pre></div>
+</div>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>threads</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>list</em><em>[</em><em>str</em><em>]</em><em>]</em>) – Mapping from thread/execution names to their ordered list
+of marker names.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A list of <code class="xref py py-class docutils literal notranslate"><span class="pre">Schedule</span></code> objects covering every valid interleaving.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>list[<a class="reference internal" href="#frontrun.common.Schedule" title="frontrun.common.Schedule"><em>Schedule</em></a>]</p>
+</dd>
+</dl>
+<p>Example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">schedules</span> <span class="o">=</span> <span class="n">all_marker_schedules</span><span class="p">(</span>
+    <span class="n">threads</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;t1&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;a&quot;</span><span class="p">,</span> <span class="s2">&quot;b&quot;</span><span class="p">],</span> <span class="s2">&quot;t2&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;x&quot;</span><span class="p">,</span> <span class="s2">&quot;y&quot;</span><span class="p">]},</span>
+<span class="p">)</span>
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">schedules</span><span class="p">)</span> <span class="o">==</span> <span class="mi">6</span>  <span class="c1"># C(4,2)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="id26">
+<span class="sig-prename descclassname"><span class="pre">frontrun.trace_markers.</span></span><span class="sig-name descname"><span class="pre">explore_marker_interleavings</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">setup</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">threads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">invariant</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">stop_on_first</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">deadlock_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10.0</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/frontrun/trace_markers.html#explore_marker_interleavings"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#id26" title="Link to this definition">¶</a></dt>
+<dd><p>Explore all marker-level interleavings and check an invariant.</p>
+<p>Generates every valid interleaving of the declared markers (preserving
+per-thread order), runs each one against real code via <a class="reference internal" href="#frontrun.trace_markers.TraceExecutor" title="frontrun.trace_markers.TraceExecutor"><code class="xref py py-class docutils literal notranslate"><span class="pre">TraceExecutor</span></code></a>,
+and checks the invariant after each execution.</p>
+<p>This sits between manual trace markers (exact schedule, one interleaving)
+and bytecode exploration (random, enormous search space).  For <em>N</em> threads
+with a few markers each, the search space is small enough to explore
+exhaustively — giving completeness guarantees at the marker granularity.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>setup</strong> (<em>Callable</em><em>[</em><em>[</em><em>...</em><em>]</em><em>, </em><em>Any</em><em>]</em>) – Factory producing fresh shared state for each execution.</p></li>
+<li><p><strong>threads</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>tuple</em><em>[</em><em>Callable</em><em>[</em><em>[</em><em>...</em><em>]</em><em>, </em><em>None</em><em>]</em><em>, </em><em>list</em><em>[</em><em>str</em><em>]</em><em>]</em><em>]</em>) – Mapping from execution name to <code class="docutils literal notranslate"><span class="pre">(target_fn,</span> <span class="pre">markers)</span></code> where
+<em>target_fn</em> takes the setup result and <em>markers</em> is the ordered
+list of <code class="docutils literal notranslate"><span class="pre">#</span> <span class="pre">frontrun:</span></code> marker names that <em>target_fn</em> hits.</p></li>
+<li><p><strong>invariant</strong> (<em>Callable</em><em>[</em><em>[</em><em>...</em><em>]</em><em>, </em><em>bool</em><em>]</em>) – Predicate on the shared state; returns True if correct.</p></li>
+<li><p><strong>stop_on_first</strong> (<em>bool</em>) – Stop after finding the first invariant violation
+(default True).</p></li>
+<li><p><strong>deadlock_timeout</strong> (<em>float</em>) – Per-schedule deadlock detection timeout.</p></li>
+<li><p><strong>timeout</strong> (<em>float</em><em> | </em><em>None</em>) – Per-schedule join timeout.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>An <a class="reference internal" href="#frontrun.common.InterleavingResult" title="frontrun.common.InterleavingResult"><code class="xref py py-class docutils literal notranslate"><span class="pre">InterleavingResult</span></code></a>.  The <code class="docutils literal notranslate"><span class="pre">counterexample</span></code>
+field is a <code class="xref py py-class docutils literal notranslate"><span class="pre">Schedule</span></code> (not a list of ints) when a violation is
+found.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#frontrun.common.InterleavingResult" title="frontrun.common.InterleavingResult"><em>InterleavingResult</em></a></p>
+</dd>
+</dl>
 </dd></dl>
 
 </section>
@@ -2342,6 +2585,15 @@ The async form returns an awaitable.</p>
 </ul>
 </li>
 <li><a class="reference internal" href="#frontrun.trace_markers.frontrun"><code class="docutils literal notranslate"><span class="pre">frontrun()</span></code></a></li>
+<li><a class="reference internal" href="#frontrun.trace_markers.marker_schedule_strategy"><code class="docutils literal notranslate"><span class="pre">marker_schedule_strategy()</span></code></a></li>
+<li><a class="reference internal" href="#frontrun.trace_markers.all_marker_schedules"><code class="docutils literal notranslate"><span class="pre">all_marker_schedules()</span></code></a></li>
+<li><a class="reference internal" href="#frontrun.trace_markers.explore_marker_interleavings"><code class="docutils literal notranslate"><span class="pre">explore_marker_interleavings()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#marker-schedule-exploration">Marker Schedule Exploration</a><ul>
+<li><a class="reference internal" href="#id24"><code class="docutils literal notranslate"><span class="pre">marker_schedule_strategy()</span></code></a></li>
+<li><a class="reference internal" href="#id25"><code class="docutils literal notranslate"><span class="pre">all_marker_schedules()</span></code></a></li>
+<li><a class="reference internal" href="#id26"><code class="docutils literal notranslate"><span class="pre">explore_marker_interleavings()</span></code></a></li>
 </ul>
 </li>
 <li><a class="reference internal" href="#module-frontrun.async_trace_markers">Async Trace Markers</a><ul>
@@ -2462,7 +2714,7 @@ The async form returns an awaitable.</p>
       
     </aside>
   </div>
-</div><script src="_static/documentation_options.js?v=e259d695"></script>
+</div><script src="_static/documentation_options.js?v=c87aa342"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/scripts/furo.js?v=46bd48cc"></script>
