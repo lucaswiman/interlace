@@ -304,6 +304,10 @@ class TestResolveParameters:
         resolved = resolve_parameters(sql, (1, 2), "numeric")
         assert resolved == sql
 
+    def test_dollar_zero_not_resolved_to_last_param(self):
+        resolved = resolve_parameters("SELECT $0, $1", ("first", "second"), "dollar")
+        assert "'second'" not in resolved or "$0" in resolved
+
     # -----------------------------------------------------------------
     # named paramstyle
     # -----------------------------------------------------------------

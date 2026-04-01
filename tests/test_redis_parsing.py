@@ -386,6 +386,25 @@ class TestSpecialCommands:
         assert result.write_keys == ["dest"]
 
 
+class TestObjectCommand:
+    """Test Redis OBJECT subcommands."""
+
+    def test_object_help_no_keys(self) -> None:
+        result = parse_redis_access("OBJECT", ("HELP",))
+        assert result.read_keys == []
+        assert result.write_keys == []
+
+    def test_object_encoding_reads_key(self) -> None:
+        result = parse_redis_access("OBJECT", ("ENCODING", "mykey"))
+        assert result.read_keys == ["mykey"]
+        assert result.write_keys == []
+
+    def test_object_no_args(self) -> None:
+        result = parse_redis_access("OBJECT", ())
+        assert result.read_keys == []
+        assert result.write_keys == []
+
+
 class TestServerCommands:
     """Test that server commands produce no key conflicts."""
 

@@ -401,8 +401,10 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
         )
 
     # OBJECT HELP, OBJECT ENCODING, etc. — first real key is second arg.
-    if upper == "OBJECT" and len(cmd_args) >= 2:
-        return RedisAccessResult(read_keys=[str(cmd_args[1])], write_keys=[], is_transaction_control=False)
+    if upper == "OBJECT":
+        if len(cmd_args) >= 2:
+            return RedisAccessResult(read_keys=[str(cmd_args[1])], write_keys=[], is_transaction_control=False)
+        return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=False)
 
     # WAIT, WAITAOF — no keys.
     if upper in ("WAIT", "WAITAOF"):

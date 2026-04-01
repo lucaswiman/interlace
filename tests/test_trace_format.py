@@ -14,6 +14,7 @@ from frontrun._trace_format import (
     SourceLineEvent,
     TraceEvent,
     TraceRecorder,
+    _collapse_runs,
     build_call_chain,
     classify_conflict,
     deduplicate_to_source_lines,
@@ -124,6 +125,57 @@ class TestTraceRecorder:
         ev = recorder.events[0]
         assert ev.detail == "SQL: SELECT * FROM users WHERE id = 1"
         assert ev.call_chain == ["QuerySet.get", "AcquireUserView.post"]
+
+
+class TestTraceRecorderOrdering:
+    def test_events_appended_in_step_order(self) -> None:
+        import threading
+
+        recorder = TraceRecorder()
+        barrier = threading.Barrier(4)
+
+        class FakeFrame:
+            class f_code:  # noqa: N801
+                co_filename = "test.py"
+                co_name = "test_fn"
+
+            f_lineno = 1
+
+        def record_many(tid: int) -> None:
+            barrier.wait()
+            for _ in range(100):
+                recorder.record(tid, FakeFrame(), "LOAD_ATTR", "read")  # type: ignore[arg-type]
+
+        threads = [threading.Thread(target=record_many, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        steps = [e.step_index for e in recorder.events]
+        assert steps == sorted(steps)
+
+
+class TestCollapseRuns:
+    def _make_events(self, count: int) -> list[SourceLineEvent]:
+        return [
+            SourceLineEvent(
+                thread_id=i % 2,
+                filename="test.py",
+                lineno=i,
+                function_name="f",
+                source_line=f"line {i}",
+            )
+            for i in range(count)
+        ]
+
+    def test_even_max_lines_not_exceeded(self) -> None:
+        result = _collapse_runs(self._make_events(100), max_lines=30)
+        assert len(result) <= 30
+
+    def test_small_max_lines_not_exceeded(self) -> None:
+        assert len(_collapse_runs(self._make_events(20), max_lines=1)) <= 1
+        assert len(_collapse_runs(self._make_events(20), max_lines=2)) <= 2
 
 
 # ---------------------------------------------------------------------------

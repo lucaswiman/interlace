@@ -156,6 +156,37 @@ class TestClassifyWriteSkew:
         assert "accounts" in result.summary or "balances" in result.summary
 
 
+class TestClassifyWriteSkewSingleTable:
+    def test_write_skew_single_table_different_rows(self) -> None:
+        events = [
+            _sql_event_row(0, 0, "accounts", "id=1", "read"),
+            _sql_event_row(1, 1, "accounts", "id=1", "write"),
+            _sql_event_row(2, 1, "accounts", "id=2", "read"),
+            _sql_event_row(3, 0, "accounts", "id=2", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert result.kind == "write_skew"
+
+
+class TestFindCycleState:
+    def test_edge_to_stale_entries_dont_corrupt_cycle(self) -> None:
+        from frontrun._sql_anomaly import _find_cycle
+
+        graph: dict[int, list[tuple[int, str, str]]] = {
+            0: [(1, "WR", "tbl_a")],
+            1: [(2, "RW", "tbl_a")],
+            3: [(4, "WR", "tbl_b")],
+            4: [(5, "RW", "tbl_b")],
+            5: [(3, "WW", "tbl_b")],
+        }
+
+        result = _find_cycle(graph)
+        assert result is not None
+        for frm, to, _etype, _res in result:
+            assert frm in {3, 4, 5} and to in {3, 4, 5}
+
+
 class TestClassifyWriteWrite:
     def test_write_write_no_reads(self) -> None:
         events = [

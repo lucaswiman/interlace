@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import threading
 
 import pytest
 
@@ -94,3 +95,23 @@ class TestReplayHarness:
             f"Expected 10/10 reproduction with shadow stack sync, got "
             f"{result.reproduction_successes}/{result.reproduction_attempts}"
         )
+
+
+class TestIOAnchoredReplayScheduler:
+    def test_after_io_sets_finished_when_all_done(self) -> None:
+        from frontrun.dpor import _IOAnchoredReplayScheduler
+
+        sched = object.__new__(_IOAnchoredReplayScheduler)
+        sched._condition = threading.Condition(threading.Lock())
+        sched._finished = False
+        sched._error = None
+        sched._active_io_thread = 42
+        sched._next_thread_after_io = None
+        sched._current_thread = None
+        sched._threads_done = {0, 1, 42}
+        sched.num_threads = 3
+        sched._io_trace = []
+
+        sched.after_io(42, "redis://cmd")
+
+        assert sched._finished is True

@@ -101,12 +101,21 @@ class TestFormatCycleWithLockNames:
     def test_row_lock_without_names_falls_back(self) -> None:
         cycle = [("thread", 0), ("row_lock", 7)]
         result = format_cycle(cycle)
-        assert "0x7" in result
+        assert "row_lock 0x7" in result
 
     def test_lock_kind(self) -> None:
         cycle = [("thread", 0), ("lock", 0xFF)]
         result = format_cycle(cycle)
         assert "lock 0xff" in result
+
+    def test_cycle_path_forms_complete_ring(self) -> None:
+        g = WaitForGraph()
+        g.add_holding(0, 1)
+        g.add_holding(1, 2)
+        g.add_waiting(0, 2)
+        cycle = g.add_waiting(1, 1)
+        assert cycle is not None
+        assert cycle[0] == cycle[-1]
 
     def test_lock_kind_with_stable_id_map(self) -> None:
         cycle = [("thread", 0), ("lock", 0xFF), ("thread", 1), ("lock", 0xAB)]

@@ -83,6 +83,9 @@ class TestRegexParse:
     def test_cte_falls_through(self):
         assert _regex_parse("WITH cte AS (SELECT 1) SELECT * FROM cte") is None
 
+    def test_copy_subquery_falls_through(self):
+        assert _regex_parse("COPY (SELECT id FROM foo WHERE id = 1) TO STDOUT") is None
+
     def test_quoted_identifiers(self):
         r, w, *_ = _regex_parse('SELECT * FROM "My Table"')
         assert r == {"My Table"} and w == set()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import os
 import threading
 
@@ -195,6 +197,32 @@ class TestActiveFilter:
             set_active_trace_filter(None)
 
         assert results == [True], "Worker thread should see the active trace filter"
+
+
+class TestTraceFilterFinalization:
+    def _assert_no_unconditional_clear(self, source: str) -> None:
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try) and node.finalbody:
+                for stmt in node.finalbody:
+                    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                        func = stmt.value.func
+                        if isinstance(func, ast.Name) and func.id == "_set_active_trace_filter":
+                            args = stmt.value.args
+                            if len(args) == 1 and isinstance(args[0], ast.Constant) and args[0].value is None:
+                                raise AssertionError(
+                                    "_set_active_trace_filter(None) is called unconditionally in finally"
+                                )
+
+    def test_sync_dpor_finally_is_conditional(self) -> None:
+        from frontrun import dpor
+
+        self._assert_no_unconditional_clear(inspect.getsource(dpor.explore_dpor))
+
+    def test_async_dpor_finally_is_conditional(self) -> None:
+        from frontrun import async_dpor
+
+        self._assert_no_unconditional_clear(inspect.getsource(async_dpor.explore_async_dpor))
 
 
 # ---------------------------------------------------------------------------
