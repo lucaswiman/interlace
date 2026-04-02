@@ -455,8 +455,7 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
                 # Source tables (everything after the target)
                 if ast.expression:  # the SELECT source
                     for t in ast.expression.find_all(exp.Table):
-                        if t.name not in write:
-                            read.add(t.name)
+                        read.add(t.name)
             elif isinstance(ast, (exp.Update, exp.Delete)):
                 tbl = ast.this
                 if isinstance(tbl, exp.Table):

@@ -127,7 +127,11 @@ class OpcodeScheduler:
         active = [t for t in range(self.num_threads) if t not in self._threads_done]
         if not active:
             return False
-        self.schedule.extend(active)
+        # Only add entries up to the max_ops cap to prevent overshoot.
+        remaining = self._max_ops - len(self.schedule)
+        if remaining <= 0:
+            return False
+        self.schedule.extend(active[:remaining])
         return True
 
     def wait_for_turn(self, thread_id: int) -> bool:

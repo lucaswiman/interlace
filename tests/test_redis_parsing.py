@@ -358,7 +358,9 @@ class TestSpecialCommands:
         """SORT mylist BY store ... — 'store' is a BY pattern value, not the STORE keyword."""
         result = parse_redis_access("SORT", ("mylist", "BY", "store", "LIMIT", "0", "10"))
         assert result.read_keys == ["mylist"]
-        assert result.write_keys == [], f"BY pattern 'store' should not be treated as STORE keyword, got write_keys={result.write_keys}"
+        assert result.write_keys == [], (
+            f"BY pattern 'store' should not be treated as STORE keyword, got write_keys={result.write_keys}"
+        )
 
     def test_sort_get_pattern_named_store(self) -> None:
         """SORT mylist GET store — 'store' is a GET pattern, not STORE keyword."""

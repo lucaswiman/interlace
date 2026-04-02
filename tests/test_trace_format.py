@@ -240,8 +240,12 @@ class TestDeduplication:
     def test_merge_consecutive_does_not_mutate_input(self) -> None:
         """_merge_consecutive must not mutate the access_type of input SourceLineEvent objects."""
         events = [
-            SourceLineEvent(0, "test.py", 10, "f", "x = self.value", access_type="read", attr_name="value", obj_type_name="C"),
-            SourceLineEvent(0, "test.py", 10, "f", "x = self.value", access_type="write", attr_name="value", obj_type_name="C"),
+            SourceLineEvent(
+                0, "test.py", 10, "f", "x = self.value", access_type="read", attr_name="value", obj_type_name="C"
+            ),
+            SourceLineEvent(
+                0, "test.py", 10, "f", "x = self.value", access_type="write", attr_name="value", obj_type_name="C"
+            ),
         ]
         original_type = events[0].access_type
         _merge_consecutive(events)

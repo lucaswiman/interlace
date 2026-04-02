@@ -325,9 +325,7 @@ def test_extend_schedule_respects_max_ops_strictly():
         if total_scheduled > max_ops + 10:
             break  # safety
 
-    assert total_scheduled <= max_ops, (
-        f"Schedule grew to {total_scheduled} entries, exceeding max_ops={max_ops}"
-    )
+    assert total_scheduled <= max_ops, f"Schedule grew to {total_scheduled} entries, exceeding max_ops={max_ops}"
 
 
 def test_scheduler_had_error():

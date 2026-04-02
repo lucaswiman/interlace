@@ -17,7 +17,7 @@ from __future__ import annotations
 import dis
 import linecache
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from frontrun._cooperative import real_lock
@@ -534,7 +534,7 @@ def _merge_consecutive(events: list[SourceLineEvent]) -> list[SourceLineEvent]:
     """
     if not events:
         return []
-    result: list[SourceLineEvent] = [events[0]]
+    result: list[SourceLineEvent] = [replace(events[0])]
     for ev in events[1:]:
         prev = result[-1]
         if ev.thread_id == prev.thread_id and ev.lineno == prev.lineno and ev.filename == prev.filename:
