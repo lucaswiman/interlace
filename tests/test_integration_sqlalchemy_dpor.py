@@ -182,6 +182,75 @@ def test_sqlalchemy_dpor_toctou_race(engine) -> None:
     assert result.num_explored >= 1, "Expected at least 1 interleaving explored"
 
 
+def test_sqlalchemy_dpor_exec_driver_sql_race(engine) -> None:
+    """Detect a lost-update race when threads use exec_driver_sql (raw driver SQL).
+
+    Two threads each read a counter, increment it locally, and write back
+    via ``exec_driver_sql``.  Without serialisation one update is lost.
+    DPOR should detect this as a SQL race (property_holds=False).
+    """
+    from frontrun.contrib.sqlalchemy import get_connection, sqlalchemy_dpor
+
+    class _State:
+        def __init__(self) -> None:
+            with engine.connect() as conn:
+                conn.exec_driver_sql("DELETE FROM sa_dpor_test")
+                conn.exec_driver_sql(
+                    "INSERT INTO sa_dpor_test (id, value) VALUES (%s, %s)",
+                    ("counter", "0"),
+                )
+                conn.commit()
+
+    def _make_thread_fn(idx: int):
+        def _thread_fn(state: _State) -> None:
+            conn = get_connection()
+            # READ the current counter value (raw driver SQL)
+            result = conn.exec_driver_sql(
+                "SELECT value FROM sa_dpor_test WHERE id = %s",
+                ("counter",),
+            )
+            row = result.fetchone()
+            assert row is not None
+            current = int(row[0])
+            # WRITE the incremented value back
+            conn.exec_driver_sql(
+                "UPDATE sa_dpor_test SET value = %s WHERE id = %s",
+                (str(current + 1), "counter"),
+            )
+            conn.commit()
+
+        return _thread_fn
+
+    def _invariant(state: _State) -> bool:
+        # After two increments the counter must be 2.
+        # A lost update leaves it at 1.
+        with engine.connect() as conn:
+            row = conn.exec_driver_sql(
+                "SELECT value FROM sa_dpor_test WHERE id = %s",
+                ("counter",),
+            ).fetchone()
+            if row is None:
+                return False
+            return int(row[0]) == 2
+
+    result = sqlalchemy_dpor(
+        engine=engine,
+        setup=_State,
+        threads=[_make_thread_fn(0), _make_thread_fn(1)],
+        invariant=_invariant,
+        lock_timeout=2000,
+        deadlock_timeout=10.0,
+        timeout_per_run=15.0,
+    )
+
+    # DPOR must find the interleaving where both threads read 0 then
+    # both write 1 → invariant fails → property_holds is False.
+    assert not result.property_holds, (
+        f"Expected DPOR to detect lost-update race via exec_driver_sql, "
+        f"but property_holds={result.property_holds} after {result.num_explored} explorations"
+    )
+
+
 def test_sqlalchemy_setup_failure_closes_connection(monkeypatch: pytest.MonkeyPatch) -> None:
     from unittest.mock import MagicMock
 
