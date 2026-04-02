@@ -22,9 +22,12 @@ _global_report_path: str | None = None
 _MAX_RECORDED_EXECUTIONS = 1000
 
 
-def _strip_none(d: dict[str, Any]) -> dict[str, Any]:
-    """Remove keys with None values to reduce JSON size."""
-    return {k: v for k, v in d.items() if v is not None}
+def _strip_none(d: dict[str, Any], *, keep: frozenset[str] = frozenset()) -> dict[str, Any]:
+    """Remove keys with None values to reduce JSON size.
+
+    Keys listed in *keep* are preserved even when their value is None.
+    """
+    return {k: v for k, v in d.items() if v is not None or k in keep}
 
 
 def _safe_repr(obj: Any, max_len: int = 80) -> str:  # pyright: ignore[reportUnusedFunction] — imported by dpor.py at runtime
@@ -149,7 +152,8 @@ class ExplorationReport:
                     referenced_steps.add(race["current_step"])
             d["step_events"] = {str(k): _strip_none(v) for k, v in d["step_events"].items() if k in referenced_steps}
             # Strip None values from switch_points, lock_events, and top-level fields
-            d["switch_points"] = [_strip_none(sp) for sp in d["switch_points"]]
+            _sp_keep = frozenset({"from_thread"})
+            d["switch_points"] = [_strip_none(sp, keep=_sp_keep) for sp in d["switch_points"]]
             d["lock_events"] = [_strip_none(le) for le in d["lock_events"]]
             # Remove top-level None fields (race_info, deadlock_at, deadlock_cycle_description)
             exec_dicts.append(_strip_none(d))

@@ -347,8 +347,15 @@ class _ThreadTraceExecutor:
             TimeoutError: If threads don't complete within the timeout
             Any exception that occurred in a thread during execution
         """
+        import time as _time
+
+        deadline = _time.monotonic() + timeout if timeout is not None else None
         for thread in self.threads:
-            thread.join(timeout=timeout)
+            if deadline is not None:
+                remaining = deadline - _time.monotonic()
+                thread.join(timeout=max(0, remaining))
+            else:
+                thread.join()
 
         # Check if any threads are still alive after timeout
         alive_threads = [thread for thread in self.threads if thread.is_alive()]

@@ -309,7 +309,9 @@ class IOEventDispatcher:
             if not ready:
                 continue
             events, got_data = self._read_parse_dispatch()
-            if not events and not got_data and self._stopped:
+            if not events and not got_data:
+                # select said the fd was ready but no bytes were read.
+                # On a non-blocking pipe this means EOF (write end closed).
                 break
 
     def poll(self) -> None:

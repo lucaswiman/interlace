@@ -388,3 +388,31 @@ with open({data_path!r}, 'w') as f:
                 os.close(w_fd)
             os.close(r_fd)
             os.unlink(data_path)
+
+
+class TestReaderLoopEOF:
+    @pytest.mark.intentionally_leaves_dangling_threads
+    def test_reader_loop_exits_on_eof(self) -> None:
+        """When the write end of the pipe is closed externally, the reader loop must exit
+        promptly instead of busy-looping at 100% CPU."""
+        dispatcher = IOEventDispatcher()
+        dispatcher.start()
+        assert dispatcher._write_fd is not None
+        write_fd = dispatcher._write_fd
+
+        # Close write end externally to simulate unexpected EOF
+        os.close(write_fd)
+        # Prevent stop() from double-closing
+        dispatcher._write_fd = None
+
+        # Give the reader loop time to react
+        time.sleep(0.3)
+
+        # The reader thread should have exited (or at least not be spinning)
+        reader_thread = dispatcher._reader_thread
+        assert reader_thread is not None
+        reader_thread.join(timeout=1.0)
+        assert not reader_thread.is_alive(), "Reader thread is still running after EOF — likely busy-looping"
+
+        # Clean up (stop won't close write_fd since we already did)
+        dispatcher._stopped = True

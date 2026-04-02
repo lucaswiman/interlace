@@ -267,7 +267,15 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
             numkeys = int(str(cmd_args[0]))
         except (ValueError, TypeError):
             numkeys = 1
-        keys = [str(cmd_args[1 + i]) for i in range(min(numkeys, len(cmd_args) - 1))]
+        # Find the direction token (LEFT/RIGHT for LMPOP, MIN/MAX for ZMPOP)
+        # to bound key extraction — don't include it as a key.
+        direction_tokens = {"LEFT", "RIGHT"} if upper == "LMPOP" else {"MIN", "MAX"}
+        direction_pos = next(
+            (j for j in range(1, len(cmd_args)) if str(cmd_args[j]).upper() in direction_tokens),
+            len(cmd_args),
+        )
+        n_keys = min(numkeys, direction_pos - 1)
+        keys = [str(cmd_args[1 + i]) for i in range(max(0, n_keys))]
         return RedisAccessResult(read_keys=keys, write_keys=keys, is_transaction_control=False)
 
     # BZMPOP — timeout numkeys key [key ...] MIN|MAX [COUNT count]
@@ -277,7 +285,13 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
             numkeys = int(str(cmd_args[1]))
         except (ValueError, TypeError):
             numkeys = 1
-        keys = [str(cmd_args[2 + i]) for i in range(min(numkeys, len(cmd_args) - 2))]
+        # Find the direction token (MIN/MAX) to bound key extraction.
+        direction_pos = next(
+            (j for j in range(2, len(cmd_args)) if str(cmd_args[j]).upper() in ("MIN", "MAX")),
+            len(cmd_args),
+        )
+        n_keys = min(numkeys, direction_pos - 2)
+        keys = [str(cmd_args[2 + i]) for i in range(max(0, n_keys))]
         return RedisAccessResult(read_keys=keys, write_keys=keys, is_transaction_control=False)
 
     # Blocking pop commands — first arg(s) are keys, last is timeout.
@@ -316,13 +330,21 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
         return RedisAccessResult(read_keys=source_keys, write_keys=[dest], is_transaction_control=False)
 
     # SORT — can have STORE destination (write); otherwise read-only.
+    # Walk args skipping values that follow BY, GET, and LIMIT to avoid
+    # treating user-supplied pattern strings (e.g. "store") as the STORE keyword.
     if upper == "SORT":
-        args_upper = [str(a).upper() for a in cmd_args]
-        if "STORE" in args_upper:
-            store_idx = args_upper.index("STORE")
-            if store_idx + 1 < len(cmd_args):
-                dest = str(cmd_args[store_idx + 1])
+        i = 1  # skip cmd_args[0] which is the sort key (already captured as first_key)
+        while i < len(cmd_args):
+            token = str(cmd_args[i]).upper()
+            if token in ("BY", "GET"):
+                i += 2  # skip the pattern value that follows
+            elif token == "LIMIT":
+                i += 3  # skip offset and count
+            elif token == "STORE" and i + 1 < len(cmd_args):
+                dest = str(cmd_args[i + 1])
                 return RedisAccessResult(read_keys=[first_key], write_keys=[dest], is_transaction_control=False)
+            else:
+                i += 1
         return RedisAccessResult(read_keys=[first_key], write_keys=[], is_transaction_control=False)
 
     # COPY — source destination
