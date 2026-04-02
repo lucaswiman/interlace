@@ -342,6 +342,14 @@ class TestSqlglotParse:
         assert w == {"summary"}
         assert "users" in r and "orders" in r
 
+    def test_insert_select_same_table(self):
+        """INSERT INTO t SELECT * FROM t must report t as both read AND written."""
+        sql = "INSERT INTO orders SELECT * FROM orders WHERE status = 'old'"
+        r, w, *_ = _sqlglot_parse(sql)
+        assert w == {"orders"}
+        assert r is not None
+        assert "orders" in r, "self-table INSERT...SELECT must include the table in reads"
+
     def test_update_from_join(self):
         sql = "UPDATE orders SET status = 'shipped' FROM shipments WHERE orders.id = shipments.order_id"
         r, w, *_ = _sqlglot_parse(sql)

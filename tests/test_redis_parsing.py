@@ -354,6 +354,32 @@ class TestSpecialCommands:
         assert result.read_keys == ["mylist"]
         assert result.write_keys == []
 
+    def test_sort_by_pattern_named_store(self) -> None:
+        """SORT mylist BY store ... — 'store' is a BY pattern value, not the STORE keyword."""
+        result = parse_redis_access("SORT", ("mylist", "BY", "store", "LIMIT", "0", "10"))
+        assert result.read_keys == ["mylist"]
+        assert result.write_keys == [], f"BY pattern 'store' should not be treated as STORE keyword, got write_keys={result.write_keys}"
+
+    def test_sort_get_pattern_named_store(self) -> None:
+        """SORT mylist GET store — 'store' is a GET pattern, not STORE keyword."""
+        result = parse_redis_access("SORT", ("mylist", "GET", "store", "ASC"))
+        assert result.read_keys == ["mylist"]
+        assert result.write_keys == []
+
+    def test_lmpop_numkeys_exceeds_actual_keys(self) -> None:
+        """LMPOP with numkeys > actual key count must not treat LEFT/RIGHT as a key."""
+        result = parse_redis_access("LMPOP", (3, "list1", "list2", "LEFT"))
+        assert "LEFT" not in result.read_keys
+        assert "LEFT" not in result.write_keys
+        assert set(result.read_keys) == {"list1", "list2"}
+
+    def test_bzmpop_numkeys_exceeds_actual_keys(self) -> None:
+        """BZMPOP with numkeys > actual key count must not treat MIN/MAX as a key."""
+        result = parse_redis_access("BZMPOP", (0, 3, "zset1", "zset2", "MIN"))
+        assert "MIN" not in result.read_keys
+        assert "MIN" not in result.write_keys
+        assert set(result.read_keys) == {"zset1", "zset2"}
+
     def test_copy_reads_source_writes_dest(self) -> None:
         result = parse_redis_access("COPY", ("source", "dest"))
         assert result.read_keys == ["source"]

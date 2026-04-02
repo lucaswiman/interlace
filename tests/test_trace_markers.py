@@ -2,6 +2,9 @@
 
 import sys
 import threading
+import time
+
+import pytest
 
 from frontrun.common import Schedule, Step
 from frontrun.trace_markers import MarkerRegistry, ThreadCoordinator, TraceExecutor, frontrun
@@ -400,3 +403,24 @@ def get_value():
 
     assert "t1_processed" in results
     assert "t2_processed" in results
+
+
+@pytest.mark.intentionally_leaves_dangling_threads
+def test_wait_timeout_is_total_not_per_thread():
+    """wait(timeout=T) should wait at most ~T seconds total, not T per thread."""
+
+    def slow_worker():
+        time.sleep(10)
+
+    schedule = Schedule([Step("t1", "never"), Step("t2", "never")])
+    executor = TraceExecutor(schedule)
+    executor.run("t1", slow_worker)
+    executor.run("t2", slow_worker)
+
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        executor.wait(timeout=1.0)
+    elapsed = time.monotonic() - start
+    # With per-thread timeout, elapsed would be ~2s (1s per thread).
+    # With a proper total deadline, it should be ~1s.
+    assert elapsed < 1.8, f"wait() took {elapsed:.1f}s — timeout is per-thread, not total"

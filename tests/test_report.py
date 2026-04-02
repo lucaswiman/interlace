@@ -82,6 +82,39 @@ def test_exploration_report_to_json():
     assert sp["shadow_stack_top5"] == ["<Counter>", "42"]
 
 
+def test_strip_none_preserves_from_thread_none():
+    """SwitchPoint.from_thread=None (start of execution) must survive JSON serialization."""
+    report = ExplorationReport(
+        num_threads=2,
+        thread_names=["T0", "T1"],
+        executions=[
+            ExecutionRecord(
+                index=0,
+                schedule_trace=[0, 1],
+                switch_points=[
+                    SwitchPoint(
+                        schedule_index=0,
+                        from_thread=None,
+                        to_thread=0,
+                        filename="t.py",
+                        lineno=1,
+                        function_name="f",
+                        opcode="LOAD_FAST",
+                        source_line="x",
+                        shadow_stack_top5=[],
+                    ),
+                ],
+                invariant_held=True,
+                was_deadlock=False,
+            ),
+        ],
+    )
+    data = json.loads(report.to_json())
+    sp = data["executions"][0]["switch_points"][0]
+    assert "from_thread" in sp, "from_thread=None was stripped by _strip_none"
+    assert sp["from_thread"] is None
+
+
 def test_generate_html_report():
     """generate_html_report produces a valid HTML file with embedded JSON."""
     report = ExplorationReport(

@@ -310,6 +310,26 @@ def test_explore_with_seed_is_reproducible():
     assert r1.num_explored == r2.num_explored
 
 
+def test_extend_schedule_respects_max_ops_strictly():
+    """_extend_schedule should not let the schedule grow past max_ops entries."""
+    max_ops = 5
+    scheduler = OpcodeScheduler([0, 1], num_threads=2, max_ops=max_ops)
+
+    # Simulate consuming the initial schedule and extending
+    total_scheduled = len(scheduler.schedule)
+    while True:
+        scheduler._index = len(scheduler.schedule)  # consume all entries
+        if not scheduler._extend_schedule():
+            break
+        total_scheduled = len(scheduler.schedule)
+        if total_scheduled > max_ops + 10:
+            break  # safety
+
+    assert total_scheduled <= max_ops, (
+        f"Schedule grew to {total_scheduled} entries, exceeding max_ops={max_ops}"
+    )
+
+
 def test_scheduler_had_error():
     """Test that OpcodeScheduler tracks errors correctly."""
     scheduler = OpcodeScheduler([0, 1], num_threads=2)
