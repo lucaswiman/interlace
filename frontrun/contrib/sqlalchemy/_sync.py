@@ -107,6 +107,7 @@ def sqlalchemy_dpor(
             # conn.execute() acquires statement compilation locks.
             # conn.commit()/rollback() acquires transaction state locks.
             _orig_execute = conn.execute
+            _orig_exec_driver_sql = conn.exec_driver_sql
             _orig_commit = conn.commit
             _orig_rollback = conn.rollback
 
@@ -121,6 +122,7 @@ def sqlalchemy_dpor(
                 return wrapped
 
             conn.execute = _wrap_sa_method(_orig_execute)  # type: ignore[method-assign]
+            conn.exec_driver_sql = _wrap_sa_method(_orig_exec_driver_sql)  # type: ignore[method-assign]
             conn.commit = _wrap_sa_method(_orig_commit)  # type: ignore[method-assign]
             conn.rollback = _wrap_sa_method(_orig_rollback)  # type: ignore[method-assign]
             token = _current_connection.set(conn)
