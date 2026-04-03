@@ -131,6 +131,29 @@ class TestClassifyLostUpdate:
         assert 0 in result.threads
         assert 1 in result.threads
 
+    def test_serialized_t0_then_t1_is_not_lost_update(self) -> None:
+        # T0 completes its read-write cycle before T1 starts: no lost update.
+        events = [
+            _sql_event(0, 0, "accounts", "read"),
+            _sql_event(1, 0, "accounts", "write"),
+            _sql_event(2, 1, "accounts", "read"),
+            _sql_event(3, 1, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        # Serialized operations cannot produce a lost update anomaly.
+        assert result is None or result.kind != "lost_update"
+
+    def test_serialized_t1_then_t0_is_not_lost_update(self) -> None:
+        # T1 completes its read-write cycle before T0 starts: no lost update.
+        events = [
+            _sql_event(0, 1, "accounts", "read"),
+            _sql_event(1, 1, "accounts", "write"),
+            _sql_event(2, 0, "accounts", "read"),
+            _sql_event(3, 0, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is None or result.kind != "lost_update"
+
 
 class TestClassifyWriteSkew:
     def test_write_skew_different_tables(self) -> None:
