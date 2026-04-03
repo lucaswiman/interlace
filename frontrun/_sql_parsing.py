@@ -12,19 +12,17 @@ import re
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
-from frontrun._sql_lock_intent_data import (
-    _ADVISORY_LOCK_FUNCTIONS,
-    _LOCK_CLAUSE_PATTERNS,
-    _LOCK_INTENT_PRIORITY,
-    LockIntent,
-)
-
-# Re-export LockIntent so existing callers (tests, _sql_cursor) keep working.
-__all__ = ["LockIntent"]
-
 # ---------------------------------------------------------------------------
-# Typed enums for transaction operations
+# Typed enums for lock intent and transaction operations
 # ---------------------------------------------------------------------------
+
+
+class LockIntent(enum.Enum):
+    """Lock mode extracted from SQL statements (FOR UPDATE, FOR SHARE, LOCK TABLE)."""
+
+    UPDATE = "UPDATE"
+    SHARE = "SHARE"
+    UPDATE_SKIP_LOCKED = "UPDATE_SKIP_LOCKED"
 
 
 class TxOp(enum.Enum):
@@ -86,6 +84,9 @@ _RE_DELETE = re.compile(rf"\bDELETE{_WS}FROM{_WS}({_IDENT})", re.I)
 _RE_FROM = re.compile(rf"\bFROM{_WS}({_IDENT})", re.I)
 _RE_JOIN = re.compile(rf"\bJOIN{_WS}({_IDENT})", re.I)
 _RE_LITERAL = re.compile(r"'[^']*'")
+_RE_FOR_UPDATE_SKIP_LOCKED = re.compile(r"\bFOR" + _WS + r"UPDATE" + _WS + r"SKIP" + _WS + r"LOCKED\b", re.I)
+_RE_FOR_UPDATE = re.compile(r"\bFOR" + _WS + r"UPDATE\b", re.I)
+_RE_FOR_SHARE = re.compile(r"\bFOR" + _WS + r"SHARE\b", re.I)
 _RE_LOCK_TABLE = re.compile(rf"\bLOCK{_WS}TABLE{_WS}({_IDENT})", re.I)
 _RE_LOCK_MODE = re.compile(rf"\bIN{_WS}(.+){_WS}MODE\b", re.I)
 _RE_TX_BEGIN = re.compile(r"^\s*(BEGIN|START\s+TRANSACTION|SET\s+AUTOCOMMIT\s*=\s*0)\b", re.I)
@@ -220,10 +221,12 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
         write.add(tbl)
         return SqlAccessResult(read, write, lock_intent, None, None)
 
-    for _pattern, _intent in _LOCK_CLAUSE_PATTERNS:
-        if _pattern.search(no_literals):
-            lock_intent = _intent
-            break
+    if _RE_FOR_UPDATE_SKIP_LOCKED.search(no_literals):
+        lock_intent = LockIntent.UPDATE_SKIP_LOCKED
+    elif _RE_FOR_UPDATE.search(no_literals):
+        lock_intent = LockIntent.UPDATE
+    elif _RE_FOR_SHARE.search(no_literals):
+        lock_intent = LockIntent.SHARE
 
     m_insert = _RE_INSERT.search(no_literals)
     if m_insert:
@@ -300,10 +303,13 @@ def _regex_parse(sql: str) -> SqlAccessResult | None:
 
 
 def _merge_lock_intent(a: LockIntent | None, b: LockIntent | None) -> LockIntent | None:
-    """Merge two lock intents using the priority order defined in _LOCK_INTENT_PRIORITY."""
-    for intent in _LOCK_INTENT_PRIORITY:
-        if a is intent or b is intent:
-            return intent
+    """Merge two lock intents, preferring UPDATE > UPDATE_SKIP_LOCKED > SHARE."""
+    if a is LockIntent.UPDATE or b is LockIntent.UPDATE:
+        return LockIntent.UPDATE
+    if a is LockIntent.UPDATE_SKIP_LOCKED or b is LockIntent.UPDATE_SKIP_LOCKED:
+        return LockIntent.UPDATE_SKIP_LOCKED
+    if a is LockIntent.SHARE or b is LockIntent.SHARE:
+        return LockIntent.SHARE
     return None
 
 
@@ -404,7 +410,13 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
             # Advisory locks (PostgreSQL, MySQL)
             for call in ast.find_all(exp.Anonymous):
                 name = call.this.lower()
-                if name in _ADVISORY_LOCK_FUNCTIONS:
+                if name in (
+                    "pg_advisory_lock",
+                    "pg_advisory_xact_lock",
+                    "pg_advisory_lock_shared",
+                    "pg_advisory_xact_lock_shared",
+                    "get_lock",
+                ):
                     # Extract lock ID/name if it's a literal
                     if call.expressions:
                         lock_ids: list[str] = []
@@ -417,7 +429,10 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
                                 lock_ids.append("?")
                         lock_id_str = ":".join(lock_ids)
                         write.add(f"advisory_lock:{lock_id_str}")
-                        lock_intent = _merge_lock_intent(lock_intent, _ADVISORY_LOCK_FUNCTIONS[name])
+                        if "shared" in name:
+                            lock_intent = _merge_lock_intent(lock_intent, LockIntent.SHARE)
+                        else:
+                            lock_intent = _merge_lock_intent(lock_intent, LockIntent.UPDATE)
 
             # Shared table visitor logic
             for t in ast.find_all(exp.Table):
