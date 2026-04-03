@@ -241,6 +241,21 @@ class TestClassifyDirtyRead:
         assert result is not None
         assert result.kind in ("dirty_read", "non_repeatable_read", "write_write", "lost_update")
 
+    def test_dirty_read_cycle_reports_all_tables(self) -> None:
+        # A dirty read cycle spanning two tables: T0 writes A, T1 reads A (WR),
+        # T1 writes B, T0 reads B (WR) — both tables must appear in result.tables.
+        events = [
+            _sql_event(0, 0, "table_a", "write"),
+            _sql_event(1, 1, "table_a", "read"),
+            _sql_event(2, 1, "table_b", "write"),
+            _sql_event(3, 0, "table_b", "read"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert result.kind == "dirty_read"
+        assert "table_a" in result.tables
+        assert "table_b" in result.tables
+
 
 class TestClassifyNonRepeatableRead:
     def test_non_repeatable_read(self) -> None:

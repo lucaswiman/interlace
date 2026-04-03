@@ -321,11 +321,11 @@ def classify_sql_anomaly(events: list[TraceEvent]) -> SqlAnomaly | None:
 
         # Dirty read: WR edge in cycle
         if "WR" in cycle_etypes:
-            tbl = next(_resource_to_table(r) for _, _, e, r in cycle if e == "WR")
+            tbls = ", ".join(f"'{t}'" for t in sorted(cycle_tables))
             return SqlAnomaly(
                 kind="dirty_read",
-                summary=f"Dirty read on table '{tbl}': a thread read data from an uncommitted concurrent write.",
-                tables=frozenset([tbl]),
+                summary=f"Dirty read on {tbls}: a thread read data from an uncommitted concurrent write.",
+                tables=cycle_tables,
                 threads=cycle_threads,
             )
 
