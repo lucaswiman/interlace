@@ -694,9 +694,21 @@ def explore_marker_interleavings(
 
         try:
             executor.wait(timeout=timeout)
-        except (TimeoutError, Exception):
-            # Schedule stall or thread error — treat as non-violation and skip
+        except TimeoutError:
+            # Schedule stall — treat as non-violation and skip
             num_explored += 1
+            continue
+        except Exception:
+            # Thread raised an exception — treat as invariant violation
+            num_explored += 1
+            failures.append((i, schedule))
+            if stop_on_first:
+                return InterleavingResult(
+                    property_holds=False,
+                    counterexample=schedule,
+                    num_explored=num_explored,
+                    unique_interleavings=num_explored,
+                )
             continue
 
         num_explored += 1

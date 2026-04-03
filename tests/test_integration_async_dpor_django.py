@@ -42,9 +42,10 @@ if not settings.configured:
     django.setup()
 
 from django.contrib.auth import get_user_model  # noqa: E402
-from django.db import connection  # noqa: E402
+from django.db import connection, connections  # noqa: E402
 
 from frontrun.async_dpor import await_point, explore_async_dpor  # noqa: E402
+from frontrun.contrib.django import async_django_dpor  # noqa: E402
 
 User = get_user_model()
 
@@ -92,6 +93,68 @@ def _pg_available():
 
 class TestAsyncDporDjango:
     """Async DPOR integration tests with Django async ORM."""
+
+    def test_lock_timeout_is_forwarded_and_cursor_exits(self, _pg_available, monkeypatch) -> None:
+        """async_django_dpor should apply lock_timeout using a real Django cursor.
+
+        This uses the real Django connection and database, but wraps the
+        cursor so we can verify the SQL that was executed and that the cursor
+        context manager exits cleanly.
+        """
+
+        executed_sql: list[str] = []
+        cursor_exit_called = False
+        conn = connections["default"]
+        original_cursor = conn.cursor
+
+        class CursorProxy:
+            def __init__(self, cursor):
+                self._cursor = cursor
+                self._entered_cursor = None
+
+            def __enter__(self):
+                self._entered_cursor = self._cursor.__enter__()
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                nonlocal cursor_exit_called
+                cursor_exit_called = True
+                return self._cursor.__exit__(exc_type, exc, tb)
+
+            def execute(self, sql, *args, **kwargs):
+                executed_sql.append(sql)
+                target = self._entered_cursor or self._cursor
+                return target.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                target = self._entered_cursor or self._cursor
+                return getattr(target, name)
+
+        def cursor_wrapper(*args, **kwargs):
+            return CursorProxy(original_cursor(*args, **kwargs))
+
+        monkeypatch.setattr(conn, "cursor", cursor_wrapper)
+
+        class _State:
+            pass
+
+        async def noop(state: _State) -> None:
+            await await_point()
+
+        async def run_test():
+            return await async_django_dpor(
+                setup=_State,
+                tasks=[noop],
+                invariant=lambda s: True,
+                lock_timeout=500,
+                detect_sql=True,
+            )
+
+        result = asyncio.run(run_test())
+
+        assert result.property_holds
+        assert "SET lock_timeout = '500ms'" in executed_sql
+        assert cursor_exit_called
 
     @pytest.mark.intentionally_leaves_dangling_threads
     def test_activation_race(self, _pg_available) -> None:

@@ -89,5 +89,6 @@ async def async_sqlalchemy_dpor(
         tasks=wrapped_tasks,
         invariant=invariant,
         detect_sql=detect_sql,
+        lock_timeout=lock_timeout,
         **kwargs,
     )

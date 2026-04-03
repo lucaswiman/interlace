@@ -335,6 +335,7 @@ class CooperativeRLock:
         self._count = 0
         self._object_id = id(self)
         self._owner_thread_id: int | None = None  # frontrun thread_id
+        self._acquired_during_dpor_machinery = False
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         from frontrun._deadlock import get_wait_for_graph
@@ -343,6 +344,18 @@ class CooperativeRLock:
         if self._owner == me:
             self._count += 1
             return True
+
+        # Reentrancy guard: if we're already inside DPOR machinery (e.g.,
+        # GC-triggered __del__ during _process_opcode or _sync_reporter),
+        # fall back to real blocking to avoid re-entering the scheduler.
+        if _in_dpor_machinery():
+            result = self._lock.acquire(blocking=blocking, timeout=timeout if timeout >= 0 else -1)
+            if result:
+                self._owner = me
+                self._count = 1
+                self._owner_thread_id = None
+                self._acquired_during_dpor_machinery = True
+            return result
 
         if not blocking:
             if self._lock.acquire(blocking=False):
@@ -436,14 +449,18 @@ class CooperativeRLock:
         self._count -= 1
         if self._count == 0:
             owner_tid = self._owner_thread_id
+            acquired_during_dpor_machinery = self._acquired_during_dpor_machinery
             self._owner = None
             self._owner_thread_id = None
+            self._acquired_during_dpor_machinery = False
             # Reentrancy guard: skip scheduler interaction during GC __del__
             # (same guard as CooperativeLock.release — see defect #7 / #11).
             if _in_dpor_machinery():
                 self._lock.release()
                 return
             self._lock.release()
+            if acquired_during_dpor_machinery:
+                return
             self._report("lock_release")
 
             if owner_tid is not None:

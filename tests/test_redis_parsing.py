@@ -226,6 +226,59 @@ class TestSetCommands:
         assert result.read_keys == ["set1", "set2", "set3"]
         assert result.write_keys == []
 
+    def test_sinterstore_dest_is_write_only(self) -> None:
+        """SINTERSTORE overwrites dest without reading it — dest should be write-only.
+
+        Analogous to SDIFFSTORE, SUNIONSTORE, etc. which all mark dest as
+        write-only (is_read=False, is_write=True).
+        """
+        result = parse_redis_access("SINTERSTORE", ("dest", "src1", "src2"))
+        assert result.write_keys == ["dest"], "dest should be a write key"
+        assert "dest" not in result.read_keys, "dest should NOT be a read key (write-only like SDIFFSTORE)"
+        assert result.read_keys == ["src1", "src2"], "sources should be read keys"
+
+    def test_sdiffstore_dest_is_write_only(self) -> None:
+        """Sanity check: SDIFFSTORE dest is write-only (reference for SINTERSTORE fix)."""
+        result = parse_redis_access("SDIFFSTORE", ("dest", "src1", "src2"))
+        assert "dest" not in result.read_keys
+        assert result.write_keys == ["dest"]
+        assert result.read_keys == ["src1", "src2"]
+
+
+class TestMigrateKeys:
+    """Test MIGRATE command key extraction, especially the KEYS clause."""
+
+    def test_migrate_single_key_positional(self) -> None:
+        """MIGRATE host port key db timeout — single positional key."""
+        result = parse_redis_access("MIGRATE", ("host", "6379", "mykey", "0", "1000"))
+        assert "mykey" in result.read_keys or "mykey" in result.write_keys
+
+    def test_migrate_keys_clause_single(self) -> None:
+        """MIGRATE host port '' db timeout KEYS key1 — single key via KEYS clause."""
+        result = parse_redis_access("MIGRATE", ("host", "6379", "", "0", "1000", "KEYS", "key1"))
+        assert "key1" in result.read_keys or "key1" in result.write_keys
+
+    def test_migrate_keys_clause_multiple(self) -> None:
+        """MIGRATE host port '' db timeout KEYS key1 key2 — multiple keys via KEYS clause.
+
+        Regression: the kw startfrom=-2 searches from n_args-2, which misses
+        the KEYS token when there are 2+ keys after it.
+        """
+        result = parse_redis_access("MIGRATE", ("host", "6379", "", "0", "1000", "KEYS", "key1", "key2"))
+        keys = result.read_keys + result.write_keys
+        assert "key1" in keys, f"key1 should be extracted from KEYS clause, got {keys}"
+        assert "key2" in keys, f"key2 should be extracted from KEYS clause, got {keys}"
+
+    def test_migrate_keys_clause_with_copy_replace(self) -> None:
+        """MIGRATE host port '' db timeout COPY REPLACE KEYS key1 key2 key3."""
+        result = parse_redis_access(
+            "MIGRATE", ("host", "6379", "", "0", "1000", "COPY", "REPLACE", "KEYS", "key1", "key2", "key3")
+        )
+        keys = result.read_keys + result.write_keys
+        assert "key1" in keys, f"key1 missing from {keys}"
+        assert "key2" in keys, f"key2 missing from {keys}"
+        assert "key3" in keys, f"key3 missing from {keys}"
+
 
 class TestSortedSetCommands:
     """Test classification of Redis sorted set commands."""
