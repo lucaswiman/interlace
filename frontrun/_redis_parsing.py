@@ -4,23 +4,20 @@ Classifies Redis commands into read/write operations and extracts the
 key(s) each command accesses.  This enables DPOR to detect key-level
 conflicts between threads/tasks operating on the same Redis keys.
 
-The classification covers all major Redis command groups:
-- String commands (GET, SET, INCR, APPEND, etc.)
-- Hash commands (HGET, HSET, HDEL, etc.)
-- List commands (LPUSH, RPUSH, LPOP, RPOP, LRANGE, etc.)
-- Set commands (SADD, SREM, SMEMBERS, etc.)
-- Sorted set commands (ZADD, ZREM, ZRANGE, etc.)
-- Key commands (DEL, EXISTS, EXPIRE, RENAME, TYPE, etc.)
-- HyperLogLog commands (PFADD, PFCOUNT, PFMERGE)
-- Pub/Sub commands (PUBLISH, SUBSCRIBE — treated as channel resources)
-- Stream commands (XADD, XREAD, etc.)
-- Script/transaction commands (EVAL, MULTI/EXEC)
-- Cluster and server commands (ignored — no key-level conflicts)
+Key extraction rules are derived from the official Redis ``commands.json``
+key specifications (``begin_search`` / ``find_keys`` / access flags).  A
+generic interpreter replaces per-command special-case logic.  Only a
+handful of overrides remain for DPOR-specific semantics (transaction
+control, pub/sub channel prefixing, Lua script atomicity).
 """
 
 from __future__ import annotations
 
 from typing import NamedTuple
+
+# ---------------------------------------------------------------------------
+# Public result type
+# ---------------------------------------------------------------------------
 
 
 class RedisAccessResult(NamedTuple):
@@ -32,152 +29,437 @@ class RedisAccessResult(NamedTuple):
 
 
 # ---------------------------------------------------------------------------
-# Command classification tables
+# Key-spec data table — derived from Redis commands.json
+#
+# Each command maps to a list of key-spec entries:
+#   (begin_search, find_keys, is_read, is_write)
+#
+# begin_search formats:
+#   ("idx", N)                  — keys start at argument index N (1-based
+#                                 from the full Redis protocol; we subtract
+#                                 1 to index into cmd_args)
+#   ("kw", keyword, startfrom)  — keys follow the first occurrence of
+#                                 *keyword* (searched from ``startfrom``)
+#
+# find_keys formats:
+#   ("rng", lastkey, keystep, limit)
+#       lastkey=0  → single key
+#       lastkey=-1 → all remaining args (limit divides count if >1)
+#       lastkey=-2 → all args except the last
+#       lastkey=N>0 → N additional keys after the first
+#       keystep    → stride between keys (1=every arg, 2=every other)
+#       limit      → divisor for remaining-arg count (0 or 1 = no limit)
+#   ("kn", keynumidx, firstkey, keystep)
+#       keynumidx → offset from begin to the arg holding the key count
+#       firstkey  → offset from begin to the first actual key
+#       keystep   → stride between keys
 # ---------------------------------------------------------------------------
 
-# Commands that read a single key (first argument).
-_SINGLE_KEY_READ_CMDS: frozenset[str] = frozenset(
+# fmt: off
+_KeySpec = tuple[tuple[str | int, ...], tuple[str | int, ...], bool, bool]
+_COMMAND_KEY_SPECS: dict[str, list[_KeySpec]] = {
+    "APPEND": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "BITCOUNT": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "BITFIELD": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "BITFIELD_RO": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "BITOP": [(("idx", 2), ("rng", 0, 1, 0), False, True), (("idx", 3), ("rng", -1, 1, 0), True, False)],
+    "BITPOS": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "BLMOVE": [(("idx", 1), ("rng", 0, 1, 0), True, True), (("idx", 2), ("rng", 0, 1, 0), True, True)],
+    "BLMPOP": [(("idx", 2), ("kn", 0, 1, 1), True, True)],
+    "BLPOP": [(("idx", 1), ("rng", -2, 1, 0), True, True)],
+    "BRPOP": [(("idx", 1), ("rng", -2, 1, 0), True, True)],
+    "BRPOPLPUSH": [(("idx", 1), ("rng", 0, 1, 0), True, True), (("idx", 2), ("rng", 0, 1, 0), True, True)],
+    "BZMPOP": [(("idx", 2), ("kn", 0, 1, 1), True, True)],
+    "BZPOPMAX": [(("idx", 1), ("rng", -2, 1, 0), True, True)],
+    "BZPOPMIN": [(("idx", 1), ("rng", -2, 1, 0), True, True)],
+    "COPY": [(("idx", 1), ("rng", 0, 1, 0), True, False), (("idx", 2), ("rng", 0, 1, 0), False, True)],
+    "DECR": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "DECRBY": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "DEL": [(("idx", 1), ("rng", -1, 1, 0), False, True)],
+    "DUMP": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "EXISTS": [(("idx", 1), ("rng", -1, 1, 0), True, False)],
+    "EXPIRE": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "EXPIREAT": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "EXPIRETIME": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "FCALL": [(("idx", 2), ("kn", 0, 1, 1), True, True)],
+    "FCALL_RO": [(("idx", 2), ("kn", 0, 1, 1), True, False)],
+    "GEOADD": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "GEODIST": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "GEOHASH": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "GEOPOS": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "GEORADIUS": [(("idx", 1), ("rng", 0, 1, 0), True, False), (("kw", "STORE", 6), ("rng", 0, 1, 0), False, True), (("kw", "STOREDIST", 6), ("rng", 0, 1, 0), False, True)],
+    "GEORADIUSBYMEMBER": [(("idx", 1), ("rng", 0, 1, 0), True, False), (("kw", "STORE", 5), ("rng", 0, 1, 0), False, True), (("kw", "STOREDIST", 5), ("rng", 0, 1, 0), False, True)],
+    "GEORADIUSBYMEMBER_RO": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "GEORADIUS_RO": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "GEOSEARCH": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "GEOSEARCHSTORE": [(("idx", 1), ("rng", 0, 1, 0), False, True), (("idx", 2), ("rng", 0, 1, 0), True, False)],
+    "GET": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "GETBIT": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "GETDEL": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "GETEX": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "GETRANGE": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "GETSET": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "HDEL": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "HEXISTS": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "HGET": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "HGETALL": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "HINCRBY": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "HINCRBYFLOAT": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "HKEYS": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "HLEN": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "HMGET": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "HMSET": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "HRANDFIELD": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "HSCAN": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "HSET": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "HSETNX": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "HSTRLEN": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "HVALS": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "INCR": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "INCRBY": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "INCRBYFLOAT": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "LCS": [(("idx", 1), ("rng", 1, 1, 0), True, False)],
+    "LINDEX": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "LINSERT": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "LLEN": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "LMOVE": [(("idx", 1), ("rng", 0, 1, 0), True, True), (("idx", 2), ("rng", 0, 1, 0), True, True)],
+    "LMPOP": [(("idx", 1), ("kn", 0, 1, 1), True, True)],
+    "LPOP": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "LPOS": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "LPUSH": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "LPUSHX": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "LRANGE": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "LREM": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "LSET": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "LTRIM": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "MEMORY USAGE": [(("idx", 2), ("rng", 0, 1, 0), True, False)],
+    "MGET": [(("idx", 1), ("rng", -1, 1, 0), True, False)],
+    "MIGRATE": [(("idx", 3), ("rng", 0, 1, 0), True, True), (("kw", "KEYS", -2), ("rng", -1, 1, 0), True, True)],
+    "MOVE": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "MSET": [(("idx", 1), ("rng", -1, 2, 0), False, True)],
+    "MSETNX": [(("idx", 1), ("rng", -1, 2, 0), False, True)],
+    "OBJECT ENCODING": [(("idx", 2), ("rng", 0, 1, 0), True, False)],
+    "OBJECT FREQ": [(("idx", 2), ("rng", 0, 1, 0), True, False)],
+    "OBJECT IDLETIME": [(("idx", 2), ("rng", 0, 1, 0), True, False)],
+    "OBJECT REFCOUNT": [(("idx", 2), ("rng", 0, 1, 0), True, False)],
+    "PERSIST": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "PEXPIRE": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "PEXPIREAT": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "PEXPIRETIME": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "PFADD": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "PFCOUNT": [(("idx", 1), ("rng", -1, 1, 0), True, True)],
+    "PFDEBUG": [(("idx", 2), ("rng", 0, 1, 0), True, True)],
+    "PFMERGE": [(("idx", 1), ("rng", 0, 1, 0), True, True), (("idx", 2), ("rng", -1, 1, 0), True, False)],
+    "PSETEX": [(("idx", 1), ("rng", 0, 1, 0), False, True)],
+    "PTTL": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "RENAME": [(("idx", 1), ("rng", 0, 1, 0), True, True), (("idx", 2), ("rng", 0, 1, 0), False, True)],
+    "RENAMENX": [(("idx", 1), ("rng", 0, 1, 0), True, True), (("idx", 2), ("rng", 0, 1, 0), False, True)],
+    "RESTORE": [(("idx", 1), ("rng", 0, 1, 0), False, True)],
+    "RESTORE-ASKING": [(("idx", 1), ("rng", 0, 1, 0), False, True)],
+    "RPOP": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "RPOPLPUSH": [(("idx", 1), ("rng", 0, 1, 0), True, True), (("idx", 2), ("rng", 0, 1, 0), True, True)],
+    "RPUSH": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "RPUSHX": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "SADD": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "SCARD": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "SDIFF": [(("idx", 1), ("rng", -1, 1, 0), True, False)],
+    "SDIFFSTORE": [(("idx", 1), ("rng", 0, 1, 0), False, True), (("idx", 2), ("rng", -1, 1, 0), True, False)],
+    "SET": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "SETBIT": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "SETEX": [(("idx", 1), ("rng", 0, 1, 0), False, True)],
+    "SETNX": [(("idx", 1), ("rng", 0, 1, 0), False, True)],
+    "SETRANGE": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "SINTER": [(("idx", 1), ("rng", -1, 1, 0), True, False)],
+    "SINTERCARD": [(("idx", 1), ("kn", 0, 1, 1), True, False)],
+    "SINTERSTORE": [(("idx", 1), ("rng", 0, 1, 0), True, True), (("idx", 2), ("rng", -1, 1, 0), True, False)],
+    "SISMEMBER": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "SMEMBERS": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "SMISMEMBER": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "SMOVE": [(("idx", 1), ("rng", 0, 1, 0), True, True), (("idx", 2), ("rng", 0, 1, 0), True, True)],
+    "SORT": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "SORT_RO": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "SPOP": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "SRANDMEMBER": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "SREM": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "SSCAN": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "STRLEN": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "SUBSTR": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "SUNION": [(("idx", 1), ("rng", -1, 1, 0), True, False)],
+    "SUNIONSTORE": [(("idx", 1), ("rng", 0, 1, 0), False, True), (("idx", 2), ("rng", -1, 1, 0), True, False)],
+    "TOUCH": [(("idx", 1), ("rng", -1, 1, 0), True, False)],
+    "TTL": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "TYPE": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "UNLINK": [(("idx", 1), ("rng", -1, 1, 0), False, True)],
+    "WATCH": [(("idx", 1), ("rng", -1, 1, 0), True, False)],
+    "XACK": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "XADD": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "XAUTOCLAIM": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "XCLAIM": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "XDEL": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "XGROUP CREATE": [(("idx", 2), ("rng", 0, 1, 0), True, True)],
+    "XGROUP CREATECONSUMER": [(("idx", 2), ("rng", 0, 1, 0), True, True)],
+    "XGROUP DELCONSUMER": [(("idx", 2), ("rng", 0, 1, 0), True, True)],
+    "XGROUP DESTROY": [(("idx", 2), ("rng", 0, 1, 0), True, True)],
+    "XGROUP SETID": [(("idx", 2), ("rng", 0, 1, 0), True, True)],
+    "XINFO CONSUMERS": [(("idx", 2), ("rng", 0, 1, 0), True, False)],
+    "XINFO GROUPS": [(("idx", 2), ("rng", 0, 1, 0), True, False)],
+    "XINFO STREAM": [(("idx", 2), ("rng", 0, 1, 0), True, False)],
+    "XLEN": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "XPENDING": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "XRANGE": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "XREAD": [(("kw", "STREAMS", 1), ("rng", -1, 1, 2), True, False)],
+    "XREADGROUP": [(("kw", "STREAMS", 4), ("rng", -1, 1, 2), True, True)],
+    "XREVRANGE": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "XSETID": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "XTRIM": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "ZADD": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "ZCARD": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZCOUNT": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZDIFF": [(("idx", 1), ("kn", 0, 1, 1), True, False)],
+    "ZDIFFSTORE": [(("idx", 1), ("rng", 0, 1, 0), False, True), (("idx", 2), ("kn", 0, 1, 1), True, False)],
+    "ZINCRBY": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "ZINTER": [(("idx", 1), ("kn", 0, 1, 1), True, False)],
+    "ZINTERCARD": [(("idx", 1), ("kn", 0, 1, 1), True, False)],
+    "ZINTERSTORE": [(("idx", 1), ("rng", 0, 1, 0), False, True), (("idx", 2), ("kn", 0, 1, 1), True, False)],
+    "ZLEXCOUNT": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZMPOP": [(("idx", 1), ("kn", 0, 1, 1), True, True)],
+    "ZMSCORE": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZPOPMAX": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "ZPOPMIN": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "ZRANDMEMBER": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZRANGE": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZRANGEBYLEX": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZRANGEBYSCORE": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZRANGESTORE": [(("idx", 1), ("rng", 0, 1, 0), False, True), (("idx", 2), ("rng", 0, 1, 0), True, False)],
+    "ZRANK": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZREM": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "ZREMRANGEBYLEX": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "ZREMRANGEBYRANK": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "ZREMRANGEBYSCORE": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
+    "ZREVRANGE": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZREVRANGEBYLEX": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZREVRANGEBYSCORE": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZREVRANK": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZSCAN": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZSCORE": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
+    "ZUNION": [(("idx", 1), ("kn", 0, 1, 1), True, False)],
+    "ZUNIONSTORE": [(("idx", 1), ("rng", 0, 1, 0), False, True), (("idx", 2), ("kn", 0, 1, 1), True, False)],
+}
+# fmt: on
+
+# Transaction control commands — no keys, flag only.
+_TX_CONTROL_CMDS: frozenset[str] = frozenset({"MULTI", "EXEC", "DISCARD", "UNWATCH"})
+
+# EVAL/EVALSHA are atomic (Lua scripts execute without interleaving).
+# Treat as transaction control with no key-level accesses.  See defect #8.
+_EVAL_CMDS: frozenset[str] = frozenset({"EVAL", "EVALSHA", "EVAL_RO", "EVALSHA_RO", "FCALL", "FCALL_RO"})
+
+# Server/connection/cluster commands that never operate on specific keys.
+# These must not hit the conservative fallback (which treats arg[0] as a key).
+_NO_KEY_CMDS: frozenset[str] = frozenset(
     {
-        "GET",
-        "STRLEN",
-        "GETRANGE",
-        "SUBSTR",
-        "HGET",
-        "HGETALL",
-        "HKEYS",
-        "HVALS",
-        "HLEN",
-        "HEXISTS",
-        "HMGET",
-        "HRANDFIELD",
-        "HSCAN",
-        "LLEN",
-        "LRANGE",
-        "LINDEX",
-        "LPOS",
-        "SCARD",
-        "SISMEMBER",
-        "SMISMEMBER",
-        "SMEMBERS",
-        "SRANDMEMBER",
-        "SSCAN",
-        "ZCARD",
-        "ZCOUNT",
-        "ZLEXCOUNT",
-        "ZRANGE",
-        "ZRANGEBYLEX",
-        "ZRANGEBYSCORE",
-        "ZRANK",
-        "ZREVRANGE",
-        "ZREVRANGEBYLEX",
-        "ZREVRANGEBYSCORE",
-        "ZREVRANK",
-        "ZSCORE",
-        "ZMSCORE",
-        "ZRANDMEMBER",
-        "ZSCAN",
-        "TYPE",
-        "TTL",
-        "PTTL",
-        "DUMP",
-        "XLEN",
-        "XRANGE",
-        "XREVRANGE",
-        "XINFO",
-        "XPENDING",
-        "PFCOUNT",
-        "EXPIRETIME",
-        "PEXPIRETIME",
+        "ACL",
+        "ASKING",
+        "AUTH",
+        "BGREWRITEAOF",
+        "BGSAVE",
+        "CLIENT",
+        "CLUSTER",
+        "COMMAND",
+        "CONFIG",
+        "DBSIZE",
+        "DEBUG",
+        "ECHO",
+        "FAILOVER",
+        "FLUSHALL",
+        "FLUSHDB",
+        "FUNCTION",
+        "HELLO",
+        "INFO",
+        "KEYS",
+        "LASTSAVE",
+        "LATENCY",
+        "LOLWUT",
+        "MODULE",
+        "MONITOR",
+        "PFSELFTEST",
+        "PING",
+        "PSYNC",
+        "PUBSUB",
+        "QUIT",
+        "RANDOMKEY",
+        "READONLY",
+        "READWRITE",
+        "REPLCONF",
+        "REPLICAOF",
+        "RESET",
+        "ROLE",
+        "SAVE",
+        "SCAN",
+        "SCRIPT",
+        "SELECT",
+        "SHUTDOWN",
+        "SLAVEOF",
+        "SLOWLOG",
+        "SWAPDB",
+        "SYNC",
+        "TIME",
+        "WAIT",
+        "WAITAOF",
     }
 )
 
-# Commands that write a single key (first argument).
-_SINGLE_KEY_WRITE_CMDS: frozenset[str] = frozenset(
-    {
-        "SET",
-        "SETNX",
-        "SETEX",
-        "PSETEX",
-        "SETRANGE",
-        "APPEND",
-        "INCR",
-        "INCRBY",
-        "INCRBYFLOAT",
-        "DECR",
-        "DECRBY",
-        "HSET",
-        "HSETNX",
-        "HMSET",
-        "HINCRBY",
-        "HINCRBYFLOAT",
-        "HDEL",
-        "LPUSH",
-        "LPUSHX",
-        "RPUSH",
-        "RPUSHX",
-        "LPOP",
-        "RPOP",
-        "LSET",
-        "LINSERT",
-        "LREM",
-        "LTRIM",
-        "SADD",
-        "SREM",
-        "SPOP",
-        "ZADD",
-        "ZREM",
-        "ZINCRBY",
-        "ZREMRANGEBYLEX",
-        "ZREMRANGEBYRANK",
-        "ZREMRANGEBYSCORE",
-        "ZPOPMIN",
-        "ZPOPMAX",
-        "EXPIRE",
-        "EXPIREAT",
-        "PEXPIRE",
-        "PEXPIREAT",
-        "XADD",
-        "XDEL",
-        "XTRIM",
-        "XACK",
-        "PFADD",
-    }
+# Parent commands that dispatch to subcommands in the key-spec table.
+# When a specific subcommand (e.g. "OBJECT HELP") is not found, we return
+# no-keys instead of hitting the conservative fallback.
+_SUBCOMMAND_PARENTS: frozenset[str] = frozenset(
+    {parent for key in _COMMAND_KEY_SPECS if " " in key for parent in [key.split(" ", 1)[0]]}
 )
 
-# Commands that read+write a single key (first argument).
-# These are commands that both read and modify state atomically.
-_SINGLE_KEY_READ_WRITE_CMDS: frozenset[str] = frozenset(
-    {
-        "GETSET",
-        "GETDEL",
-        "PERSIST",  # Reads key, mutates TTL metadata.
-        "GETEX",  # Reads value, may mutate TTL with EX/PX/EXAT/PXAT/PERSIST options.
-    }
-)
 
-# Commands that take multiple keys as arguments (all positional args are keys).
-_MULTI_KEY_READ_CMDS: frozenset[str] = frozenset(
-    {
-        "MGET",
-        "EXISTS",
-    }
-)
+# ---------------------------------------------------------------------------
+# Generic key-spec interpreter
+# ---------------------------------------------------------------------------
 
-_MULTI_KEY_WRITE_CMDS: frozenset[str] = frozenset(
-    {
-        "DEL",
-        "UNLINK",
-    }
-)
 
-# Transaction control commands (no keys).
-_TX_CONTROL_CMDS: frozenset[str] = frozenset(
-    {
-        "MULTI",
-        "EXEC",
-        "DISCARD",
-    }
-)
+def _extract_keys_from_spec(
+    cmd_args: tuple[object, ...],
+    begin: tuple[str | int, ...],
+    find: tuple[str | int, ...],
+) -> list[str]:
+    """Extract keys from *cmd_args* using a single key-spec entry.
+
+    The ``begin`` tuple locates the starting position; ``find`` enumerates
+    keys from that position.  Both formats are documented above.
+
+    Note: ``cmd_args`` does **not** include the command name.  The indices
+    in the key-spec table are 1-based (position 1 = first argument after
+    the command name), so we subtract 1 when indexing into *cmd_args*.
+    """
+    n_args = len(cmd_args)
+
+    # --- Resolve begin position (0-based into cmd_args) ---
+    if begin[0] == "idx":
+        start = int(begin[1]) - 1  # 1-based → 0-based
+        if start < 0 or start >= n_args:
+            return []
+    elif begin[0] == "kw":
+        keyword = str(begin[1]).upper()
+        startfrom = int(begin[2])
+        # startfrom can be negative (search from end); convert to 0-based cmd_args index.
+        if startfrom >= 0:
+            search_start = max(startfrom - 1, 0)
+        else:
+            search_start = max(n_args + startfrom, 0)
+        args_upper = [str(a).upper() for a in cmd_args]
+        found = -1
+        for j in range(search_start, n_args):
+            if args_upper[j] == keyword:
+                found = j
+                break
+        if found < 0:
+            return []
+        start = found + 1  # keys begin after the keyword
+        if start >= n_args:
+            return []
+    else:
+        return []
+
+    # --- Enumerate keys from *start* ---
+    if find[0] == "rng":
+        lastkey = int(find[1])
+        keystep = max(int(find[2]), 1)
+        limit = int(find[3])
+
+        if lastkey == 0:
+            # Single key at start.
+            return [str(cmd_args[start])]
+        elif lastkey > 0:
+            # Fixed number of additional keys.
+            end = min(start + lastkey, n_args - 1)
+            return [str(cmd_args[i]) for i in range(start, end + 1, keystep)]
+        else:
+            # lastkey < 0: keys extend to the end (adjusted by lastkey).
+            # lastkey=-1 → up to and including the last arg
+            # lastkey=-2 → up to and including the second-to-last arg
+            end = n_args + lastkey + 1  # exclusive upper bound
+            if end <= start:
+                return []
+            count = end - start
+            # Apply limit divisor (e.g. XREAD: limit=2 means first half are keys).
+            if limit >= 2:
+                count = count // limit
+            if count <= 0:
+                return []
+            return [str(cmd_args[start + i * keystep]) for i in range(count) if start + i * keystep < n_args]
+
+    elif find[0] == "kn":
+        keynumidx = int(find[1])
+        firstkey_offset = int(find[2])
+        keystep = max(int(find[3]), 1)
+
+        numkeys_pos = start + keynumidx
+        if numkeys_pos >= n_args:
+            return []
+        try:
+            numkeys = int(str(cmd_args[numkeys_pos]))
+        except (ValueError, TypeError):
+            return []
+
+        first_pos = start + firstkey_offset
+        keys: list[str] = []
+        for i in range(numkeys):
+            pos = first_pos + i * keystep
+            if pos >= n_args:
+                break
+            keys.append(str(cmd_args[pos]))
+        return keys
+
+    return []
+
+
+def _lookup_key_specs(cmd_name_upper: str, cmd_args: tuple[object, ...]) -> list[_KeySpec] | None:
+    """Look up key specs, trying subcommand dispatch first."""
+    if cmd_args:
+        sub = cmd_name_upper + " " + str(cmd_args[0]).upper()
+        specs = _COMMAND_KEY_SPECS.get(sub)
+        if specs is not None:
+            return specs
+    return _COMMAND_KEY_SPECS.get(cmd_name_upper)
+
+
+# ---------------------------------------------------------------------------
+# SORT special handling (STORE keyword has "unknown" key_spec in Redis)
+# ---------------------------------------------------------------------------
+
+
+def _parse_sort(cmd_args: tuple[object, ...]) -> RedisAccessResult:
+    """Handle SORT which has an optional STORE dest that can't be expressed
+    via static key_specs (Redis marks it as ``unknown``)."""
+    if not cmd_args:
+        return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=False)
+
+    first_key = str(cmd_args[0])
+    # Walk args, skipping values after BY, GET, LIMIT to avoid treating
+    # user-supplied patterns (e.g. "store") as the STORE keyword.
+    i = 1
+    while i < len(cmd_args):
+        token = str(cmd_args[i]).upper()
+        if token in ("BY", "GET"):
+            i += 2
+        elif token == "LIMIT":
+            i += 3
+        elif token == "STORE" and i + 1 < len(cmd_args):
+            dest = str(cmd_args[i + 1])
+            return RedisAccessResult(read_keys=[first_key], write_keys=[dest], is_transaction_control=False)
+        else:
+            i += 1
+    return RedisAccessResult(read_keys=[first_key], write_keys=[], is_transaction_control=False)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAccessResult:
@@ -192,306 +474,58 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
     """
     upper = cmd_name.upper()
 
-    # Transaction control — no keys.
+    # --- Transaction control (no keys) ---
     if upper in _TX_CONTROL_CMDS:
         return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=True)
 
-    # WATCH/UNWATCH — reads for conflict purposes.
+    # WATCH — reads keys for conflict detection, flagged as transaction control.
     if upper == "WATCH":
         keys = [str(a) for a in cmd_args]
         return RedisAccessResult(read_keys=keys, write_keys=[], is_transaction_control=True)
-    if upper == "UNWATCH":
+
+    # EVAL/EVALSHA/FCALL — atomic scripts, treated as transaction control (defect #8).
+    if upper in _EVAL_CMDS:
         return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=True)
 
-    # No arguments → server/connection command (PING, INFO, etc.)
-    if not cmd_args:
-        return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=False)
-
-    first_key = str(cmd_args[0])
-
-    # Single-key read commands.
-    if upper in _SINGLE_KEY_READ_CMDS:
-        return RedisAccessResult(read_keys=[first_key], write_keys=[], is_transaction_control=False)
-
-    # Single-key write commands.
-    if upper in _SINGLE_KEY_WRITE_CMDS:
-        return RedisAccessResult(read_keys=[], write_keys=[first_key], is_transaction_control=False)
-
-    # Single-key read+write commands.
-    if upper in _SINGLE_KEY_READ_WRITE_CMDS:
-        return RedisAccessResult(read_keys=[first_key], write_keys=[first_key], is_transaction_control=False)
-
-    # Multi-key read commands.
-    if upper in _MULTI_KEY_READ_CMDS:
-        keys = [str(a) for a in cmd_args]
-        return RedisAccessResult(read_keys=keys, write_keys=[], is_transaction_control=False)
-
-    # Multi-key write commands.
-    if upper in _MULTI_KEY_WRITE_CMDS:
-        keys = [str(a) for a in cmd_args]
-        return RedisAccessResult(read_keys=[], write_keys=keys, is_transaction_control=False)
-
-    # MSET / MSETNX — args are key-value pairs.
-    if upper in ("MSET", "MSETNX"):
-        keys = [str(cmd_args[i]) for i in range(0, len(cmd_args), 2)]
-        return RedisAccessResult(read_keys=[], write_keys=keys, is_transaction_control=False)
-
-    # RENAME / RENAMENX — reads+deletes source, writes destination.
-    if upper in ("RENAME", "RENAMENX") and len(cmd_args) >= 2:
+    # Pub/Sub — channels, not keys.  Prefix with "channel:" to distinguish.
+    # Includes sharded pub/sub (SPUBLISH, SSUBSCRIBE, SUNSUBSCRIBE).
+    if upper in ("PUBLISH", "SPUBLISH") and cmd_args:
+        return RedisAccessResult(read_keys=[], write_keys=[f"channel:{cmd_args[0]}"], is_transaction_control=False)
+    if upper in ("SUBSCRIBE", "PSUBSCRIBE", "SSUBSCRIBE"):
         return RedisAccessResult(
-            read_keys=[first_key],
-            write_keys=[first_key, str(cmd_args[1])],
-            is_transaction_control=False,
+            read_keys=[f"channel:{a}" for a in cmd_args], write_keys=[], is_transaction_control=False
         )
-
-    # RPOPLPUSH / LMOVE — pops from source (read+write), pushes to destination (write).
-    if upper in ("RPOPLPUSH", "LMOVE", "BRPOPLPUSH", "BLMOVE") and len(cmd_args) >= 2:
-        return RedisAccessResult(
-            read_keys=[first_key],
-            write_keys=[first_key, str(cmd_args[1])],
-            is_transaction_control=False,
-        )
-
-    # SMOVE — removes from source (read+write), adds to destination (write).
-    if upper == "SMOVE" and len(cmd_args) >= 2:
-        return RedisAccessResult(
-            read_keys=[first_key],
-            write_keys=[first_key, str(cmd_args[1])],
-            is_transaction_control=False,
-        )
-
-    # LMPOP / ZMPOP — numkeys key [key ...] LEFT|RIGHT [COUNT count]
-    # These pop elements: read the value + remove it (write), like BLPOP/BRPOP.
-    if upper in ("LMPOP", "ZMPOP") and len(cmd_args) >= 2:
-        try:
-            numkeys = int(str(cmd_args[0]))
-        except (ValueError, TypeError):
-            numkeys = 1
-        # Find the direction token (LEFT/RIGHT for LMPOP, MIN/MAX for ZMPOP)
-        # to bound key extraction — don't include it as a key.
-        direction_tokens = {"LEFT", "RIGHT"} if upper == "LMPOP" else {"MIN", "MAX"}
-        direction_pos = next(
-            (j for j in range(1, len(cmd_args)) if str(cmd_args[j]).upper() in direction_tokens),
-            len(cmd_args),
-        )
-        n_keys = min(numkeys, direction_pos - 1)
-        keys = [str(cmd_args[1 + i]) for i in range(max(0, n_keys))]
-        return RedisAccessResult(read_keys=keys, write_keys=keys, is_transaction_control=False)
-
-    # BZMPOP — timeout numkeys key [key ...] MIN|MAX [COUNT count]
-    # Blocking pop: read the value + remove it (write), like BLPOP/BRPOP.
-    if upper == "BZMPOP" and len(cmd_args) >= 3:
-        try:
-            numkeys = int(str(cmd_args[1]))
-        except (ValueError, TypeError):
-            numkeys = 1
-        # Find the direction token (MIN/MAX) to bound key extraction.
-        direction_pos = next(
-            (j for j in range(2, len(cmd_args)) if str(cmd_args[j]).upper() in ("MIN", "MAX")),
-            len(cmd_args),
-        )
-        n_keys = min(numkeys, direction_pos - 2)
-        keys = [str(cmd_args[2 + i]) for i in range(max(0, n_keys))]
-        return RedisAccessResult(read_keys=keys, write_keys=keys, is_transaction_control=False)
-
-    # Blocking pop commands — first arg(s) are keys, last is timeout.
-    # These are read+write: they return the popped value (read) and remove
-    # the element (write), matching how RPOPLPUSH treats its source key.
-    if upper in ("BLPOP", "BRPOP"):
-        # Args: key [key ...] timeout
-        keys = [str(a) for a in cmd_args[:-1]] if len(cmd_args) > 1 else [first_key]
-        return RedisAccessResult(read_keys=keys, write_keys=keys, is_transaction_control=False)
-
-    # BZPOPMIN / BZPOPMAX — key [key ...] timeout (read+write like BLPOP/BRPOP)
-    if upper in ("BZPOPMIN", "BZPOPMAX"):
-        keys = [str(a) for a in cmd_args[:-1]] if len(cmd_args) > 1 else [first_key]
-        return RedisAccessResult(read_keys=keys, write_keys=keys, is_transaction_control=False)
-
-    # Set operations with destination: SUNIONSTORE, SINTERSTORE, SDIFFSTORE
-    if upper in ("SUNIONSTORE", "SINTERSTORE", "SDIFFSTORE") and len(cmd_args) >= 2:
-        dest = first_key
-        source_keys = [str(a) for a in cmd_args[1:]]
-        return RedisAccessResult(read_keys=source_keys, write_keys=[dest], is_transaction_control=False)
-
-    # SUNION, SINTER, SDIFF — read multiple keys, no writes.
-    if upper in ("SUNION", "SINTER", "SDIFF"):
-        keys = [str(a) for a in cmd_args]
-        return RedisAccessResult(read_keys=keys, write_keys=[], is_transaction_control=False)
-
-    # Sorted set store operations: ZUNIONSTORE, ZINTERSTORE, ZDIFFSTORE
-    # Args: destination numkeys key [key ...]
-    if upper in ("ZUNIONSTORE", "ZINTERSTORE", "ZDIFFSTORE") and len(cmd_args) >= 3:
-        dest = first_key
-        try:
-            numkeys = int(str(cmd_args[1]))
-        except (ValueError, TypeError):
-            numkeys = len(cmd_args) - 2
-        source_keys = [str(cmd_args[2 + i]) for i in range(min(numkeys, len(cmd_args) - 2))]
-        return RedisAccessResult(read_keys=source_keys, write_keys=[dest], is_transaction_control=False)
-
-    # SORT — can have STORE destination (write); otherwise read-only.
-    # Walk args skipping values that follow BY, GET, and LIMIT to avoid
-    # treating user-supplied pattern strings (e.g. "store") as the STORE keyword.
-    if upper == "SORT":
-        i = 1  # skip cmd_args[0] which is the sort key (already captured as first_key)
-        while i < len(cmd_args):
-            token = str(cmd_args[i]).upper()
-            if token in ("BY", "GET"):
-                i += 2  # skip the pattern value that follows
-            elif token == "LIMIT":
-                i += 3  # skip offset and count
-            elif token == "STORE" and i + 1 < len(cmd_args):
-                dest = str(cmd_args[i + 1])
-                return RedisAccessResult(read_keys=[first_key], write_keys=[dest], is_transaction_control=False)
-            else:
-                i += 1
-        return RedisAccessResult(read_keys=[first_key], write_keys=[], is_transaction_control=False)
-
-    # COPY — source destination
-    if upper == "COPY" and len(cmd_args) >= 2:
-        return RedisAccessResult(
-            read_keys=[first_key],
-            write_keys=[str(cmd_args[1])],
-            is_transaction_control=False,
-        )
-
-    # XREAD — read-only stream consumption.
-    if upper == "XREAD":
-        args_upper = [str(a).upper() for a in cmd_args]
-        if "STREAMS" in args_upper:
-            streams_idx = args_upper.index("STREAMS")
-            remaining = list(cmd_args[streams_idx + 1 :])
-            n_streams = len(remaining) // 2
-            keys = [str(remaining[i]) for i in range(n_streams)]
-            return RedisAccessResult(read_keys=keys, write_keys=[], is_transaction_control=False)
+    if upper in ("UNSUBSCRIBE", "PUNSUBSCRIBE", "SUNSUBSCRIBE"):
         return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=False)
 
-    # XREADGROUP — advances consumer group last-delivered-ID (read + write).
-    if upper == "XREADGROUP":
-        args_upper = [str(a).upper() for a in cmd_args]
-        if "STREAMS" in args_upper:
-            streams_idx = args_upper.index("STREAMS")
-            remaining = list(cmd_args[streams_idx + 1 :])
-            n_streams = len(remaining) // 2
-            keys = [str(remaining[i]) for i in range(n_streams)]
-            return RedisAccessResult(read_keys=keys, write_keys=keys, is_transaction_control=False)
+    # SORT/SORT_RO — STORE keyword has "unknown" key_spec; use dedicated parser.
+    if upper in ("SORT", "SORT_RO"):
+        return _parse_sort(cmd_args)
+
+    # Server/connection commands — no key-level conflicts.
+    if upper in _NO_KEY_CMDS:
         return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=False)
 
-    # XGROUP — subcommand with key.
-    if upper == "XGROUP" and len(cmd_args) >= 2:
-        return RedisAccessResult(read_keys=[], write_keys=[str(cmd_args[1])], is_transaction_control=False)
+    # --- Generic key-spec extraction ---
+    specs = _lookup_key_specs(upper, cmd_args)
 
-    # EVAL / EVALSHA — Redis Lua scripts execute atomically (no other
-    # commands can interleave), so we treat them as transaction control
-    # to avoid false key-level conflict arcs.  See defect #8.
-    if upper in ("EVAL", "EVALSHA", "EVAL_RO", "EVALSHA_RO"):
-        return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=True)
-
-    # PUBLISH — channel, message.
-    if upper == "PUBLISH" and len(cmd_args) >= 1:
-        channel = f"channel:{first_key}"
-        return RedisAccessResult(read_keys=[], write_keys=[channel], is_transaction_control=False)
-
-    # SUBSCRIBE / PSUBSCRIBE — channels.
-    if upper in ("SUBSCRIBE", "PSUBSCRIBE"):
-        channels = [f"channel:{a}" for a in cmd_args]
-        return RedisAccessResult(read_keys=channels, write_keys=[], is_transaction_control=False)
-
-    # GEODIST, GEOPOS, GEOHASH, GEOSEARCH — pure read commands.
-    if upper in ("GEODIST", "GEOPOS", "GEOHASH", "GEOSEARCH"):
-        return RedisAccessResult(read_keys=[first_key], write_keys=[], is_transaction_control=False)
-
-    # GEORADIUS / GEORADIUSBYMEMBER — read, but STORE/STOREDIST writes a destination key.
-    if upper in ("GEORADIUS", "GEORADIUSBYMEMBER"):
-        args_upper = [str(a).upper() for a in cmd_args]
-        for store_kw in ("STORE", "STOREDIST"):
-            if store_kw in args_upper:
-                store_idx = args_upper.index(store_kw)
-                if store_idx + 1 < len(cmd_args):
-                    dest = str(cmd_args[store_idx + 1])
-                    return RedisAccessResult(read_keys=[first_key], write_keys=[dest], is_transaction_control=False)
-        return RedisAccessResult(read_keys=[first_key], write_keys=[], is_transaction_control=False)
-
-    # GEOADD / GEOSEARCHSTORE — write commands.
-    if upper == "GEOADD":
-        return RedisAccessResult(read_keys=[], write_keys=[first_key], is_transaction_control=False)
-    if upper == "GEOSEARCHSTORE" and len(cmd_args) >= 2:
-        return RedisAccessResult(
-            read_keys=[str(cmd_args[1])],
-            write_keys=[first_key],
-            is_transaction_control=False,
-        )
-
-    # OBJECT HELP, OBJECT ENCODING, etc. — first real key is second arg.
-    if upper == "OBJECT":
-        if len(cmd_args) >= 2:
-            return RedisAccessResult(read_keys=[str(cmd_args[1])], write_keys=[], is_transaction_control=False)
+    if specs is None:
+        # If this is a parent that has subcommand variants (e.g. OBJECT, XGROUP)
+        # but the specific subcommand wasn't found, return no keys.
+        if upper in _SUBCOMMAND_PARENTS:
+            return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=False)
+        # Truly unknown command with args → conservative fallback: treat first arg as write key.
+        if cmd_args:
+            return RedisAccessResult(read_keys=[], write_keys=[str(cmd_args[0])], is_transaction_control=False)
         return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=False)
 
-    # WAIT, WAITAOF — no keys.
-    if upper in ("WAIT", "WAITAOF"):
-        return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=False)
+    read_keys: list[str] = []
+    write_keys: list[str] = []
+    for begin, find, is_read, is_write in specs:
+        keys = _extract_keys_from_spec(cmd_args, begin, find)
+        if is_read:
+            read_keys.extend(keys)
+        if is_write:
+            write_keys.extend(keys)
 
-    # PFMERGE — destination key [key ...]
-    if upper == "PFMERGE":
-        source_keys = [str(a) for a in cmd_args[1:]]
-        return RedisAccessResult(read_keys=source_keys, write_keys=[first_key], is_transaction_control=False)
-
-    # BITOP — operation destkey key [key ...]
-    if upper == "BITOP" and len(cmd_args) >= 3:
-        dest = str(cmd_args[1])
-        source_keys = [str(a) for a in cmd_args[2:]]
-        return RedisAccessResult(read_keys=source_keys, write_keys=[dest], is_transaction_control=False)
-
-    # BITCOUNT, BITPOS, BITFIELD_RO — read single key.
-    if upper in ("BITCOUNT", "BITPOS", "BITFIELD_RO", "GETBIT"):
-        return RedisAccessResult(read_keys=[first_key], write_keys=[], is_transaction_control=False)
-
-    # BITFIELD, SETBIT — write single key.
-    if upper in ("BITFIELD", "SETBIT"):
-        return RedisAccessResult(read_keys=[], write_keys=[first_key], is_transaction_control=False)
-
-    # SCAN, DBSIZE, FLUSHDB, SELECT, etc. — server commands, no specific key conflicts.
-    # KEYS, RANDOMKEY — server-level scan, not key-specific.
-    if upper in (
-        "PING",
-        "ECHO",
-        "INFO",
-        "CONFIG",
-        "CLIENT",
-        "SLOWLOG",
-        "DEBUG",
-        "DBSIZE",
-        "FLUSHDB",
-        "FLUSHALL",
-        "SELECT",
-        "SWAPDB",
-        "AUTH",
-        "SCAN",
-        "KEYS",
-        "RANDOMKEY",
-        "WAIT",
-        "COMMAND",
-        "TIME",
-        "CLUSTER",
-        "READONLY",
-        "READWRITE",
-        "ASKING",
-        "LATENCY",
-        "MEMORY",
-        "MODULE",
-        "ACL",
-        "RESET",
-        "QUIT",
-        "SHUTDOWN",
-        "BGSAVE",
-        "BGREWRITEAOF",
-        "SAVE",
-        "LASTSAVE",
-        "UNSUBSCRIBE",
-        "PUNSUBSCRIBE",
-    ):
-        return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=False)
-
-    # Fallback: treat first argument as a write key (conservative).
-    return RedisAccessResult(read_keys=[], write_keys=[first_key], is_transaction_control=False)
+    return RedisAccessResult(read_keys=read_keys, write_keys=write_keys, is_transaction_control=False)
