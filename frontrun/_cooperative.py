@@ -344,6 +344,16 @@ class CooperativeRLock:
             self._count += 1
             return True
 
+        # Reentrancy guard: if we're already inside DPOR machinery (e.g.,
+        # GC-triggered __del__ during _process_opcode or _sync_reporter),
+        # fall back to real blocking to avoid re-entering the scheduler.
+        if _in_dpor_machinery():
+            result = self._lock.acquire(blocking=blocking, timeout=timeout if timeout >= 0 else -1)
+            if result:
+                self._owner = me
+                self._count = 1
+            return result
+
         if not blocking:
             if self._lock.acquire(blocking=False):
                 self._owner = me

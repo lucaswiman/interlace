@@ -311,6 +311,4 @@ class TestExploreMarkerInterleavings:
         # When reader runs before writer, it crashes with AttributeError.
         # The current buggy code swallows this and reports property_holds=True.
         # The fix should surface it as a failure.
-        assert not result.property_holds, (
-            "Thread crashes should be reported as failures, not silently swallowed"
-        )
+        assert not result.property_holds, "Thread crashes should be reported as failures, not silently swallowed"

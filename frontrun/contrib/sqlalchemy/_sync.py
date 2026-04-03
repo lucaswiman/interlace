@@ -126,13 +126,19 @@ def sqlalchemy_dpor(
             conn.commit = _wrap_sa_method(_orig_commit)  # type: ignore[method-assign]
             conn.rollback = _wrap_sa_method(_orig_rollback)  # type: ignore[method-assign]
             token = _current_connection.set(conn)
+            exc_info: tuple[type[BaseException], BaseException, object] | tuple[None, None, None] = (None, None, None)
             try:
                 fn(state)
+            except BaseException:
+                import sys
+
+                exc_info = sys.exc_info()  # type: ignore[assignment]
+                raise
             finally:
                 _current_connection.reset(token)
                 suppress_sync_reporting()
                 try:
-                    conn_ctx.__exit__(None, None, None)
+                    conn_ctx.__exit__(*exc_info)
                 finally:
                     unsuppress_sync_reporting()
 

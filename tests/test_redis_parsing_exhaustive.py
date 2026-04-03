@@ -95,7 +95,7 @@ _EXHAUSTIVE_CASES: list[tuple[str, str, tuple[object, ...], list[str], list[str]
     ("SDIFFSTORE", "SDIFFSTORE", ("dst", "s1", "s2"), ["s1", "s2"], ["dst"], False),
     ("SINTER", "SINTER", ("s1", "s2", "s3"), ["s1", "s2", "s3"], [], False),
     ("SINTERCARD", "SINTERCARD", ("2", "k1", "k2"), ["k1", "k2"], [], False),
-    ("SINTERSTORE", "SINTERSTORE", ("dst", "s1", "s2"), ["dst", "s1", "s2"], ["dst"], False),
+    ("SINTERSTORE", "SINTERSTORE", ("dst", "s1", "s2"), ["s1", "s2"], ["dst"], False),
     ("SISMEMBER", "SISMEMBER", ("myset", "m1"), ["myset"], [], False),
     ("SMEMBERS", "SMEMBERS", ("myset",), ["myset"], [], False),
     ("SMISMEMBER", "SMISMEMBER", ("myset", "m1", "m2"), ["myset"], [], False),

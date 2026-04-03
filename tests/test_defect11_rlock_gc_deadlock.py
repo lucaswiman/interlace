@@ -182,7 +182,6 @@ class TestRLockGCReentrancyGuard:
         mode.  The test checks that scheduler.wait_for_turn is NOT called.
         """
         import threading
-        import time
 
         rlock = CooperativeRLock()
         wait_for_turn_called = False

@@ -5,10 +5,9 @@ Uses mock objects to test without requiring Django or SQLAlchemy installed.
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 
 class TestDjangoAsyncLockTimeoutForwarding:
@@ -40,10 +39,9 @@ class TestDjangoAsyncLockTimeoutForwarding:
             patch.dict(sys.modules, {"django": MagicMock(), "django.db": MagicMock()}),
             patch("frontrun.async_dpor.explore_async_dpor", fake_explore_async_dpor),
         ):
-            from frontrun.contrib.django._async import async_django_dpor
-
             # Force re-import to pick up mocks
             import importlib
+
             import frontrun.contrib.django._async as mod
 
             importlib.reload(mod)

@@ -76,9 +76,8 @@ async def async_django_dpor(
             conn.close()
             conn.ensure_connection()
             if lock_timeout is not None:
-                cursor = conn.cursor()
-                cursor.execute(f"SET lock_timeout = '{int(lock_timeout)}ms'")
-                cursor.close()
+                with conn.cursor() as cursor:
+                    cursor.execute(f"SET lock_timeout = '{int(lock_timeout)}ms'")
             try:
                 await fn(state)
             finally:
@@ -94,5 +93,6 @@ async def async_django_dpor(
         invariant=invariant,
         detect_sql=detect_sql,
         trace_packages=trace_packages,
+        lock_timeout=lock_timeout,
         **kwargs,
     )
