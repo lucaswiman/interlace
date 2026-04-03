@@ -230,9 +230,6 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
     if not expressions:
         return None  # unparseable → fall back to endpoint-level
 
-    if not expressions:
-        return None
-
     all_write: set[str] = set()
     all_read: set[str] = set()
     all_delete: set[str] = set()

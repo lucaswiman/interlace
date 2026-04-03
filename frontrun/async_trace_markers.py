@@ -222,9 +222,14 @@ class AsyncTraceExecutor:
             threads.append(thread)
             thread.start()
 
-        # Wait for all threads to complete
+        # Wait for all threads to complete using a shared deadline so that
+        # N threads with timeout T wait at most T seconds total, not N*T.
+        import time as _time
+
+        deadline = _time.monotonic() + timeout
         for thread in threads:
-            thread.join(timeout=timeout)
+            remaining = deadline - _time.monotonic()
+            thread.join(timeout=max(0.0, remaining))
 
         # Check if any threads are still alive after timeout
         alive_threads: list[threading.Thread] = [thread for thread in threads if thread.is_alive()]
