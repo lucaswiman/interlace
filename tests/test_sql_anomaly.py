@@ -131,6 +131,29 @@ class TestClassifyLostUpdate:
         assert 0 in result.threads
         assert 1 in result.threads
 
+    def test_serialized_t0_then_t1_is_not_lost_update(self) -> None:
+        # T0 completes its read-write cycle before T1 starts: no lost update.
+        events = [
+            _sql_event(0, 0, "accounts", "read"),
+            _sql_event(1, 0, "accounts", "write"),
+            _sql_event(2, 1, "accounts", "read"),
+            _sql_event(3, 1, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        # Serialized operations cannot produce a lost update anomaly.
+        assert result is None or result.kind != "lost_update"
+
+    def test_serialized_t1_then_t0_is_not_lost_update(self) -> None:
+        # T1 completes its read-write cycle before T0 starts: no lost update.
+        events = [
+            _sql_event(0, 1, "accounts", "read"),
+            _sql_event(1, 1, "accounts", "write"),
+            _sql_event(2, 0, "accounts", "read"),
+            _sql_event(3, 0, "accounts", "write"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is None or result.kind != "lost_update"
+
 
 class TestClassifyWriteSkew:
     def test_write_skew_different_tables(self) -> None:
@@ -217,6 +240,21 @@ class TestClassifyDirtyRead:
         result = classify_sql_anomaly(events)
         assert result is not None
         assert result.kind in ("dirty_read", "non_repeatable_read", "write_write", "lost_update")
+
+    def test_dirty_read_cycle_reports_all_tables(self) -> None:
+        # A dirty read cycle spanning two tables: T0 writes A, T1 reads A (WR),
+        # T1 writes B, T0 reads B (WR) — both tables must appear in result.tables.
+        events = [
+            _sql_event(0, 0, "table_a", "write"),
+            _sql_event(1, 1, "table_a", "read"),
+            _sql_event(2, 1, "table_b", "write"),
+            _sql_event(3, 0, "table_b", "read"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert result.kind == "dirty_read"
+        assert "table_a" in result.tables
+        assert "table_b" in result.tables
 
 
 class TestClassifyNonRepeatableRead:

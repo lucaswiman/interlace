@@ -228,24 +228,43 @@ def _check_phantom_read(ops: list[tuple[int, str, str, str]]) -> SqlAnomaly | No
 
 
 def _check_lost_update(ops: list[tuple[int, str, str, str]]) -> SqlAnomaly | None:
-    # Lost update: two threads both read AND write the same resource.
-    resource_thread_access: dict[str, dict[int, set[str]]] = {}
-    for tid, resource, _table, access in ops:
-        resource_thread_access.setdefault(resource, {}).setdefault(tid, set()).add(access)
+    # Lost update: two threads both read AND write the same resource, and their
+    # operations interleave (each thread's read precedes the other thread's write).
+    # Serialized executions (T0 fully completes before T1 starts) are not lost updates.
+    resource_thread_ops: dict[str, dict[int, list[tuple[int, str]]]] = {}
+    for idx, (tid, resource, _table, access) in enumerate(ops):
+        resource_thread_ops.setdefault(resource, {}).setdefault(tid, []).append((idx, access))
 
-    for resource, thread_map in resource_thread_access.items():
-        rw_threads = sorted(tid for tid, accesses in thread_map.items() if "read" in accesses and "write" in accesses)
-        if len(rw_threads) >= 2:
-            table = _resource_to_table(resource)
-            return SqlAnomaly(
-                kind="lost_update",
-                summary=(
-                    f"Lost update on table '{table}': both threads read then wrote the same rows, "
-                    f"so one thread's update overwrote the other's."
-                ),
-                tables=frozenset([table]),
-                threads=frozenset(rw_threads[:2]),
-            )
+    for resource, thread_map in resource_thread_ops.items():
+        # Collect threads with both read and write operations, recording
+        # the earliest read and latest write index for each.
+        rw_threads: dict[int, tuple[int, int]] = {}
+        for tid, thread_ops in thread_map.items():
+            reads = [i for i, acc in thread_ops if acc == "read"]
+            writes = [i for i, acc in thread_ops if acc == "write"]
+            if reads and writes:
+                rw_threads[tid] = (min(reads), max(writes))
+
+        tids = sorted(rw_threads.keys())
+        for i, ta in enumerate(tids):
+            for tb in tids[i + 1 :]:
+                r0, w0 = rw_threads[ta]
+                r1, w1 = rw_threads[tb]
+                # A true lost update requires interleaving: each thread reads
+                # before the other thread's last write.  If r1 >= w0, T1 read
+                # after T0 finished writing (serialized), so T1 saw T0's result
+                # and no update is lost.  Symmetric check for the other order.
+                if r0 < w1 and r1 < w0:
+                    table = _resource_to_table(resource)
+                    return SqlAnomaly(
+                        kind="lost_update",
+                        summary=(
+                            f"Lost update on table '{table}': both threads read then wrote the same rows, "
+                            f"so one thread's update overwrote the other's."
+                        ),
+                        tables=frozenset([table]),
+                        threads=frozenset([ta, tb]),
+                    )
     return None
 
 
@@ -302,11 +321,11 @@ def classify_sql_anomaly(events: list[TraceEvent]) -> SqlAnomaly | None:
 
         # Dirty read: WR edge in cycle
         if "WR" in cycle_etypes:
-            tbl = next(_resource_to_table(r) for _, _, e, r in cycle if e == "WR")
+            tbls = ", ".join(f"'{t}'" for t in sorted(cycle_tables))
             return SqlAnomaly(
                 kind="dirty_read",
-                summary=f"Dirty read on table '{tbl}': a thread read data from an uncommitted concurrent write.",
-                tables=frozenset([tbl]),
+                summary=f"Dirty read on {tbls}: a thread read data from an uncommitted concurrent write.",
+                tables=cycle_tables,
                 threads=cycle_threads,
             )
 

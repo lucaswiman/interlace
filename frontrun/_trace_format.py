@@ -710,7 +710,7 @@ def format_trace(
     # Reproduction stats
     if reproduction_attempts > 0:
         parts.append("")
-        pct = reproduction_successes * 100 // reproduction_attempts
+        pct = round(reproduction_successes * 100 / reproduction_attempts)
         parts.append(f"  Reproduced {reproduction_successes}/{reproduction_attempts} times ({pct}%)")
 
     parts.append("")

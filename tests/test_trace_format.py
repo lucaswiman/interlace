@@ -380,6 +380,19 @@ class TestFormatting:
         assert "0/10" in output
         assert "0%" in output
 
+    def test_reproduction_percentage_rounds_not_truncates(self) -> None:
+        """Reproduction percentage should be rounded, not floor-divided.
+
+        2/3 = 66.67% → should display 67%, not 66%.
+        """
+        events = [
+            TraceEvent(0, 0, "counter.py", 10, "increment", "LOAD_ATTR", "read", "value", "Counter"),
+            TraceEvent(1, 1, "counter.py", 10, "increment", "LOAD_ATTR", "read", "value", "Counter"),
+        ]
+        output = format_trace(events, num_threads=2, reproduction_attempts=3, reproduction_successes=2)
+        assert "2/3" in output
+        assert "67%" in output
+
 
 # ---------------------------------------------------------------------------
 # Call chain helpers
