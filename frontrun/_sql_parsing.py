@@ -72,39 +72,6 @@ class SqlAccessResult(NamedTuple):
 _EMPTY = SqlAccessResult(set(), set(), None, None, None, None, None)
 
 
-# Precompiled patterns — matches the leading keyword + first table name.
-# Handles optional schema qualification (schema.table) and quoted identifiers.
-_IDENT = r'(?:"[^"]+"(?:\."[^"]+")?|`[^`]+`(?:\.`[^`]+`)?|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)'
-_WS = r"[\s\n]+"
-
-_RE_SELECT = re.compile(r"\bSELECT\b", re.I)
-_RE_INSERT = re.compile(rf"\bINSERT{_WS}INTO{_WS}({_IDENT})", re.I)
-_RE_UPDATE = re.compile(rf"\bUPDATE{_WS}({_IDENT}){_WS}SET\b", re.I)
-_RE_DELETE = re.compile(rf"\bDELETE{_WS}FROM{_WS}({_IDENT})", re.I)
-_RE_FROM = re.compile(rf"\bFROM{_WS}({_IDENT})", re.I)
-_RE_JOIN = re.compile(rf"\bJOIN{_WS}({_IDENT})", re.I)
-_RE_LITERAL = re.compile(r"'[^']*'")
-_RE_FOR_UPDATE_SKIP_LOCKED = re.compile(r"\bFOR" + _WS + r"UPDATE" + _WS + r"SKIP" + _WS + r"LOCKED\b", re.I)
-_RE_FOR_UPDATE = re.compile(r"\bFOR" + _WS + r"UPDATE\b", re.I)
-_RE_FOR_SHARE = re.compile(r"\bFOR" + _WS + r"SHARE\b", re.I)
-_RE_LOCK_TABLE = re.compile(rf"\bLOCK{_WS}TABLE{_WS}({_IDENT})", re.I)
-_RE_LOCK_MODE = re.compile(rf"\bIN{_WS}(.+){_WS}MODE\b", re.I)
-_RE_TX_BEGIN = re.compile(r"^\s*(BEGIN|START\s+TRANSACTION|SET\s+AUTOCOMMIT\s*=\s*0)\b", re.I)
-_RE_TX_COMMIT = re.compile(r"^\s*(COMMIT|END|SET\s+AUTOCOMMIT\s*=\s*1)\b", re.I)
-_RE_TX_ROLLBACK = re.compile(r"^\s*ROLLBACK\b", re.I)
-_RE_TX_SAVEPOINT = re.compile(r"^\s*SAVEPOINT\s+(\w+)\b", re.I)
-_RE_TX_RELEASE = re.compile(r"^\s*RELEASE\s+(SAVEPOINT\s+)?(\w+)\b", re.I)
-_RE_TX_ROLLBACK_TO = re.compile(r"^\s*ROLLBACK\s+TO\s+(SAVEPOINT\s+)?(\w+)\b", re.I)
-# COPY: COPY table FROM/TO ...
-_RE_COPY = re.compile(rf"^\s*COPY{_WS}({_IDENT})", re.I)
-_RE_COPY_DIR = re.compile(r"\b(FROM|TO)\b", re.I)
-# PREPARE / EXECUTE (PostgreSQL server-side prepared statements)
-_RE_PREPARE = re.compile(rf"^\s*PREPARE{_WS}(\w+)", re.I)
-_RE_PREPARE_AS = re.compile(r"\bAS\b", re.I)
-_RE_EXECUTE_STMT = re.compile(rf"^\s*EXECUTE{_WS}(\w+)", re.I)
-_RE_DEALLOCATE = re.compile(rf"^\s*DEALLOCATE{_WS}", re.I)
-
-
 def _strip_quotes(name: str) -> str:
     """Remove surrounding quotes/backticks and extract table from schema.table.
 
@@ -137,171 +104,6 @@ def _strip_quotes(name: str) -> str:
     return last
 
 
-def _regex_parse(sql: str) -> SqlAccessResult | None:
-    """Fast-path: extract tables from simple single-statement SQL.
-
-    Returns a :class:`SqlAccessResult` or None if the SQL is too complex
-    (subqueries, CTEs, UNION, MERGE) and needs the full parser.
-    """
-    stripped = sql.strip().rstrip(";").strip()
-
-    # Quick multi-statement check (before tx control, avoids regex cost)
-    # Only strip trailing semicolons; interior semicolons indicate multiple statements.
-    if ";" in stripped:
-        return None
-
-    # Transaction control - check before other patterns (no literal stripping needed)
-    if _RE_TX_BEGIN.search(stripped):
-        return SqlAccessResult(set(), set(), None, TxOp.BEGIN, None)
-    if _RE_TX_COMMIT.search(stripped):
-        return SqlAccessResult(set(), set(), None, TxOp.COMMIT, None)
-    if _RE_TX_ROLLBACK.search(stripped):
-        m = _RE_TX_ROLLBACK_TO.search(stripped)
-        if m:
-            return SqlAccessResult(set(), set(), None, RollbackTo(m.group(2)), None)
-        return SqlAccessResult(set(), set(), None, TxOp.ROLLBACK, None)
-    m = _RE_TX_SAVEPOINT.search(stripped)
-    if m:
-        return SqlAccessResult(set(), set(), None, Savepoint(m.group(1)), None)
-    m = _RE_TX_RELEASE.search(stripped)
-    if m:
-        return SqlAccessResult(set(), set(), None, Release(m.group(2)), None)
-
-    # Strip literals to avoid false positives (e.g. " FROM " inside a string)
-    no_literals = _RE_LITERAL.sub(" ", stripped)
-    upper_no_literals = no_literals.upper()
-
-    # Bail to full parser for complex SQL
-    if any(kw in upper_no_literals for kw in ("WITH ", "UNION", "INTERSECT", "EXCEPT", "MERGE", "EXISTS")):
-        return None
-
-    # FOR SYSTEM_TIME is complex for regex, bail to sqlglot
-    if "SYSTEM_TIME" in upper_no_literals:
-        return None
-
-    if "USING" in upper_no_literals and "DELETE" in upper_no_literals:
-        return None
-
-    if " FROM " in upper_no_literals:
-        # Check for multiple tables in FROM clause (comma-separated)
-        # Using a conservative split to avoid complicated regex
-        from_after = upper_no_literals.split(" FROM ", 1)[1]
-        for end_kw in (" WHERE ", " GROUP BY ", " ORDER BY ", " LIMIT ", " FOR "):
-            from_after = from_after.split(end_kw, 1)[0]
-        if "," in from_after:
-            return None
-
-    # Subqueries in DELETE or UPDATE (SELECT appearing after the first keyword)
-    if (
-        not any(stripped.lower().startswith(kw) for kw in ("select", "insert", "prepare"))
-        and "SELECT" in upper_no_literals
-    ):
-        return None
-
-    # Function calls (advisory locks etc) — bail to sqlglot
-    if "(" in stripped and not stripped.lower().startswith("insert"):
-        if any(kw in stripped.lower() for kw in ("pg_advisory", "get_lock")):
-            return None
-
-    read: set[str] = set()
-    write: set[str] = set()
-    lock_intent: LockIntent | None = None
-
-    m_lock = _RE_LOCK_TABLE.search(no_literals)
-    if m_lock:
-        tbl = _strip_quotes(m_lock.group(1))
-        # Treat LOCK TABLE as an exclusive write by default for safety.
-        # This ensures it conflicts with all other accesses.
-        lock_intent = LockIntent.UPDATE
-        m_mode = _RE_LOCK_MODE.search(no_literals)
-        if m_mode:
-            mode = m_mode.group(1).upper()
-            if "SHARE" in mode and "EXCLUSIVE" not in mode:
-                lock_intent = LockIntent.SHARE
-        write.add(tbl)
-        return SqlAccessResult(read, write, lock_intent, None, None)
-
-    if _RE_FOR_UPDATE_SKIP_LOCKED.search(no_literals):
-        lock_intent = LockIntent.UPDATE_SKIP_LOCKED
-    elif _RE_FOR_UPDATE.search(no_literals):
-        lock_intent = LockIntent.UPDATE
-    elif _RE_FOR_SHARE.search(no_literals):
-        lock_intent = LockIntent.SHARE
-
-    m_insert = _RE_INSERT.search(no_literals)
-    if m_insert:
-        write.add(_strip_quotes(m_insert.group(1)))
-        # Source tables in INSERT ... SELECT ... FROM
-        for m in _RE_FROM.finditer(no_literals, m_insert.end()):
-            read.add(_strip_quotes(m.group(1)))
-        return SqlAccessResult(read, write, lock_intent, None, None)
-
-    m_update = _RE_UPDATE.search(no_literals)
-    if m_update:
-        tbl = _strip_quotes(m_update.group(1))
-        write.add(tbl)
-        read.add(tbl)  # WHERE reads the target
-        # Subquery tables in FROM/JOIN (UPDATE ... FROM ... syntax)
-        for m in _RE_FROM.finditer(no_literals, m_update.end()):
-            t = _strip_quotes(m.group(1))
-            if t not in write:
-                read.add(t)
-        return SqlAccessResult(read, write, lock_intent, None, None)
-
-    m_delete = _RE_DELETE.search(no_literals)
-    if m_delete:
-        tbl = _strip_quotes(m_delete.group(1))
-        write.add(tbl)
-        read.add(tbl)
-        return SqlAccessResult(read, write, lock_intent, None, None, None, {tbl})
-
-    if _RE_SELECT.search(no_literals):
-        for m in _RE_FROM.finditer(no_literals):
-            read.add(_strip_quotes(m.group(1)))
-        for m in _RE_JOIN.finditer(no_literals):
-            read.add(_strip_quotes(m.group(1)))
-        return SqlAccessResult(read, write, lock_intent, None, None)
-
-    # COPY table FROM/TO — PostgreSQL bulk I/O
-    m_copy = _RE_COPY.search(no_literals)
-    if m_copy:
-        tbl = _strip_quotes(m_copy.group(1))
-        # COPY (subquery) — has parenthesis right after COPY, bail to sqlglot
-        after_copy = no_literals[m_copy.start() :].lstrip()
-        if after_copy.upper().startswith("COPY") and "(" in after_copy.split()[1:2]:
-            return None
-        m_dir = _RE_COPY_DIR.search(no_literals, m_copy.end())
-        if m_dir and m_dir.group(1).upper() == "TO":
-            read.add(tbl)
-        else:
-            write.add(tbl)
-        return SqlAccessResult(read, write, None, None, None)
-
-    # DEALLOCATE [PREPARE] stmt_name — no table access
-    if _RE_DEALLOCATE.search(stripped):
-        return SqlAccessResult(set(), set(), None, None, None)
-
-    # PREPARE stmt AS <sql> — parse the inner SQL
-    m_prepare = _RE_PREPARE.search(stripped)
-    if m_prepare:
-        m_as = _RE_PREPARE_AS.search(stripped, m_prepare.end())
-        if m_as:
-            inner_sql = stripped[m_as.end() :].strip()
-            if inner_sql:
-                inner = _regex_parse(inner_sql)
-                if inner is not None:
-                    return inner
-                return None  # let sqlglot handle the inner SQL
-        return SqlAccessResult(set(), set(), None, None, None)
-
-    # EXECUTE stmt_name [(params)] — opaque, cannot resolve table without prepared stmt registry
-    m_exec = _RE_EXECUTE_STMT.search(stripped)
-    if m_exec:
-        return SqlAccessResult(set(), set(), None, None, None)
-
-    return None  # unknown statement type → fall through
-
-
 def _merge_lock_intent(a: LockIntent | None, b: LockIntent | None) -> LockIntent | None:
     """Merge two lock intents, preferring UPDATE > UPDATE_SKIP_LOCKED > SHARE."""
     if a is LockIntent.UPDATE or b is LockIntent.UPDATE:
@@ -314,12 +116,17 @@ def _merge_lock_intent(a: LockIntent | None, b: LockIntent | None) -> LockIntent
 
 
 def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
-    """Full parser: handles CTEs, subqueries, UNION, MERGE, etc.
+    """Parse a SQL statement and return table access information.
 
-    Returns a single merged :class:`SqlAccessResult` for all statements.
-    For multi-statement SQL, reads/writes are merged and the last tx_op wins.
-    The ``ast`` field is populated with the first parsed AST (for single-statement
-    SQL, this is the only AST; callers can use it to avoid re-parsing).
+    Handles all statement types:
+    - DML (SELECT/INSERT/UPDATE/DELETE), CTEs, UNION, MERGE via sqlglot AST
+    - COPY, ROLLBACK TO SAVEPOINT, SET AUTOCOMMIT via sqlglot AST
+    - Constructs sqlglot cannot parse (LOCK TABLE, SAVEPOINT, RELEASE,
+      DEALLOCATE, PREPARE, EXECUTE, START TRANSACTION, END) via string checks
+
+    Returns a single merged SqlAccessResult, or None if parsing fails entirely
+    (endpoint-level I/O detection remains as fallback).
+    The ``ast`` field is populated for single-statement SQL from the sqlglot parse.
     """
     try:
         import sqlglot  # type: ignore[import-untyped]
@@ -327,6 +134,71 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
         from sqlglot import exp  # type: ignore[import-untyped]
     except ImportError:
         return None
+
+    # ---------------------------------------------------------------------------
+    # Pre-checks: constructs sqlglot cannot parse, handled via string operations.
+    # Only applies to single-statement SQL (no interior semicolons).
+    # ---------------------------------------------------------------------------
+    stripped = sql.strip().rstrip(";").strip()
+    if ";" not in stripped:
+        upper = stripped.upper()
+
+        # START TRANSACTION — sqlglot misparses as Alias
+        if upper == "START TRANSACTION" or upper.startswith("START TRANSACTION "):
+            return SqlAccessResult(set(), set(), None, TxOp.BEGIN, None)
+
+        # END — sqlglot parses as a Column identifier
+        if upper == "END":
+            return SqlAccessResult(set(), set(), None, TxOp.COMMIT, None)
+
+        # SAVEPOINT <name> — sqlglot misparses as Alias
+        if upper.startswith("SAVEPOINT "):
+            parts = stripped[10:].strip().split()
+            if parts:
+                return SqlAccessResult(set(), set(), None, Savepoint(parts[0]), None)
+
+        # RELEASE [SAVEPOINT] <name> — sqlglot ERROR
+        if upper.startswith("RELEASE "):
+            rest = stripped[8:].strip()
+            if rest.upper().startswith("SAVEPOINT "):
+                rest = rest[10:].strip()
+            parts = rest.split()
+            if parts:
+                return SqlAccessResult(set(), set(), None, Release(parts[0]), None)
+
+        # LOCK TABLE <table> [IN <mode> MODE] — sqlglot ERROR for all dialects
+        if upper.startswith("LOCK TABLE "):
+            rest = stripped[11:].strip()
+            in_idx = rest.upper().find(" IN ")
+            tbl_raw = rest[:in_idx].strip() if in_idx > 0 else rest.strip()
+            tbl = _strip_quotes(tbl_raw)
+            table_lock_intent: LockIntent = LockIntent.UPDATE
+            if in_idx > 0:
+                mode_part = rest[in_idx + 4 :].upper()
+                mode_end = mode_part.find(" MODE")
+                mode = mode_part[:mode_end] if mode_end > 0 else mode_part
+                if "SHARE" in mode and "EXCLUSIVE" not in mode:
+                    table_lock_intent = LockIntent.SHARE
+            return SqlAccessResult(set(), {tbl}, table_lock_intent, None, None)
+
+        # DEALLOCATE [PREPARE] <name> | DEALLOCATE ALL — sqlglot misparses
+        if upper.startswith("DEALLOCATE "):
+            return SqlAccessResult(set(), set(), None, None, None)
+
+        # PREPARE <name> AS <sql> — sqlglot treats as opaque Command
+        if upper.startswith("PREPARE "):
+            as_idx = upper.find(" AS ")
+            if as_idx > 0:
+                inner_sql = stripped[as_idx + 4 :].strip()
+                if inner_sql:
+                    inner = _sqlglot_parse(inner_sql)
+                    if inner is not None:
+                        return inner
+            return SqlAccessResult(set(), set(), None, None, None)
+
+        # EXECUTE <name> [(params)] — opaque without a prepared stmt registry
+        if upper.startswith("EXECUTE "):
+            return SqlAccessResult(set(), set(), None, None, None)
 
     # Pre-process pyformat parameter placeholders (%s, %(name)s) which
     # sqlglot default dialect chokes on (misinterprets % as modulo).
@@ -336,14 +208,27 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
     try:
         expressions = sqlglot.parse(sql)
     except sqlglot_errors.ParseError:
-        # Fallback for FOR SYSTEM_TIME if default dialect fails
-        if "FOR SYSTEM_TIME" in sql.upper():
-            try:
-                expressions = sqlglot.parse(sql, read="tsql")
-            except sqlglot_errors.ParseError:
-                return None
-        else:
-            return None  # unparseable → fall back to endpoint-level
+        expressions = None
+
+    # Fallback dialects: mysql handles backtick identifiers and MySQL-specific syntax
+    # (ON DUPLICATE KEY UPDATE, etc.); tsql handles FOR SYSTEM_TIME.
+    # Also re-parse with mysql when backticks are present even if default succeeded,
+    # since the default dialect may misparse backtick-quoted identifiers.
+    sql_upper = sql.upper()
+    if not expressions or "`" in sql:
+        try:
+            mysql_exprs = sqlglot.parse(sql, read="mysql")
+            if mysql_exprs:
+                expressions = mysql_exprs
+        except sqlglot_errors.ParseError:
+            pass
+    if not expressions and "FOR SYSTEM_TIME" in sql_upper:
+        try:
+            expressions = sqlglot.parse(sql, read="tsql")
+        except sqlglot_errors.ParseError:
+            pass
+    if not expressions:
+        return None  # unparseable → fall back to endpoint-level
 
     if not expressions:
         return None
@@ -374,7 +259,29 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
         elif isinstance(ast, exp.Commit):
             tx_op = TxOp.COMMIT
         elif isinstance(ast, exp.Rollback):
-            tx_op = TxOp.ROLLBACK
+            sp = ast.args.get("savepoint")
+            if sp:
+                tx_op = RollbackTo(sp.name)
+            else:
+                tx_op = TxOp.ROLLBACK
+        elif isinstance(ast, exp.Set):
+            # SET AUTOCOMMIT = 0 → BEGIN, SET AUTOCOMMIT = 1 → COMMIT
+            for item in ast.find_all(exp.SetItem):
+                eq = item.this
+                if eq and isinstance(eq, exp.EQ) and isinstance(eq.this, exp.Column):
+                    if eq.this.name.upper() == "AUTOCOMMIT" and isinstance(eq.expression, exp.Literal):
+                        tx_op = TxOp.BEGIN if eq.expression.this == "0" else TxOp.COMMIT
+        elif isinstance(ast, exp.Copy):
+            # COPY table FROM (write) / TO (read); COPY (subquery) TO → no table name
+            tbl_node = ast.this
+            if isinstance(tbl_node, exp.Schema):
+                tbl_node = tbl_node.this  # COPY table(cols) → Schema wraps Table
+            if isinstance(tbl_node, exp.Table):
+                tbl_name = tbl_node.name
+                if ast.args.get("kind"):  # kind=True means FROM (write into table)
+                    write.add(tbl_name)
+                else:
+                    read.add(tbl_name)
         else:
             # Extract lock intent from SELECT (including inside CTEs)
             def _extract_lock_intent_from_select(select_node: exp.Expression) -> LockIntent | None:
@@ -508,16 +415,9 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
 def parse_sql_access(sql: str) -> SqlAccessResult:
     """Extract table access info from a SQL statement.
 
-    Uses regex fast-path for simple statements, falls back to sqlglot
-    for complex SQL. Returns empty sets if parsing fails entirely
+    Returns empty sets if parsing fails entirely
     (endpoint-level I/O detection remains as fallback).
     """
-    # Fast path: covers ~90% of ORM-generated SQL
-    result = _regex_parse(sql)
-    if result is not None:
-        return result
-
-    # Full parser for complex SQL
     result = _sqlglot_parse(sql)
     if result is not None:
         return result

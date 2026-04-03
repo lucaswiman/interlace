@@ -1,10 +1,10 @@
 """Tests for SQL statement parsing (read/write table extraction).
 
 Covers:
-- Regex fast-path: SELECT, INSERT, UPDATE, DELETE, JOINs
-- Complex SQL falling through to sqlglot: CTEs, UNION, MERGE, RETURNING, etc.
-- sqlglot full-parser path: CTEs, subqueries, UNION, MERGE, INSERT...SELECT
-- Combined parse_sql_access: end-to-end routing and fallback behaviour
+- _sqlglot_parse: SELECT, INSERT, UPDATE, DELETE, JOINs, CTEs, UNION, MERGE,
+  COPY, LOCK TABLE, SAVEPOINT, RELEASE, PREPARE/EXECUTE/DEALLOCATE,
+  SET AUTOCOMMIT, ROLLBACK TO SAVEPOINT
+- parse_sql_access: end-to-end routing and fallback behaviour
 - Edge cases: quoted identifiers, schema qualification, whitespace, semicolons
 """
 
@@ -15,7 +15,6 @@ import pytest
 from frontrun._sql_parsing import (
     LockIntent,
     TxOp,
-    _regex_parse,
     _sqlglot_parse,
     _strip_quotes,
     parse_sql_access,
@@ -51,227 +50,134 @@ class TestStripQuotes:
 
 
 # ---------------------------------------------------------------------------
-# _regex_parse — spec cases
+# _sqlglot_parse — non-DML constructs now handled inside _sqlglot_parse
 # ---------------------------------------------------------------------------
 
 
-class TestRegexParse:
-    def test_select(self):
-        r, w, *_ = _regex_parse("SELECT id, name FROM users WHERE id = 1")
-        assert r == {"users"} and w == set()
+class TestSqlglotParseNonDml:
+    """Constructs previously handled by the regex path, now absorbed into _sqlglot_parse."""
 
-    def test_insert(self):
-        r, w, *_ = _regex_parse("INSERT INTO orders (user_id, amount) VALUES (1, 100)")
-        assert r == set() and w == {"orders"}
-
-    def test_insert_select(self):
-        r, w, *_ = _regex_parse("INSERT INTO archive SELECT * FROM orders")
-        assert r == {"orders"} and w == {"archive"}
-
-    def test_update(self):
-        r, w, *_ = _regex_parse("UPDATE accounts SET balance = balance - 100 WHERE id = 1")
-        assert r == {"accounts"} and w == {"accounts"}
-
-    def test_delete(self):
-        r, w, *_ = _regex_parse("DELETE FROM sessions WHERE expires_at < NOW()")
-        assert r == {"sessions"} and w == {"sessions"}
-
-    def test_join(self):
-        r, w, *_ = _regex_parse("SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id")
-        assert r == {"users", "orders"} and w == set()
-
-    def test_cte_falls_through(self):
-        assert _regex_parse("WITH cte AS (SELECT 1) SELECT * FROM cte") is None
-
-    def test_copy_subquery_falls_through(self):
-        assert _regex_parse("COPY (SELECT id FROM foo WHERE id = 1) TO STDOUT") is None
-
-    def test_quoted_identifiers(self):
-        r, w, *_ = _regex_parse('SELECT * FROM "My Table"')
-        assert r == {"My Table"} and w == set()
-
-    def test_schema_qualified(self):
-        r, w, *_ = _regex_parse("SELECT * FROM public.users")
-        assert r == {"users"} and w == set()
+    @pytest.fixture(autouse=True)
+    def _require_sqlglot(self):
+        pytest.importorskip("sqlglot")
 
     # -----------------------------------------------------------------------
-    # Additional SELECT tests
+    # Transaction control — string-checked before sqlglot call
     # -----------------------------------------------------------------------
 
-    def test_select_no_from(self):
-        r, w, *_ = _regex_parse("SELECT 1")
-        assert r == set() and w == set()
+    def test_start_transaction(self):
+        r = _sqlglot_parse("START TRANSACTION")
+        assert r is not None and r.tx_op is TxOp.BEGIN
 
-    def test_select_multiple_joins(self):
-        sql = (
-            "SELECT u.name, o.id, p.name "
-            "FROM users u "
-            "JOIN orders o ON u.id = o.user_id "
-            "JOIN products p ON o.product_id = p.id"
-        )
-        r, w, *_ = _regex_parse(sql)
-        assert r == {"users", "orders", "products"} and w == set()
+    def test_end_as_commit(self):
+        r = _sqlglot_parse("END")
+        assert r is not None and r.tx_op is TxOp.COMMIT
 
-    def test_select_left_join(self):
-        r, w, *_ = _regex_parse("SELECT * FROM users u LEFT JOIN profiles p ON u.id = p.user_id")
-        assert r == {"users", "profiles"} and w == set()
+    def test_savepoint(self):
+        r = _sqlglot_parse("SAVEPOINT sp1")
+        from frontrun._sql_parsing import Savepoint
 
-    def test_select_right_join(self):
-        r, w, *_ = _regex_parse("SELECT * FROM users u RIGHT JOIN orders o ON u.id = o.user_id")
-        assert r == {"users", "orders"} and w == set()
+        assert r is not None and r.tx_op == Savepoint("sp1")
 
-    def test_select_inner_join(self):
-        r, w, *_ = _regex_parse("SELECT * FROM products p INNER JOIN categories c ON p.cat_id = c.id")
-        assert r == {"products", "categories"} and w == set()
+    def test_release_savepoint(self):
+        r = _sqlglot_parse("RELEASE SAVEPOINT sp1")
+        from frontrun._sql_parsing import Release
 
-    def test_select_cross_join(self):
-        r, w, *_ = _regex_parse("SELECT * FROM users CROSS JOIN roles")
-        assert r == {"users", "roles"} and w == set()
+        assert r is not None and r.tx_op == Release("sp1")
 
-    def test_select_mixed_case_keywords(self):
-        r, w, *_ = _regex_parse("select * from ORDERS where id = 42")
-        assert r == {"ORDERS"} and w == set()
+    def test_release_no_keyword(self):
+        r = _sqlglot_parse("RELEASE sp1")
+        from frontrun._sql_parsing import Release
 
-    def test_select_multiline(self):
-        sql = """SELECT
-            u.id,
-            u.name
-        FROM
-            users u
-        WHERE
-            u.active = true"""
-        r, w, *_ = _regex_parse(sql)
-        assert r == {"users"} and w == set()
+        assert r is not None and r.tx_op == Release("sp1")
 
-    def test_select_extra_whitespace(self):
-        r, w, *_ = _regex_parse("SELECT  *   FROM   orders   WHERE   id  =  1")
-        assert r == {"orders"} and w == set()
+    def test_rollback_to_savepoint(self):
+        r = _sqlglot_parse("ROLLBACK TO SAVEPOINT sp1")
+        from frontrun._sql_parsing import RollbackTo
 
-    def test_select_with_trailing_semicolon(self):
-        r, w, *_ = _regex_parse("SELECT * FROM users;")
-        assert r == {"users"} and w == set()
+        assert r is not None and r.tx_op == RollbackTo("sp1")
 
-    def test_select_schema_qualified_with_double_quotes(self):
-        # The regex _IDENT matches "public" as a quoted identifier; the ".\"users\"" part is not
-        # captured as a single token by the regex, so "public" is extracted as the table name.
-        r, w, *_ = _regex_parse('SELECT * FROM "public"."users"')
-        assert w == set() and len(r) > 0
+    def test_set_autocommit_0(self):
+        r = _sqlglot_parse("SET AUTOCOMMIT = 0")
+        assert r is not None and r.tx_op is TxOp.BEGIN
 
-    def test_select_backtick_table(self):
-        r, w, *_ = _regex_parse("SELECT * FROM `my_table`")
-        assert r == {"my_table"} and w == set()
+    def test_set_autocommit_1(self):
+        r = _sqlglot_parse("SET AUTOCOMMIT = 1")
+        assert r is not None and r.tx_op is TxOp.COMMIT
 
     # -----------------------------------------------------------------------
-    # Additional INSERT tests
+    # LOCK TABLE
     # -----------------------------------------------------------------------
 
-    def test_insert_values_no_read(self):
-        r, w, *_ = _regex_parse("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')")
-        assert r == set() and w == {"users"}
+    def test_lock_table_exclusive(self):
+        r = _sqlglot_parse("LOCK TABLE users IN EXCLUSIVE MODE")
+        assert r is not None
+        assert "users" in r.write_tables
+        assert r.lock_intent is LockIntent.UPDATE
 
-    def test_insert_select_with_join(self):
-        sql = "INSERT INTO summary SELECT o.id, u.name FROM orders o JOIN users u ON o.user_id = u.id"
-        r, w, *_ = _regex_parse(sql)
-        assert w == {"summary"}
-        assert "orders" in r
+    def test_lock_table_share(self):
+        r = _sqlglot_parse("LOCK TABLE users IN SHARE MODE")
+        assert r is not None
+        assert "users" in r.write_tables
+        assert r.lock_intent is LockIntent.SHARE
 
-    def test_insert_schema_qualified_target(self):
-        r, w, *_ = _regex_parse("INSERT INTO public.events (type) VALUES ('login')")
-        assert w == {"events"} and r == set()
-
-    def test_insert_backtick_target(self):
-        r, w, *_ = _regex_parse("INSERT INTO `session_logs` (user_id) VALUES (1)")
-        assert w == {"session_logs"} and r == set()
-
-    # -----------------------------------------------------------------------
-    # Additional UPDATE tests
-    # -----------------------------------------------------------------------
-
-    def test_update_target_in_both_read_and_write(self):
-        r, w, *_ = _regex_parse("UPDATE products SET stock = stock - 1 WHERE id = 5")
-        assert "products" in r and "products" in w
-
-    def test_update_from_clause(self):
-        sql = "UPDATE orders SET status = 'done' FROM users WHERE orders.user_id = users.id"
-        r, w, *_ = _regex_parse(sql)
-        assert w == {"orders"}
-        assert "orders" in r
-        assert "users" in r
-
-    def test_update_schema_qualified(self):
-        r, w, *_ = _regex_parse("UPDATE public.accounts SET balance = 0 WHERE id = 1")
-        assert "accounts" in w and "accounts" in r
-
-    def test_update_mixed_case(self):
-        r, w, *_ = _regex_parse("update Users set name = 'Bob' where id = 3")
-        assert "Users" in w and "Users" in r
+    def test_lock_table_no_mode(self):
+        r = _sqlglot_parse("LOCK TABLE orders")
+        assert r is not None
+        assert "orders" in r.write_tables
+        assert r.lock_intent is LockIntent.UPDATE
 
     # -----------------------------------------------------------------------
-    # Additional DELETE tests
+    # COPY
     # -----------------------------------------------------------------------
 
-    def test_delete_no_where(self):
-        r, w, *_ = _regex_parse("DELETE FROM old_logs")
-        assert r == {"old_logs"} and w == {"old_logs"}
+    def test_copy_from_stdin(self):
+        r = _sqlglot_parse("COPY users FROM STDIN")
+        assert r is not None
+        assert "users" in r.write_tables and r.read_tables == set()
 
-    def test_delete_schema_qualified(self):
-        r, w, *_ = _regex_parse("DELETE FROM archive.events WHERE created_at < '2020-01-01'")
-        assert "events" in w and "events" in r
+    def test_copy_to_stdout(self):
+        r = _sqlglot_parse("COPY orders TO STDOUT")
+        assert r is not None
+        assert "orders" in r.read_tables and r.write_tables == set()
 
-    def test_delete_backtick(self):
-        r, w, *_ = _regex_parse("DELETE FROM `temp_rows` WHERE expired = 1")
-        assert r == {"temp_rows"} and w == {"temp_rows"}
-
-    # -----------------------------------------------------------------------
-    # Complex SQL → falls through to None
-    # -----------------------------------------------------------------------
-
-    def test_union_falls_through(self):
-        assert _regex_parse("SELECT id FROM users UNION SELECT id FROM admins") is None
-
-    def test_intersect_falls_through(self):
-        assert _regex_parse("SELECT id FROM a INTERSECT SELECT id FROM b") is None
-
-    def test_except_falls_through(self):
-        assert _regex_parse("SELECT id FROM a EXCEPT SELECT id FROM b") is None
-
-    def test_merge_falls_through(self):
-        sql = "MERGE INTO target USING source ON target.id = source.id WHEN MATCHED THEN UPDATE SET target.v = source.v"
-        assert _regex_parse(sql) is None
-
-    def test_returning_succeeds_regex(self):
-        r, w, *_ = _regex_parse("INSERT INTO orders (total) VALUES (100) RETURNING id")
-        assert r == set() and w == {"orders"}
-
-    def test_with_cte_select_falls_through(self):
-        assert _regex_parse("WITH t AS (SELECT 1) SELECT * FROM t") is None
-
-    def test_with_recursive_falls_through(self):
-        sql = "WITH RECURSIVE nums AS (SELECT 1 UNION ALL SELECT n+1 FROM nums) SELECT * FROM nums"
-        assert _regex_parse(sql) is None
+    def test_copy_with_columns(self):
+        r = _sqlglot_parse("COPY users (name, email) FROM STDIN")
+        assert r is not None
+        assert "users" in r.write_tables
 
     # -----------------------------------------------------------------------
-    # Empty / unknown statements
+    # DEALLOCATE / PREPARE / EXECUTE
+    # -----------------------------------------------------------------------
+
+    def test_deallocate(self):
+        r = _sqlglot_parse("DEALLOCATE my_stmt")
+        assert r is not None and r.read_tables == set() and r.write_tables == set()
+
+    def test_prepare_select(self):
+        r = _sqlglot_parse("PREPARE my_q AS SELECT * FROM users WHERE id = $1")
+        assert r is not None and "users" in r.read_tables
+
+    def test_prepare_insert(self):
+        r = _sqlglot_parse("PREPARE ins AS INSERT INTO orders (total) VALUES ($1)")
+        assert r is not None and "orders" in r.write_tables
+
+    def test_execute(self):
+        r = _sqlglot_parse("EXECUTE my_q")
+        assert r is not None and r.read_tables == set() and r.write_tables == set()
+
+    # -----------------------------------------------------------------------
+    # Miscellaneous
     # -----------------------------------------------------------------------
 
     def test_empty_string(self):
-        assert _regex_parse("") is None
+        r = _sqlglot_parse("")
+        # Either None or empty result is acceptable; must not crash
+        assert r is None or (r.read_tables == set() and r.write_tables == set())
 
     def test_whitespace_only(self):
-        assert _regex_parse("   \n\t  ") is None
-
-    def test_unknown_statement_ddl(self):
-        assert _regex_parse("CREATE TABLE foo (id INT)") is None
-
-    def test_unknown_statement_truncate(self):
-        assert _regex_parse("TRUNCATE TABLE sessions") is None
-
-    def test_unknown_statement_grant(self):
-        # GRANT contains the word SELECT, so the regex SELECT path matches and returns
-        # (empty sets) because there's no FROM clause — not None.
-        result = _regex_parse("GRANT SELECT ON users TO readonly")
-        # Either None (fell through) or empty sets (matched SELECT path with no FROM)
-        assert result is None or (result.read_tables == set() and result.write_tables == set())
+        r = _sqlglot_parse("   \n\t  ")
+        assert r is None or (r.read_tables == set() and r.write_tables == set())
 
 
 # ---------------------------------------------------------------------------
