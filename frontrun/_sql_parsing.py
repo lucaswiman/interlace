@@ -72,30 +72,6 @@ class SqlAccessResult(NamedTuple):
 _EMPTY = SqlAccessResult(set(), set(), None, None, None, None, None)
 
 
-# Precompiled patterns for constructs not handled by sqlglot:
-# transaction control (including savepoints and SET AUTOCOMMIT),
-# LOCK TABLE (lock intent), COPY, and PREPARE/EXECUTE/DEALLOCATE.
-_IDENT = r'(?:"[^"]+"(?:\."[^"]+")?|`[^`]+`(?:\.`[^`]+`)?|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)'
-_WS = r"[\s\n]+"
-
-_RE_LOCK_TABLE = re.compile(rf"\bLOCK{_WS}TABLE{_WS}({_IDENT})", re.I)
-_RE_LOCK_MODE = re.compile(rf"\bIN{_WS}(.+){_WS}MODE\b", re.I)
-_RE_TX_BEGIN = re.compile(r"^\s*(BEGIN|START\s+TRANSACTION|SET\s+AUTOCOMMIT\s*=\s*0)\b", re.I)
-_RE_TX_COMMIT = re.compile(r"^\s*(COMMIT|END|SET\s+AUTOCOMMIT\s*=\s*1)\b", re.I)
-_RE_TX_ROLLBACK = re.compile(r"^\s*ROLLBACK\b", re.I)
-_RE_TX_SAVEPOINT = re.compile(r"^\s*SAVEPOINT\s+(\w+)\b", re.I)
-_RE_TX_RELEASE = re.compile(r"^\s*RELEASE\s+(SAVEPOINT\s+)?(\w+)\b", re.I)
-_RE_TX_ROLLBACK_TO = re.compile(r"^\s*ROLLBACK\s+TO\s+(SAVEPOINT\s+)?(\w+)\b", re.I)
-# COPY: COPY table FROM/TO ...
-_RE_COPY = re.compile(rf"^\s*COPY{_WS}({_IDENT})", re.I)
-_RE_COPY_DIR = re.compile(r"\b(FROM|TO)\b", re.I)
-# PREPARE / EXECUTE (PostgreSQL server-side prepared statements)
-_RE_PREPARE = re.compile(rf"^\s*PREPARE{_WS}(\w+)", re.I)
-_RE_PREPARE_AS = re.compile(r"\bAS\b", re.I)
-_RE_EXECUTE_STMT = re.compile(rf"^\s*EXECUTE{_WS}(\w+)", re.I)
-_RE_DEALLOCATE = re.compile(rf"^\s*DEALLOCATE{_WS}", re.I)
-
-
 def _strip_quotes(name: str) -> str:
     """Remove surrounding quotes/backticks and extract table from schema.table.
 
@@ -128,86 +104,6 @@ def _strip_quotes(name: str) -> str:
     return last
 
 
-def _regex_parse(sql: str) -> SqlAccessResult | None:
-    """Handle SQL constructs not covered by sqlglot.
-
-    Covers: transaction control (including savepoints and SET AUTOCOMMIT),
-    LOCK TABLE (for lock intent), COPY, and PREPARE/EXECUTE/DEALLOCATE.
-    Returns None for everything else, which falls through to sqlglot.
-    """
-    stripped = sql.strip().rstrip(";").strip()
-
-    # Multi-statement → let sqlglot handle
-    if ";" in stripped:
-        return None
-
-    # Transaction control — check before other patterns
-    if _RE_TX_BEGIN.search(stripped):
-        return SqlAccessResult(set(), set(), None, TxOp.BEGIN, None)
-    if _RE_TX_COMMIT.search(stripped):
-        return SqlAccessResult(set(), set(), None, TxOp.COMMIT, None)
-    if _RE_TX_ROLLBACK.search(stripped):
-        m = _RE_TX_ROLLBACK_TO.search(stripped)
-        if m:
-            return SqlAccessResult(set(), set(), None, RollbackTo(m.group(2)), None)
-        return SqlAccessResult(set(), set(), None, TxOp.ROLLBACK, None)
-    m = _RE_TX_SAVEPOINT.search(stripped)
-    if m:
-        return SqlAccessResult(set(), set(), None, Savepoint(m.group(1)), None)
-    m = _RE_TX_RELEASE.search(stripped)
-    if m:
-        return SqlAccessResult(set(), set(), None, Release(m.group(2)), None)
-
-    # LOCK TABLE — sqlglot parses it as DDL but doesn't set lock_intent
-    m_lock = _RE_LOCK_TABLE.search(stripped)
-    if m_lock:
-        tbl = _strip_quotes(m_lock.group(1))
-        lock_intent: LockIntent = LockIntent.UPDATE
-        m_mode = _RE_LOCK_MODE.search(stripped)
-        if m_mode:
-            mode = m_mode.group(1).upper()
-            if "SHARE" in mode and "EXCLUSIVE" not in mode:
-                lock_intent = LockIntent.SHARE
-        return SqlAccessResult(set(), {tbl}, lock_intent, None, None)
-
-    # COPY table FROM/TO — PostgreSQL bulk I/O (sqlglot doesn't handle)
-    m_copy = _RE_COPY.search(stripped)
-    if m_copy:
-        tbl = _strip_quotes(m_copy.group(1))
-        # COPY (subquery) — has parenthesis right after COPY, bail to sqlglot
-        after_copy = stripped[m_copy.start() :].lstrip()
-        if after_copy.upper().startswith("COPY") and "(" in after_copy.split()[1:2]:
-            return None
-        m_dir = _RE_COPY_DIR.search(stripped, m_copy.end())
-        if m_dir and m_dir.group(1).upper() == "TO":
-            return SqlAccessResult({tbl}, set(), None, None, None)
-        else:
-            return SqlAccessResult(set(), {tbl}, None, None, None)
-
-    # DEALLOCATE [PREPARE] stmt_name — no table access
-    if _RE_DEALLOCATE.search(stripped):
-        return SqlAccessResult(set(), set(), None, None, None)
-
-    # PREPARE stmt AS <sql> — parse the inner SQL directly
-    m_prepare = _RE_PREPARE.search(stripped)
-    if m_prepare:
-        m_as = _RE_PREPARE_AS.search(stripped, m_prepare.end())
-        if m_as:
-            inner_sql = stripped[m_as.end() :].strip()
-            if inner_sql:
-                inner = _regex_parse(inner_sql) or _sqlglot_parse(inner_sql)
-                if inner is not None:
-                    return inner
-        return SqlAccessResult(set(), set(), None, None, None)
-
-    # EXECUTE stmt_name [(params)] — opaque without prepared stmt registry
-    m_exec = _RE_EXECUTE_STMT.search(stripped)
-    if m_exec:
-        return SqlAccessResult(set(), set(), None, None, None)
-
-    return None  # fall through to sqlglot
-
-
 def _merge_lock_intent(a: LockIntent | None, b: LockIntent | None) -> LockIntent | None:
     """Merge two lock intents, preferring UPDATE > UPDATE_SKIP_LOCKED > SHARE."""
     if a is LockIntent.UPDATE or b is LockIntent.UPDATE:
@@ -220,12 +116,17 @@ def _merge_lock_intent(a: LockIntent | None, b: LockIntent | None) -> LockIntent
 
 
 def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
-    """Full parser: handles CTEs, subqueries, UNION, MERGE, etc.
+    """Parse a SQL statement and return table access information.
 
-    Returns a single merged :class:`SqlAccessResult` for all statements.
-    For multi-statement SQL, reads/writes are merged and the last tx_op wins.
-    The ``ast`` field is populated with the first parsed AST (for single-statement
-    SQL, this is the only AST; callers can use it to avoid re-parsing).
+    Handles all statement types:
+    - DML (SELECT/INSERT/UPDATE/DELETE), CTEs, UNION, MERGE via sqlglot AST
+    - COPY, ROLLBACK TO SAVEPOINT, SET AUTOCOMMIT via sqlglot AST
+    - Constructs sqlglot cannot parse (LOCK TABLE, SAVEPOINT, RELEASE,
+      DEALLOCATE, PREPARE, EXECUTE, START TRANSACTION, END) via string checks
+
+    Returns a single merged SqlAccessResult, or None if parsing fails entirely
+    (endpoint-level I/O detection remains as fallback).
+    The ``ast`` field is populated for single-statement SQL from the sqlglot parse.
     """
     try:
         import sqlglot  # type: ignore[import-untyped]
@@ -233,6 +134,71 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
         from sqlglot import exp  # type: ignore[import-untyped]
     except ImportError:
         return None
+
+    # ---------------------------------------------------------------------------
+    # Pre-checks: constructs sqlglot cannot parse, handled via string operations.
+    # Only applies to single-statement SQL (no interior semicolons).
+    # ---------------------------------------------------------------------------
+    stripped = sql.strip().rstrip(";").strip()
+    if ";" not in stripped:
+        upper = stripped.upper()
+
+        # START TRANSACTION — sqlglot misparses as Alias
+        if upper == "START TRANSACTION" or upper.startswith("START TRANSACTION "):
+            return SqlAccessResult(set(), set(), None, TxOp.BEGIN, None)
+
+        # END — sqlglot parses as a Column identifier
+        if upper == "END":
+            return SqlAccessResult(set(), set(), None, TxOp.COMMIT, None)
+
+        # SAVEPOINT <name> — sqlglot misparses as Alias
+        if upper.startswith("SAVEPOINT "):
+            parts = stripped[10:].strip().split()
+            if parts:
+                return SqlAccessResult(set(), set(), None, Savepoint(parts[0]), None)
+
+        # RELEASE [SAVEPOINT] <name> — sqlglot ERROR
+        if upper.startswith("RELEASE "):
+            rest = stripped[8:].strip()
+            if rest.upper().startswith("SAVEPOINT "):
+                rest = rest[10:].strip()
+            parts = rest.split()
+            if parts:
+                return SqlAccessResult(set(), set(), None, Release(parts[0]), None)
+
+        # LOCK TABLE <table> [IN <mode> MODE] — sqlglot ERROR for all dialects
+        if upper.startswith("LOCK TABLE "):
+            rest = stripped[11:].strip()
+            in_idx = rest.upper().find(" IN ")
+            tbl_raw = rest[:in_idx].strip() if in_idx > 0 else rest.strip()
+            tbl = _strip_quotes(tbl_raw)
+            table_lock_intent: LockIntent = LockIntent.UPDATE
+            if in_idx > 0:
+                mode_part = rest[in_idx + 4 :].upper()
+                mode_end = mode_part.find(" MODE")
+                mode = mode_part[:mode_end] if mode_end > 0 else mode_part
+                if "SHARE" in mode and "EXCLUSIVE" not in mode:
+                    table_lock_intent = LockIntent.SHARE
+            return SqlAccessResult(set(), {tbl}, table_lock_intent, None, None)
+
+        # DEALLOCATE [PREPARE] <name> | DEALLOCATE ALL — sqlglot misparses
+        if upper.startswith("DEALLOCATE "):
+            return SqlAccessResult(set(), set(), None, None, None)
+
+        # PREPARE <name> AS <sql> — sqlglot treats as opaque Command
+        if upper.startswith("PREPARE "):
+            as_idx = upper.find(" AS ")
+            if as_idx > 0:
+                inner_sql = stripped[as_idx + 4 :].strip()
+                if inner_sql:
+                    inner = _sqlglot_parse(inner_sql)
+                    if inner is not None:
+                        return inner
+            return SqlAccessResult(set(), set(), None, None, None)
+
+        # EXECUTE <name> [(params)] — opaque without a prepared stmt registry
+        if upper.startswith("EXECUTE "):
+            return SqlAccessResult(set(), set(), None, None, None)
 
     # Pre-process pyformat parameter placeholders (%s, %(name)s) which
     # sqlglot default dialect chokes on (misinterprets % as modulo).
@@ -293,7 +259,29 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
         elif isinstance(ast, exp.Commit):
             tx_op = TxOp.COMMIT
         elif isinstance(ast, exp.Rollback):
-            tx_op = TxOp.ROLLBACK
+            sp = ast.args.get("savepoint")
+            if sp:
+                tx_op = RollbackTo(sp.name)
+            else:
+                tx_op = TxOp.ROLLBACK
+        elif isinstance(ast, exp.Set):
+            # SET AUTOCOMMIT = 0 → BEGIN, SET AUTOCOMMIT = 1 → COMMIT
+            for item in ast.find_all(exp.SetItem):
+                eq = item.this
+                if eq and isinstance(eq, exp.EQ) and isinstance(eq.this, exp.Column):
+                    if eq.this.name.upper() == "AUTOCOMMIT" and isinstance(eq.expression, exp.Literal):
+                        tx_op = TxOp.BEGIN if eq.expression.this == "0" else TxOp.COMMIT
+        elif isinstance(ast, exp.Copy):
+            # COPY table FROM (write) / TO (read); COPY (subquery) TO → no table name
+            tbl_node = ast.this
+            if isinstance(tbl_node, exp.Schema):
+                tbl_node = tbl_node.this  # COPY table(cols) → Schema wraps Table
+            if isinstance(tbl_node, exp.Table):
+                tbl_name = tbl_node.name
+                if ast.args.get("kind"):  # kind=True means FROM (write into table)
+                    write.add(tbl_name)
+                else:
+                    read.add(tbl_name)
         else:
             # Extract lock intent from SELECT (including inside CTEs)
             def _extract_lock_intent_from_select(select_node: exp.Expression) -> LockIntent | None:
@@ -427,16 +415,9 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
 def parse_sql_access(sql: str) -> SqlAccessResult:
     """Extract table access info from a SQL statement.
 
-    Uses regex fast-path for simple statements, falls back to sqlglot
-    for complex SQL. Returns empty sets if parsing fails entirely
+    Returns empty sets if parsing fails entirely
     (endpoint-level I/O detection remains as fallback).
     """
-    # Fast path: covers ~90% of ORM-generated SQL
-    result = _regex_parse(sql)
-    if result is not None:
-        return result
-
-    # Full parser for complex SQL
     result = _sqlglot_parse(sql)
     if result is not None:
         return result

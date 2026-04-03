@@ -1,10 +1,10 @@
 """Tests for SQL statement parsing (read/write table extraction).
 
 Covers:
-- Regex path: transaction control, LOCK TABLE, COPY, PREPARE/EXECUTE/DEALLOCATE
-- DML routed to sqlglot: SELECT, INSERT, UPDATE, DELETE, JOINs, CTEs, UNION, MERGE
-- sqlglot full-parser path: CTEs, subqueries, UNION, MERGE, INSERT...SELECT
-- Combined parse_sql_access: end-to-end routing and fallback behaviour
+- _sqlglot_parse: SELECT, INSERT, UPDATE, DELETE, JOINs, CTEs, UNION, MERGE,
+  COPY, LOCK TABLE, SAVEPOINT, RELEASE, PREPARE/EXECUTE/DEALLOCATE,
+  SET AUTOCOMMIT, ROLLBACK TO SAVEPOINT
+- parse_sql_access: end-to-end routing and fallback behaviour
 - Edge cases: quoted identifiers, schema qualification, whitespace, semicolons
 """
 
@@ -15,7 +15,6 @@ import pytest
 from frontrun._sql_parsing import (
     LockIntent,
     TxOp,
-    _regex_parse,
     _sqlglot_parse,
     _strip_quotes,
     parse_sql_access,
@@ -51,63 +50,134 @@ class TestStripQuotes:
 
 
 # ---------------------------------------------------------------------------
-# _regex_parse — only handles constructs sqlglot doesn't cover
+# _sqlglot_parse — non-DML constructs now handled inside _sqlglot_parse
 # ---------------------------------------------------------------------------
 
 
-class TestRegexParse:
-    """_regex_parse only handles tx control, LOCK TABLE, COPY, PREPARE/EXECUTE/DEALLOCATE.
-    DML (SELECT/INSERT/UPDATE/DELETE) falls through to sqlglot (returns None).
-    """
+class TestSqlglotParseNonDml:
+    """Constructs previously handled by the regex path, now absorbed into _sqlglot_parse."""
+
+    @pytest.fixture(autouse=True)
+    def _require_sqlglot(self):
+        pytest.importorskip("sqlglot")
 
     # -----------------------------------------------------------------------
-    # DML → falls through to sqlglot (returns None)
+    # Transaction control — string-checked before sqlglot call
     # -----------------------------------------------------------------------
 
-    def test_select_falls_through(self):
-        assert _regex_parse("SELECT id, name FROM users WHERE id = 1") is None
+    def test_start_transaction(self):
+        r = _sqlglot_parse("START TRANSACTION")
+        assert r is not None and r.tx_op is TxOp.BEGIN
 
-    def test_insert_falls_through(self):
-        assert _regex_parse("INSERT INTO orders (user_id, amount) VALUES (1, 100)") is None
+    def test_end_as_commit(self):
+        r = _sqlglot_parse("END")
+        assert r is not None and r.tx_op is TxOp.COMMIT
 
-    def test_update_falls_through(self):
-        assert _regex_parse("UPDATE accounts SET balance = balance - 100 WHERE id = 1") is None
+    def test_savepoint(self):
+        r = _sqlglot_parse("SAVEPOINT sp1")
+        from frontrun._sql_parsing import Savepoint
 
-    def test_delete_falls_through(self):
-        assert _regex_parse("DELETE FROM sessions WHERE expires_at < NOW()") is None
+        assert r is not None and r.tx_op == Savepoint("sp1")
 
-    def test_cte_falls_through(self):
-        assert _regex_parse("WITH cte AS (SELECT 1) SELECT * FROM cte") is None
+    def test_release_savepoint(self):
+        r = _sqlglot_parse("RELEASE SAVEPOINT sp1")
+        from frontrun._sql_parsing import Release
 
-    def test_union_falls_through(self):
-        assert _regex_parse("SELECT id FROM users UNION SELECT id FROM admins") is None
+        assert r is not None and r.tx_op == Release("sp1")
 
-    def test_merge_falls_through(self):
-        sql = "MERGE INTO target USING source ON target.id = source.id WHEN MATCHED THEN UPDATE SET target.v = source.v"
-        assert _regex_parse(sql) is None
+    def test_release_no_keyword(self):
+        r = _sqlglot_parse("RELEASE sp1")
+        from frontrun._sql_parsing import Release
 
-    def test_ddl_falls_through(self):
-        assert _regex_parse("CREATE TABLE foo (id INT)") is None
+        assert r is not None and r.tx_op == Release("sp1")
 
-    def test_truncate_falls_through(self):
-        assert _regex_parse("TRUNCATE TABLE sessions") is None
+    def test_rollback_to_savepoint(self):
+        r = _sqlglot_parse("ROLLBACK TO SAVEPOINT sp1")
+        from frontrun._sql_parsing import RollbackTo
+
+        assert r is not None and r.tx_op == RollbackTo("sp1")
+
+    def test_set_autocommit_0(self):
+        r = _sqlglot_parse("SET AUTOCOMMIT = 0")
+        assert r is not None and r.tx_op is TxOp.BEGIN
+
+    def test_set_autocommit_1(self):
+        r = _sqlglot_parse("SET AUTOCOMMIT = 1")
+        assert r is not None and r.tx_op is TxOp.COMMIT
 
     # -----------------------------------------------------------------------
-    # Empty / unknown statements
+    # LOCK TABLE
+    # -----------------------------------------------------------------------
+
+    def test_lock_table_exclusive(self):
+        r = _sqlglot_parse("LOCK TABLE users IN EXCLUSIVE MODE")
+        assert r is not None
+        assert "users" in r.write_tables
+        assert r.lock_intent is LockIntent.UPDATE
+
+    def test_lock_table_share(self):
+        r = _sqlglot_parse("LOCK TABLE users IN SHARE MODE")
+        assert r is not None
+        assert "users" in r.write_tables
+        assert r.lock_intent is LockIntent.SHARE
+
+    def test_lock_table_no_mode(self):
+        r = _sqlglot_parse("LOCK TABLE orders")
+        assert r is not None
+        assert "orders" in r.write_tables
+        assert r.lock_intent is LockIntent.UPDATE
+
+    # -----------------------------------------------------------------------
+    # COPY
+    # -----------------------------------------------------------------------
+
+    def test_copy_from_stdin(self):
+        r = _sqlglot_parse("COPY users FROM STDIN")
+        assert r is not None
+        assert "users" in r.write_tables and r.read_tables == set()
+
+    def test_copy_to_stdout(self):
+        r = _sqlglot_parse("COPY orders TO STDOUT")
+        assert r is not None
+        assert "orders" in r.read_tables and r.write_tables == set()
+
+    def test_copy_with_columns(self):
+        r = _sqlglot_parse("COPY users (name, email) FROM STDIN")
+        assert r is not None
+        assert "users" in r.write_tables
+
+    # -----------------------------------------------------------------------
+    # DEALLOCATE / PREPARE / EXECUTE
+    # -----------------------------------------------------------------------
+
+    def test_deallocate(self):
+        r = _sqlglot_parse("DEALLOCATE my_stmt")
+        assert r is not None and r.read_tables == set() and r.write_tables == set()
+
+    def test_prepare_select(self):
+        r = _sqlglot_parse("PREPARE my_q AS SELECT * FROM users WHERE id = $1")
+        assert r is not None and "users" in r.read_tables
+
+    def test_prepare_insert(self):
+        r = _sqlglot_parse("PREPARE ins AS INSERT INTO orders (total) VALUES ($1)")
+        assert r is not None and "orders" in r.write_tables
+
+    def test_execute(self):
+        r = _sqlglot_parse("EXECUTE my_q")
+        assert r is not None and r.read_tables == set() and r.write_tables == set()
+
+    # -----------------------------------------------------------------------
+    # Miscellaneous
     # -----------------------------------------------------------------------
 
     def test_empty_string(self):
-        assert _regex_parse("") is None
+        r = _sqlglot_parse("")
+        # Either None or empty result is acceptable; must not crash
+        assert r is None or (r.read_tables == set() and r.write_tables == set())
 
     def test_whitespace_only(self):
-        assert _regex_parse("   \n\t  ") is None
-
-    # -----------------------------------------------------------------------
-    # COPY subquery → falls through
-    # -----------------------------------------------------------------------
-
-    def test_copy_subquery_falls_through(self):
-        assert _regex_parse("COPY (SELECT id FROM foo WHERE id = 1) TO STDOUT") is None
+        r = _sqlglot_parse("   \n\t  ")
+        assert r is None or (r.read_tables == set() and r.write_tables == set())
 
 
 # ---------------------------------------------------------------------------
