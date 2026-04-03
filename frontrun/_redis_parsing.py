@@ -251,4 +251,11 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
         if is_write:
             write_keys.extend(keys)
 
+    if upper == "MIGRATE":
+        # Redis allows an empty-string positional placeholder when the actual
+        # keys are supplied via the KEYS clause. That placeholder is not a
+        # real key and must not create false conflicts.
+        read_keys = [key for key in read_keys if key != ""]
+        write_keys = [key for key in write_keys if key != ""]
+
     return RedisAccessResult(read_keys=read_keys, write_keys=write_keys, is_transaction_control=False)

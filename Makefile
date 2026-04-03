@@ -45,9 +45,9 @@ build-io: $(IO_RUST_SOURCES)
 	cp target/release/libfrontrun_io.so frontrun/libfrontrun_io.so 2>/dev/null || \
 	cp target/release/libfrontrun_io.dylib frontrun/libfrontrun_io.dylib 2>/dev/null || true
 
-# Build integration test venv with redis, requests, sqlalchemy, psycopg2
+# Build integration test venv with redis, requests, sqlalchemy, django, psycopg2
 build-integration-%: build-dpor-%
-	uv pip install redis requests sqlalchemy psycopg2-binary --python=$(CURDIR)/.venv-$*/bin/python
+	uv pip install redis requests sqlalchemy django psycopg2-binary --python=$(CURDIR)/.venv-$*/bin/python
 
 # Build example venv with SQLAlchemy + psycopg2 for examples/orm_race.py
 build-examples-%: build-dpor-%
