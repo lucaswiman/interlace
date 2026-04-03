@@ -1,6 +1,7 @@
 """Tests for the frontrun async_trace_markers module."""
 
 import asyncio
+import time
 
 import pytest
 
@@ -362,3 +363,43 @@ def test_task_errors_tracked():
 
     assert "t1" in executor.task_errors
     assert isinstance(executor.task_errors["t1"], ValueError)
+
+
+@pytest.mark.intentionally_leaves_dangling_threads
+def test_run_uses_shared_timeout_deadline():
+    """AsyncTraceExecutor.run() should use a shared deadline across all threads.
+
+    With N hanging threads, the total wait should be ~timeout, not N*timeout.
+    Regression test: previously each thread.join(timeout=timeout) was called
+    independently, so 3 threads with timeout=0.5s would wait up to 1.5s total.
+    The correct behavior (matching the sync _ThreadTraceExecutor.wait()) is to
+    compute a single deadline and reduce remaining time for each subsequent join.
+    """
+
+    async def hanging_task() -> None:
+        await asyncio.sleep(100)  # hangs far beyond timeout
+
+    # Use a schedule with a single task that won't be reached (tasks never hit
+    # any markers, so each thread simply blocks waiting for the execution lock).
+    schedule = Schedule([Step("task1", "never_reached")])
+    executor = AsyncTraceExecutor(schedule, deadlock_timeout=100.0)
+
+    timeout = 0.5
+    num_threads = 3
+
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        executor.run(
+            {"task1": hanging_task, "task2": hanging_task, "task3": hanging_task},
+            timeout=timeout,
+        )
+    elapsed = time.monotonic() - start
+
+    # With shared deadline: total elapsed ≈ timeout (0.5s)
+    # With per-thread timeout (bug): total elapsed ≈ num_threads * timeout (1.5s)
+    # We allow up to (N-1)*timeout extra slack to reliably catch the bug.
+    assert elapsed < (num_threads - 1) * timeout, (
+        f"Elapsed {elapsed:.2f}s exceeds {(num_threads - 1) * timeout:.1f}s: "
+        f"run() appears to give each thread its own full timeout instead of "
+        f"using a shared deadline (expected ~{timeout:.1f}s total)"
+    )
