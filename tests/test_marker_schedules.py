@@ -276,3 +276,41 @@ class TestExploreMarkerInterleavings:
         executor.wait(timeout=5.0)
         # The counterexample should reproduce the invariant violation
         assert account.balance != 200
+
+    def test_thread_error_not_silently_swallowed(self):
+        """Thread exceptions should be reported, not silently skipped.
+
+        Regression: except (TimeoutError, Exception) swallowed ALL exceptions,
+        including real user-code bugs like AttributeError or ValueError, causing
+        explore_marker_interleavings to report property_holds=True even when
+        threads crash on every schedule.
+        """
+
+        class BuggyState:
+            def __init__(self):
+                self.value: int | None = None
+
+            def writer(self) -> None:
+                self.value = 42  # frontrun: write
+
+            def reader(self) -> None:
+                # This will always raise AttributeError when value is None
+                _ = self.value.bit_length()  # frontrun: read  # type: ignore[union-attr]
+
+        # The reader crashes on some interleavings (when it runs before writer).
+        # This should NOT be silently swallowed — it should be reported as
+        # a failure (property_holds=False) or re-raised, not hidden.
+        result = explore_marker_interleavings(
+            setup=BuggyState,
+            threads={
+                "writer": (lambda s: s.writer(), ["write"]),
+                "reader": (lambda s: s.reader(), ["read"]),
+            },
+            invariant=lambda s: s.value == 42,
+        )
+        # When reader runs before writer, it crashes with AttributeError.
+        # The current buggy code swallows this and reports property_holds=True.
+        # The fix should surface it as a failure.
+        assert not result.property_holds, (
+            "Thread crashes should be reported as failures, not silently swallowed"
+        )

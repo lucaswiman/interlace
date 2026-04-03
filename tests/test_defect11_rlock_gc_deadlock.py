@@ -167,3 +167,76 @@ class TestRLockGCReentrancyGuard:
 
         # Should complete without deadlock
         assert not rlock._is_owned()
+
+    def test_rlock_acquire_contested_inside_dpor_machinery_falls_back(self) -> None:
+        """CooperativeRLock.acquire() inside DPOR machinery should fall back to real blocking.
+
+        Regression: CooperativeLock.acquire() has an _in_dpor_machinery() guard
+        that falls back to the real lock, but CooperativeRLock.acquire() is
+        missing this guard.  When GC fires during DPOR machinery and triggers
+        a __del__ that acquires a contested RLock, the RLock.acquire() enters
+        the slow path and calls scheduler.wait_for_turn(), which is unsafe.
+
+        We use a real thread to hold the lock, then try to acquire from the
+        main thread with blocking=True and a short timeout while in machinery
+        mode.  The test checks that scheduler.wait_for_turn is NOT called.
+        """
+        import threading
+        import time
+
+        rlock = CooperativeRLock()
+        wait_for_turn_called = False
+        holder_ready = threading.Event()
+        holder_release = threading.Event()
+
+        class FakeScheduler:
+            _finished = False
+            _error = None
+
+            def wait_for_turn(self, thread_id: int) -> None:
+                nonlocal wait_for_turn_called
+                wait_for_turn_called = True
+
+            def report_error(self, err: Exception) -> None:
+                pass
+
+        scheduler = FakeScheduler()
+        graph = install_wait_for_graph()
+
+        def holder() -> None:
+            """Hold the underlying lock from another thread."""
+            rlock._lock.acquire()
+            holder_ready.set()
+            holder_release.wait(timeout=5.0)
+            rlock._lock.release()
+
+        t = threading.Thread(target=holder)
+        t.start()
+        holder_ready.wait(timeout=5.0)
+
+        try:
+            set_context(scheduler, 0)  # type: ignore[arg-type]
+            set_sync_reporter(lambda event, obj_id, lock_obj: None)
+
+            # Simulate being inside DPOR machinery
+            _scheduler_tls._in_dpor_machinery = True
+
+            # Blocking acquire with timeout — should fall back to real blocking
+            # and NOT call scheduler.wait_for_turn()
+            result = rlock.acquire(blocking=True, timeout=0.1)
+            # Primary assertion: scheduler should NOT be involved during machinery
+            assert not wait_for_turn_called, (
+                "CooperativeRLock.acquire() should fall back to real blocking when "
+                "_in_dpor_machinery() is True, but scheduler.wait_for_turn was called"
+            )
+            if result:
+                rlock._owner = None
+                rlock._count = 0
+                rlock._lock.release()
+        finally:
+            _scheduler_tls._in_dpor_machinery = False
+            set_sync_reporter(None)
+            set_context(None, None)  # type: ignore[arg-type]
+            holder_release.set()
+            t.join(timeout=5.0)
+            uninstall_wait_for_graph()
