@@ -3277,6 +3277,7 @@ def _run_dpor_schedule(
     deadlock_timeout: float = 5.0,
     trace_recorder: TraceRecorder | None = None,
     io_schedule: list[tuple[int, str]] | None = None,
+    patch_sleep: bool = True,
 ) -> T:
     """Replay a DPOR schedule using the DPOR runner rather than OpcodeScheduler.
 
@@ -3305,7 +3306,8 @@ def _run_dpor_schedule(
 
     runner._patch_locks()
     runner._patch_io()
-    runner._patch_sleep()
+    if patch_sleep:
+        runner._patch_sleep()
     try:
         state = setup()
 
@@ -3341,6 +3343,7 @@ def _reproduce_dpor_counterexample(
     invariant: Callable[[T], bool] | None = None,
     detect_io: bool = True,
     io_schedule: list[tuple[int, str]] | None = None,
+    patch_sleep: bool = True,
 ) -> tuple[int, int]:
     """Measure how often a DPOR counterexample reproduces under the DPOR runner.
 
@@ -3378,6 +3381,7 @@ def _reproduce_dpor_counterexample(
                     detect_io=detect_io,
                     deadlock_timeout=deadlock_timeout,
                     io_schedule=io_schedule,
+                    patch_sleep=patch_sleep,
                 )
                 if invariant is not None and not invariant(replay_state):
                     successes += 1
@@ -3713,6 +3717,7 @@ def explore_dpor(
                         invariant=None,
                         detect_io=detect_io,
                         io_schedule=list(scheduler._io_trace) if detect_io and scheduler._io_trace else None,
+                        patch_sleep=patch_sleep,
                     )
                     result.reproduction_attempts = attempts
                     result.reproduction_successes = successes
@@ -3774,6 +3779,7 @@ def explore_dpor(
                         invariant=invariant,
                         detect_io=detect_io,
                         io_schedule=list(scheduler._io_trace) if detect_io and scheduler._io_trace else None,
+                        patch_sleep=patch_sleep,
                     )
                     result.reproduction_attempts = attempts
                     result.reproduction_successes = successes
