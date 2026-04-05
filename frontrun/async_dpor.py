@@ -322,6 +322,42 @@ def _unpatch_asyncio_lock() -> None:
 
 
 # ---------------------------------------------------------------------------
+# asyncio.sleep patching
+# ---------------------------------------------------------------------------
+
+_real_asyncio_sleep = asyncio.sleep
+_async_sleep_patched = False
+
+
+async def _cooperative_async_sleep(delay: float, result: Any = None) -> Any:  # noqa: ANN401
+    """No-delay replacement for ``asyncio.sleep`` during exploration.
+
+    Yields to the event loop (``await asyncio.sleep(0)``) so it remains
+    a scheduling point, but skips the actual delay.
+    """
+    await _real_asyncio_sleep(0)
+    return result
+
+
+def _patch_asyncio_sleep() -> None:
+    """Replace ``asyncio.sleep`` with a zero-delay version."""
+    global _async_sleep_patched  # noqa: PLW0603
+    if _async_sleep_patched:
+        return
+    asyncio.sleep = _cooperative_async_sleep  # type: ignore[assignment]
+    _async_sleep_patched = True
+
+
+def _unpatch_asyncio_sleep() -> None:
+    """Restore original ``asyncio.sleep``."""
+    global _async_sleep_patched  # noqa: PLW0603
+    if not _async_sleep_patched:
+        return
+    asyncio.sleep = _real_asyncio_sleep  # type: ignore[assignment]
+    _async_sleep_patched = False
+
+
+# ---------------------------------------------------------------------------
 # Await point
 # ---------------------------------------------------------------------------
 
@@ -1105,6 +1141,7 @@ async def explore_async_dpor(
     total_timeout: float | None = None,
     warn_nondeterministic_sql: bool = True,
     lock_timeout: int | None = None,
+    patch_sleep: bool = True,
 ) -> InterleavingResult:
     """Systematically explore async interleavings using DPOR.
 
@@ -1193,6 +1230,8 @@ async def explore_async_dpor(
         set_lock_timeout(lock_timeout)
 
     _patch_asyncio_lock()
+    if patch_sleep:
+        _patch_asyncio_sleep()
 
     try:
         while True:
@@ -1336,6 +1375,8 @@ async def explore_async_dpor(
         if trace_packages is not None:
             _set_active_trace_filter(None)
         set_lock_timeout(prev_lock_timeout)
+        if patch_sleep:
+            _unpatch_asyncio_sleep()
         _unpatch_asyncio_lock()
         if detect_sql and _sql_async_available:
             unpatch_sql_async()

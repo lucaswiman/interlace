@@ -1140,3 +1140,56 @@ def unpatch_locks() -> None:
         queue.LifoQueue = real_lifo_queue  # type: ignore[assignment]
         queue.PriorityQueue = real_priority_queue  # type: ignore[assignment]
         _patched = False
+
+
+# ---------------------------------------------------------------------------
+# Sleep patching
+# ---------------------------------------------------------------------------
+
+_real_time_sleep = time.sleep
+_sleep_patch_count = 0
+_sleep_patch_lock = real_lock()
+
+
+def _cooperative_sleep(seconds: float) -> None:  # noqa: ARG001
+    """No-op replacement for ``time.sleep`` during exploration.
+
+    Acts as a scheduling point: if a cooperative scheduler context is
+    active, yields a turn so other threads can run.  The actual delay
+    is skipped entirely — sleeping during interleaving exploration would
+    make execution extremely slow.
+    """
+    ctx = get_context()
+    if ctx is not None:
+        scheduler, thread_id = ctx
+        scheduler.wait_for_turn(thread_id)
+
+
+def patch_sleep() -> None:
+    """Replace ``time.sleep`` with a no-op cooperative version.
+
+    Reference-counted like :func:`patch_locks` so multiple concurrent
+    callers are safe.
+    """
+    global _sleep_patch_count  # noqa: PLW0603
+    with _sleep_patch_lock:
+        _sleep_patch_count += 1
+        if _sleep_patch_count > 1:
+            return
+        time.sleep = _cooperative_sleep  # type: ignore[assignment]
+
+
+def unpatch_sleep() -> None:
+    """Restore the original ``time.sleep``.
+
+    Only restores when all paired ``patch_sleep()`` calls have been
+    balanced.
+    """
+    global _sleep_patch_count  # noqa: PLW0603
+    with _sleep_patch_lock:
+        if _sleep_patch_count <= 0:
+            return
+        _sleep_patch_count -= 1
+        if _sleep_patch_count > 0:
+            return
+        time.sleep = _real_time_sleep  # type: ignore[assignment]
