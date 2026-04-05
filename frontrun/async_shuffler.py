@@ -359,6 +359,7 @@ async def explore_interleavings(
     deadlock_timeout: float = 5.0,
     detect_sql: bool = False,
     trace_packages: list[str] | None = None,
+    patch_sleep: bool = True,
 ) -> InterleavingResult:
     """Search for async interleavings that violate an invariant.
 
@@ -398,6 +399,10 @@ async def explore_interleavings(
     """
     if detect_sql and _sql_async_available:
         patch_sql_async()
+    if patch_sleep:
+        from frontrun.async_dpor import _patch_asyncio_sleep, _unpatch_asyncio_sleep
+
+        _patch_asyncio_sleep()
     try:
         rng = random.Random(seed)
         num_tasks = len(tasks)
@@ -427,6 +432,10 @@ async def explore_interleavings(
         result.unique_interleavings = len(seen_schedule_hashes)
         return result
     finally:
+        if patch_sleep:
+            from frontrun.async_dpor import _unpatch_asyncio_sleep
+
+            _unpatch_asyncio_sleep()
         if detect_sql and _sql_async_available:
             unpatch_sql_async()
 

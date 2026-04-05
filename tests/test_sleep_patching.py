@@ -62,14 +62,19 @@ class TestSleepInDpor:
 
     def test_sleep_in_thread_does_not_delay(self) -> None:
         """time.sleep inside explored threads should not actually sleep."""
+        import threading
 
         class State:
-            value: int = 0
+            def __init__(self) -> None:
+                self.value = 0
+                self.lock = threading.Lock()
 
         def thread_with_sleep(state: State) -> None:
-            state.value += 1
+            with state.lock:
+                state.value += 1
             time.sleep(10)  # Would be very slow if not patched
-            state.value += 1
+            with state.lock:
+                state.value += 1
 
         start = time.monotonic()
         result = explore_dpor(

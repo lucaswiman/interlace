@@ -42,10 +42,12 @@ from typing import Any, TypeVar
 from frontrun._cooperative import (
     clear_context,
     patch_locks,
+    patch_sleep,
     real_condition,
     real_lock,
     set_context,
     unpatch_locks,
+    unpatch_sleep,
 )
 from frontrun._deadlock import DeadlockError, SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
 from frontrun._io_detection import (
@@ -222,6 +224,7 @@ class BytecodeShuffler:
         self.errors: dict[int, Exception] = {}
         self._lock_patched = False
         self._io_patched = False
+        self._sleep_patched = False
         self._monitoring_active = False
 
     def _patch_locks(self):
@@ -237,6 +240,17 @@ class BytecodeShuffler:
 
             uninstall_wait_for_graph()
             self._lock_patched = False
+
+    def _patch_sleep(self):
+        """Replace time.sleep with a cooperative no-op."""
+        patch_sleep()
+        self._sleep_patched = True
+
+    def _unpatch_sleep(self):
+        """Restore original time.sleep."""
+        if self._sleep_patched:
+            unpatch_sleep()
+            self._sleep_patched = False
 
     def _patch_io(self):
         """Replace socket and open with traced versions."""
@@ -558,6 +572,7 @@ def run_with_schedule(
     debug: bool = False,
     deadlock_timeout: float = 5.0,
     trace_recorder: TraceRecorder | None = None,
+    patch_sleep: bool = True,
 ) -> T:
     """Run one interleaving and return the state object.
 
@@ -586,6 +601,8 @@ def run_with_schedule(
     # Patch locks BEFORE setup() so any locks created there are cooperative
     runner._patch_locks()
     runner._patch_io()
+    if patch_sleep:
+        runner._patch_sleep()
     try:
         state = setup()
 
@@ -606,6 +623,7 @@ def run_with_schedule(
         if isinstance(scheduler._error, DeadlockError):
             raise scheduler._error
     finally:
+        runner._unpatch_sleep()
         runner._unpatch_io()
         runner._unpatch_locks()
     return state
@@ -626,6 +644,7 @@ def explore_interleavings(
     total_timeout: float | None = None,
     warn_nondeterministic_sql: bool = True,
     trace_packages: list[str] | None = None,
+    patch_sleep: bool = True,
 ) -> InterleavingResult:
     """Search for interleavings that violate an invariant.
 
@@ -711,6 +730,7 @@ def explore_interleavings(
                 detect_io=detect_io,
                 deadlock_timeout=deadlock_timeout,
                 trace_recorder=recorder,
+                patch_sleep=patch_sleep,
             )
             result.num_explored += 1
             seen_schedule_hashes.add(hash(tuple(schedule)))
@@ -735,6 +755,7 @@ def explore_interleavings(
                                 timeout=timeout_per_run,
                                 detect_io=detect_io,
                                 deadlock_timeout=deadlock_timeout,
+                                patch_sleep=patch_sleep,
                             )
                             if not invariant(replay_state):
                                 successes += 1

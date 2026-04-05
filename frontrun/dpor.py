@@ -48,11 +48,13 @@ from typing import Any, TypeVar
 from frontrun._cooperative import (
     clear_context,
     patch_locks,
+    patch_sleep,
     real_condition,
     real_lock,
     set_context,
     set_sync_reporter,
     unpatch_locks,
+    unpatch_sleep,
 )
 from frontrun._deadlock import DeadlockError, SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
 from frontrun._io_detection import (
@@ -2639,6 +2641,7 @@ class DporBytecodeRunner:
         self.errors: dict[int, Exception] = {}
         self._lock_patched = False
         self._io_patched = False
+        self._sleep_patched = False
         self._monitoring_active = False
 
     def _patch_locks(self) -> None:
@@ -2651,6 +2654,15 @@ class DporBytecodeRunner:
             unpatch_locks()
             uninstall_wait_for_graph()
             self._lock_patched = False
+
+    def _patch_sleep(self) -> None:
+        patch_sleep()
+        self._sleep_patched = True
+
+    def _unpatch_sleep(self) -> None:
+        if self._sleep_patched:
+            unpatch_sleep()
+            self._sleep_patched = False
 
     def _patch_io(self) -> None:
         if not self.detect_io:
@@ -3293,6 +3305,7 @@ def _run_dpor_schedule(
 
     runner._patch_locks()
     runner._patch_io()
+    runner._patch_sleep()
     try:
         state = setup()
 
@@ -3310,6 +3323,7 @@ def _run_dpor_schedule(
         if isinstance(scheduler._error, DeadlockError):
             raise scheduler._error
     finally:
+        runner._unpatch_sleep()
         runner._unpatch_io()
         runner._unpatch_locks()
     return state
@@ -3404,6 +3418,7 @@ def explore_dpor(
     trace_packages: list[str] | None = None,
     track_dunder_dict_accesses: bool = False,
     search: str | None = None,
+    patch_sleep: bool = True,
 ) -> InterleavingResult:
     """Systematically explore interleavings using DPOR.
 
@@ -3486,6 +3501,11 @@ def explore_dpor(
             before reaching a bug.  The alternative strategies spread
             exploration across different conflict points earlier, finding
             bugs faster on average.
+        patch_sleep: If True (default), replace ``time.sleep`` with a
+            no-op that yields to the scheduler.  This prevents threads
+            from actually sleeping during exploration (which would be
+            extremely slow) while preserving sleep calls as scheduling
+            points.  Set to False if your code depends on real delays.
 
     Returns:
         InterleavingResult with exploration statistics and any counterexample found.
@@ -3640,6 +3660,8 @@ def explore_dpor(
 
             runner._patch_locks()
             runner._patch_io()
+            if patch_sleep:
+                runner._patch_sleep()
             try:
                 state = setup()
 
@@ -3655,6 +3677,7 @@ def explore_dpor(
                 except TimeoutError:
                     pass
             finally:
+                runner._unpatch_sleep()
                 runner._unpatch_io()
                 runner._unpatch_locks()
 
