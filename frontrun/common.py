@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from itertools import permutations
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from frontrun._sql_anomaly import SqlAnomaly
@@ -101,6 +103,7 @@ class InterleavingResult:
     reproduction_attempts: int = 0
     reproduction_successes: int = 0
     sql_anomaly: SqlAnomaly | None = None
+    races_detected: bool = False
 
     def __repr__(self) -> str:
         ce = self.counterexample
@@ -108,7 +111,61 @@ class InterleavingResult:
             ce_repr = f"[{', '.join(map(str, ce[:5]))}, ...({len(ce)} steps)]"
         else:
             ce_repr = repr(ce)
-        return (
-            f"InterleavingResult(property_holds={self.property_holds}, "
-            f"counterexample={ce_repr}, num_explored={self.num_explored})"
-        )
+        parts = [
+            f"property_holds={self.property_holds}",
+            f"counterexample={ce_repr}",
+            f"num_explored={self.num_explored}",
+        ]
+        if self.races_detected:
+            parts.append("races_detected=True")
+        return f"InterleavingResult({', '.join(parts)})"
+
+
+def compute_serializable_states(
+    setup: Callable[[], Any],
+    thread_funcs: list[Callable[[Any], None]],
+    state_hash: Callable[[Any], Any] | None = None,
+) -> set[Any]:
+    """Compute the set of valid serializable states.
+
+    Runs all N! sequential orderings of the thread functions and collects
+    the hash of each resulting state.  An interleaved execution is
+    *serializable* if its final state hash is in this set.
+
+    Args:
+        setup: Factory that creates fresh shared state.
+        thread_funcs: Thread/task functions (each takes state as argument).
+        state_hash: Hash function for state.  If None, uses ``repr()``.
+
+    Returns:
+        Set of valid state hashes.
+    """
+    if state_hash is None:
+        state_hash = repr
+    valid: set[Any] = set()
+    for perm in permutations(range(len(thread_funcs))):
+        s = setup()
+        for i in perm:
+            thread_funcs[i](s)
+        valid.add(state_hash(s))
+    return valid
+
+
+async def compute_serializable_states_async(
+    setup: Callable[[], Any],
+    task_funcs: list[Callable[[Any], Any]],
+    state_hash: Callable[[Any], Any] | None = None,
+) -> set[Any]:
+    """Async version of compute_serializable_states.
+
+    Runs all N! sequential orderings of async task functions.
+    """
+    if state_hash is None:
+        state_hash = repr
+    valid: set[Any] = set()
+    for perm in permutations(range(len(task_funcs))):
+        s = setup()
+        for i in perm:
+            await task_funcs[i](s)
+        valid.add(state_hash(s))
+    return valid

@@ -85,6 +85,11 @@ pub struct PendingRace {
     /// sequences (len == 1) that would normally be covered by inline
     /// insertion. Set for races on objects with resource groups (Defect #15).
     pub inline_skipped: bool,
+    /// Whether this is an attribute-level race (from `process_access` /
+    /// `process_first_access`) vs a container-level, I/O, or synthetic race.
+    /// Only attribute-level races are "true" data races for the purpose of
+    /// `error_on_any_race` mode.
+    pub is_attribute_race: bool,
 }
 
 /// Check whether two access kinds conflict (i.e., are dependent).

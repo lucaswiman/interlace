@@ -14,7 +14,6 @@ import pytest
 
 from frontrun.dpor import explore_dpor
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -120,9 +119,7 @@ class TestSerializableInvariantDpor:
             preemption_bound=2,
             reproduce_on_failure=0,
         )
-        assert not result.property_holds, (
-            "serializable_invariant with custom hash should detect lost update"
-        )
+        assert not result.property_holds, "serializable_invariant with custom hash should detect lost update"
 
     def test_two_counters_atomicity(self):
         """Two counters incremented non-atomically — interleaving can desync them."""
@@ -136,9 +133,7 @@ class TestSerializableInvariantDpor:
         )
         # Sequential: both counters always end at 2.
         # Interleaved: can end with a=2, b=1 (not serializable).
-        assert not result.property_holds, (
-            "serializable_invariant should detect non-atomic two-counter update"
-        )
+        assert not result.property_holds, "serializable_invariant should detect non-atomic two-counter update"
 
 
 class TestSerializableInvariantBytecode:
@@ -156,9 +151,7 @@ class TestSerializableInvariantBytecode:
             seed=42,
             reproduce_on_failure=0,
         )
-        assert not result.property_holds, (
-            "serializable_invariant should detect lost update in bytecode shuffler"
-        )
+        assert not result.property_holds, "serializable_invariant should detect lost update in bytecode shuffler"
 
 
 class TestSerializableInvariantAsyncDpor:
@@ -190,9 +183,7 @@ class TestSerializableInvariantAsyncDpor:
             )
 
         result = asyncio.run(run())
-        assert not result.property_holds, (
-            "serializable_invariant should detect lost update in async DPOR"
-        )
+        assert not result.property_holds, "serializable_invariant should detect lost update in async DPOR"
 
 
 class TestSerializableInvariantAsyncShuffler:
@@ -224,9 +215,7 @@ class TestSerializableInvariantAsyncShuffler:
             )
 
         result = asyncio.run(run())
-        assert not result.property_holds, (
-            "serializable_invariant should detect lost update in async shuffler"
-        )
+        assert not result.property_holds, "serializable_invariant should detect lost update in async shuffler"
 
 
 # ---------------------------------------------------------------------------
@@ -251,9 +240,7 @@ class TestErrorOnAnyRaceDpor:
             preemption_bound=2,
             reproduce_on_failure=0,
         )
-        assert not result.property_holds, (
-            "error_on_any_race should flag unsynchronized write-write race"
-        )
+        assert not result.property_holds, "error_on_any_race should flag unsynchronized write-write race"
 
     def test_locked_counter_no_race(self):
         """Properly locked counter has no races."""
@@ -288,9 +275,7 @@ class TestErrorOnAnyRaceDpor:
             preemption_bound=2,
             reproduce_on_failure=0,
         )
-        assert not result.property_holds, (
-            "error_on_any_race should flag unsynchronized read-write race"
-        )
+        assert not result.property_holds, "error_on_any_race should flag unsynchronized read-write race"
 
 
 class TestErrorOnAnyRaceAsyncDpor:
@@ -319,9 +304,7 @@ class TestErrorOnAnyRaceAsyncDpor:
             )
 
         result = asyncio.run(run())
-        assert not result.property_holds, (
-            "error_on_any_race should flag unsynchronized write in async DPOR"
-        )
+        assert not result.property_holds, "error_on_any_race should flag unsynchronized write in async DPOR"
 
 
 class TestErrorOnAnyRaceBytecode:
