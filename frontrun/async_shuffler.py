@@ -360,6 +360,8 @@ async def explore_interleavings(
     detect_sql: bool = False,
     trace_packages: list[str] | None = None,
     patch_sleep: bool = True,
+    serializable_invariant: Callable[[Any], Any] | bool = False,
+    error_on_any_race: bool = False,
 ) -> InterleavingResult:
     """Search for async interleavings that violate an invariant.
 

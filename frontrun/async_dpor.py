@@ -1142,6 +1142,8 @@ async def explore_async_dpor(
     warn_nondeterministic_sql: bool = True,
     lock_timeout: int | None = None,
     patch_sleep: bool = True,
+    serializable_invariant: Callable[[T], Any] | bool = False,
+    error_on_any_race: bool = False,
 ) -> InterleavingResult:
     """Systematically explore async interleavings using DPOR.
 

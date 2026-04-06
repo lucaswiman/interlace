@@ -645,6 +645,8 @@ def explore_interleavings(
     warn_nondeterministic_sql: bool = True,
     trace_packages: list[str] | None = None,
     patch_sleep: bool = True,
+    serializable_invariant: Callable[[T], Any] | bool = False,
+    error_on_any_race: bool = False,
 ) -> InterleavingResult:
     """Search for interleavings that violate an invariant.
 

@@ -3423,6 +3423,8 @@ def explore_dpor(
     track_dunder_dict_accesses: bool = False,
     search: str | None = None,
     patch_sleep: bool = True,
+    serializable_invariant: Callable[[T], Any] | bool = False,
+    error_on_any_race: bool = False,
 ) -> InterleavingResult:
     """Systematically explore interleavings using DPOR.
 

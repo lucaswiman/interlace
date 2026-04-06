@@ -1,0 +1,393 @@
+"""Tests for serializable_invariant and error_on_any_race options.
+
+These tests verify that:
+1. serializable_invariant detects when interleaved execution produces
+   a state not achievable by any sequential ordering.
+2. error_on_any_race flags unsynchronized races even when the user
+   invariant passes.
+"""
+
+import asyncio
+import threading
+
+import pytest
+
+from frontrun.dpor import explore_dpor
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+class Counter:
+    """Unsynchronized counter — classic lost-update bug."""
+
+    def __init__(self):
+        self.value = 0
+
+    def __repr__(self):
+        return f"Counter(value={self.value})"
+
+
+def increment(state: Counter) -> None:
+    temp = state.value
+    state.value = temp + 1
+
+
+class TwoCounters:
+    """Two counters that are always equal when run sequentially."""
+
+    def __init__(self):
+        self.a = 0
+        self.b = 0
+
+    def __repr__(self):
+        return f"TwoCounters(a={self.a}, b={self.b})"
+
+
+def increment_both(state: TwoCounters) -> None:
+    """Increment both counters — non-atomic, so interleaving can split them."""
+    temp_a = state.a
+    temp_b = state.b
+    state.a = temp_a + 1
+    state.b = temp_b + 1
+
+
+class LockedCounter:
+    """Properly synchronized counter — no races."""
+
+    def __init__(self):
+        self.value = 0
+        self.lock = threading.Lock()
+
+    def __repr__(self):
+        return f"LockedCounter(value={self.value})"
+
+
+def locked_increment(state: LockedCounter) -> None:
+    with state.lock:
+        temp = state.value
+        state.value = temp + 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: serializable_invariant
+# ---------------------------------------------------------------------------
+
+
+class TestSerializableInvariantDpor:
+    """Test serializable_invariant with explore_dpor."""
+
+    def test_lost_update_detected(self):
+        """Two threads incrementing without locks — counter=1 is not serializable.
+
+        Sequential orderings: [T0, T1] -> 2, [T1, T0] -> 2.
+        Only valid final state: Counter(value=2).
+        Interleaved can produce Counter(value=1) — not serializable.
+        """
+        result = explore_dpor(
+            setup=Counter,
+            threads=[increment, increment],
+            invariant=lambda s: True,  # trivially passing — bug should come from serializability
+            serializable_invariant=True,
+            preemption_bound=2,
+            reproduce_on_failure=0,
+        )
+        assert not result.property_holds, (
+            "serializable_invariant should detect lost update (counter=1 is not serializable)"
+        )
+
+    def test_locked_counter_is_serializable(self):
+        """Properly locked counter is always serializable."""
+        result = explore_dpor(
+            setup=LockedCounter,
+            threads=[locked_increment, locked_increment],
+            invariant=lambda s: True,
+            serializable_invariant=True,
+            preemption_bound=2,
+            reproduce_on_failure=0,
+        )
+        assert result.property_holds, "locked counter should always be serializable"
+
+    def test_custom_hash_function(self):
+        """serializable_invariant accepts a callable for custom state hashing."""
+        result = explore_dpor(
+            setup=Counter,
+            threads=[increment, increment],
+            invariant=lambda s: True,
+            serializable_invariant=lambda s: s.value,  # custom hash
+            preemption_bound=2,
+            reproduce_on_failure=0,
+        )
+        assert not result.property_holds, (
+            "serializable_invariant with custom hash should detect lost update"
+        )
+
+    def test_two_counters_atomicity(self):
+        """Two counters incremented non-atomically — interleaving can desync them."""
+        result = explore_dpor(
+            setup=TwoCounters,
+            threads=[increment_both, increment_both],
+            invariant=lambda s: True,
+            serializable_invariant=True,
+            preemption_bound=2,
+            reproduce_on_failure=0,
+        )
+        # Sequential: both counters always end at 2.
+        # Interleaved: can end with a=2, b=1 (not serializable).
+        assert not result.property_holds, (
+            "serializable_invariant should detect non-atomic two-counter update"
+        )
+
+
+class TestSerializableInvariantBytecode:
+    """Test serializable_invariant with bytecode explore_interleavings."""
+
+    def test_lost_update_detected(self):
+        from frontrun.bytecode import explore_interleavings
+
+        result = explore_interleavings(
+            setup=Counter,
+            threads=[increment, increment],
+            invariant=lambda s: True,
+            serializable_invariant=True,
+            max_attempts=200,
+            seed=42,
+            reproduce_on_failure=0,
+        )
+        assert not result.property_holds, (
+            "serializable_invariant should detect lost update in bytecode shuffler"
+        )
+
+
+class TestSerializableInvariantAsyncDpor:
+    """Test serializable_invariant with explore_async_dpor."""
+
+    def test_lost_update_detected(self):
+        from frontrun.async_dpor import explore_async_dpor
+
+        class AsyncCounter:
+            def __init__(self):
+                self.value = 0
+
+            def __repr__(self):
+                return f"AsyncCounter(value={self.value})"
+
+        async def async_increment(state: AsyncCounter) -> None:
+            temp = state.value
+            await asyncio.sleep(0)
+            state.value = temp + 1
+
+        async def run():
+            return await explore_async_dpor(
+                setup=AsyncCounter,
+                tasks=[async_increment, async_increment],
+                invariant=lambda s: True,
+                serializable_invariant=True,
+                preemption_bound=2,
+                reproduce_on_failure=0,
+            )
+
+        result = asyncio.run(run())
+        assert not result.property_holds, (
+            "serializable_invariant should detect lost update in async DPOR"
+        )
+
+
+class TestSerializableInvariantAsyncShuffler:
+    """Test serializable_invariant with async shuffler explore_interleavings."""
+
+    def test_lost_update_detected(self):
+        from frontrun.async_shuffler import explore_interleavings
+
+        class AsyncCounter:
+            def __init__(self):
+                self.value = 0
+
+            def __repr__(self):
+                return f"AsyncCounter(value={self.value})"
+
+        async def async_increment(state: AsyncCounter) -> None:
+            temp = state.value
+            await asyncio.sleep(0)
+            state.value = temp + 1
+
+        async def run():
+            return await explore_interleavings(
+                setup=AsyncCounter,
+                tasks=[async_increment, async_increment],
+                invariant=lambda s: True,
+                serializable_invariant=True,
+                max_attempts=200,
+                seed=42,
+            )
+
+        result = asyncio.run(run())
+        assert not result.property_holds, (
+            "serializable_invariant should detect lost update in async shuffler"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: error_on_any_race
+# ---------------------------------------------------------------------------
+
+
+class TestErrorOnAnyRaceDpor:
+    """Test error_on_any_race with explore_dpor."""
+
+    def test_unsynchronized_write_detected(self):
+        """Two threads writing same variable without locks — race even if invariant passes.
+
+        The invariant `True` passes trivially, but the unsynchronized write
+        should be flagged as a race.
+        """
+        result = explore_dpor(
+            setup=Counter,
+            threads=[increment, increment],
+            invariant=lambda s: True,
+            error_on_any_race=True,
+            preemption_bound=2,
+            reproduce_on_failure=0,
+        )
+        assert not result.property_holds, (
+            "error_on_any_race should flag unsynchronized write-write race"
+        )
+
+    def test_locked_counter_no_race(self):
+        """Properly locked counter has no races."""
+        result = explore_dpor(
+            setup=LockedCounter,
+            threads=[locked_increment, locked_increment],
+            invariant=lambda s: True,
+            error_on_any_race=True,
+            preemption_bound=2,
+            reproduce_on_failure=0,
+        )
+        assert result.property_holds, "locked counter should have no races"
+
+    def test_read_write_race_detected(self):
+        """One thread reads, another writes — race detected."""
+
+        class SharedState:
+            def __init__(self):
+                self.value = 0
+
+        def writer(state: SharedState) -> None:
+            state.value = 42
+
+        def reader(state: SharedState) -> None:
+            _ = state.value
+
+        result = explore_dpor(
+            setup=SharedState,
+            threads=[writer, reader],
+            invariant=lambda s: True,
+            error_on_any_race=True,
+            preemption_bound=2,
+            reproduce_on_failure=0,
+        )
+        assert not result.property_holds, (
+            "error_on_any_race should flag unsynchronized read-write race"
+        )
+
+
+class TestErrorOnAnyRaceAsyncDpor:
+    """Test error_on_any_race with explore_async_dpor."""
+
+    def test_unsynchronized_write_detected(self):
+        from frontrun.async_dpor import explore_async_dpor
+
+        class AsyncCounter:
+            def __init__(self):
+                self.value = 0
+
+        async def async_increment(state: AsyncCounter) -> None:
+            temp = state.value
+            await asyncio.sleep(0)
+            state.value = temp + 1
+
+        async def run():
+            return await explore_async_dpor(
+                setup=AsyncCounter,
+                tasks=[async_increment, async_increment],
+                invariant=lambda s: True,
+                error_on_any_race=True,
+                preemption_bound=2,
+                reproduce_on_failure=0,
+            )
+
+        result = asyncio.run(run())
+        assert not result.property_holds, (
+            "error_on_any_race should flag unsynchronized write in async DPOR"
+        )
+
+
+class TestErrorOnAnyRaceBytecode:
+    """Test error_on_any_race with bytecode shuffler.
+
+    The bytecode shuffler does not have DPOR race detection, so
+    error_on_any_race should raise ValueError.
+    """
+
+    def test_raises_valueerror(self):
+        from frontrun.bytecode import explore_interleavings
+
+        with pytest.raises(ValueError, match="error_on_any_race.*DPOR"):
+            explore_interleavings(
+                setup=Counter,
+                threads=[increment, increment],
+                invariant=lambda s: True,
+                error_on_any_race=True,
+                max_attempts=1,
+                reproduce_on_failure=0,
+            )
+
+
+class TestErrorOnAnyRaceAsyncShuffler:
+    """Test error_on_any_race with async shuffler.
+
+    The async shuffler does not have DPOR race detection, so
+    error_on_any_race should raise ValueError.
+    """
+
+    def test_raises_valueerror(self):
+        from frontrun.async_shuffler import explore_interleavings
+
+        async def async_noop(state: Counter) -> None:
+            pass
+
+        async def run():
+            return await explore_interleavings(
+                setup=Counter,
+                tasks=[async_noop, async_noop],
+                invariant=lambda s: True,
+                error_on_any_race=True,
+                max_attempts=1,
+            )
+
+        with pytest.raises(ValueError, match="error_on_any_race.*DPOR"):
+            asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Tests: combined
+# ---------------------------------------------------------------------------
+
+
+class TestCombinedOptions:
+    """Test serializable_invariant and error_on_any_race together."""
+
+    def test_both_enabled_dpor(self):
+        """Both options enabled — both should report failure."""
+        result = explore_dpor(
+            setup=Counter,
+            threads=[increment, increment],
+            invariant=lambda s: True,
+            serializable_invariant=True,
+            error_on_any_race=True,
+            preemption_bound=2,
+            reproduce_on_failure=0,
+        )
+        assert not result.property_holds
