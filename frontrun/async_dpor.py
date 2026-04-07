@@ -1142,6 +1142,8 @@ async def explore_async_dpor(
     warn_nondeterministic_sql: bool = True,
     lock_timeout: int | None = None,
     patch_sleep: bool = True,
+    serializable_invariant: Callable[[T], Any] | bool = False,
+    error_on_any_race: bool = False,
 ) -> InterleavingResult:
     """Systematically explore async interleavings using DPOR.
 
@@ -1202,6 +1204,15 @@ async def explore_async_dpor(
     """
     if trace_packages is not None:
         _set_active_trace_filter(_TraceFilter(trace_packages))
+
+    # Compute serializable baseline if requested.
+    serial_valid_states: set[Any] | None = None
+    if serializable_invariant is not False:
+        from frontrun.common import compute_serializable_states_async
+
+        hash_fn: Callable[[Any], Any] | None = serializable_invariant if callable(serializable_invariant) else None
+        serial_valid_states = await compute_serializable_states_async(setup, tasks, state_hash=hash_fn)
+
     num_tasks = len(tasks)
     pb = None if preemption_bound is None else preemption_bound
     me = None if max_executions is None else max_executions
@@ -1345,6 +1356,43 @@ async def explore_async_dpor(
 
             if warn_nondeterministic_sql:
                 check_uncaptured_inserts()
+
+            # --- error_on_any_race: treat unsynchronized races as failures ---
+            if error_on_any_race and not is_deadlock and task_error is None:
+                raw_races_check = engine.attribute_races()
+                if raw_races_check:
+                    result.property_holds = False
+                    result.races_detected = True
+                    schedule_list = list(execution.schedule_trace)
+                    result.failures.append((result.num_explored, schedule_list))
+                    if result.counterexample is None:
+                        result.counterexample = schedule_list
+                        result.explanation = (
+                            f"Unsynchronized race detected in execution {result.num_explored}.\n"
+                            f"{len(raw_races_check)} race(s) found between tasks on shared objects."
+                        )
+                    if stop_on_first:
+                        return result
+
+            # --- serializable_invariant: check against sequential baselines ---
+            if serial_valid_states is not None and not is_deadlock and task_error is None:
+                hash_fn_check: Callable[[Any], Any] = (
+                    serializable_invariant if callable(serializable_invariant) else repr
+                )
+                state_h = hash_fn_check(state)
+                if state_h not in serial_valid_states:
+                    result.property_holds = False
+                    schedule_list = list(execution.schedule_trace)
+                    result.failures.append((result.num_explored, schedule_list))
+                    if result.counterexample is None:
+                        result.counterexample = schedule_list
+                        result.explanation = (
+                            f"Serializability violation in execution {result.num_explored}.\n"
+                            f"State {state_h!r} does not match any sequential ordering.\n"
+                            f"Valid sequential states: {serial_valid_states!r}"
+                        )
+                    if stop_on_first:
+                        return result
 
             if not is_deadlock and task_error is None and not invariant(state):
                 result.property_holds = False

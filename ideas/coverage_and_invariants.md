@@ -554,8 +554,8 @@ itself wrote them).
 | Priority | Feature | Effort | Impact | Depends on |
 |----------|---------|--------|--------|------------|
 | **P0** | Reads-from fingerprinting (§1.2.1) | Medium | High | Engine changes |
-| **P0** | Serializability checking (§2.1.1) | Low | High | None |
-| **P1** | Race reporting mode (§2.1.4) | Low | Medium | Already tracked |
+| **P0** | ~~Serializability checking (§2.1.1)~~ | Low | High | None | **DONE** |
+| **P1** | ~~Race reporting mode (§2.1.4)~~ | Low | Medium | Already tracked | **DONE** |
 | **P1** | Coverage-guided Hypothesis (§1.4) | Low | Medium | §1.2.1 |
 | **P1** | Lock-order violation detection (§2.1.5) | Low | Medium | WaitForGraph exists |
 | **P2** | Static race pre-analysis (§1.3.1) | Medium | Medium | AST parsing |
@@ -622,6 +622,26 @@ Together, they multiply: fewer executions × more bugs per execution = much
 better bug-finding ROI.
 
 ---
+
+## Implementation status
+
+### Implemented
+
+**Serializability checking (§2.1.1)** — `serializable_invariant` parameter added to all four
+exploration functions (`explore_dpor`, `explore_async_dpor`, `explore_interleavings` sync
+and async). When enabled, all N! sequential orderings are run before exploration to compute
+valid final states. Each interleaved execution's final state is checked against this set.
+Accepts `True` (uses `repr()` as hash) or a callable `state_hash` function. Default off.
+
+**Race reporting / error_on_any_race (§2.1.4)** — `error_on_any_race` parameter added to
+DPOR exploration functions (`explore_dpor`, `explore_async_dpor`). When enabled, any
+unsynchronized data race detected by the DPOR vector clock engine is treated as a test
+failure, even if the user-supplied invariant passes. Filters out container-level
+(`report_first_access`) and lock-synthetic races to avoid false positives — only
+attribute-level and I/O races are flagged. For non-DPOR shufflers, passing
+`error_on_any_race=True` raises `ValueError` since they lack race detection. Default off.
+
+Both options set `result.races_detected` on `InterleavingResult` when races are found.
 
 ## References
 

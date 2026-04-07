@@ -210,6 +210,18 @@ impl PyDporEngine {
             .map(|r| (r.prev_path_id, r.current_path_id, r.thread_id, r.race_object))
             .collect()
     }
+
+    /// Return only attribute-level data races (not container-level or lock-synthetic).
+    /// These represent true unsynchronized shared memory accesses suitable for
+    /// `error_on_any_race` mode.
+    fn attribute_races(&self) -> Vec<(usize, usize, usize, Option<u64>)> {
+        self.inner
+            .pending_races()
+            .iter()
+            .filter(|r| r.is_attribute_race)
+            .map(|r| (r.prev_path_id, r.current_path_id, r.thread_id, r.race_object))
+            .collect()
+    }
 }
 
 impl PyDporEngine {

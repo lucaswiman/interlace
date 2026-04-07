@@ -360,6 +360,8 @@ async def explore_interleavings(
     detect_sql: bool = False,
     trace_packages: list[str] | None = None,
     patch_sleep: bool = True,
+    serializable_invariant: Callable[[Any], Any] | bool = False,
+    error_on_any_race: bool = False,
 ) -> InterleavingResult:
     """Search for async interleavings that violate an invariant.
 
@@ -397,6 +399,17 @@ async def explore_interleavings(
         InterleavingResult with the outcome.  The ``unique_interleavings``
         field reports how many distinct schedule orderings were observed.
     """
+    if error_on_any_race:
+        raise ValueError("error_on_any_race requires DPOR (use explore_async_dpor instead)")
+
+    # Compute serializable baseline if requested.
+    serial_valid_states: set[Any] | None = None
+    if serializable_invariant is not False:
+        from frontrun.common import compute_serializable_states_async
+
+        hash_fn: Callable[[Any], Any] | None = serializable_invariant if callable(serializable_invariant) else None
+        serial_valid_states = await compute_serializable_states_async(setup, tasks, state_hash=hash_fn)
+
     if detect_sql and _sql_async_available:
         patch_sql_async()
     _unpatch_asyncio_sleep_fn = None
@@ -424,6 +437,23 @@ async def explore_interleavings(
             )
             result.num_explored += 1
             seen_schedule_hashes.add(hash(tuple(schedule)))
+
+            # --- serializable_invariant check ---
+            if serial_valid_states is not None:
+                hash_fn_check: Callable[[Any], Any] = (
+                    serializable_invariant if callable(serializable_invariant) else repr
+                )
+                state_h = hash_fn_check(state)
+                if state_h not in serial_valid_states:
+                    result.property_holds = False
+                    result.counterexample = schedule
+                    result.unique_interleavings = len(seen_schedule_hashes)
+                    result.explanation = (
+                        f"Serializability violation in execution {result.num_explored}.\n"
+                        f"State {state_h!r} does not match any sequential ordering.\n"
+                        f"Valid sequential states: {serial_valid_states!r}"
+                    )
+                    return result
 
             if not invariant(state):
                 result.property_holds = False
