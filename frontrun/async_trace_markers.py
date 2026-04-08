@@ -116,6 +116,11 @@ class AsyncTraceExecutor:
             A trace function suitable for sys.settrace
         """
 
+        # Track which (filename, lineno) markers have already been triggered
+        # to prevent double-firing when an inline marker (code + comment on
+        # the same line) is followed by executable code without a marker.
+        _triggered_markers: set[tuple[str, int]] = set()
+
         def trace_function(frame: Any, event: str, arg: Any) -> Any:
             try:
                 # Only care about 'line' events
@@ -131,6 +136,7 @@ class AsyncTraceExecutor:
                 # Check current line (for inline markers like: x = 1  # frontrun: marker)
                 marker_name = self.marker_registry.get_marker(filename, lineno)
                 if marker_name:
+                    _triggered_markers.add((filename, lineno))
                     # Release execution lock while waiting (let other threads run).
                     # wait_for_turn reacquires it before returning.
                     self.coordinator._execution_lock.release()
@@ -140,10 +146,14 @@ class AsyncTraceExecutor:
                         raise self.coordinator.error
                     return trace_function
 
-                # Check previous line (for separate-line markers)
-                if lineno > 1:
+                # Check previous line (for separate-line markers like:
+                #   # frontrun: marker
+                #   x = 1
+                # Skip if the previous line was already triggered as an inline marker.)
+                if lineno > 1 and (filename, lineno - 1) not in _triggered_markers:
                     prev_marker = self.marker_registry.get_marker(filename, lineno - 1)
                     if prev_marker:
+                        _triggered_markers.add((filename, lineno - 1))
                         # Release execution lock while waiting (let other threads run).
                         # wait_for_turn reacquires it before returning.
                         self.coordinator._execution_lock.release()
