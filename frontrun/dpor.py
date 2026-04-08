@@ -3701,7 +3701,8 @@ def explore_dpor(
             # Check for deadlock before running the invariant — a deadlock
             # means the program never completed, so the invariant can never be
             # satisfied.  Report it as a property violation with a clear message.
-            if isinstance(scheduler._error, DeadlockError):
+            is_deadlock = isinstance(scheduler._error, DeadlockError)
+            if is_deadlock:
                 result.property_holds = False
                 with engine_lock:
                     schedule = execution.schedule_trace
@@ -3769,7 +3770,7 @@ def explore_dpor(
                 check_uncaptured_inserts()
 
             # --- error_on_any_race: treat unsynchronized races as failures ---
-            if error_on_any_race:
+            if error_on_any_race and not is_deadlock:
                 with engine_lock:
                     raw_races_check = engine.attribute_races()
                 if raw_races_check:
@@ -3792,14 +3793,12 @@ def explore_dpor(
                         return result
 
             # --- serializable_invariant: check against sequential baselines ---
-            _serializable_failed = False
-            if serial_valid_states is not None:
+            if serial_valid_states is not None and not is_deadlock:
                 hash_fn_check: Callable[[Any], Any] = (
                     serializable_invariant if callable(serializable_invariant) else repr
                 )
                 state_h = hash_fn_check(state)
                 if state_h not in serial_valid_states:
-                    _serializable_failed = True
                     result.property_holds = False
                     with engine_lock:
                         schedule = execution.schedule_trace
@@ -3818,7 +3817,7 @@ def explore_dpor(
                             _INSTR_CACHE.clear()
                         return result
 
-            if not invariant(state):
+            if not is_deadlock and not invariant(state):
                 result.property_holds = False
                 with engine_lock:
                     schedule = execution.schedule_trace
