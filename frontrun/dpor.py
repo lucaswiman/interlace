@@ -3921,10 +3921,10 @@ def explore_dpor(
         set_lock_timeout(prev_lock_timeout)
         if preload_dispatcher is not None:
             preload_dispatcher.stop()
+        _object_key_reverse_map = None
 
     # Generate HTML report if requested
     if report is not None and report_path is not None:
         generate_html_report(report, report_path)
-    _object_key_reverse_map = None
 
     return result
