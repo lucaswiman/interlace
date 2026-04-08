@@ -680,22 +680,7 @@ class TestAsyncpgExecutemanyDbObj:
 
     def test_executemany_passes_db_obj(self) -> None:
         """_patched_executemany should pass db_obj=self for correct database scoping."""
-        from unittest.mock import patch as mock_patch
-
-        captured_kwargs: list[dict[str, Any]] = []
-        original_report = _report_sql_access
-
-        def spy_report_sql_access(*args: Any, **kwargs: Any) -> Any:
-            captured_kwargs.append(kwargs)
-            return original_report(*args, **kwargs)
-
-        # Simulate the asyncpg patching by calling _report_sql_access
-        # directly with the same arguments _patched_executemany would use.
-        # We can't easily test the actual patched method without asyncpg
-        # installed, so we verify the source code pattern instead.
         import inspect
-
-        from frontrun._sql_cursor_async import _ASYNC_ORIGINAL_METHODS
 
         source = inspect.getsource(sql_cursor_async_mod)
         # Find the _patched_executemany function definition
@@ -703,9 +688,7 @@ class TestAsyncpgExecutemanyDbObj:
         assert idx != -1, "_patched_executemany not found in source"
         # Extract the function body (next ~15 lines)
         func_body = source[idx : idx + 600]
-        assert "db_obj=self" in func_body, (
-            "_patched_executemany should pass db_obj=self to _report_sql_access"
-        )
+        assert "db_obj=self" in func_body, "_patched_executemany should pass db_obj=self to _report_sql_access"
 
     def test_executemany_has_dpor_scheduling_point(self) -> None:
         """_patched_executemany should have a DPOR scheduling point."""

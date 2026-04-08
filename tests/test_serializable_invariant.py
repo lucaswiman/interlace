@@ -441,9 +441,7 @@ class TestSerializableInvariantDeadlockInteraction:
         )
         # Each execution number should appear at most once in failures
         exec_nums = [num for num, _ in result.failures]
-        assert len(exec_nums) == len(set(exec_nums)), (
-            f"Duplicate execution numbers in failures: {exec_nums}"
-        )
+        assert len(exec_nums) == len(set(exec_nums)), f"Duplicate execution numbers in failures: {exec_nums}"
 
 
 class TestErrorOnAnyRaceDeadlockInteraction:
@@ -471,6 +469,4 @@ class TestErrorOnAnyRaceDeadlockInteraction:
         assert not result.property_holds, "Deadlock should be detected"
         # Each execution number should appear at most once in failures
         exec_nums = [num for num, _ in result.failures]
-        assert len(exec_nums) == len(set(exec_nums)), (
-            f"Duplicate execution numbers in failures: {exec_nums}"
-        )
+        assert len(exec_nums) == len(set(exec_nums)), f"Duplicate execution numbers in failures: {exec_nums}"

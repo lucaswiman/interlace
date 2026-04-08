@@ -326,6 +326,4 @@ class TestTraceFilterCleanupOnException:
                 trace_packages=["my_package"],
                 reproduce_on_failure=0,
             )
-        assert get_active_trace_filter() == old_filter, (
-            "Trace filter leaked after exception in explore_dpor setup"
-        )
+        assert get_active_trace_filter() == old_filter, "Trace filter leaked after exception in explore_dpor setup"

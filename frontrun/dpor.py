@@ -3707,6 +3707,7 @@ def explore_dpor(
             # satisfied.  Report it as a property violation with a clear message.
             is_deadlock = isinstance(scheduler._error, DeadlockError)
             if is_deadlock:
+                assert isinstance(scheduler._error, DeadlockError)  # help pyright narrow
                 result.property_holds = False
                 with engine_lock:
                     schedule = execution.schedule_trace
