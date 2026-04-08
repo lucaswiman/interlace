@@ -3530,10 +3530,14 @@ def explore_dpor(
     # Compute serializable baseline if requested.
     serial_valid_states: set[Any] | None = None
     if serializable_invariant is not False:
-        from frontrun.common import compute_serializable_states
+        try:
+            from frontrun.common import compute_serializable_states
 
-        hash_fn: Callable[[T], Any] | None = serializable_invariant if callable(serializable_invariant) else None
-        serial_valid_states = compute_serializable_states(setup, threads, state_hash=hash_fn)
+            hash_fn: Callable[[T], Any] | None = serializable_invariant if callable(serializable_invariant) else None
+            serial_valid_states = compute_serializable_states(setup, threads, state_hash=hash_fn)
+        except BaseException:
+            _set_active_trace_filter(None)
+            raise
 
     num_threads = len(threads)
     engine = PyDporEngine(

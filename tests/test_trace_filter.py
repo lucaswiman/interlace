@@ -276,3 +276,56 @@ class TestCmdlineUserCode:
                 main.__file__ = saved_file  # type: ignore[attr-defined]
             else:
                 delattr(main, "__file__")
+
+
+# ---------------------------------------------------------------------------
+# Trace filter cleanup on exception
+# ---------------------------------------------------------------------------
+
+
+class TestTraceFilterCleanupOnException:
+    """Trace filter must be cleaned up even if setup code raises."""
+
+    def test_bytecode_explore_cleans_filter_on_setup_error(self) -> None:
+        """If serializable_invariant setup raises, trace filter is cleaned up."""
+        from frontrun.bytecode import explore_interleavings
+
+        def bad_setup():
+            raise RuntimeError("setup failed!")
+
+        old_filter = get_active_trace_filter()
+        with pytest.raises(RuntimeError, match="setup failed"):
+            explore_interleavings(
+                setup=bad_setup,
+                threads=[lambda s: None],
+                invariant=lambda s: True,
+                serializable_invariant=True,
+                trace_packages=["my_package"],
+                max_attempts=1,
+                reproduce_on_failure=0,
+            )
+        # The trace filter must be restored, not leaked
+        assert get_active_trace_filter() == old_filter, (
+            "Trace filter leaked after exception in explore_interleavings setup"
+        )
+
+    def test_dpor_explore_cleans_filter_on_setup_error(self) -> None:
+        """If serializable_invariant setup raises, trace filter is cleaned up."""
+        from frontrun.dpor import explore_dpor
+
+        def bad_setup():
+            raise RuntimeError("setup failed!")
+
+        old_filter = get_active_trace_filter()
+        with pytest.raises(RuntimeError, match="setup failed"):
+            explore_dpor(
+                setup=bad_setup,
+                threads=[lambda s: None],
+                invariant=lambda s: True,
+                serializable_invariant=True,
+                trace_packages=["my_package"],
+                reproduce_on_failure=0,
+            )
+        assert get_active_trace_filter() == old_filter, (
+            "Trace filter leaked after exception in explore_dpor setup"
+        )

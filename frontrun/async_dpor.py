@@ -1208,10 +1208,14 @@ async def explore_async_dpor(
     # Compute serializable baseline if requested.
     serial_valid_states: set[Any] | None = None
     if serializable_invariant is not False:
-        from frontrun.common import compute_serializable_states_async
+        try:
+            from frontrun.common import compute_serializable_states_async
 
-        hash_fn: Callable[[Any], Any] | None = serializable_invariant if callable(serializable_invariant) else None
-        serial_valid_states = await compute_serializable_states_async(setup, tasks, state_hash=hash_fn)
+            hash_fn: Callable[[Any], Any] | None = serializable_invariant if callable(serializable_invariant) else None
+            serial_valid_states = await compute_serializable_states_async(setup, tasks, state_hash=hash_fn)
+        except BaseException:
+            _set_active_trace_filter(None)
+            raise
 
     num_tasks = len(tasks)
     pb = None if preemption_bound is None else preemption_bound
