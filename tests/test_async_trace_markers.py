@@ -403,3 +403,52 @@ def test_run_uses_shared_timeout_deadline():
         f"run() appears to give each thread its own full timeout instead of "
         f"using a shared deadline (expected ~{timeout:.1f}s total)"
     )
+
+
+class TestInlineMarkerNoDoubleTrigger:
+    """Inline markers (code + comment on same line) must fire exactly once."""
+
+    def test_inline_marker_fires_once(self):
+        """An inline marker followed by a non-marker line must not double-trigger.
+
+        When an inline marker (code + comment) is followed by executable code
+        without a marker, the "check previous line" logic in the async trace
+        function can re-trigger the same marker. This causes a schedule stall
+        because the re-triggered marker name doesn't match the next expected step.
+        """
+
+        class State:
+            def __init__(self):
+                self.steps: list[str] = []
+
+        async def task_a(state: State):
+            state.steps.append("a1")  # frontrun: a_step1
+            state.steps.append("a_between")  # no marker — would re-trigger a_step1
+            state.steps.append("a2")  # frontrun: a_step2
+
+        async def task_b(state: State):
+            state.steps.append("b1")  # frontrun: b_step1
+
+        schedule = Schedule(
+            [
+                Step("task_a", "a_step1"),
+                Step("task_b", "b_step1"),
+                Step("task_a", "a_step2"),
+            ]
+        )
+
+        state = State()
+        executor = AsyncTraceExecutor(schedule, deadlock_timeout=3.0)
+        executor.run(
+            {"task_a": lambda: task_a(state), "task_b": lambda: task_b(state)},
+            timeout=5.0,
+        )
+
+        # If the previous-line check double-triggers, the coordinator stalls
+        # for deadlock_timeout seconds. Verify it completed quickly.
+        assert "a1" in state.steps and "b1" in state.steps and "a2" in state.steps, (
+            f"All markers should fire without stall, got steps: {state.steps}"
+        )
+        assert executor.coordinator.error is None, (
+            f"Coordinator should not have errors (double-trigger causes stall): {executor.coordinator.error}"
+        )
