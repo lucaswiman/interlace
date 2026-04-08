@@ -626,8 +626,17 @@ fn sockaddr_to_resource(addr: *const sockaddr, addrlen: socklen_t) -> Option<Str
                 port
             ))
         } else if family == AF_UNIX {
+            let sun_path_offset = std::mem::offset_of!(libc::sockaddr_un, sun_path);
+            if (addrlen as usize) < sun_path_offset {
+                return None;
+            }
             let sun = &*(addr as *const libc::sockaddr_un);
-            let path_bytes = &sun.sun_path;
+            // Only read as many path bytes as addrlen allows.
+            let max_path_len = (addrlen as usize) - sun_path_offset;
+            let path_bytes = std::slice::from_raw_parts(
+                sun.sun_path.as_ptr() as *const u8,
+                max_path_len.min(sun.sun_path.len()),
+            );
             let len = path_bytes
                 .iter()
                 .position(|&b| b == 0)
@@ -635,11 +644,8 @@ fn sockaddr_to_resource(addr: *const sockaddr, addrlen: socklen_t) -> Option<Str
             if len == 0 {
                 Some("socket:unix:abstract".to_string())
             } else {
-                let path = std::str::from_utf8(std::slice::from_raw_parts(
-                    path_bytes.as_ptr() as *const u8,
-                    len,
-                ))
-                .unwrap_or("unix:???");
+                let path =
+                    std::str::from_utf8(&path_bytes[..len]).unwrap_or("unix:???");
                 Some(format!("socket:unix:{}", path))
             }
         } else {
