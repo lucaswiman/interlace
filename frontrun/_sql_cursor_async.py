@@ -324,8 +324,12 @@ def _patch_asyncpg() -> None:
             _ASYNC_ORIGINAL_METHODS[key] = orig_em
 
             async def _patched_executemany(self: Any, command: Any, args: Any, **kwargs: Any) -> Any:
-                reported = _report_sql_access(command, None, is_executemany=True, paramstyle="dollar")
+                reported = _report_sql_access(command, None, db_obj=self, is_executemany=True, paramstyle="dollar")
                 _acquire_pending_row_locks()
+                if reported:
+                    _dpor_ctx = _get_dpor_context()
+                    if _dpor_ctx is not None:
+                        _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
                 try:
                     if reported:
                         with _suppress_endpoint_io():
