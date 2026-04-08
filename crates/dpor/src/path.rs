@@ -1513,6 +1513,7 @@ mod tests {
             thread_id: 2,
             race_object: Some(1),
             inline_skipped: false,
+            is_attribute_race: false,
         };
 
         path.process_deferred_races(&[race]);
