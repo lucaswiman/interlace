@@ -3790,6 +3790,25 @@ def explore_dpor(
                     if stop_on_first:
                         with _INSTR_CACHE_LOCK:
                             _INSTR_CACHE.clear()
+                        if report is not None and report_path is not None:
+                            if _collecting_report:
+                                with engine_lock:
+                                    schedule_trace_r = list(execution.schedule_trace)
+                                    raw_races_r = engine.pending_races()
+                                report.executions.append(
+                                    ExecutionRecord(
+                                        index=len(report.executions),
+                                        schedule_trace=schedule_trace_r,
+                                        switch_points=switch_points,
+                                        invariant_held=False,
+                                        was_deadlock=False,
+                                        race_info=_build_race_info(raw_races_r),
+                                        step_events=scheduler._step_event_collector or {},
+                                        lock_events=scheduler._lock_event_collector or [],
+                                        deadlock_at=scheduler._deadlock_at,
+                                    )
+                                )
+                            generate_html_report(report, report_path)
                         return result
 
             # --- serializable_invariant: check against sequential baselines ---
@@ -3815,6 +3834,25 @@ def explore_dpor(
                     if stop_on_first:
                         with _INSTR_CACHE_LOCK:
                             _INSTR_CACHE.clear()
+                        if report is not None and report_path is not None:
+                            if _collecting_report:
+                                with engine_lock:
+                                    schedule_trace_r = list(execution.schedule_trace)
+                                    raw_races_r = engine.pending_races()
+                                report.executions.append(
+                                    ExecutionRecord(
+                                        index=len(report.executions),
+                                        schedule_trace=schedule_trace_r,
+                                        switch_points=switch_points,
+                                        invariant_held=False,
+                                        was_deadlock=False,
+                                        race_info=_build_race_info(raw_races_r),
+                                        step_events=scheduler._step_event_collector or {},
+                                        lock_events=scheduler._lock_event_collector or [],
+                                        deadlock_at=scheduler._deadlock_at,
+                                    )
+                                )
+                            generate_html_report(report, report_path)
                         return result
 
             if not is_deadlock and not invariant(state):
