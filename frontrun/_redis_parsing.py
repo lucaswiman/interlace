@@ -197,6 +197,13 @@ def parse_redis_access(cmd_name: str, cmd_args: tuple[object, ...]) -> RedisAcce
     """
     upper = cmd_name.upper()
 
+    # Normalize compound command names from redis-py 4.2+ (e.g.
+    # "XGROUP CREATE") by splitting the subcommand back into cmd_args.
+    if " " in upper:
+        parts = upper.split(" ", 1)
+        upper = parts[0]
+        cmd_args = (parts[1],) + cmd_args
+
     # --- Transaction control (no keys) ---
     if upper in _TX_CONTROL_CMDS:
         return RedisAccessResult(read_keys=[], write_keys=[], is_transaction_control=True)

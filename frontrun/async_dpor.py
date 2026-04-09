@@ -1053,7 +1053,8 @@ class _ReplayAsyncScheduler(InterleavedLoop):
     def __init__(self, schedule: list[int], num_tasks: int, *, deadlock_timeout: float = 5.0) -> None:
         super().__init__(deadlock_timeout=deadlock_timeout)
         self._replay_schedule = list(schedule)
-        self._replay_index = 0
+        # Start at index 1 because schedule[0] is consumed as the initial _current_task.
+        self._replay_index = 1 if schedule else 0
         self._replay_max_ops = len(self._replay_schedule) * 10 + 10_000
         self._current_task: int | None = schedule[0] if schedule else None
         self._num_replay_tasks = num_tasks
@@ -1089,6 +1090,25 @@ class _ReplayAsyncScheduler(InterleavedLoop):
     def finish_task(self, task_id: int) -> None:
         self._tasks_done.add(task_id)
 
+    async def _mark_done(self, task_id: Any) -> None:
+        """Mark a task as finished and update _current_task if needed."""
+        async with self._condition:
+            self._tasks_done.add(task_id)
+            if self._current_task == task_id:
+                # Advance to the next scheduled task so other tasks can proceed.
+                while True:
+                    if self._replay_index >= len(self._replay_schedule):
+                        if not self._extend_schedule():
+                            self._current_task = None
+                            self._finished = True
+                            break
+                    scheduled = self._replay_schedule[self._replay_index]
+                    self._replay_index += 1
+                    if scheduled not in self._tasks_done:
+                        self._current_task = scheduled
+                        break
+            self._condition.notify_all()
+
 
 async def _reproduce_async_counterexample(
     schedule_list: list[int],
@@ -1105,10 +1125,17 @@ async def _reproduce_async_counterexample(
     for _ in range(reproduce_on_failure):
         scheduler = _ReplayAsyncScheduler(schedule_list, num_tasks, deadlock_timeout=deadlock_timeout)
         state = setup()
-        task_funcs: dict[int, Callable[..., Coroutine[Any, Any, None]]] = {
-            i: (lambda s=state, t=t: t(s))  # type: ignore[assignment]
-            for i, t in enumerate(tasks)
-        }
+        # Wrap tasks with _AutoPauseCoroutine so every await becomes a
+        # scheduling point that the replay scheduler can control.
+        task_funcs: dict[int, Callable[..., Coroutine[Any, Any, None]]] = {}
+        for i, t in enumerate(tasks):
+
+            async def _wrapped(s: Any = state, fn: Any = t, tid: int = i) -> None:
+                _auto_pause_active.set(True)
+                await _AutoPauseCoroutine(fn(s), tid, scheduler)  # type: ignore[arg-type]
+
+            task_funcs[i] = _wrapped
+
         deadlocked = False
         try:
             await scheduler.run_all(task_funcs, timeout=timeout_per_run)  # type: ignore[arg-type]

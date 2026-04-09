@@ -909,8 +909,12 @@ class CooperativeCondition:
         # bookkeeping in wait().
         #
         # Advance _served by exactly n (or fewer if there aren't enough
-        # waiters).  Only waiters whose ticket < _served will wake.
-        actual = min(n, self._waiters)
+        # un-served tickets).  Only waiters whose ticket < _served will wake.
+        # Use _next_ticket - _served (un-served tickets) instead of _waiters,
+        # because _waiters includes already-notified waiters that haven't yet
+        # re-acquired the lock to decrement _waiters.
+        unserved = self._next_ticket - self._served
+        actual = min(n, unserved)
         self._served += actual
         self._notify_count += actual
         # Also wake the real condition for threads in the non-cooperative
@@ -921,10 +925,10 @@ class CooperativeCondition:
     def notify_all(self) -> None:
         # Enforce the Condition invariant: caller must hold self._lock.
         self._check_owned()
-        actual = self._waiters
-        if actual > 0:
-            self._served += actual
-            self._notify_count += actual
+        unserved = self._next_ticket - self._served
+        if unserved > 0:
+            self._served += unserved
+            self._notify_count += unserved
         with self._real_cond:
             self._real_cond.notify_all()
 

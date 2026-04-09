@@ -11,7 +11,6 @@ Covers:
 from __future__ import annotations
 
 from frontrun._trace_format import (
-    CollapsedRun,
     SourceLineEvent,
     TraceEvent,
     TraceRecorder,
@@ -19,7 +18,6 @@ from frontrun._trace_format import (
     _merge_consecutive,
     build_call_chain,
     classify_conflict,
-    condense_trace,
     deduplicate_to_source_lines,
     filter_to_shared_accesses,
     format_trace,

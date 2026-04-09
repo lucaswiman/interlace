@@ -511,8 +511,9 @@ class TestDjangoPlaceholders:
         assert "t" in result.read_tables
 
     def test_escaped_percent_not_treated_as_placeholder(self):
-        """%%s in SQL (escaped percent) must not be converted to a placeholder."""
-        sql = "SELECT %%s FROM users"
+        """%%s in SQL (escaped percent) must not corrupt the SQL before parsing."""
+        # Real-world case: LIKE '%%smith' contains %%s which must not become ?
+        sql = "SELECT * FROM users WHERE name LIKE '%%smith' AND id = %s"
         result = parse_sql_access(sql)
         assert "users" in result.read_tables
 
@@ -550,8 +551,6 @@ class TestLockTableMultiTable:
 class TestInsertTableRegex:
     def test_schema_qualified_insert(self):
         """INSERT INTO schema.table should capture the table, not the schema."""
-        import re
-
         from frontrun._sql_cursor import _RE_INSERT_TABLE
 
         m = _RE_INSERT_TABLE.match("INSERT INTO public.users (name) VALUES ('alice')")
