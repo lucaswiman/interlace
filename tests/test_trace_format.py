@@ -878,3 +878,52 @@ class TestDporIntegration:
         assert result.explanation is None
         assert result.reproduction_attempts == 0
         assert result.reproduction_successes == 0
+
+
+class TestCollapsedRunThreadNames:
+    """CollapsedRun should use custom thread_names, not hardcoded 'Thread N'."""
+
+    def _make_many_events(self, thread_id: int, count: int) -> list[SourceLineEvent]:
+        """Create a long run of events from one thread to trigger collapse."""
+        return [
+            SourceLineEvent(
+                thread_id=thread_id,
+                filename="counter.py",
+                lineno=i + 1,
+                function_name="increment",
+                source_line=f"line {i}",
+                access_type="read",
+                obj_type_name="Counter",
+                attr_name="value",
+            )
+            for i in range(count)
+        ]
+
+    def test_collapsed_run_uses_thread_names(self) -> None:
+        """When events are collapsed, the summary should use thread_names, not 'Thread N'."""
+        # Build a trace with enough events from thread 0 to force collapse,
+        # plus a single event from thread 1 to create a shared access.
+        events_t0 = self._make_many_events(0, 40)
+        events_t1 = [
+            SourceLineEvent(
+                thread_id=1,
+                filename="counter.py",
+                lineno=1,
+                function_name="increment",
+                source_line="line 0",
+                access_type="write",
+                obj_type_name="Counter",
+                attr_name="value",
+            )
+        ]
+        all_events = events_t0 + events_t1
+
+        output = format_trace(
+            all_events,
+            num_threads=2,
+            thread_names=["Alice", "Bob"],
+            max_lines=5,
+        )
+        # The collapsed run should say "Alice" not "Thread 0"
+        assert "Thread 0" not in output, f"CollapsedRun used 'Thread 0' instead of 'Alice':\n{output}"
+        assert "Alice" in output

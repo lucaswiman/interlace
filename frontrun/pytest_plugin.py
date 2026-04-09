@@ -72,6 +72,9 @@ def _should_patch(config: pytest.Config) -> bool:
     return is_active()
 
 
+_PATCHED_ATTR = "_frontrun_patched"
+
+
 def pytest_configure(config: pytest.Config) -> None:
     # Set up report path if requested
     report_path = config.getoption("--frontrun-report", default=None)
@@ -94,6 +97,10 @@ def pytest_configure(config: pytest.Config) -> None:
     from frontrun._cooperative import patch_locks
 
     patch_locks()
+    # Record that we patched, so pytest_unconfigure can unpatch even if
+    # the environment changes during the test session (e.g. a test clears
+    # FRONTRUN_ACTIVE).
+    config._frontrun_patched = True  # type: ignore[attr-defined]
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
@@ -102,7 +109,7 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
     frontrun._report._global_report_path = None
 
-    if not _should_patch(config):
+    if not getattr(config, "_frontrun_patched", False):
         return
 
     from frontrun._cooperative import unpatch_locks

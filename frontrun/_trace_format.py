@@ -649,7 +649,10 @@ def format_trace(
     for item in condensed:
         if isinstance(item, CollapsedRun):
             if item.thread_id >= 0:
-                parts.append(f"  {'':>{max_thread_label}} | ... {item.count} more lines from Thread {item.thread_id}")
+                thread_label = (
+                    thread_names[item.thread_id] if item.thread_id < len(thread_names) else f"Thread {item.thread_id}"
+                )
+                parts.append(f"  {'':>{max_thread_label}} | ... {item.count} more lines from {thread_label}")
             else:
                 parts.append(f"  {'':>{max_thread_label}} | ... {item.count} more lines omitted")
             continue

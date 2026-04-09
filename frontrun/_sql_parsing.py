@@ -166,12 +166,12 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
             if parts:
                 return SqlAccessResult(set(), set(), None, Release(parts[0]), None)
 
-        # LOCK TABLE <table> [IN <mode> MODE] — sqlglot ERROR for all dialects
+        # LOCK TABLE <table>[, <table>...] [IN <mode> MODE] — sqlglot ERROR for all dialects
         if upper.startswith("LOCK TABLE "):
             rest = stripped[11:].strip()
             in_idx = rest.upper().find(" IN ")
             tbl_raw = rest[:in_idx].strip() if in_idx > 0 else rest.strip()
-            tbl = _strip_quotes(tbl_raw)
+            tables = {_strip_quotes(t.strip()) for t in tbl_raw.split(",")}
             table_lock_intent: LockIntent = LockIntent.UPDATE
             if in_idx > 0:
                 mode_part = rest[in_idx + 4 :].upper()
@@ -179,7 +179,7 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
                 mode = mode_part[:mode_end] if mode_end > 0 else mode_part
                 if "SHARE" in mode and "EXCLUSIVE" not in mode:
                     table_lock_intent = LockIntent.SHARE
-            return SqlAccessResult(set(), {tbl}, table_lock_intent, None, None)
+            return SqlAccessResult(set(), tables, table_lock_intent, None, None)
 
         # DEALLOCATE [PREPARE] <name> | DEALLOCATE ALL — sqlglot misparses
         if upper.startswith("DEALLOCATE "):
@@ -203,7 +203,9 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
     # Pre-process pyformat parameter placeholders (%s, %(name)s) which
     # sqlglot default dialect chokes on (misinterprets % as modulo).
     if "%" in sql:
-        sql = re.sub(r"%(?:\(\w+\))?s", "?", sql)
+        sql = re.sub(r"(?<!%)%(?:\(\w+\))?s", "?", sql)
+        # Unescape %% → % (pyformat/format uses %% for a literal percent)
+        sql = sql.replace("%%", "%")
 
     try:
         expressions = sqlglot.parse(sql)

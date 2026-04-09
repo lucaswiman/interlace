@@ -84,11 +84,11 @@ class TestCooperativeConditionNotificationLoss:
             cond.notify()
         assert cond._served == before + 1, "notify should advance served by 1"
 
-        # notify_all should serve all remaining waiters (capped at _waiters)
-        before = cond._served
+        # notify_all should serve all remaining un-served tickets (not all _waiters,
+        # since some may already have been served by the previous notify(1)).
         with cond:
             cond.notify_all()
-        assert cond._served >= before + 3, "notify_all should advance served by at least waiters count"
+        assert cond._served == cond._next_ticket, "notify_all should serve all remaining tickets"
 
     def test_notify_without_lock_raises(self):
         """Calling notify() without holding the lock should raise RuntimeError."""

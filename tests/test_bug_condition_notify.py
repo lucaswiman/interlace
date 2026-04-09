@@ -171,3 +171,63 @@ def test_condition_sequential_notify_accumulates():
     woken = sum(1 for t in waiter_tickets if t < served)
 
     assert woken == 2, f"Two notify(1) calls should wake 2 waiters, but {woken} would wake."
+
+
+def test_notify_does_not_over_advance_served_past_next_ticket():
+    """Bug: notify() uses _waiters (includes already-notified waiters still
+    in wait()) instead of the true un-notified count (_next_ticket - _served).
+
+    When notify() is called multiple times before notified waiters can
+    re-acquire the lock and decrement _waiters, _served can advance past
+    _next_ticket, causing future wait() calls to return immediately without
+    any corresponding notify() — a spurious wakeup.
+
+    Scenario:
+      - 3 waiters with tickets 0, 1, 2
+      - notify(2): should advance _served to 2 (tickets 0,1 served) ✓
+      - notify(2): only 1 un-served ticket remains (ticket 2), so _served
+        should advance to 3 at most, NOT to 4.
+    """
+    lock = CooperativeLock()
+    cond = CooperativeCondition(lock)
+
+    lock.acquire()
+
+    cond._waiters = 3
+    cond._next_ticket = 3
+
+    cond.notify(2)  # serve tickets 0, 1 → _served should be 2
+    assert cond._served == 2
+
+    cond.notify(2)  # only ticket 2 remains un-served → _served should be 3
+    assert cond._served <= cond._next_ticket, (
+        f"notify() over-advanced _served ({cond._served}) past _next_ticket ({cond._next_ticket}). "
+        f"Future waiters will get spurious wakeups."
+    )
+
+    lock.release()
+
+
+def test_notify_all_does_not_over_advance_served():
+    """notify_all() after some tickets already served should not over-advance."""
+    lock = CooperativeLock()
+    cond = CooperativeCondition(lock)
+
+    lock.acquire()
+
+    cond._waiters = 3
+    cond._next_ticket = 3
+
+    cond.notify(1)  # serve ticket 0 → _served = 1
+    assert cond._served == 1
+
+    # _waiters is still 3 (notified waiter hasn't re-acquired lock).
+    # notify_all() should serve remaining 2 tickets, not all 3 again.
+    cond.notify_all()
+
+    assert cond._served <= cond._next_ticket, (
+        f"notify_all() over-advanced _served ({cond._served}) past _next_ticket ({cond._next_ticket}). "
+        f"Future waiters will get spurious wakeups."
+    )
+
+    lock.release()
