@@ -175,3 +175,56 @@ class TestIsFrontrunInternalLive:
         import frontrun._cooperative as mod
 
         assert _is_frontrun_internal(mod.__dict__) is True
+
+
+class TestPytestUnconfigureTracksPatching:
+    """pytest_unconfigure should unpatch based on whether configure actually patched,
+    not by re-evaluating _should_patch() which may give a different answer."""
+
+    def test_env_var_change_does_not_prevent_unpatch(self):
+        """If FRONTRUN_ACTIVE is cleared during a test session,
+        pytest_unconfigure should still unpatch if pytest_configure patched."""
+        import os
+
+        import frontrun._cooperative as _coop
+        from frontrun.pytest_plugin import pytest_configure, pytest_unconfigure
+
+        class FakeConfig:
+            """Minimal pytest.Config stub for testing."""
+
+            _options: dict[str, object] = {}
+
+            def getoption(self, name: str, default: object = None) -> object:
+                return self._options.get(name, default)
+
+        config = FakeConfig()
+
+        # Simulate: FRONTRUN_ACTIVE=1 at configure time
+        old_env = os.environ.get("FRONTRUN_ACTIVE")
+        os.environ["FRONTRUN_ACTIVE"] = "1"
+        count_before = _coop._patch_count
+        try:
+            pytest_configure(config)  # type: ignore[arg-type]
+            count_after_configure = _coop._patch_count
+
+            # Simulate: test clears the env var
+            del os.environ["FRONTRUN_ACTIVE"]
+
+            # Bug: _should_patch re-evaluates is_active(), which returns False
+            # because FRONTRUN_ACTIVE is gone, so unpatch is skipped.
+            pytest_unconfigure(config)  # type: ignore[arg-type]
+            count_after_unconfigure = _coop._patch_count
+
+            assert count_after_unconfigure == count_before, (
+                f"pytest_unconfigure failed to unpatch: count went from {count_before} → "
+                f"{count_after_configure} (configure) → {count_after_unconfigure} (unconfigure). "
+                f"Expected it to return to {count_before}."
+            )
+        finally:
+            if old_env is not None:
+                os.environ["FRONTRUN_ACTIVE"] = old_env
+            elif "FRONTRUN_ACTIVE" not in os.environ:
+                pass
+            # Ensure we're back to a sane state
+            while _coop._patch_count > count_before:
+                unpatch_locks()

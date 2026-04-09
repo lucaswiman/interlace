@@ -656,3 +656,69 @@ class TestCommandCoverage:
                 f"Command {cmd_name} with args {actual_args[:5]}... returned no keys — "
                 f"likely hitting the fallback. Add explicit handling."
             )
+
+
+class TestCompoundSubcommandKeyExtraction:
+    """redis-py 4.2+ sends subcommands as compound names like 'XGROUP CREATE'.
+
+    When cmd_name contains a space, the subcommand word is NOT in cmd_args,
+    so key-spec indices must be adjusted.
+    """
+
+    def test_xgroup_create_compound(self):
+        result = parse_redis_access("XGROUP CREATE", ("mystream", "grp", "0"))
+        assert "mystream" in result.write_keys
+
+    def test_xgroup_destroy_compound(self):
+        result = parse_redis_access("XGROUP DESTROY", ("mystream", "grp"))
+        assert "mystream" in result.write_keys
+
+    def test_xinfo_groups_compound(self):
+        result = parse_redis_access("XINFO GROUPS", ("mystream",))
+        assert "mystream" in result.read_keys
+
+    def test_xinfo_stream_compound(self):
+        result = parse_redis_access("XINFO STREAM", ("mystream",))
+        assert "mystream" in result.read_keys
+
+    def test_memory_usage_compound(self):
+        result = parse_redis_access("MEMORY USAGE", ("mykey",))
+        assert "mykey" in result.read_keys
+
+    def test_xgroup_setid_compound(self):
+        result = parse_redis_access("XGROUP SETID", ("mystream", "grp", "0"))
+        assert "mystream" in result.write_keys
+
+
+class TestCompoundNoKeyCmds:
+    """Compound command names for server/admin commands should not produce false keys."""
+
+    def test_client_setname_no_keys(self):
+        result = parse_redis_access("CLIENT SETNAME", ("myname",))
+        assert result.read_keys == []
+        assert result.write_keys == []
+
+    def test_config_get_no_keys(self):
+        result = parse_redis_access("CONFIG GET", ("maxmemory",))
+        assert result.read_keys == []
+        assert result.write_keys == []
+
+    def test_slowlog_get_no_keys(self):
+        result = parse_redis_access("SLOWLOG GET", ("10",))
+        assert result.read_keys == []
+        assert result.write_keys == []
+
+    def test_acl_getuser_no_keys(self):
+        result = parse_redis_access("ACL GETUSER", ("admin",))
+        assert result.read_keys == []
+        assert result.write_keys == []
+
+    def test_cluster_info_no_keys(self):
+        result = parse_redis_access("CLUSTER INFO", ())
+        assert result.read_keys == []
+        assert result.write_keys == []
+
+    def test_script_exists_no_keys(self):
+        result = parse_redis_access("SCRIPT EXISTS", ("abc123",))
+        assert result.read_keys == []
+        assert result.write_keys == []

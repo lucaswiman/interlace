@@ -509,3 +509,83 @@ class TestDjangoPlaceholders:
         sql = "SELECT * FROM t WHERE id = %(id)s"
         result = parse_sql_access(sql)
         assert "t" in result.read_tables
+
+    def test_escaped_percent_not_treated_as_placeholder(self):
+        """%%s in SQL (escaped percent) must not be converted to a placeholder."""
+        sql = "SELECT %%s FROM users"
+        result = parse_sql_access(sql)
+        assert "users" in result.read_tables
+
+    def test_escaped_percent_with_real_placeholder(self):
+        """Mix of real %s placeholder and %%s escaped percent."""
+        sql = "SELECT * FROM t WHERE x = %s AND y LIKE '%%something'"
+        result = parse_sql_access(sql)
+        assert "t" in result.read_tables
+
+    def test_escaped_named_percent_not_treated_as_placeholder(self):
+        """%%(name)s must not be converted to a placeholder."""
+        sql = "SELECT * FROM t WHERE x = '%%(id)s'"
+        result = parse_sql_access(sql)
+        assert "t" in result.read_tables
+
+
+class TestLockTableMultiTable:
+    def test_lock_multiple_tables(self):
+        """LOCK TABLE t1, t2 IN ... MODE should report both tables."""
+        result = parse_sql_access("LOCK TABLE users, orders IN EXCLUSIVE MODE")
+        assert result.write_tables == {"users", "orders"}
+
+    def test_lock_multiple_tables_no_mode(self):
+        """LOCK TABLE t1, t2 (no mode clause) should report both tables."""
+        result = parse_sql_access("LOCK TABLE users, orders")
+        assert result.write_tables == {"users", "orders"}
+
+    def test_lock_multiple_tables_share_mode(self):
+        """LOCK TABLE ... IN SHARE MODE should use SHARE intent for all tables."""
+        result = parse_sql_access("LOCK TABLE users, orders IN SHARE MODE")
+        assert result.write_tables == {"users", "orders"}
+        assert result.lock_intent == LockIntent.SHARE
+
+
+class TestInsertTableRegex:
+    def test_schema_qualified_insert(self):
+        """INSERT INTO schema.table should capture the table, not the schema."""
+        import re
+
+        from frontrun._sql_cursor import _RE_INSERT_TABLE
+
+        m = _RE_INSERT_TABLE.match("INSERT INTO public.users (name) VALUES ('alice')")
+        assert m is not None
+        assert m.group(1) == "users"
+
+    def test_insert_or_replace(self):
+        """INSERT OR REPLACE INTO table should match."""
+        from frontrun._sql_cursor import _RE_INSERT_TABLE
+
+        m = _RE_INSERT_TABLE.match("INSERT OR REPLACE INTO users (id, name) VALUES (1, 'alice')")
+        assert m is not None
+        assert m.group(1) == "users"
+
+    def test_insert_or_ignore(self):
+        """INSERT OR IGNORE INTO table should match."""
+        from frontrun._sql_cursor import _RE_INSERT_TABLE
+
+        m = _RE_INSERT_TABLE.match("INSERT OR IGNORE INTO users (id, name) VALUES (1, 'alice')")
+        assert m is not None
+        assert m.group(1) == "users"
+
+    def test_insert_ignore_mysql(self):
+        """INSERT IGNORE INTO table should match (MySQL)."""
+        from frontrun._sql_cursor import _RE_INSERT_TABLE
+
+        m = _RE_INSERT_TABLE.match("INSERT IGNORE INTO users (name) VALUES ('alice')")
+        assert m is not None
+        assert m.group(1) == "users"
+
+    def test_basic_insert_still_works(self):
+        """Ensure basic INSERT INTO still works after regex change."""
+        from frontrun._sql_cursor import _RE_INSERT_TABLE
+
+        m = _RE_INSERT_TABLE.match("INSERT INTO users (name) VALUES ('alice')")
+        assert m is not None
+        assert m.group(1) == "users"
