@@ -705,16 +705,15 @@ def explore_interleavings(
         raise ValueError("error_on_any_race requires DPOR (use explore_dpor instead)")
     if trace_packages is not None:
         _set_active_trace_filter(_TraceFilter(trace_packages))
-
-    # Compute serializable baseline if requested.
-    serial_valid_states: set[Any] | None = None
-    if serializable_invariant is not False:
-        from frontrun.common import compute_serializable_states
-
-        hash_fn: Callable[[T], Any] | None = serializable_invariant if callable(serializable_invariant) else None
-        serial_valid_states = compute_serializable_states(setup, threads, state_hash=hash_fn)
-
     try:
+        # Compute serializable baseline if requested.
+        serial_valid_states: set[Any] | None = None
+        if serializable_invariant is not False:
+            from frontrun.common import compute_serializable_states
+
+            hash_fn: Callable[[T], Any] | None = serializable_invariant if callable(serializable_invariant) else None
+            serial_valid_states = compute_serializable_states(setup, threads, state_hash=hash_fn)
+
         rng = random.Random(seed)
         num_threads = len(threads)
         result = InterleavingResult(property_holds=True, num_explored=0)

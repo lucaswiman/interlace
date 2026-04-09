@@ -3530,10 +3530,14 @@ def explore_dpor(
     # Compute serializable baseline if requested.
     serial_valid_states: set[Any] | None = None
     if serializable_invariant is not False:
-        from frontrun.common import compute_serializable_states
+        try:
+            from frontrun.common import compute_serializable_states
 
-        hash_fn: Callable[[T], Any] | None = serializable_invariant if callable(serializable_invariant) else None
-        serial_valid_states = compute_serializable_states(setup, threads, state_hash=hash_fn)
+            hash_fn: Callable[[T], Any] | None = serializable_invariant if callable(serializable_invariant) else None
+            serial_valid_states = compute_serializable_states(setup, threads, state_hash=hash_fn)
+        except BaseException:
+            _set_active_trace_filter(None)
+            raise
 
     num_threads = len(threads)
     engine = PyDporEngine(
@@ -3639,6 +3643,34 @@ def explore_dpor(
         )
         _object_key_reverse_map = {}
 
+    def _record_and_emit_report(*, was_deadlock: bool = False) -> None:
+        """Record the current execution to the report and write the HTML file."""
+        if report is None or report_path is None:
+            return
+        if not _collecting_report:
+            generate_html_report(report, report_path)
+            return
+        with engine_lock:
+            sched = list(execution.schedule_trace)
+            races = engine.pending_races()
+        report.executions.append(
+            ExecutionRecord(
+                index=len(report.executions),
+                schedule_trace=sched,
+                switch_points=switch_points,
+                invariant_held=False,
+                was_deadlock=was_deadlock,
+                race_info=_build_race_info(races),
+                step_events=scheduler._step_event_collector or {},
+                lock_events=scheduler._lock_event_collector or [],
+                deadlock_at=scheduler._deadlock_at,
+                deadlock_cycle_description=getattr(scheduler._error, "cycle_description", None)
+                if was_deadlock
+                else None,
+            )
+        )
+        generate_html_report(report, report_path)
+
     try:
         while True:
             if total_deadline is not None and time.monotonic() > total_deadline:
@@ -3701,7 +3733,9 @@ def explore_dpor(
             # Check for deadlock before running the invariant — a deadlock
             # means the program never completed, so the invariant can never be
             # satisfied.  Report it as a property violation with a clear message.
-            if isinstance(scheduler._error, DeadlockError):
+            _deadlock_err = scheduler._error if isinstance(scheduler._error, DeadlockError) else None
+            is_deadlock = _deadlock_err is not None
+            if _deadlock_err is not None:
                 result.property_holds = False
                 with engine_lock:
                     schedule = execution.schedule_trace
@@ -3712,7 +3746,7 @@ def explore_dpor(
                 if result.explanation is None:
                     result.explanation = (
                         f"Deadlock detected after {result.num_explored} interleaving(s).\n\n"
-                        f"{scheduler._error.cycle_description}"
+                        f"{_deadlock_err.cycle_description}"
                     )
 
                 # Replay the counterexample to measure reproducibility
@@ -3741,35 +3775,14 @@ def explore_dpor(
                 if stop_on_first:
                     with _INSTR_CACHE_LOCK:
                         _INSTR_CACHE.clear()
-                    if report is not None and report_path is not None:
-                        # Record the failing execution before generating report
-                        if _collecting_report:
-                            with engine_lock:
-                                schedule_trace_r = list(execution.schedule_trace)
-                                raw_races = engine.pending_races()
-                            race_info = _build_race_info(raw_races)
-                            report.executions.append(
-                                ExecutionRecord(
-                                    index=len(report.executions),
-                                    schedule_trace=schedule_trace_r,
-                                    switch_points=switch_points,
-                                    invariant_held=False,
-                                    was_deadlock=True,
-                                    race_info=race_info,
-                                    step_events=scheduler._step_event_collector or {},
-                                    lock_events=scheduler._lock_event_collector or [],
-                                    deadlock_at=scheduler._deadlock_at,
-                                    deadlock_cycle_description=getattr(scheduler._error, "cycle_description", None),
-                                )
-                            )
-                        generate_html_report(report, report_path)
+                    _record_and_emit_report(was_deadlock=True)
                     return result
 
             if warn_nondeterministic_sql:
                 check_uncaptured_inserts()
 
             # --- error_on_any_race: treat unsynchronized races as failures ---
-            if error_on_any_race:
+            if error_on_any_race and not is_deadlock:
                 with engine_lock:
                     raw_races_check = engine.attribute_races()
                 if raw_races_check:
@@ -3789,17 +3802,16 @@ def explore_dpor(
                     if stop_on_first:
                         with _INSTR_CACHE_LOCK:
                             _INSTR_CACHE.clear()
+                        _record_and_emit_report()
                         return result
 
             # --- serializable_invariant: check against sequential baselines ---
-            _serializable_failed = False
-            if serial_valid_states is not None:
+            if serial_valid_states is not None and not is_deadlock:
                 hash_fn_check: Callable[[Any], Any] = (
                     serializable_invariant if callable(serializable_invariant) else repr
                 )
                 state_h = hash_fn_check(state)
                 if state_h not in serial_valid_states:
-                    _serializable_failed = True
                     result.property_holds = False
                     with engine_lock:
                         schedule = execution.schedule_trace
@@ -3816,9 +3828,10 @@ def explore_dpor(
                     if stop_on_first:
                         with _INSTR_CACHE_LOCK:
                             _INSTR_CACHE.clear()
+                        _record_and_emit_report()
                         return result
 
-            if not invariant(state):
+            if not is_deadlock and not invariant(state):
                 result.property_holds = False
                 with engine_lock:
                     schedule = execution.schedule_trace
@@ -3862,29 +3875,9 @@ def explore_dpor(
                 if result.sql_anomaly is None:
                     result.sql_anomaly = classify_sql_anomaly(recorder.events)
                 if stop_on_first:
-                    # Clear cache before returning
                     with _INSTR_CACHE_LOCK:
                         _INSTR_CACHE.clear()
-                    if report is not None and report_path is not None:
-                        if _collecting_report:
-                            with engine_lock:
-                                schedule_trace_r2 = list(execution.schedule_trace)
-                                raw_races2 = engine.pending_races()
-                            race_info2 = _build_race_info(raw_races2)
-                            report.executions.append(
-                                ExecutionRecord(
-                                    index=len(report.executions),
-                                    schedule_trace=schedule_trace_r2,
-                                    switch_points=switch_points,
-                                    invariant_held=False,
-                                    was_deadlock=False,
-                                    race_info=race_info2,
-                                    step_events=scheduler._step_event_collector or {},
-                                    lock_events=scheduler._lock_event_collector or [],
-                                    deadlock_at=scheduler._deadlock_at,
-                                )
-                            )
-                        generate_html_report(report, report_path)
+                    _record_and_emit_report()
                     return result
 
             # Clear instruction cache between executions to avoid stale code ids
@@ -3928,10 +3921,10 @@ def explore_dpor(
         set_lock_timeout(prev_lock_timeout)
         if preload_dispatcher is not None:
             preload_dispatcher.stop()
+        _object_key_reverse_map = None
 
     # Generate HTML report if requested
     if report is not None and report_path is not None:
         generate_html_report(report, report_path)
-    _object_key_reverse_map = None
 
     return result

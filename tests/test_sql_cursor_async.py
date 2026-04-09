@@ -673,3 +673,31 @@ async def test_non_string_operation_passthrough() -> None:
     result = await _intercept_execute_async(fake_execute, None, 42)  # type: ignore[arg-type]
     assert result == "ok"
     assert len(log.events) == 0
+
+
+class TestAsyncpgExecutemanyDbObj:
+    """Verify asyncpg _patched_executemany passes db_obj to _report_sql_access."""
+
+    def test_executemany_passes_db_obj(self) -> None:
+        """_patched_executemany should pass db_obj=self for correct database scoping."""
+        import inspect
+
+        source = inspect.getsource(sql_cursor_async_mod)
+        # Find the _patched_executemany function definition
+        idx = source.find("async def _patched_executemany")
+        assert idx != -1, "_patched_executemany not found in source"
+        # Extract the function body (next ~15 lines)
+        func_body = source[idx : idx + 600]
+        assert "db_obj=self" in func_body, "_patched_executemany should pass db_obj=self to _report_sql_access"
+
+    def test_executemany_has_dpor_scheduling_point(self) -> None:
+        """_patched_executemany should have a DPOR scheduling point."""
+        import inspect
+
+        source = inspect.getsource(sql_cursor_async_mod)
+        idx = source.find("async def _patched_executemany")
+        assert idx != -1
+        func_body = source[idx : idx + 600]
+        assert "_get_dpor_context" in func_body, (
+            "_patched_executemany should call _get_dpor_context for DPOR scheduling"
+        )

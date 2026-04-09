@@ -116,6 +116,13 @@ class AsyncTraceExecutor:
             A trace function suitable for sys.settrace
         """
 
+        # Track the most recent line that triggered as a current-line marker.
+        # This prevents the "check previous line" logic from double-firing
+        # when an inline marker (code + comment) is followed by a non-marker
+        # line.  Using a single-value tracker (not a set) ensures markers in
+        # loops still fire on every iteration.
+        _last_current_line_marker: list[tuple[str, int] | None] = [None]
+
         def trace_function(frame: Any, event: str, arg: Any) -> Any:
             try:
                 # Only care about 'line' events
@@ -131,6 +138,7 @@ class AsyncTraceExecutor:
                 # Check current line (for inline markers like: x = 1  # frontrun: marker)
                 marker_name = self.marker_registry.get_marker(filename, lineno)
                 if marker_name:
+                    _last_current_line_marker[0] = (filename, lineno)
                     # Release execution lock while waiting (let other threads run).
                     # wait_for_turn reacquires it before returning.
                     self.coordinator._execution_lock.release()
@@ -140,8 +148,11 @@ class AsyncTraceExecutor:
                         raise self.coordinator.error
                     return trace_function
 
-                # Check previous line (for separate-line markers)
-                if lineno > 1:
+                # Check previous line (for separate-line markers like:
+                #   # frontrun: marker
+                #   x = 1
+                # Skip if the previous line was just triggered as an inline marker.)
+                if lineno > 1 and _last_current_line_marker[0] != (filename, lineno - 1):
                     prev_marker = self.marker_registry.get_marker(filename, lineno - 1)
                     if prev_marker:
                         # Release execution lock while waiting (let other threads run).

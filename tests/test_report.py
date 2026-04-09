@@ -228,3 +228,80 @@ def test_append_unique_lock_event_deduplicates_adjacent_duplicates():
     _append_unique_lock_event(events, distinct)
 
     assert events == [first, distinct]
+
+
+def test_report_generated_on_error_on_any_race_early_return():
+    """HTML report should be generated when error_on_any_race triggers stop_on_first."""
+    import frontrun._report
+
+    with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as f:
+        path = f.name
+
+    try:
+        frontrun._report._global_report_path = path
+
+        class Counter:
+            def __init__(self):
+                self.value = 0
+
+        def increment(c: Counter) -> None:
+            temp = c.value
+            c.value = temp + 1
+
+        result = explore_dpor(
+            setup=Counter,
+            threads=[increment, increment],
+            invariant=lambda c: True,  # invariant passes — race is the trigger
+            error_on_any_race=True,
+            preemption_bound=2,
+            reproduce_on_failure=0,
+        )
+        assert not result.property_holds
+        assert os.path.exists(path), "HTML report should be generated on error_on_any_race early return"
+        with open(path) as f:
+            html = f.read()
+        assert "dpor-report" in html
+    finally:
+        frontrun._report._global_report_path = None
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_report_generated_on_serializable_invariant_early_return():
+    """HTML report should be generated when serializable_invariant triggers stop_on_first."""
+    import frontrun._report
+
+    with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as f:
+        path = f.name
+
+    try:
+        frontrun._report._global_report_path = path
+
+        class Counter:
+            def __init__(self):
+                self.value = 0
+
+            def __repr__(self):
+                return f"Counter(value={self.value})"
+
+        def increment(c: Counter) -> None:
+            temp = c.value
+            c.value = temp + 1
+
+        result = explore_dpor(
+            setup=Counter,
+            threads=[increment, increment],
+            invariant=lambda c: True,
+            serializable_invariant=True,
+            preemption_bound=2,
+            reproduce_on_failure=0,
+        )
+        assert not result.property_holds
+        assert os.path.exists(path), "HTML report should be generated on serializable_invariant early return"
+        with open(path) as f:
+            html = f.read()
+        assert "dpor-report" in html
+    finally:
+        frontrun._report._global_report_path = None
+        if os.path.exists(path):
+            os.unlink(path)

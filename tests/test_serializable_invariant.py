@@ -374,3 +374,99 @@ class TestCombinedOptions:
             reproduce_on_failure=0,
         )
         assert not result.property_holds
+
+
+# ---------------------------------------------------------------------------
+# Tests: deadlock interaction (stop_on_first=False)
+# ---------------------------------------------------------------------------
+
+
+class _DeadlockState:
+    """Two locks with shared counter — lock-order inversion causes deadlock."""
+
+    def __init__(self):
+        self.lock_a = threading.Lock()
+        self.lock_b = threading.Lock()
+        self.value = 0
+
+    def __repr__(self):
+        return f"_DeadlockState(value={self.value})"
+
+
+def _deadlock_thread0(state: _DeadlockState) -> None:
+    with state.lock_a:
+        state.value += 1
+        with state.lock_b:
+            pass
+
+
+def _deadlock_thread1(state: _DeadlockState) -> None:
+    with state.lock_b:
+        state.value += 1
+        with state.lock_a:
+            pass
+
+
+class TestSerializableInvariantDeadlockInteraction:
+    """serializable_invariant must not fire on deadlocked executions.
+
+    When a deadlock occurs, threads don't run to completion, so the
+    state is partial/undefined.  Checking it against sequential baselines
+    produces false positives.  The async_dpor version correctly guards
+    with ``not is_deadlock``; the sync dpor.py must do the same.
+    """
+
+    def test_no_spurious_serializability_failure_on_deadlock(self):
+        """Deadlock + serializable_invariant should not add duplicate failures.
+
+        Each execution that deadlocks should appear exactly once in
+        result.failures (from the deadlock detection), not a second time
+        from the serializable_invariant check on partial state.
+        """
+        result = explore_dpor(
+            setup=_DeadlockState,
+            threads=[_deadlock_thread0, _deadlock_thread1],
+            invariant=lambda s: True,
+            serializable_invariant=True,
+            stop_on_first=False,
+            max_executions=50,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            reproduce_on_failure=0,
+        )
+        assert not result.property_holds, "Deadlock should be detected"
+        assert "deadlock" in (result.explanation or "").lower(), (
+            f"Explanation should mention deadlock, got: {result.explanation}"
+        )
+        # Each execution number should appear at most once in failures
+        exec_nums = [num for num, _ in result.failures]
+        assert len(exec_nums) == len(set(exec_nums)), f"Duplicate execution numbers in failures: {exec_nums}"
+
+
+class TestErrorOnAnyRaceDeadlockInteraction:
+    """error_on_any_race must not fire on deadlocked executions.
+
+    A deadlock is not a "race" — it's a distinct failure mode.  Checking
+    races on incomplete executions is misleading.  The async_dpor version
+    correctly guards with ``not is_deadlock``; sync dpor.py must match.
+    """
+
+    def test_no_spurious_race_detection_on_deadlock(self):
+        """Deadlock + error_on_any_race should not add duplicate failures."""
+        result = explore_dpor(
+            setup=_DeadlockState,
+            threads=[_deadlock_thread0, _deadlock_thread1],
+            invariant=lambda s: True,
+            error_on_any_race=True,
+            stop_on_first=False,
+            max_executions=50,
+            preemption_bound=2,
+            detect_io=False,
+            deadlock_timeout=2.0,
+            reproduce_on_failure=0,
+        )
+        assert not result.property_holds, "Deadlock should be detected"
+        # Each execution number should appear at most once in failures
+        exec_nums = [num for num, _ in result.failures]
+        assert len(exec_nums) == len(set(exec_nums)), f"Duplicate execution numbers in failures: {exec_nums}"
