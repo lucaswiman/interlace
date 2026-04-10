@@ -1236,10 +1236,11 @@ async def explore_async_dpor(
     serial_valid_states: set[Any] | None = None
     if serializable_invariant is not False:
         try:
-            from frontrun.common import compute_serializable_states_async
+            from frontrun.common import compute_serializable_states_async, resolve_serializable_hash_fn
 
-            hash_fn: Callable[[Any], Any] | None = serializable_invariant if callable(serializable_invariant) else None
-            serial_valid_states = await compute_serializable_states_async(setup, tasks, state_hash=hash_fn)
+            serial_valid_states = await compute_serializable_states_async(
+                setup, tasks, state_hash=resolve_serializable_hash_fn(serializable_invariant)
+            )
         except BaseException:
             _set_active_trace_filter(None)
             raise
@@ -1407,21 +1408,18 @@ async def explore_async_dpor(
 
             # --- serializable_invariant: check against sequential baselines ---
             if serial_valid_states is not None and not is_deadlock and task_error is None:
-                hash_fn_check: Callable[[Any], Any] = (
-                    serializable_invariant if callable(serializable_invariant) else repr
+                from frontrun.common import check_serializability_violation
+
+                ser_explanation = check_serializability_violation(
+                    state, serial_valid_states, serializable_invariant, result.num_explored
                 )
-                state_h = hash_fn_check(state)
-                if state_h not in serial_valid_states:
+                if ser_explanation is not None:
                     result.property_holds = False
                     schedule_list = list(execution.schedule_trace)
                     result.failures.append((result.num_explored, schedule_list))
                     if result.counterexample is None:
                         result.counterexample = schedule_list
-                        result.explanation = (
-                            f"Serializability violation in execution {result.num_explored}.\n"
-                            f"State {state_h!r} does not match any sequential ordering.\n"
-                            f"Valid sequential states: {serial_valid_states!r}"
-                        )
+                        result.explanation = ser_explanation
                     if stop_on_first:
                         return result
 

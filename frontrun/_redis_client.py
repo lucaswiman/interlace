@@ -91,15 +91,37 @@ def _get_redis_db_scope(client: Any) -> str | None:
 
 def _get_dpor_context() -> tuple[Any, int] | None:
     """Return (scheduler, thread_id) if DPOR is active, else ``None``."""
-    from frontrun._io_detection import get_dpor_scheduler, get_dpor_thread_id
+    from frontrun._io_detection import get_dpor_context
 
-    scheduler = get_dpor_scheduler()
-    if scheduler is None:
-        return None
-    thread_id = get_dpor_thread_id()
-    if thread_id is None:
-        return None
-    return scheduler, thread_id
+    return get_dpor_context()
+
+
+# ---------------------------------------------------------------------------
+# Pipeline command parsing
+# ---------------------------------------------------------------------------
+
+
+def _report_pipeline_commands(pipeline: Any, client: Any) -> bool:
+    """Parse a redis Pipeline's command_stack and report all queued accesses.
+
+    Returns ``True`` if any command was reported to the I/O layer.
+    """
+    command_stack = getattr(pipeline, "command_stack", [])
+    reported = False
+    for cmd in command_stack:
+        # redis-py Pipeline stores commands as PipelineCommand or tuples.
+        if hasattr(cmd, "args"):
+            cmd_args_full = cmd.args
+        elif isinstance(cmd, (list, tuple)):
+            cmd_args_full = cmd[0] if cmd and isinstance(cmd[0], (list, tuple)) else cmd
+        else:
+            continue
+        if cmd_args_full:
+            cmd_name = str(cmd_args_full[0])
+            cmd_cmd_args = tuple(cmd_args_full[1:])
+            if _report_redis_access(cmd_name, cmd_cmd_args, client=client):
+                reported = True
+    return reported
 
 
 # ---------------------------------------------------------------------------
@@ -206,22 +228,7 @@ def _intercept_pipeline_execute(
     **kwargs: Any,
 ) -> Any:
     """Intercept redis.Pipeline.execute to report all queued commands."""
-    # Pipeline command_stack contains the queued commands.
-    command_stack = getattr(self, "command_stack", [])
-    reported = False
-    for cmd in command_stack:
-        # redis-py Pipeline stores commands as PipelineCommand or tuples.
-        if hasattr(cmd, "args"):
-            cmd_args_full = cmd.args
-        elif isinstance(cmd, (list, tuple)):
-            cmd_args_full = cmd[0] if cmd and isinstance(cmd[0], (list, tuple)) else cmd
-        else:
-            continue
-        if cmd_args_full:
-            cmd_name = str(cmd_args_full[0])
-            cmd_cmd_args = tuple(cmd_args_full[1:])
-            if _report_redis_access(cmd_name, cmd_cmd_args, client=self):
-                reported = True
+    reported = _report_pipeline_commands(self, client=self)
 
     # In replay mode (defect #9 fix), force a scheduling point even
     # without IO reporting so the replay scheduler can enforce the

@@ -709,10 +709,11 @@ def explore_interleavings(
         # Compute serializable baseline if requested.
         serial_valid_states: set[Any] | None = None
         if serializable_invariant is not False:
-            from frontrun.common import compute_serializable_states
+            from frontrun.common import compute_serializable_states, resolve_serializable_hash_fn
 
-            hash_fn: Callable[[T], Any] | None = serializable_invariant if callable(serializable_invariant) else None
-            serial_valid_states = compute_serializable_states(setup, threads, state_hash=hash_fn)
+            serial_valid_states = compute_serializable_states(
+                setup, threads, state_hash=resolve_serializable_hash_fn(serializable_invariant)
+            )
 
         rng = random.Random(seed)
         num_threads = len(threads)
@@ -752,19 +753,16 @@ def explore_interleavings(
 
             # --- serializable_invariant check ---
             if serial_valid_states is not None:
-                hash_fn_check: Callable[[Any], Any] = (
-                    serializable_invariant if callable(serializable_invariant) else repr
+                from frontrun.common import check_serializability_violation
+
+                explanation = check_serializability_violation(
+                    state, serial_valid_states, serializable_invariant, result.num_explored
                 )
-                state_h = hash_fn_check(state)
-                if state_h not in serial_valid_states:
+                if explanation is not None:
                     result.property_holds = False
                     result.counterexample = schedule
                     result.unique_interleavings = len(seen_schedule_hashes)
-                    result.explanation = (
-                        f"Serializability violation in execution {result.num_explored}.\n"
-                        f"State {state_h!r} does not match any sequential ordering.\n"
-                        f"Valid sequential states: {serial_valid_states!r}"
-                    )
+                    result.explanation = explanation
                     return result
 
             if not invariant(state):

@@ -32,6 +32,42 @@ from frontrun._sql_cursor import (
 )
 
 # ---------------------------------------------------------------------------
+# Shared async DPOR scheduling + endpoint suppression
+# ---------------------------------------------------------------------------
+
+
+async def _dpor_schedule_and_suppress_async(
+    reported: bool,
+    execute: Any,
+) -> Any:
+    """DPOR scheduling point + endpoint I/O suppression for async SQL execution.
+
+    Shared core used by all async SQL interception paths:
+    acquires pending row locks, forces a DPOR scheduling point if *reported*,
+    suppresses endpoint-level I/O during the actual driver call, and releases
+    row locks on exception.
+
+    Args:
+        reported: Whether ``_report_sql_access`` recorded table accesses.
+        execute: A zero-argument async callable that performs the actual
+            driver method call.
+    """
+    _acquire_pending_row_locks()
+    if reported:
+        _dpor_ctx = _get_dpor_context()
+        if _dpor_ctx is not None:
+            _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
+    try:
+        if reported:
+            with _suppress_endpoint_io():
+                return await execute()
+        return await execute()
+    except Exception:
+        _release_dpor_row_locks()
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Async interception
 # ---------------------------------------------------------------------------
 
@@ -56,33 +92,12 @@ async def _intercept_execute_async(
         operation, parameters, db_obj=self, is_executemany=is_executemany, paramstyle=paramstyle
     )
 
-    # Block if another DPOR thread holds a conflicting row lock
-    _acquire_pending_row_locks()
+    async def _execute() -> Any:
+        if parameters is not None:
+            return await original_method(self, operation, parameters)
+        return await original_method(self, operation)
 
-    # Force a DPOR scheduling point so the engine can interleave between
-    # SQL operations.  Without this, all code inside frontrun/ is skipped
-    # by the tracer, so pending_io is never flushed between back-to-back
-    # SQL calls.
-    if reported:
-        _dpor_ctx = _get_dpor_context()
-        if _dpor_ctx is not None:
-            _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
-
-    try:
-        if reported:
-            with _suppress_endpoint_io():
-                if parameters is not None:
-                    result = await original_method(self, operation, parameters)
-                else:
-                    result = await original_method(self, operation)
-        else:
-            if parameters is not None:
-                result = await original_method(self, operation, parameters)
-            else:
-                result = await original_method(self, operation)
-    except Exception:
-        _release_dpor_row_locks()
-        raise
+    result = await _dpor_schedule_and_suppress_async(reported, _execute)
 
     # Post-INSERT: capture lastrowid and record indexical alias
     if insert_match is not None and not is_executemany and reported:
@@ -105,27 +120,7 @@ async def _intercept_asyncpg_execute(
     resolution for asyncpg's binary protocol parameters).
     """
     reported = _report_sql_access(operation, None, db_obj=self, is_executemany=False, paramstyle="dollar")
-
-    # Block if another DPOR thread holds a conflicting row lock
-    _acquire_pending_row_locks()
-
-    # Force a DPOR scheduling point so the engine can interleave between
-    # SQL operations.  Without this, all code inside frontrun/ is skipped
-    # by the tracer, so pending_io is never flushed between back-to-back
-    # SQL calls.
-    if reported:
-        _dpor_ctx = _get_dpor_context()
-        if _dpor_ctx is not None:
-            _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
-
-    try:
-        if reported:
-            with _suppress_endpoint_io():
-                return await original_method(self, operation, *args, **kwargs)
-        return await original_method(self, operation, *args, **kwargs)
-    except Exception:
-        _release_dpor_row_locks()
-        raise
+    return await _dpor_schedule_and_suppress_async(reported, lambda: original_method(self, operation, *args, **kwargs))
 
 
 # ---------------------------------------------------------------------------
@@ -206,19 +201,7 @@ def _patch_psycopg_async() -> None:
         def _make_patched(orig: Any, is_em: bool) -> Any:
             async def _patched(self: Any, query: Any, params: Any = None, /, **kwargs: Any) -> Any:
                 reported = _report_sql_access(query, params, db_obj=self, is_executemany=is_em, paramstyle="format")
-                _acquire_pending_row_locks()
-                if reported:
-                    _dpor_ctx = _get_dpor_context()
-                    if _dpor_ctx is not None:
-                        _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
-                try:
-                    if reported:
-                        with _suppress_endpoint_io():
-                            return await orig(self, query, params, **kwargs)
-                    return await orig(self, query, params, **kwargs)
-                except Exception:
-                    _release_dpor_row_locks()
-                    raise
+                return await _dpor_schedule_and_suppress_async(reported, lambda: orig(self, query, params, **kwargs))
 
             _patched.__name__ = orig.__name__
             _patched.__qualname__ = orig.__qualname__
@@ -258,19 +241,9 @@ def _patch_aiomysql() -> None:
         def _make_patched(orig: Any, is_em: bool) -> Any:
             async def _patched(self: Any, query: Any, args: Any = None, *extra: Any, **kwargs: Any) -> Any:
                 reported = _report_sql_access(query, args, db_obj=self, is_executemany=is_em, paramstyle="pyformat")
-                _acquire_pending_row_locks()
-                if reported:
-                    _dpor_ctx = _get_dpor_context()
-                    if _dpor_ctx is not None:
-                        _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
-                try:
-                    if reported:
-                        with _suppress_endpoint_io():
-                            return await orig(self, query, args, *extra, **kwargs)
-                    return await orig(self, query, args, *extra, **kwargs)
-                except Exception:
-                    _release_dpor_row_locks()
-                    raise
+                return await _dpor_schedule_and_suppress_async(
+                    reported, lambda: orig(self, query, args, *extra, **kwargs)
+                )
 
             _patched.__name__ = orig.__name__
             _patched.__qualname__ = orig.__qualname__
@@ -325,19 +298,7 @@ def _patch_asyncpg() -> None:
 
             async def _patched_executemany(self: Any, command: Any, args: Any, **kwargs: Any) -> Any:
                 reported = _report_sql_access(command, None, db_obj=self, is_executemany=True, paramstyle="dollar")
-                _acquire_pending_row_locks()
-                if reported:
-                    _dpor_ctx = _get_dpor_context()
-                    if _dpor_ctx is not None:
-                        _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
-                try:
-                    if reported:
-                        with _suppress_endpoint_io():
-                            return await orig_em(self, command, args, **kwargs)
-                    return await orig_em(self, command, args, **kwargs)
-                except Exception:
-                    _release_dpor_row_locks()
-                    raise
+                return await _dpor_schedule_and_suppress_async(reported, lambda: orig_em(self, command, args, **kwargs))
 
             _patched_executemany.__name__ = "executemany"
             _patched_executemany.__qualname__ = orig_em.__qualname__
