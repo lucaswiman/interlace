@@ -292,6 +292,47 @@ class TestNoSqlEvents:
         assert result is None
 
 
+class TestCrossGranularityNonRepeatableRead:
+    """Bug: _check_non_repeatable_read matches by exact resource_id, missing
+    cross-granularity conflicts where a row-level read is interleaved with
+    a table-level write on the same table.
+
+    Example: Thread 0 reads accounts:(('id','1'),) twice, with Thread 1
+    doing a table-level write to accounts in between. The resource strings
+    differ, so the non-repeatable read is missed.
+    """
+
+    def test_row_read_table_write_row_read(self) -> None:
+        """Row-level reads with a table-level write in between should be detected."""
+        events = [
+            _sql_event_row(0, 0, "accounts", "(('id','1'),)", "read"),
+            _sql_event(1, 1, "accounts", "write"),  # table-level write
+            _sql_event_row(2, 0, "accounts", "(('id','1'),)", "read"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None, (
+            "Cross-granularity non-repeatable read should be detected: "
+            "Thread 0 reads a row twice while Thread 1 writes to the same table"
+        )
+        assert result.kind == "non_repeatable_read"
+        assert "accounts" in result.tables
+
+    def test_table_read_row_write_table_read(self) -> None:
+        """Table-level reads with a row-level write in between should be detected."""
+        events = [
+            _sql_event(0, 0, "accounts", "read"),  # table-level read
+            _sql_event_row(1, 1, "accounts", "(('id','1'),)", "write"),  # row-level write
+            _sql_event(2, 0, "accounts", "read"),  # table-level read
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None, (
+            "Cross-granularity non-repeatable read should be detected: "
+            "Thread 0 reads a table twice while Thread 1 writes to a row"
+        )
+        assert result.kind == "non_repeatable_read"
+        assert "accounts" in result.tables
+
+
 class TestClassifyPhantomRead:
     def test_phantom_read_insert_between_reads(self) -> None:
         """Thread 0 reads different tables; thread 1 does write-only INSERT on orders.
