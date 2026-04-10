@@ -170,8 +170,7 @@ def test_different_seeds_explore_differently() -> None:
 
     # At least two seeds must produce a different total exploration count.
     assert len(set(counts)) > 1, (
-        f"All seeds produced the same num_explored={counts[0]}; "
-        "random strategy must vary traversal order across seeds"
+        f"All seeds produced the same num_explored={counts[0]}; random strategy must vary traversal order across seeds"
     )
 
 

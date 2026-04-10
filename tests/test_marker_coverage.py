@@ -7,9 +7,8 @@ FAIL until the feature is implemented.
 
 import pytest
 
-from frontrun.common import Schedule, Step
+from frontrun.common import Schedule
 from frontrun.trace_markers import all_marker_schedules
-
 
 # ---------------------------------------------------------------------------
 # Shared test fixtures / helpers

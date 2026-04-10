@@ -250,8 +250,7 @@ class TestHybridNumExplored:
         )
 
         assert result.num_explored >= expected_marker_schedules, (
-            f"Expected num_explored >= {expected_marker_schedules} "
-            f"(one per marker schedule), got {result.num_explored}"
+            f"Expected num_explored >= {expected_marker_schedules} (one per marker schedule), got {result.num_explored}"
         )
 
     def test_num_explored_scales_with_bytecode_attempts(self):
@@ -380,8 +379,7 @@ class TestBytecodeAttemptsParameter:
         # With bytecode_attempts=0, num_explored should equal the number of
         # distinct marker schedules (no extra bytecode runs).
         assert result.num_explored == num_markers, (
-            f"bytecode_attempts=0 should run exactly {num_markers} schedules, "
-            f"got {result.num_explored}"
+            f"bytecode_attempts=0 should run exactly {num_markers} schedules, got {result.num_explored}"
         )
 
     def test_higher_attempts_runs_more_explorations(self):
@@ -459,9 +457,7 @@ class TestHybridReturnType:
         )
 
         assert not result.property_holds
-        assert result.counterexample is not None, (
-            "counterexample should be set when property_holds=False"
-        )
+        assert result.counterexample is not None, "counterexample should be set when property_holds=False"
 
     @pytest.mark.intentionally_leaves_dangling_threads
     def test_counterexample_is_none_when_property_holds(self):
@@ -526,7 +522,11 @@ class TestHybridMoreThoroughThanMarkersAlone:
         marker schedule, so it explores strictly more schedules and has a
         higher chance of exercising subtle thread-scheduling-dependent races.
         """
-        from frontrun.trace_markers import all_marker_schedules, explore_hybrid_interleavings, explore_marker_interleavings
+        from frontrun.trace_markers import (
+            all_marker_schedules,
+            explore_hybrid_interleavings,
+            explore_marker_interleavings,
+        )
 
         marker_decl = {"t1": ["read", "write"], "t2": ["read", "write"]}
         pure_marker_count = len(all_marker_schedules(marker_decl))

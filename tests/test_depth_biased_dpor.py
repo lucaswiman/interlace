@@ -22,7 +22,6 @@ import pytest
 
 from frontrun.dpor import explore_dpor
 
-
 # ---------------------------------------------------------------------------
 # Scenario helpers (identical to test_search_strategies.py)
 # ---------------------------------------------------------------------------
@@ -211,8 +210,7 @@ def test_same_seed_is_deterministic() -> None:
     result_b = explore_dpor(**kwargs)  # type: ignore[arg-type]
 
     assert result_a.num_explored == result_b.num_explored, (
-        f"depth-biased:7 is non-deterministic: first run={result_a.num_explored}, "
-        f"second run={result_b.num_explored}"
+        f"depth-biased:7 is non-deterministic: first run={result_a.num_explored}, second run={result_b.num_explored}"
     )
     assert not result_a.property_holds
     assert not result_b.property_holds
@@ -388,8 +386,7 @@ def test_depth_biased_efficiency_vs_dfs_lost_update() -> None:
     depth_biased_count = depth_biased_result.num_explored
 
     assert depth_biased_count <= dfs_count * 2, (
-        f"depth-biased took {depth_biased_count} executions to find the bug, "
-        f"more than 2x DFS ({dfs_count})"
+        f"depth-biased took {depth_biased_count} executions to find the bug, more than 2x DFS ({dfs_count})"
     )
 
 
@@ -424,8 +421,7 @@ def test_depth_biased_efficiency_vs_dfs_bank_transfer() -> None:
     depth_biased_count = depth_biased_result.num_explored
 
     assert depth_biased_count <= dfs_count * 2, (
-        f"depth-biased took {depth_biased_count} executions to find the bug, "
-        f"more than 2x DFS ({dfs_count})"
+        f"depth-biased took {depth_biased_count} executions to find the bug, more than 2x DFS ({dfs_count})"
     )
 
 
@@ -460,8 +456,7 @@ def test_depth_biased_efficiency_vs_dfs_three_threads() -> None:
     depth_biased_count = depth_biased_result.num_explored
 
     assert depth_biased_count <= dfs_count * 2, (
-        f"depth-biased took {depth_biased_count} executions to find the bug, "
-        f"more than 2x DFS ({dfs_count})"
+        f"depth-biased took {depth_biased_count} executions to find the bug, more than 2x DFS ({dfs_count})"
     )
 
 

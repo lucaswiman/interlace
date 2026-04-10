@@ -833,7 +833,7 @@ def explore_hybrid_interleavings(
             thread_objs: list[threading.Thread] = []
             thread_exc: list[BaseException | None] = [None]
 
-            for _exec_name, (target_fn, _markers) in threads.items():
+            for target_fn, _markers in threads.values():
 
                 def _runner(
                     s: Any = state,
