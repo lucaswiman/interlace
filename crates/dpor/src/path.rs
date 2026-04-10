@@ -61,6 +61,25 @@ pub enum SearchStrategy {
     /// (i.e., those that reverse races at shallower depths get explored first).
     /// Falls back to max_thread() — the reverse of DFS's min_thread().
     ConflictFirst,
+    /// Randomized ordering: at each wakeup tree node, pick a random child
+    /// using a seeded PRNG. Different seeds explore different parts of the
+    /// trace space first, which is valuable with `stop_on_first=True`.
+    ///
+    /// Soundness is unaffected: sleep sets and wakeup trees are orthogonal
+    /// to exploration order. Each explored trace is still a distinct
+    /// Mazurkiewicz equivalence class.
+    ///
+    /// Ref: random_dpor.md Proposal A.
+    Random { seed: u64 },
+    /// Depth-biased backtrack selection: instead of always picking the deepest
+    /// backtrack point (DFS), use a weighted selection that sometimes picks
+    /// shallower backtracks. This produces more "globally different" traces
+    /// when exploring shallow backtracks (they diverge earlier in the execution).
+    ///
+    /// The `seed` controls the PRNG for weighted selection.
+    ///
+    /// Ref: random_dpor.md Proposal D.
+    DepthBiased { seed: u64 },
 }
 
 /// A pending race collected during execution for deferred processing.
@@ -736,6 +755,16 @@ impl Path {
                             sorted[idx]
                         }
                         SearchStrategy::ConflictFirst => sorted[n - 1],
+                        SearchStrategy::Random { seed } => {
+                            let idx = splitmix64_index(self.selection_counter, *seed, n);
+                            self.selection_counter += 1;
+                            sorted[idx]
+                        }
+                        SearchStrategy::DepthBiased { seed } => {
+                            let idx = splitmix64_index(self.selection_counter, *seed, n);
+                            self.selection_counter += 1;
+                            sorted[idx]
+                        }
                     })
                 }
             };
@@ -1017,6 +1046,25 @@ fn gcd(mut a: usize, mut b: usize) -> usize {
         a = t;
     }
     a
+}
+
+/// Compute a pseudo-random index in `0..n` using splitmix64.
+///
+/// Given a counter `step` and a seed, produces a deterministic but
+/// well-distributed index. Different seeds produce different sequences;
+/// same seed + same step always returns the same index.
+///
+/// Uses the splitmix64 finalizer (Vigna, 2015) which has excellent
+/// statistical properties and is extremely fast (no external crate needed).
+fn splitmix64_index(step: u64, seed: u64, n: usize) -> usize {
+    if n <= 1 {
+        return 0;
+    }
+    let mut z = step.wrapping_add(seed).wrapping_add(0x9e3779b97f4a7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z = z ^ (z >> 31);
+    (z % n as u64) as usize
 }
 
 /// Compute a bit-reversal permutation index.
@@ -2094,5 +2142,68 @@ mod tests {
             !path.branches[1].propagated_sleep_accesses.contains_key(&0),
             "T0 must wake up: Write vs Read is a real conflict"
         );
+    }
+
+    // --- splitmix64 (Random / DepthBiased strategy) tests ---
+
+    #[test]
+    fn test_splitmix64_in_range() {
+        for n in [1, 2, 3, 5, 10, 100] {
+            for step in 0..20 {
+                let idx = splitmix64_index(step, 0, n);
+                assert!(idx < n, "splitmix64_index({step}, 0, {n}) = {idx} out of range");
+            }
+        }
+    }
+
+    #[test]
+    fn test_splitmix64_n1_always_zero() {
+        assert_eq!(splitmix64_index(0, 0, 1), 0);
+        assert_eq!(splitmix64_index(42, 99, 1), 0);
+    }
+
+    #[test]
+    fn test_splitmix64_different_seeds_differ() {
+        // Different seeds should (usually) produce different indices
+        let order_s0: Vec<usize> = (0..10).map(|s| splitmix64_index(s, 0, 5)).collect();
+        let order_s1: Vec<usize> = (0..10).map(|s| splitmix64_index(s, 42, 5)).collect();
+        assert_ne!(order_s0, order_s1, "different seeds should produce different orderings");
+    }
+
+    #[test]
+    fn test_splitmix64_deterministic() {
+        // Same inputs always produce same output
+        let a = splitmix64_index(7, 42, 10);
+        let b = splitmix64_index(7, 42, 10);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_random_strategy_explores_differently() {
+        // Random strategy with different seeds should pick different threads
+        // at the same scheduling point
+        let mut path_s0 = Path::new(None, SearchStrategy::Random { seed: 0 });
+        let mut path_s1 = Path::new(None, SearchStrategy::Random { seed: 42 });
+
+        // Both start with same available threads
+        path_s0.schedule(&[0, 1, 2], 0, 3);
+        path_s1.schedule(&[0, 1, 2], 0, 3);
+
+        // Insert wakeups for threads 1 and 2
+        path_s0.insert_wakeup(0, 1, None);
+        path_s0.insert_wakeup(0, 2, None);
+        path_s1.insert_wakeup(0, 1, None);
+        path_s1.insert_wakeup(0, 2, None);
+
+        // After step(), each should pick from {1, 2} but may pick differently
+        assert!(path_s0.step());
+        assert!(path_s1.step());
+
+        let c0 = path_s0.schedule(&[0, 1, 2], 0, 3);
+        let c1 = path_s1.schedule(&[0, 1, 2], 0, 3);
+
+        // Both should be valid (Some(1) or Some(2))
+        assert!(c0 == Some(1) || c0 == Some(2), "seed 0 chose {:?}", c0);
+        assert!(c1 == Some(1) || c1 == Some(2), "seed 42 chose {:?}", c1);
     }
 }

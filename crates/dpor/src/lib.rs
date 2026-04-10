@@ -276,9 +276,26 @@ impl PyDporEngine {
                 Ok(SearchStrategy::Stride { seed })
             }
             Some("conflict-first") => Ok(SearchStrategy::ConflictFirst),
+            Some(s) if s == "random" => Ok(SearchStrategy::Random { seed: 0 }),
+            Some(s) if s.starts_with("random:") => {
+                let seed_str = &s["random:".len()..];
+                let seed = seed_str.parse::<u64>().map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("invalid seed in '{s}': {e}"))
+                })?;
+                Ok(SearchStrategy::Random { seed })
+            }
+            Some(s) if s == "depth-biased" => Ok(SearchStrategy::DepthBiased { seed: 0 }),
+            Some(s) if s.starts_with("depth-biased:") => {
+                let seed_str = &s["depth-biased:".len()..];
+                let seed = seed_str.parse::<u64>().map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!("invalid seed in '{s}': {e}"))
+                })?;
+                Ok(SearchStrategy::DepthBiased { seed })
+            }
             Some(other) => Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "unknown search strategy '{other}'; expected 'dfs', 'bit-reversal[:seed]', \
-                 'round-robin[:seed]', 'stride[:seed]', or 'conflict-first'"
+                 'round-robin[:seed]', 'stride[:seed]', 'random[:seed]', 'depth-biased[:seed]', \
+                 or 'conflict-first'"
             ))),
         }
     }

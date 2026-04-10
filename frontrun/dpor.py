@@ -3499,6 +3499,13 @@ def explore_dpor(
               sibling (s coprime to branching factor, derived from seed).
             - ``"conflict-first"`` — reverse of DFS (highest thread ID
               first), preferring threads added by race reversals.
+            - ``"random"`` or ``"random:<seed>"`` — pick a random wakeup
+              tree branch at each scheduling point using a seeded PRNG.
+              Different seeds explore different parts of the trace space
+              first, which is valuable with ``stop_on_first=True``.
+            - ``"depth-biased"`` or ``"depth-biased:<seed>"`` — weighted
+              random selection that sometimes picks shallower backtracks,
+              producing more globally different traces.
 
             **Use a non-DFS strategy when the trace space is large and
             you have a limited execution budget** (``stop_on_first=True``

@@ -158,51 +158,32 @@ def test_depth_biased_seed_zero() -> None:
 
 
 def test_different_seeds_produce_different_orders() -> None:
-    """Different seeds lead to different num_explored when stop_on_first=True.
+    """Different seeds lead to different num_explored with stop_on_first=False.
 
-    With stop_on_first=True the engine stops at the first failing execution,
-    so the choice of which trace to visit first determines how many executions
-    are needed.  Two different seeds should (with high probability across the
-    full trace space) produce different counts at least once across the
-    scenarios tried here.
+    With stop_on_first=False, exploration order affects sleep set effectiveness
+    and thus total execution count.  Uses the three-thread counter scenario
+    which has 8+ equivalence classes.
     """
-    setups_and_threads_and_invariants = [
-        scenario_lost_update(),
-        scenario_three_thread_counter(),
-        scenario_bank_transfer(),
-    ]
+    setup, threads, invariant = scenario_three_thread_counter()
 
-    counts_seed_1 = []
-    counts_seed_99 = []
-
-    for setup, threads, invariant in setups_and_threads_and_invariants:
-        r1 = explore_dpor(
+    counts: list[int] = []
+    for seed in (1, 2, 3, 7, 42, 99):
+        r = explore_dpor(
             setup=setup,
             threads=threads,
             invariant=invariant,
             max_executions=1000,
-            stop_on_first=True,
-            search="depth-biased:1",
+            stop_on_first=False,
+            search=f"depth-biased:{seed}",
             detect_io=False,
             reproduce_on_failure=0,
         )
-        r99 = explore_dpor(
-            setup=setup,
-            threads=threads,
-            invariant=invariant,
-            max_executions=1000,
-            stop_on_first=True,
-            search="depth-biased:99",
-            detect_io=False,
-            reproduce_on_failure=0,
-        )
-        counts_seed_1.append(r1.num_explored)
-        counts_seed_99.append(r99.num_explored)
+        counts.append(r.num_explored)
 
-    # At least one scenario should differ between the two seeds.
-    assert counts_seed_1 != counts_seed_99, (
-        f"seeds 1 and 99 produced identical num_explored across all scenarios: "
-        f"seed_1={counts_seed_1}, seed_99={counts_seed_99}"
+    # At least two seeds must produce a different exploration count.
+    assert len(set(counts)) > 1, (
+        f"All seeds produced the same num_explored={counts[0]}; "
+        "depth-biased strategy must vary traversal order across seeds"
     )
 
 

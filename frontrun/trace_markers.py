@@ -33,6 +33,7 @@ import re
 import sys
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from frontrun._cooperative import real_condition, real_lock
@@ -736,4 +737,302 @@ def explore_marker_interleavings(
         property_holds=True,
         num_explored=num_explored,
         unique_interleavings=num_explored,
+    )
+
+
+def explore_hybrid_interleavings(
+    setup: Callable[..., Any],
+    threads: dict[str, tuple[Callable[..., None], list[str]]],
+    invariant: Callable[..., bool],
+    *,
+    stop_on_first: bool = True,
+    deadlock_timeout: float = 5.0,
+    timeout: float | None = 10.0,
+    bytecode_attempts: int = 100,
+) -> InterleavingResult:
+    """Explore marker-level interleavings combined with bytecode-level exploration.
+
+    For each valid marker schedule (as produced by :func:`all_marker_schedules`),
+    this function first runs the deterministic marker-level execution via
+    :class:`TraceExecutor`, then runs ``bytecode_attempts`` additional concurrent
+    executions with real thread scheduling to expose intra-window bytecode races.
+
+    This finds bugs that pure marker exploration misses — races that require a
+    specific bytecode-level interleaving *within* a marker window.
+
+    Args:
+        setup: Factory producing fresh shared state for each execution.
+        threads: Mapping from execution name to ``(target_fn, markers)`` where
+            *target_fn* takes the setup result and *markers* is the ordered
+            list of ``# frontrun:`` marker names that *target_fn* hits.
+        invariant: Predicate on the shared state; returns True if correct.
+        stop_on_first: Stop after finding the first invariant violation
+            (default True).
+        deadlock_timeout: Per-schedule deadlock detection timeout (for marker runs).
+        timeout: Per-schedule join timeout.
+        bytecode_attempts: Number of concurrent (bytecode-random) executions to
+            run per marker schedule.  When 0, behaves identically to
+            :func:`explore_marker_interleavings`.
+
+    Returns:
+        An :class:`~frontrun.common.InterleavingResult`.  ``num_explored`` counts
+        all executions (marker + bytecode).  ``counterexample`` is a
+        :class:`Schedule` when the marker-level run triggered the violation, or
+        the most-recent marker schedule when a bytecode run failed.
+    """
+    marker_decl = {name: markers for name, (_, markers) in threads.items()}
+    schedules = all_marker_schedules(marker_decl)
+
+    num_explored = 0
+    failures: list[tuple[int, Schedule]] = []
+
+    for i, schedule in enumerate(schedules):
+        # --- Marker-level execution ---
+        state = setup()
+        executor = TraceExecutor(schedule, deadlock_timeout=deadlock_timeout)
+
+        for exec_name, (target_fn, _markers) in threads.items():
+
+            def _make_runner(s: Any = state, fn: Callable[..., None] = target_fn) -> None:
+                fn(s)
+
+            executor.run(exec_name, _make_runner)
+
+        try:
+            executor.wait(timeout=timeout)
+        except TimeoutError:
+            num_explored += 1
+            continue
+        except Exception:
+            num_explored += 1
+            failures.append((i, schedule))
+            if stop_on_first:
+                return InterleavingResult(
+                    property_holds=False,
+                    counterexample=schedule,
+                    num_explored=num_explored,
+                    unique_interleavings=num_explored,
+                )
+            continue
+
+        num_explored += 1
+
+        if not invariant(state):
+            failures.append((i, schedule))
+            if stop_on_first:
+                return InterleavingResult(
+                    property_holds=False,
+                    counterexample=schedule,
+                    num_explored=num_explored,
+                    unique_interleavings=num_explored,
+                )
+
+        # --- Bytecode-level attempts for this marker schedule ---
+        for _ in range(bytecode_attempts):
+            state = setup()
+            thread_objs: list[threading.Thread] = []
+            thread_exc: list[BaseException | None] = [None]
+
+            for _exec_name, (target_fn, _markers) in threads.items():
+
+                def _runner(
+                    s: Any = state,
+                    fn: Callable[..., None] = target_fn,
+                    exc_holder: list[BaseException | None] = thread_exc,
+                ) -> None:
+                    try:
+                        fn(s)
+                    except BaseException as e:
+                        exc_holder[0] = e
+
+                thread_objs.append(threading.Thread(target=_runner))
+
+            for t in thread_objs:
+                t.start()
+            join_deadline = timeout if timeout is not None else 30.0
+            for t in thread_objs:
+                t.join(timeout=join_deadline)
+            # If any thread is still alive, skip this attempt (potential deadlock).
+            if any(t.is_alive() for t in thread_objs):
+                num_explored += 1
+                continue
+
+            num_explored += 1
+
+            if thread_exc[0] is not None:
+                failures.append((num_explored, schedule))
+                if stop_on_first:
+                    return InterleavingResult(
+                        property_holds=False,
+                        counterexample=schedule,
+                        num_explored=num_explored,
+                        unique_interleavings=num_explored,
+                    )
+                continue
+
+            if not invariant(state):
+                failures.append((num_explored, schedule))
+                if stop_on_first:
+                    return InterleavingResult(
+                        property_holds=False,
+                        counterexample=schedule,
+                        num_explored=num_explored,
+                        unique_interleavings=num_explored,
+                    )
+
+    if failures:
+        return InterleavingResult(
+            property_holds=False,
+            counterexample=failures[0][1],
+            num_explored=num_explored,
+            unique_interleavings=num_explored,
+            failures=failures,  # type: ignore[arg-type]
+        )
+
+    return InterleavingResult(
+        property_holds=True,
+        num_explored=num_explored,
+        unique_interleavings=num_explored,
+    )
+
+
+@dataclass
+class MarkerCoverageResult:
+    """Result of a marker-level interleaving exploration with coverage statistics."""
+
+    interleaving_result: InterleavingResult
+    total_schedules: int
+    executed_schedules: int
+    coverage_ratio: float
+    missed_schedules: list[Schedule]
+    executed_schedule_list: list[Schedule]
+
+
+def marker_coverage_report(
+    setup: Callable[..., Any],
+    threads: dict[str, tuple[Callable[..., None], list[str]]],
+    invariant: Callable[..., bool],
+    *,
+    stop_on_first: bool = True,
+    deadlock_timeout: float = 5.0,
+    timeout: float | None = 10.0,
+) -> MarkerCoverageResult:
+    """Explore marker-level interleavings and return coverage statistics.
+
+    Runs the same exploration as :func:`explore_marker_interleavings` but also
+    tracks which schedules were executed vs. missed, enabling coverage analysis.
+
+    Args:
+        setup: Factory producing fresh shared state for each execution.
+        threads: Mapping from execution name to ``(target_fn, markers)`` where
+            *target_fn* takes the setup result and *markers* is the ordered
+            list of ``# frontrun:`` marker names that *target_fn* hits.
+        invariant: Predicate on the shared state; returns True if correct.
+        stop_on_first: Stop after finding the first invariant violation
+            (default True).
+        deadlock_timeout: Per-schedule deadlock detection timeout.
+        timeout: Per-schedule join timeout.
+
+    Returns:
+        A :class:`MarkerCoverageResult` with exploration results and coverage info.
+    """
+    marker_decl = {name: markers for name, (_, markers) in threads.items()}
+    all_schedules = all_marker_schedules(marker_decl)
+
+    num_explored = 0
+    failures: list[tuple[int, Schedule]] = []
+    executed_schedule_list: list[Schedule] = []
+
+    for i, schedule in enumerate(all_schedules):
+        state = setup()
+        executor = TraceExecutor(schedule, deadlock_timeout=deadlock_timeout)
+
+        for exec_name, (target_fn, _markers) in threads.items():
+
+            def _make_runner(s: Any = state, fn: Callable[..., None] = target_fn) -> None:
+                fn(s)
+
+            executor.run(exec_name, _make_runner)
+
+        try:
+            executor.wait(timeout=timeout)
+        except TimeoutError:
+            # Schedule stall — treat as non-violation and skip
+            num_explored += 1
+            executed_schedule_list.append(schedule)
+            continue
+        except Exception:
+            # Thread raised an exception — treat as invariant violation
+            num_explored += 1
+            executed_schedule_list.append(schedule)
+            failures.append((i, schedule))
+            if stop_on_first:
+                interleaving_result = InterleavingResult(
+                    property_holds=False,
+                    counterexample=schedule,
+                    num_explored=num_explored,
+                    unique_interleavings=num_explored,
+                )
+                total = len(all_schedules)
+                executed = len(executed_schedule_list)
+                missed = [s for s in all_schedules if s not in executed_schedule_list]
+                return MarkerCoverageResult(
+                    interleaving_result=interleaving_result,
+                    total_schedules=total,
+                    executed_schedules=executed,
+                    coverage_ratio=executed / total if total > 0 else 1.0,
+                    missed_schedules=missed,
+                    executed_schedule_list=executed_schedule_list,
+                )
+            continue
+
+        num_explored += 1
+        executed_schedule_list.append(schedule)
+
+        if not invariant(state):
+            failures.append((i, schedule))
+            if stop_on_first:
+                interleaving_result = InterleavingResult(
+                    property_holds=False,
+                    counterexample=schedule,
+                    num_explored=num_explored,
+                    unique_interleavings=num_explored,
+                )
+                total = len(all_schedules)
+                executed = len(executed_schedule_list)
+                missed = [s for s in all_schedules if s not in executed_schedule_list]
+                return MarkerCoverageResult(
+                    interleaving_result=interleaving_result,
+                    total_schedules=total,
+                    executed_schedules=executed,
+                    coverage_ratio=executed / total if total > 0 else 1.0,
+                    missed_schedules=missed,
+                    executed_schedule_list=executed_schedule_list,
+                )
+
+    if failures:
+        interleaving_result = InterleavingResult(
+            property_holds=False,
+            counterexample=failures[0][1],
+            num_explored=num_explored,
+            unique_interleavings=num_explored,
+            failures=failures,  # type: ignore[arg-type]
+        )
+    else:
+        interleaving_result = InterleavingResult(
+            property_holds=True,
+            num_explored=num_explored,
+            unique_interleavings=num_explored,
+        )
+
+    total = len(all_schedules)
+    executed = len(executed_schedule_list)
+    missed = [s for s in all_schedules if s not in executed_schedule_list]
+    return MarkerCoverageResult(
+        interleaving_result=interleaving_result,
+        total_schedules=total,
+        executed_schedules=executed,
+        coverage_ratio=executed / total if total > 0 else 1.0,
+        missed_schedules=missed,
+        executed_schedule_list=executed_schedule_list,
     )

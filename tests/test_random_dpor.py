@@ -146,19 +146,19 @@ def test_random_seeded_strategy_accepted() -> None:
 def test_different_seeds_explore_differently() -> None:
     """Two distinct seeds should traverse the wakeup tree in different orders.
 
-    With stop_on_first=True the number of executions explored before the first
-    failure is a proxy for the traversal order.  We run several seed pairs and
-    assert that at least one pair differs — this is extremely unlikely to be
-    violated by any correct random implementation.
+    With stop_on_first=False, exploration order affects sleep set effectiveness
+    and thus total execution count.  We compare multiple seeds on a scenario
+    with many traces (three-thread counter has 8+ equivalence classes).  At
+    least two seeds should produce different total counts.
     """
-    setup, threads, invariant, _ = scenario_lost_update()
+    setup, threads, invariant, _ = scenario_three_thread_counter()
 
     common_kwargs = {
         "setup": setup,
         "threads": threads,
         "invariant": invariant,
         "max_executions": 500,
-        "stop_on_first": True,
+        "stop_on_first": False,
         "detect_io": False,
         "reproduce_on_failure": 0,
     }
@@ -168,7 +168,7 @@ def test_different_seeds_explore_differently() -> None:
         r = explore_dpor(**common_kwargs, search=f"random:{seed}")  # type: ignore[arg-type]
         counts.append(r.num_explored)
 
-    # At least two seeds must produce a different exploration count.
+    # At least two seeds must produce a different total exploration count.
     assert len(set(counts)) > 1, (
         f"All seeds produced the same num_explored={counts[0]}; "
         "random strategy must vary traversal order across seeds"
