@@ -48,6 +48,27 @@ class TestStripQuotes:
     def test_no_quotes_no_schema(self):
         assert _strip_quotes("accounts") == "accounts"
 
+    def test_quoted_schema_unquoted_table(self):
+        """Bug: _strip_quotes('"public".users') should return 'users' not 'user'.
+
+        When the schema is quoted but the table is not, the [1:-1] slice
+        intended to strip surrounding quotes incorrectly removes the last
+        character of the table name instead of a closing quote.
+        """
+        assert _strip_quotes('"public".users') == "users"
+
+    def test_backtick_schema_unquoted_table(self):
+        """Same bug with backtick-quoted schema and unquoted table."""
+        assert _strip_quotes("`myschema`.orders") == "orders"
+
+    def test_unquoted_schema_quoted_table(self):
+        """When schema is unquoted but table is quoted, extract table correctly."""
+        assert _strip_quotes('public."Special Table"') == "Special Table"
+
+    def test_backtick_schema_backtick_table(self):
+        """Backtick-quoted schema and backtick-quoted table."""
+        assert _strip_quotes("`myschema`.`users`") == "users"
+
 
 # ---------------------------------------------------------------------------
 # _sqlglot_parse — non-DML constructs now handled inside _sqlglot_parse
@@ -546,6 +567,23 @@ class TestLockTableMultiTable:
         result = parse_sql_access("LOCK TABLE users, orders IN SHARE MODE")
         assert result.write_tables == {"users", "orders"}
         assert result.lock_intent == LockIntent.SHARE
+
+
+class TestLockTableQuotedSchema:
+    def test_lock_table_quoted_schema_unquoted_table(self):
+        """LOCK TABLE "schema".table should extract the table name, not truncate it.
+
+        Bug: _strip_quotes incorrectly applies [1:-1] when the name starts
+        with a quote but doesn't end with one, stripping the last char of
+        the table name instead of a closing quote.
+        """
+        result = parse_sql_access('LOCK TABLE "public".users IN EXCLUSIVE MODE')
+        assert "users" in result.write_tables, f"Expected 'users' in write_tables, got {result.write_tables}"
+
+    def test_lock_table_quoted_schema_quoted_table(self):
+        """LOCK TABLE "schema"."table" should work correctly (regression check)."""
+        result = parse_sql_access('LOCK TABLE "public"."users" IN EXCLUSIVE MODE')
+        assert "users" in result.write_tables, f"Expected 'users' in write_tables, got {result.write_tables}"
 
 
 class TestInsertTableRegex:
