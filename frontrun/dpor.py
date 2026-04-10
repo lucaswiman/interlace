@@ -55,25 +55,24 @@ from frontrun._cooperative import (
     unpatch_locks,
     unpatch_sleep,
 )
-from frontrun._opcode_observer import (
-    ShadowStack,
-    StableObjectIds,
-    _CALL_OPCODES,
-    _call_might_report_access,
-    _get_instructions,
-    _is_shared_opcode,
-    _make_object_key,
-    _process_opcode,
-    _register_object_key,
-    clear_instr_cache,
-    get_object_key_reverse_map,
-    set_object_key_reverse_map,
-)
 from frontrun._deadlock import DeadlockError, SchedulerAbort, install_wait_for_graph, uninstall_wait_for_graph
 from frontrun._io_detection import (
     patch_io,
     set_io_reporter,
     unpatch_io,
+)
+from frontrun._opcode_observer import (
+    _CALL_OPCODES,
+    ShadowStack,
+    StableObjectIds,
+    _call_might_report_access,
+    _get_instructions,
+    _is_shared_opcode,
+    _make_object_key,
+    _process_opcode,
+    clear_instr_cache,
+    get_object_key_reverse_map,
+    set_object_key_reverse_map,
 )
 from frontrun._redis_client import (
     is_redis_tid_suppressed,

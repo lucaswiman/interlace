@@ -51,6 +51,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Generator
 from typing import Any, TypeVar
 
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
+from frontrun._opcode_observer import ShadowStack, StableObjectIds, _make_object_key, _process_opcode
 from frontrun._sql_cursor import clear_sql_metadata, get_lock_timeout, set_lock_timeout
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._tracing import TraceFilter as _TraceFilter
@@ -60,7 +61,6 @@ from frontrun._tracing import set_active_trace_filter as _set_active_trace_filte
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.async_scheduler import InterleavedLoop
 from frontrun.common import InterleavingResult, check_serializability_violation
-from frontrun._opcode_observer import ShadowStack, StableObjectIds, _make_object_key, _process_opcode
 from frontrun.dpor import _USE_SYS_MONITORING
 
 try:

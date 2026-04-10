@@ -14,6 +14,7 @@ provides an object satisfying the narrow interface used by
 
 from __future__ import annotations
 
+import _io as _io_module
 import builtins as _builtins_mod
 import dis
 import functools as _functools_mod
@@ -23,12 +24,25 @@ import threading
 import types
 from typing import Any
 
-import _io as _io_module
-
 from frontrun._cooperative import CooperativeLock as _CooperativeLock
 from frontrun._cooperative import real_lock
 
 _PY_VERSION = sys.version_info[:2]
+
+__all__ = [
+    "ShadowStack",
+    "StableObjectIds",
+    "_CALL_OPCODES",
+    "_SHARED_ACCESS_OPCODES",
+    "_call_might_report_access",
+    "_get_instructions",
+    "_is_shared_opcode",
+    "_make_object_key",
+    "_process_opcode",
+    "clear_instr_cache",
+    "get_object_key_reverse_map",
+    "set_object_key_reverse_map",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +685,8 @@ def _is_shared_opcode(code: Any, instruction_offset: int) -> bool:
         if not argrepr or ("[" not in argrepr and "NB_SUBSCR" not in argrepr.upper()):
             return False
     return True
+
+
 def _process_opcode(
     frame: Any,
     scheduler: Any,
@@ -1342,5 +1358,3 @@ def _process_opcode(
                 shadow.push(None)
         except (ValueError, TypeError):
             shadow.clear()
-
-
