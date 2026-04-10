@@ -298,39 +298,68 @@ class TestCrossGranularityNonRepeatableRead:
     a table-level write on the same table.
 
     Example: Thread 0 reads accounts:(('id','1'),) twice, with Thread 1
-    doing a table-level write to accounts in between. The resource strings
+    doing an UPDATE (read+write) on accounts in between. The resource strings
     differ, so the non-repeatable read is missed.
+
+    Note: write-only threads (INSERT/DELETE with no read) should still be
+    classified as phantom reads, not non-repeatable reads.
     """
 
-    def test_row_read_table_write_row_read(self) -> None:
-        """Row-level reads with a table-level write in between should be detected."""
+    def test_row_read_table_update_row_read(self) -> None:
+        """Row-level reads with a table-level UPDATE in between should be NRR.
+
+        Thread 1 does both read and write (UPDATE pattern), so this is a
+        non-repeatable read, not a phantom read.
+        """
         events = [
             _sql_event_row(0, 0, "accounts", "(('id','1'),)", "read"),
-            _sql_event(1, 1, "accounts", "write"),  # table-level write
-            _sql_event_row(2, 0, "accounts", "(('id','1'),)", "read"),
+            _sql_event(1, 1, "accounts", "read"),   # Thread 1 reads (UPDATE reads WHERE clause)
+            _sql_event(2, 1, "accounts", "write"),   # Thread 1 writes (UPDATE sets values)
+            _sql_event_row(3, 0, "accounts", "(('id','1'),)", "read"),
         ]
         result = classify_sql_anomaly(events)
         assert result is not None, (
             "Cross-granularity non-repeatable read should be detected: "
-            "Thread 0 reads a row twice while Thread 1 writes to the same table"
+            "Thread 0 reads a row twice while Thread 1 UPDATEs the same table"
         )
         assert result.kind == "non_repeatable_read"
         assert "accounts" in result.tables
 
-    def test_table_read_row_write_table_read(self) -> None:
-        """Table-level reads with a row-level write in between should be detected."""
+    def test_table_read_row_update_table_read(self) -> None:
+        """Table-level reads with a row-level UPDATE in between should be NRR.
+
+        Thread 1 does both read and write at row level (UPDATE pattern).
+        """
         events = [
             _sql_event(0, 0, "accounts", "read"),  # table-level read
-            _sql_event_row(1, 1, "accounts", "(('id','1'),)", "write"),  # row-level write
-            _sql_event(2, 0, "accounts", "read"),  # table-level read
+            _sql_event_row(1, 1, "accounts", "(('id','1'),)", "read"),  # row-level read (UPDATE WHERE)
+            _sql_event_row(2, 1, "accounts", "(('id','1'),)", "write"),  # row-level write (UPDATE SET)
+            _sql_event(3, 0, "accounts", "read"),  # table-level read
         ]
         result = classify_sql_anomaly(events)
         assert result is not None, (
             "Cross-granularity non-repeatable read should be detected: "
-            "Thread 0 reads a table twice while Thread 1 writes to a row"
+            "Thread 0 reads a table twice while Thread 1 UPDATEs a row"
         )
         assert result.kind == "non_repeatable_read"
         assert "accounts" in result.tables
+
+    def test_row_read_table_insert_row_read_is_phantom(self) -> None:
+        """Row-level reads with a write-only INSERT in between is phantom, not NRR.
+
+        Thread 1 only writes (INSERT pattern, no reads), so this should be
+        classified as a phantom read.
+        """
+        events = [
+            _sql_event_row(0, 0, "orders", "set_a", "read"),
+            _sql_event(1, 1, "orders", "write"),  # Thread 1 INSERTs (write-only)
+            _sql_event_row(2, 0, "orders", "set_a", "read"),
+        ]
+        result = classify_sql_anomaly(events)
+        assert result is not None
+        assert result.kind == "phantom_read", (
+            "Write-only thread (INSERT) between reads should be phantom_read, not NRR"
+        )
 
 
 class TestClassifyPhantomRead:
