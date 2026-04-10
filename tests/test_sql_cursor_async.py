@@ -707,7 +707,9 @@ class TestAsyncUpdateZeroRowRelease:
         try:
             cursor = MockCursor()
             await _intercept_execute_async(
-                fake_execute, cursor, "UPDATE users SET name = 'x' WHERE id = 999",
+                fake_execute,
+                cursor,
+                "UPDATE users SET name = 'x' WHERE id = 999",
                 paramstyle="qmark",
             )
             assert len(release_calls) > 0, (

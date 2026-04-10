@@ -313,8 +313,8 @@ class TestCrossGranularityNonRepeatableRead:
         """
         events = [
             _sql_event_row(0, 0, "accounts", "(('id','1'),)", "read"),
-            _sql_event(1, 1, "accounts", "read"),   # Thread 1 reads (UPDATE reads WHERE clause)
-            _sql_event(2, 1, "accounts", "write"),   # Thread 1 writes (UPDATE sets values)
+            _sql_event(1, 1, "accounts", "read"),  # Thread 1 reads (UPDATE reads WHERE clause)
+            _sql_event(2, 1, "accounts", "write"),  # Thread 1 writes (UPDATE sets values)
             _sql_event_row(3, 0, "accounts", "(('id','1'),)", "read"),
         ]
         result = classify_sql_anomaly(events)
@@ -357,9 +357,7 @@ class TestCrossGranularityNonRepeatableRead:
         ]
         result = classify_sql_anomaly(events)
         assert result is not None
-        assert result.kind == "phantom_read", (
-            "Write-only thread (INSERT) between reads should be phantom_read, not NRR"
-        )
+        assert result.kind == "phantom_read", "Write-only thread (INSERT) between reads should be phantom_read, not NRR"
 
 
 class TestClassifyPhantomRead:

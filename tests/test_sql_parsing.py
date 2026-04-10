@@ -578,16 +578,12 @@ class TestLockTableQuotedSchema:
         the table name instead of a closing quote.
         """
         result = parse_sql_access('LOCK TABLE "public".users IN EXCLUSIVE MODE')
-        assert "users" in result.write_tables, (
-            f"Expected 'users' in write_tables, got {result.write_tables}"
-        )
+        assert "users" in result.write_tables, f"Expected 'users' in write_tables, got {result.write_tables}"
 
     def test_lock_table_quoted_schema_quoted_table(self):
         """LOCK TABLE "schema"."table" should work correctly (regression check)."""
         result = parse_sql_access('LOCK TABLE "public"."users" IN EXCLUSIVE MODE')
-        assert "users" in result.write_tables, (
-            f"Expected 'users' in write_tables, got {result.write_tables}"
-        )
+        assert "users" in result.write_tables, f"Expected 'users' in write_tables, got {result.write_tables}"
 
 
 class TestInsertTableRegex:
