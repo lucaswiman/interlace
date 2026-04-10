@@ -60,7 +60,8 @@ from frontrun._tracing import set_active_trace_filter as _set_active_trace_filte
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.async_scheduler import InterleavedLoop
 from frontrun.common import InterleavingResult, check_serializability_violation
-from frontrun.dpor import _USE_SYS_MONITORING, ShadowStack, StableObjectIds, _process_opcode
+from frontrun._opcode_observer import ShadowStack, StableObjectIds, _process_opcode
+from frontrun.dpor import _USE_SYS_MONITORING
 
 try:
     from frontrun._dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]
@@ -754,14 +755,6 @@ class AsyncDporScheduler(InterleavedLoop):
     def _trace_user_opcode(self, frame: Any) -> None:
         task_id = _task_id_var.get()
         if task_id is None or _scheduler_var.get() is not self or _in_trace_processing.get():
-            return
-        # When I/O detection (Redis/SQL) is active, skip opcode-level access
-        # reporting entirely.  The I/O-level reporters already capture the
-        # real key/table conflicts.  Running _process_opcode on user frames
-        # would still pick up shared Python state (module globals, class
-        # objects, connection pool internals) creating false DPOR wakeup tree
-        # entries and excess path exploration for independent I/O operations.
-        if self._detect_sql or self._detect_redis:
             return
         token = _in_trace_processing.set(True)
         try:
