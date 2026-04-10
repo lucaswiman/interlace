@@ -59,7 +59,7 @@ from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.async_scheduler import InterleavedLoop
-from frontrun.common import InterleavingResult
+from frontrun.common import InterleavingResult, check_serializability_violation
 from frontrun.dpor import _USE_SYS_MONITORING, ShadowStack, StableObjectIds, _process_opcode
 
 try:
@@ -1234,13 +1234,13 @@ async def explore_async_dpor(
 
     # Compute serializable baseline if requested.
     serial_valid_states: set[Any] | None = None
+    serial_hash_fn: Callable[[Any], Any] = repr
     if serializable_invariant is not False:
         try:
             from frontrun.common import compute_serializable_states_async, resolve_serializable_hash_fn
 
-            serial_valid_states = await compute_serializable_states_async(
-                setup, tasks, state_hash=resolve_serializable_hash_fn(serializable_invariant)
-            )
+            serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
+            serial_valid_states = await compute_serializable_states_async(setup, tasks, state_hash=serial_hash_fn)
         except BaseException:
             _set_active_trace_filter(None)
             raise
@@ -1408,10 +1408,8 @@ async def explore_async_dpor(
 
             # --- serializable_invariant: check against sequential baselines ---
             if serial_valid_states is not None and not is_deadlock and task_error is None:
-                from frontrun.common import check_serializability_violation
-
                 ser_explanation = check_serializability_violation(
-                    state, serial_valid_states, serializable_invariant, result.num_explored
+                    state, serial_valid_states, serial_hash_fn, result.num_explored
                 )
                 if ser_explanation is not None:
                     result.property_holds = False

@@ -30,6 +30,7 @@ from typing import Any
 
 from frontrun import _real_threading as _rt
 from frontrun._io_detection import _io_tls, get_io_reporter
+from frontrun._io_detection import get_dpor_context as _get_dpor_context
 from frontrun._schema import get_schema
 from frontrun._sql_insert_tracker import record_insert, resolve_alias
 from frontrun._sql_parsing import (
@@ -356,13 +357,6 @@ def _detect_autobegin(cursor: Any) -> None:
         _io_tls._is_autobegin = True
         _io_tls._tx_buffer = []
         _io_tls._tx_savepoints = {}
-
-
-def _get_dpor_context() -> tuple[Any, int] | None:
-    """Return (scheduler, thread_id) if DPOR is active, else ``None``."""
-    from frontrun._io_detection import get_dpor_context
-
-    return get_dpor_context()
 
 
 def _acquire_pending_row_locks() -> None:

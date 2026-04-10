@@ -49,7 +49,7 @@ from typing import Any, Optional
 # Lazy import for async SQL patching — shared with async_dpor.py
 from frontrun.async_dpor import _sql_async_available, patch_sql_async, unpatch_sql_async
 from frontrun.async_scheduler import InterleavedLoop
-from frontrun.common import InterleavingResult
+from frontrun.common import InterleavingResult, check_serializability_violation
 
 # Context variable to track the active scheduler and task ID
 _scheduler_var: contextvars.ContextVar[Optional["AwaitScheduler"]] = contextvars.ContextVar("_scheduler", default=None)
@@ -391,12 +391,12 @@ async def explore_interleavings(
 
     # Compute serializable baseline if requested.
     serial_valid_states: set[Any] | None = None
+    serial_hash_fn: Callable[[Any], Any] = repr
     if serializable_invariant is not False:
         from frontrun.common import compute_serializable_states_async, resolve_serializable_hash_fn
 
-        serial_valid_states = await compute_serializable_states_async(
-            setup, tasks, state_hash=resolve_serializable_hash_fn(serializable_invariant)
-        )
+        serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
+        serial_valid_states = await compute_serializable_states_async(setup, tasks, state_hash=serial_hash_fn)
 
     if detect_sql and _sql_async_available:
         patch_sql_async()
@@ -428,10 +428,8 @@ async def explore_interleavings(
 
             # --- serializable_invariant check ---
             if serial_valid_states is not None:
-                from frontrun.common import check_serializability_violation
-
                 explanation = check_serializability_violation(
-                    state, serial_valid_states, serializable_invariant, result.num_explored
+                    state, serial_valid_states, serial_hash_fn, result.num_explored
                 )
                 if explanation is not None:
                     result.property_holds = False

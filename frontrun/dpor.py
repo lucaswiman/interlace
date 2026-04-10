@@ -84,7 +84,7 @@ from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.cli import require_active as _require_frontrun_env
-from frontrun.common import InterleavingResult
+from frontrun.common import InterleavingResult, check_serializability_violation
 
 try:
     from frontrun._dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]
@@ -3529,13 +3529,13 @@ def explore_dpor(
 
     # Compute serializable baseline if requested.
     serial_valid_states: set[Any] | None = None
+    serial_hash_fn: Callable[[Any], Any] = repr
     if serializable_invariant is not False:
         try:
             from frontrun.common import compute_serializable_states, resolve_serializable_hash_fn
 
-            serial_valid_states = compute_serializable_states(
-                setup, threads, state_hash=resolve_serializable_hash_fn(serializable_invariant)
-            )
+            serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
+            serial_valid_states = compute_serializable_states(setup, threads, state_hash=serial_hash_fn)
         except BaseException:
             _set_active_trace_filter(None)
             raise
@@ -3808,10 +3808,8 @@ def explore_dpor(
 
             # --- serializable_invariant: check against sequential baselines ---
             if serial_valid_states is not None and not is_deadlock:
-                from frontrun.common import check_serializability_violation
-
                 ser_explanation = check_serializability_violation(
-                    state, serial_valid_states, serializable_invariant, result.num_explored
+                    state, serial_valid_states, serial_hash_fn, result.num_explored
                 )
                 if ser_explanation is not None:
                     result.property_holds = False

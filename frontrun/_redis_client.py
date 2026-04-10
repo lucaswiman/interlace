@@ -26,6 +26,7 @@ from typing import Any
 
 from frontrun import _real_threading as _rt
 from frontrun._io_detection import _io_tls, get_io_reporter
+from frontrun._io_detection import get_dpor_context as _get_dpor_context
 from frontrun._redis_parsing import parse_redis_access
 
 _suppress_tids: set[int] = set()
@@ -85,23 +86,11 @@ def _get_redis_db_scope(client: Any) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# DPOR context helpers (mirrors _sql_cursor.py)
-# ---------------------------------------------------------------------------
-
-
-def _get_dpor_context() -> tuple[Any, int] | None:
-    """Return (scheduler, thread_id) if DPOR is active, else ``None``."""
-    from frontrun._io_detection import get_dpor_context
-
-    return get_dpor_context()
-
-
-# ---------------------------------------------------------------------------
 # Pipeline command parsing
 # ---------------------------------------------------------------------------
 
 
-def _report_pipeline_commands(pipeline: Any, client: Any) -> bool:
+def _report_pipeline_commands(pipeline: Any) -> bool:
     """Parse a redis Pipeline's command_stack and report all queued accesses.
 
     Returns ``True`` if any command was reported to the I/O layer.
@@ -119,7 +108,7 @@ def _report_pipeline_commands(pipeline: Any, client: Any) -> bool:
         if cmd_args_full:
             cmd_name = str(cmd_args_full[0])
             cmd_cmd_args = tuple(cmd_args_full[1:])
-            if _report_redis_access(cmd_name, cmd_cmd_args, client=client):
+            if _report_redis_access(cmd_name, cmd_cmd_args, client=pipeline):
                 reported = True
     return reported
 
@@ -228,7 +217,7 @@ def _intercept_pipeline_execute(
     **kwargs: Any,
 ) -> Any:
     """Intercept redis.Pipeline.execute to report all queued commands."""
-    reported = _report_pipeline_commands(self, client=self)
+    reported = _report_pipeline_commands(self)
 
     # In replay mode (defect #9 fix), force a scheduling point even
     # without IO reporting so the replay scheduler can enforce the

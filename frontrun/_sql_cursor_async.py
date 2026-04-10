@@ -18,14 +18,15 @@ shared with the sync module via ``_report_sql_access``.
 from __future__ import annotations
 
 import importlib
+from collections.abc import Awaitable, Callable
 from typing import Any
 
+from frontrun._io_detection import get_dpor_context as _get_dpor_context
 from frontrun._sql_cursor import (
     _RE_INSERT_TABLE,
     _acquire_pending_row_locks,
     _capture_insert_id,
     _detect_autobegin,
-    _get_dpor_context,
     _release_dpor_row_locks,
     _report_sql_access,
     _suppress_endpoint_io,
@@ -38,7 +39,7 @@ from frontrun._sql_cursor import (
 
 async def _dpor_schedule_and_suppress_async(
     reported: bool,
-    execute: Any,
+    execute: Callable[[], Awaitable[Any]],
 ) -> Any:
     """DPOR scheduling point + endpoint I/O suppression for async SQL execution.
 

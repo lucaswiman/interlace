@@ -185,15 +185,19 @@ def resolve_serializable_hash_fn(
 def check_serializability_violation(
     state: Any,
     serial_valid_states: set[Any],
-    serializable_invariant: Callable[[Any], Any] | bool,
+    hash_fn: Callable[[Any], Any],
     execution_num: int,
 ) -> str | None:
     """Check whether *state* violates serializability.
 
     Returns an explanation string when the state hash is not in
     *serial_valid_states*, or ``None`` if it passes.
+
+    *hash_fn* should be the resolved state-hash function (use
+    :func:`resolve_serializable_hash_fn` to convert the raw
+    ``serializable_invariant`` parameter, falling back to ``repr``
+    when it returns ``None``).
     """
-    hash_fn: Callable[[Any], Any] = serializable_invariant if callable(serializable_invariant) else repr
     state_h = hash_fn(state)
     if state_h not in serial_valid_states:
         return (

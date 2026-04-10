@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from frontrun._io_detection import get_dpor_context as _get_dpor_context
 from frontrun._redis_client import (
-    _get_dpor_context,
     _report_pipeline_commands,
     _report_redis_access,
     _suppress_endpoint_io,
@@ -100,7 +100,7 @@ async def _intercept_pipeline_execute_async(
     **kwargs: Any,
 ) -> Any:
     """Async version of ``_intercept_pipeline_execute``."""
-    reported = _report_pipeline_commands(self, client=self)
+    reported = _report_pipeline_commands(self)
 
     if reported:
         dpor_ctx = _get_dpor_context()

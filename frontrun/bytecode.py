@@ -66,7 +66,7 @@ from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.cli import require_active as _require_frontrun_env
-from frontrun.common import InterleavingResult
+from frontrun.common import InterleavingResult, check_serializability_violation
 
 # Type variable for the shared state passed between setup and thread functions
 T = TypeVar("T")
@@ -708,12 +708,12 @@ def explore_interleavings(
     try:
         # Compute serializable baseline if requested.
         serial_valid_states: set[Any] | None = None
+        serial_hash_fn: Callable[[Any], Any] = repr
         if serializable_invariant is not False:
             from frontrun.common import compute_serializable_states, resolve_serializable_hash_fn
 
-            serial_valid_states = compute_serializable_states(
-                setup, threads, state_hash=resolve_serializable_hash_fn(serializable_invariant)
-            )
+            serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
+            serial_valid_states = compute_serializable_states(setup, threads, state_hash=serial_hash_fn)
 
         rng = random.Random(seed)
         num_threads = len(threads)
@@ -753,10 +753,8 @@ def explore_interleavings(
 
             # --- serializable_invariant check ---
             if serial_valid_states is not None:
-                from frontrun.common import check_serializability_violation
-
                 explanation = check_serializability_violation(
-                    state, serial_valid_states, serializable_invariant, result.num_explored
+                    state, serial_valid_states, serial_hash_fn, result.num_explored
                 )
                 if explanation is not None:
                     result.property_holds = False
