@@ -24,6 +24,7 @@ from typing import Any
 from frontrun._io_detection import get_dpor_context as _get_dpor_context
 from frontrun._sql_cursor import (
     _RE_INSERT_TABLE,
+    _RE_UPDATE_TABLE,
     _acquire_pending_row_locks,
     _capture_insert_id,
     _detect_autobegin,
@@ -88,6 +89,7 @@ async def _intercept_execute_async(
     ``_report_sql_access`` helper, then ``await``s the original async method.
     """
     insert_match = _RE_INSERT_TABLE.match(operation) if isinstance(operation, str) else None
+    update_match = _RE_UPDATE_TABLE.match(operation) if isinstance(operation, str) else None
     _detect_autobegin(self)
     reported = _report_sql_access(
         operation, parameters, db_obj=self, is_executemany=is_executemany, paramstyle=paramstyle
@@ -99,6 +101,17 @@ async def _intercept_execute_async(
         return await original_method(self, operation)
 
     result = await _dpor_schedule_and_suppress_async(reported, _execute)
+
+    # Defect #6 fix: release row locks for 0-row UPDATEs.
+    # An UPDATE that matches 0 rows acquires no real database row locks,
+    # but frontrun's row-lock arbitration may have acquired a scheduler-level
+    # lock based on the WHERE-clause resource ID.  Releasing it prevents
+    # over-serialization that blocks DPOR from exploring interleavings where
+    # both 0-row UPDATEs execute before either INSERT.
+    if update_match is not None and reported:
+        rowcount = getattr(self, "rowcount", -1)
+        if rowcount == 0:
+            _release_dpor_row_locks()
 
     # Post-INSERT: capture lastrowid and record indexical alias
     if insert_match is not None and not is_executemany and reported:
