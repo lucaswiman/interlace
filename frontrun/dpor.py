@@ -2,15 +2,16 @@
 Bytecode-tracing DPOR (Dynamic Partial Order Reduction) for frontrun.
 
 This module implements systematic interleaving exploration using DPOR.
-Shares cooperative threading primitives and shadow-stack infrastructure
-with bytecode.py (random exploration).
+Bytecode-level opcode processing and shadow-stack access detection live
+in ``frontrun._opcode_observer``; this module provides the scheduler,
+thread runner, and top-level ``explore_dpor()`` API.
 
 The approach:
 1. A Rust DPOR engine (frontrun._dpor) manages the exploration tree,
    vector clocks, and wakeup tree exploration.
-2. Python drives execution: runs threads under sys.settrace opcode
-   tracing, uses a shadow stack to detect shared-memory accesses,
-   and feeds access/sync events to the Rust engine.
+2. Python drives execution: runs threads under sys.settrace/sys.monitoring
+   opcode tracing, uses a shadow stack (see ``_opcode_observer``) to detect
+   shared-memory accesses, and feeds access/sync events to the Rust engine.
 3. Cooperative threading primitives (lock, event, etc.) are monkey-patched
    to yield control back to the DPOR scheduler and report synchronization
    events for happens-before tracking.
@@ -114,11 +115,6 @@ _PY_VERSION = sys.version_info[:2]
 # free-threaded builds (3.13t/3.14t) where sys.settrace + f_trace_opcodes
 # has a known crash bug (CPython #118415).
 _USE_SYS_MONITORING = _PY_VERSION >= (3, 12)
-
-# ---------------------------------------------------------------------------
-# Result type
-# ---------------------------------------------------------------------------
-
 
 # ---------------------------------------------------------------------------
 # Thread-local state for the DPOR scheduler

@@ -60,7 +60,7 @@ from frontrun._tracing import set_active_trace_filter as _set_active_trace_filte
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.async_scheduler import InterleavedLoop
 from frontrun.common import InterleavingResult, check_serializability_violation
-from frontrun._opcode_observer import ShadowStack, StableObjectIds, _process_opcode
+from frontrun._opcode_observer import ShadowStack, StableObjectIds, _make_object_key, _process_opcode
 from frontrun.dpor import _USE_SYS_MONITORING
 
 try:
@@ -138,11 +138,6 @@ _in_trace_processing: contextvars.ContextVar[bool] = contextvars.ContextVar("_in
 # ---------------------------------------------------------------------------
 # Object key helper (shared with sync dpor.py)
 # ---------------------------------------------------------------------------
-
-
-def _make_object_key(obj_id: int, name: Any) -> int:
-    """Create a non-negative u64 object key for the Rust engine."""
-    return hash((obj_id, name)) & 0xFFFFFFFFFFFFFFFF
 
 
 # Synchronization acquisition points must still be explored even when the
