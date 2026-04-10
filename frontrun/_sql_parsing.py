@@ -91,10 +91,13 @@ def _strip_quotes(name: str) -> str:
         # Mixed quoting — unlikely but handle gracefully
         last = name.rsplit(".", 1)[-1]
     else:
-        # Unquoted or single quoted identifier
-        if name.startswith(('"', "`")):
-            name = name[1:-1]
-        return name.rsplit(".", 1)[-1]
+        # No "." or `.` boundary detected.  Split on plain dot to
+        # separate schema from table, then strip quotes from the
+        # resulting table component.  The previous code assumed a
+        # leading quote meant the *entire* string was quoted and used
+        # [1:-1] — but for mixed cases like "public".users the last
+        # character is part of the table name, not a closing quote.
+        last = name.rsplit(".", 1)[-1]
 
     # Strip remaining quotes from the last component
     if last.startswith(('"', "`")):
