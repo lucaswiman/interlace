@@ -46,23 +46,10 @@ from collections.abc import AsyncGenerator, Callable, Coroutine, Generator
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
+# Lazy import for async SQL patching — shared with async_dpor.py
+from frontrun.async_dpor import _sql_async_available, patch_sql_async, unpatch_sql_async
 from frontrun.async_scheduler import InterleavedLoop
-from frontrun.common import InterleavingResult
-
-# Lazy import for async SQL patching (avoid hard dependency)
-_sql_async_available = False
-try:
-    from frontrun._sql_cursor_async import patch_sql_async, unpatch_sql_async
-
-    _sql_async_available = True
-except ImportError:
-
-    def patch_sql_async() -> None:  # type: ignore[misc]
-        pass
-
-    def unpatch_sql_async() -> None:  # type: ignore[misc]
-        pass
-
+from frontrun.common import InterleavingResult, check_serializability_violation
 
 # Context variable to track the active scheduler and task ID
 _scheduler_var: contextvars.ContextVar[Optional["AwaitScheduler"]] = contextvars.ContextVar("_scheduler", default=None)
@@ -404,11 +391,12 @@ async def explore_interleavings(
 
     # Compute serializable baseline if requested.
     serial_valid_states: set[Any] | None = None
+    serial_hash_fn: Callable[[Any], Any] = repr
     if serializable_invariant is not False:
-        from frontrun.common import compute_serializable_states_async
+        from frontrun.common import compute_serializable_states_async, resolve_serializable_hash_fn
 
-        hash_fn: Callable[[Any], Any] | None = serializable_invariant if callable(serializable_invariant) else None
-        serial_valid_states = await compute_serializable_states_async(setup, tasks, state_hash=hash_fn)
+        serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
+        serial_valid_states = await compute_serializable_states_async(setup, tasks, state_hash=serial_hash_fn)
 
     if detect_sql and _sql_async_available:
         patch_sql_async()
@@ -440,19 +428,14 @@ async def explore_interleavings(
 
             # --- serializable_invariant check ---
             if serial_valid_states is not None:
-                hash_fn_check: Callable[[Any], Any] = (
-                    serializable_invariant if callable(serializable_invariant) else repr
+                explanation = check_serializability_violation(
+                    state, serial_valid_states, serial_hash_fn, result.num_explored
                 )
-                state_h = hash_fn_check(state)
-                if state_h not in serial_valid_states:
+                if explanation is not None:
                     result.property_holds = False
                     result.counterexample = schedule
                     result.unique_interleavings = len(seen_schedule_hashes)
-                    result.explanation = (
-                        f"Serializability violation in execution {result.num_explored}.\n"
-                        f"State {state_h!r} does not match any sequential ordering.\n"
-                        f"Valid sequential states: {serial_valid_states!r}"
-                    )
+                    result.explanation = explanation
                     return result
 
             if not invariant(state):

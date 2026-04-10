@@ -169,3 +169,40 @@ async def compute_serializable_states_async(
             await task_funcs[i](s)
         valid.add(state_hash(s))
     return valid
+
+
+def resolve_serializable_hash_fn(
+    serializable_invariant: Callable[[Any], Any] | bool,
+) -> Callable[[Any], Any] | None:
+    """Extract the state-hash function from a ``serializable_invariant`` parameter.
+
+    Returns the callable itself when it is a hash function, or ``None``
+    when the caller passed ``True`` (meaning "use the default ``repr``").
+    """
+    return serializable_invariant if callable(serializable_invariant) else None
+
+
+def check_serializability_violation(
+    state: Any,
+    serial_valid_states: set[Any],
+    hash_fn: Callable[[Any], Any],
+    execution_num: int,
+) -> str | None:
+    """Check whether *state* violates serializability.
+
+    Returns an explanation string when the state hash is not in
+    *serial_valid_states*, or ``None`` if it passes.
+
+    *hash_fn* should be the resolved state-hash function (use
+    :func:`resolve_serializable_hash_fn` to convert the raw
+    ``serializable_invariant`` parameter, falling back to ``repr``
+    when it returns ``None``).
+    """
+    state_h = hash_fn(state)
+    if state_h not in serial_valid_states:
+        return (
+            f"Serializability violation in execution {execution_num}.\n"
+            f"State {state_h!r} does not match any sequential ordering.\n"
+            f"Valid sequential states: {serial_valid_states!r}"
+        )
+    return None

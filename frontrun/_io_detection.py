@@ -72,6 +72,21 @@ def set_dpor_thread_id(thread_id: int | None) -> None:
     _io_tls._dpor_thread_id = thread_id
 
 
+def get_dpor_context() -> tuple[Any, int] | None:
+    """Return ``(scheduler, thread_id)`` if DPOR is active, else ``None``.
+
+    Convenience wrapper used by SQL and Redis interception modules to
+    obtain the active scheduler and logical thread ID in a single call.
+    """
+    scheduler = get_dpor_scheduler()
+    if scheduler is None:
+        return None
+    thread_id = get_dpor_thread_id()
+    if thread_id is None:
+        return None
+    return scheduler, thread_id
+
+
 # ---------------------------------------------------------------------------
 # Resource identity helpers
 # ---------------------------------------------------------------------------

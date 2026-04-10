@@ -84,7 +84,7 @@ from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.cli import require_active as _require_frontrun_env
-from frontrun.common import InterleavingResult
+from frontrun.common import InterleavingResult, check_serializability_violation
 
 try:
     from frontrun._dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]
@@ -3529,12 +3529,13 @@ def explore_dpor(
 
     # Compute serializable baseline if requested.
     serial_valid_states: set[Any] | None = None
+    serial_hash_fn: Callable[[Any], Any] = repr
     if serializable_invariant is not False:
         try:
-            from frontrun.common import compute_serializable_states
+            from frontrun.common import compute_serializable_states, resolve_serializable_hash_fn
 
-            hash_fn: Callable[[T], Any] | None = serializable_invariant if callable(serializable_invariant) else None
-            serial_valid_states = compute_serializable_states(setup, threads, state_hash=hash_fn)
+            serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
+            serial_valid_states = compute_serializable_states(setup, threads, state_hash=serial_hash_fn)
         except BaseException:
             _set_active_trace_filter(None)
             raise
@@ -3807,11 +3808,10 @@ def explore_dpor(
 
             # --- serializable_invariant: check against sequential baselines ---
             if serial_valid_states is not None and not is_deadlock:
-                hash_fn_check: Callable[[Any], Any] = (
-                    serializable_invariant if callable(serializable_invariant) else repr
+                ser_explanation = check_serializability_violation(
+                    state, serial_valid_states, serial_hash_fn, result.num_explored
                 )
-                state_h = hash_fn_check(state)
-                if state_h not in serial_valid_states:
+                if ser_explanation is not None:
                     result.property_holds = False
                     with engine_lock:
                         schedule = execution.schedule_trace
@@ -3820,11 +3820,7 @@ def explore_dpor(
                     if result.counterexample is None:
                         result.counterexample = schedule_list
                     if result.explanation is None:
-                        result.explanation = (
-                            f"Serializability violation in execution {result.num_explored}.\n"
-                            f"State {state_h!r} does not match any sequential ordering.\n"
-                            f"Valid sequential states: {serial_valid_states!r}"
-                        )
+                        result.explanation = ser_explanation
                     if stop_on_first:
                         with _INSTR_CACHE_LOCK:
                             _INSTR_CACHE.clear()

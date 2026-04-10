@@ -263,41 +263,32 @@ async def test_executemany() -> None:
 
 
 class TestExecutemanyPatching:
-    def test_patched_executemany_acquires_pending_row_locks(self) -> None:
+    def test_patched_executemany_uses_dpor_schedule_and_suppress(self) -> None:
+        """_patched_executemany delegates DPOR scheduling to _dpor_schedule_and_suppress_async."""
         import ast
         import inspect
 
         source = inspect.getsource(sql_cursor_async_mod)
         tree = ast.parse(source)
 
-        found_acquire = False
+        found = False
         for node in ast.walk(tree):
             if isinstance(node, ast.AsyncFunctionDef) and node.name == "_patched_executemany":
                 for child in ast.walk(node):
                     if isinstance(child, ast.Call):
                         func = child.func
-                        if isinstance(func, ast.Name) and func.id == "_acquire_pending_row_locks":
-                            found_acquire = True
+                        if isinstance(func, ast.Name) and func.id == "_dpor_schedule_and_suppress_async":
+                            found = True
                             break
-        assert found_acquire
+        assert found, "_patched_executemany should delegate to _dpor_schedule_and_suppress_async"
 
-    def test_patched_executemany_releases_row_locks_on_exception(self) -> None:
-        import ast
+    def test_dpor_schedule_and_suppress_acquires_and_releases_row_locks(self) -> None:
+        """_dpor_schedule_and_suppress_async acquires row locks and releases on exception."""
         import inspect
 
-        source = inspect.getsource(sql_cursor_async_mod)
-        tree = ast.parse(source)
-
-        found_release = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_patched_executemany":
-                for child in ast.walk(node):
-                    if isinstance(child, ast.Call):
-                        func = child.func
-                        if isinstance(func, ast.Name) and func.id == "_release_dpor_row_locks":
-                            found_release = True
-                            break
-        assert found_release
+        source = inspect.getsource(sql_cursor_async_mod._dpor_schedule_and_suppress_async)
+        assert "_acquire_pending_row_locks" in source
+        assert "_release_dpor_row_locks" in source
 
 
 # ---------------------------------------------------------------------------
@@ -691,13 +682,11 @@ class TestAsyncpgExecutemanyDbObj:
         assert "db_obj=self" in func_body, "_patched_executemany should pass db_obj=self to _report_sql_access"
 
     def test_executemany_has_dpor_scheduling_point(self) -> None:
-        """_patched_executemany should have a DPOR scheduling point."""
+        """_patched_executemany should have a DPOR scheduling point via the shared helper."""
         import inspect
 
-        source = inspect.getsource(sql_cursor_async_mod)
-        idx = source.find("async def _patched_executemany")
-        assert idx != -1
-        func_body = source[idx : idx + 600]
-        assert "_get_dpor_context" in func_body, (
-            "_patched_executemany should call _get_dpor_context for DPOR scheduling"
+        # The scheduling point is now in _dpor_schedule_and_suppress_async
+        source = inspect.getsource(sql_cursor_async_mod._dpor_schedule_and_suppress_async)
+        assert "_get_dpor_context" in source, (
+            "_dpor_schedule_and_suppress_async should call _get_dpor_context for DPOR scheduling"
         )

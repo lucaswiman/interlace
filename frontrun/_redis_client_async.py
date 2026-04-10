@@ -15,8 +15,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from frontrun._io_detection import get_dpor_context as _get_dpor_context
 from frontrun._redis_client import (
-    _get_dpor_context,
+    _report_pipeline_commands,
     _report_redis_access,
     _suppress_endpoint_io,
 )
@@ -99,20 +100,7 @@ async def _intercept_pipeline_execute_async(
     **kwargs: Any,
 ) -> Any:
     """Async version of ``_intercept_pipeline_execute``."""
-    command_stack = getattr(self, "command_stack", [])
-    reported = False
-    for cmd in command_stack:
-        if hasattr(cmd, "args"):
-            cmd_args_full = cmd.args
-        elif isinstance(cmd, (list, tuple)):
-            cmd_args_full = cmd[0] if cmd and isinstance(cmd[0], (list, tuple)) else cmd
-        else:
-            continue
-        if cmd_args_full:
-            cmd_name = str(cmd_args_full[0])
-            cmd_cmd_args = tuple(cmd_args_full[1:])
-            if _report_redis_access(cmd_name, cmd_cmd_args, client=self):
-                reported = True
+    reported = _report_pipeline_commands(self)
 
     if reported:
         dpor_ctx = _get_dpor_context()
