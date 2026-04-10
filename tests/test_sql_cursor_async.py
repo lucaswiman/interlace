@@ -666,6 +666,69 @@ async def test_non_string_operation_passthrough() -> None:
     assert len(log.events) == 0
 
 
+class TestAsyncUpdateZeroRowRelease:
+    """Bug: async _intercept_execute_async doesn't release row locks for 0-row UPDATEs.
+
+    The sync _intercept_execute (Defect #6 fix) checks cursor.rowcount after
+    UPDATE statements and calls _release_dpor_row_locks() when rowcount == 0.
+    This prevents over-serialization in DPOR exploration: a 0-row UPDATE
+    acquires no real database row locks, so the scheduler-level lock should
+    also be released.
+
+    The async version is missing this handling entirely.
+    """
+
+    @pytest.mark.asyncio
+    async def test_zero_row_update_releases_row_locks(self) -> None:
+        """After a 0-row UPDATE, pending row locks should be released."""
+        release_calls: list[bool] = []
+
+        # Mock cursor with rowcount = 0
+        class MockCursor:
+            rowcount = 0
+
+        async def fake_execute(self: Any, sql: Any, params: Any = None) -> None:
+            pass
+
+        # Patch _release_dpor_row_locks to track calls
+        import frontrun._sql_cursor_async as mod
+
+        orig_release = mod._release_dpor_row_locks
+
+        def tracking_release() -> None:
+            release_calls.append(True)
+            orig_release()
+
+        mod._release_dpor_row_locks = tracking_release  # type: ignore[assignment]
+
+        log = IOLog()
+        set_io_reporter(log)
+
+        try:
+            cursor = MockCursor()
+            await _intercept_execute_async(
+                fake_execute, cursor, "UPDATE users SET name = 'x' WHERE id = 999",
+                paramstyle="qmark",
+            )
+            assert len(release_calls) > 0, (
+                "_release_dpor_row_locks was not called after 0-row UPDATE in async path. "
+                "The sync path (Defect #6 fix) releases row locks when rowcount == 0, "
+                "but the async path is missing this handling."
+            )
+        finally:
+            mod._release_dpor_row_locks = orig_release  # type: ignore[assignment]
+
+    def test_source_has_update_match(self) -> None:
+        """_intercept_execute_async should extract _RE_UPDATE_TABLE match like the sync version."""
+        import inspect
+
+        source = inspect.getsource(_intercept_execute_async)
+        assert "_RE_UPDATE_TABLE" in source or "update_match" in source, (
+            "_intercept_execute_async should check for UPDATE statements "
+            "to release row locks on 0-row matches (Defect #6 fix)"
+        )
+
+
 class TestAsyncpgExecutemanyDbObj:
     """Verify asyncpg _patched_executemany passes db_obj to _report_sql_access."""
 
