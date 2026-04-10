@@ -29,11 +29,17 @@ from frontrun._cooperative import real_lock
 
 _PY_VERSION = sys.version_info[:2]
 
+# sys.monitoring (PEP 669) is available since 3.12 and is required for
+# free-threaded builds (3.13t/3.14t) where sys.settrace + f_trace_opcodes
+# has a known crash bug (CPython #118415).
+_USE_SYS_MONITORING = _PY_VERSION >= (3, 12)
+
 __all__ = [
     "ShadowStack",
     "StableObjectIds",
     "_CALL_OPCODES",
     "_SHARED_ACCESS_OPCODES",
+    "_USE_SYS_MONITORING",
     "_call_might_report_access",
     "_get_instructions",
     "_is_shared_opcode",
@@ -42,6 +48,8 @@ __all__ = [
     "clear_instr_cache",
     "get_object_key_reverse_map",
     "set_object_key_reverse_map",
+    "setup_opcode_monitoring",
+    "teardown_opcode_monitoring",
 ]
 
 
@@ -1358,3 +1366,54 @@ def _process_opcode(
                 shadow.push(None)
         except (ValueError, TypeError):
             shadow.clear()
+
+
+# ---------------------------------------------------------------------------
+# Shared sys.monitoring helpers (used by dpor.py and async_dpor.py)
+# ---------------------------------------------------------------------------
+
+
+def setup_opcode_monitoring(
+    *,
+    tool_name: str,
+    handle_py_start: Any,
+    handle_py_return: Any,
+    handle_instruction: Any,
+) -> int:
+    """Set up sys.monitoring for opcode tracing. Returns the tool ID.
+
+    Handles the full tool ID lifecycle including defensive cleanup of
+    stale tool IDs from interrupted runs (e.g. pytest-timeout kills a
+    test before teardown).
+    """
+    mon = sys.monitoring
+    tool_id: int = mon.PROFILER_ID  # type: ignore[attr-defined]
+
+    try:
+        mon.use_tool_id(tool_id, tool_name)  # type: ignore[attr-defined]
+    except ValueError:
+        # Tool ID still held from a previous interrupted run — force cleanup.
+        mon.set_events(tool_id, 0)  # type: ignore[attr-defined]
+        mon.register_callback(tool_id, mon.events.PY_START, None)  # type: ignore[attr-defined]
+        mon.register_callback(tool_id, mon.events.PY_RETURN, None)  # type: ignore[attr-defined]
+        mon.register_callback(tool_id, mon.events.INSTRUCTION, None)  # type: ignore[attr-defined]
+        mon.free_tool_id(tool_id)  # type: ignore[attr-defined]
+        mon.use_tool_id(tool_id, tool_name)  # type: ignore[attr-defined]
+
+    mon.set_events(tool_id, mon.events.PY_START | mon.events.PY_RETURN | mon.events.INSTRUCTION)  # type: ignore[attr-defined]
+    mon.register_callback(tool_id, mon.events.PY_START, handle_py_start)  # type: ignore[attr-defined]
+    mon.register_callback(tool_id, mon.events.PY_RETURN, handle_py_return)  # type: ignore[attr-defined]
+    mon.register_callback(tool_id, mon.events.INSTRUCTION, handle_instruction)  # type: ignore[attr-defined]
+    return tool_id
+
+
+def teardown_opcode_monitoring(tool_id: int | None) -> None:
+    """Tear down sys.monitoring for opcode tracing."""
+    if tool_id is None:
+        return
+    mon = sys.monitoring
+    mon.set_events(tool_id, 0)  # type: ignore[attr-defined]
+    mon.register_callback(tool_id, mon.events.PY_START, None)  # type: ignore[attr-defined]
+    mon.register_callback(tool_id, mon.events.PY_RETURN, None)  # type: ignore[attr-defined]
+    mon.register_callback(tool_id, mon.events.INSTRUCTION, None)  # type: ignore[attr-defined]
+    mon.free_tool_id(tool_id)  # type: ignore[attr-defined]

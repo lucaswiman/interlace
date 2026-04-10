@@ -63,6 +63,7 @@ from frontrun._io_detection import (
 )
 from frontrun._opcode_observer import (
     _CALL_OPCODES,
+    _USE_SYS_MONITORING,
     ShadowStack,
     StableObjectIds,
     _call_might_report_access,
@@ -73,6 +74,8 @@ from frontrun._opcode_observer import (
     clear_instr_cache,
     get_object_key_reverse_map,
     set_object_key_reverse_map,
+    setup_opcode_monitoring,
+    teardown_opcode_monitoring,
 )
 from frontrun._redis_client import (
     is_redis_tid_suppressed,
@@ -108,12 +111,6 @@ except ModuleNotFoundError as _err:
     ) from _err
 
 T = TypeVar("T")
-
-_PY_VERSION = sys.version_info[:2]
-# sys.monitoring (PEP 669) is available since 3.12 and is required for
-# free-threaded builds (3.13t/3.14t) where sys.settrace + f_trace_opcodes
-# has a known crash bug (CPython #118415).
-_USE_SYS_MONITORING = _PY_VERSION >= (3, 12)
 
 # ---------------------------------------------------------------------------
 # Thread-local state for the DPOR scheduler
@@ -1470,31 +1467,9 @@ class DporBytecodeRunner:
         if not _USE_SYS_MONITORING:
             return
 
-        mon = sys.monitoring
-        tool_id = mon.PROFILER_ID  # type: ignore[attr-defined]
-        DporBytecodeRunner._TOOL_ID = tool_id
-
-        # Defensively free the tool ID if it's still claimed from a previous
-        # run that was interrupted (e.g. by pytest-timeout) before
-        # _teardown_monitoring could call free_tool_id.  Without this,
-        # use_tool_id raises "tool N is already in use" and every subsequent
-        # test in the suite fails.
-        try:
-            mon.use_tool_id(tool_id, "frontrun._dpor")  # type: ignore[attr-defined]
-        except ValueError:
-            # Tool ID still held from a previous interrupted run — force cleanup.
-            mon.set_events(tool_id, 0)  # type: ignore[attr-defined]
-            mon.register_callback(tool_id, mon.events.PY_START, None)  # type: ignore[attr-defined]
-            mon.register_callback(tool_id, mon.events.PY_RETURN, None)  # type: ignore[attr-defined]
-            mon.register_callback(tool_id, mon.events.INSTRUCTION, None)  # type: ignore[attr-defined]
-            mon.free_tool_id(tool_id)  # type: ignore[attr-defined]
-            mon.use_tool_id(tool_id, "frontrun._dpor")  # type: ignore[attr-defined]
-
-        mon.set_events(tool_id, mon.events.PY_START | mon.events.PY_RETURN | mon.events.INSTRUCTION)  # type: ignore[attr-defined]
-
         scheduler = self.scheduler
-
         _detect_io = scheduler._detect_io
+        mon = sys.monitoring
 
         def handle_py_start(code: Any, instruction_offset: int) -> Any:
             # Only use mon.DISABLE for code that should *never* be traced
@@ -1594,22 +1569,18 @@ class DporBytecodeRunner:
             scheduler.report_and_wait(frame, thread_id)
             return None
 
-        mon.register_callback(tool_id, mon.events.PY_START, handle_py_start)  # type: ignore[attr-defined]
-        mon.register_callback(tool_id, mon.events.PY_RETURN, handle_py_return)  # type: ignore[attr-defined]
-        mon.register_callback(tool_id, mon.events.INSTRUCTION, handle_instruction)  # type: ignore[attr-defined]
+        DporBytecodeRunner._TOOL_ID = setup_opcode_monitoring(
+            tool_name="frontrun._dpor",
+            handle_py_start=handle_py_start,
+            handle_py_return=handle_py_return,
+            handle_instruction=handle_instruction,
+        )
         self._monitoring_active = True
 
     def _teardown_monitoring(self) -> None:
         if not self._monitoring_active:
             return
-        mon = sys.monitoring
-        tool_id = DporBytecodeRunner._TOOL_ID
-        if tool_id is not None:
-            mon.set_events(tool_id, 0)  # type: ignore[attr-defined]
-            mon.register_callback(tool_id, mon.events.PY_START, None)  # type: ignore[attr-defined]
-            mon.register_callback(tool_id, mon.events.PY_RETURN, None)  # type: ignore[attr-defined]
-            mon.register_callback(tool_id, mon.events.INSTRUCTION, None)  # type: ignore[attr-defined]
-            mon.free_tool_id(tool_id)  # type: ignore[attr-defined]
+        teardown_opcode_monitoring(DporBytecodeRunner._TOOL_ID)
         self._monitoring_active = False
 
     # --- Thread entry points ---
