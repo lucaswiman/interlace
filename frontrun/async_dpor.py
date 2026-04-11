@@ -51,16 +51,23 @@ from collections.abc import Awaitable, Callable, Coroutine, Generator
 from typing import Any, TypeVar
 
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
+from frontrun._opcode_observer import (
+    _USE_SYS_MONITORING,
+    ShadowStack,
+    StableObjectIds,
+    _make_object_key,
+    _process_opcode,
+    make_monitoring_callbacks,
+    make_settrace_callback,
+    setup_opcode_monitoring,
+    teardown_opcode_monitoring,
+)
 from frontrun._sql_cursor import clear_sql_metadata, get_lock_timeout, set_lock_timeout
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._tracing import TraceFilter as _TraceFilter
-from frontrun._tracing import is_cmdline_user_code as _is_cmdline_user_code
-from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
-from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.async_scheduler import InterleavedLoop
 from frontrun.common import InterleavingResult, check_serializability_violation
-from frontrun.dpor import _USE_SYS_MONITORING, ShadowStack, StableObjectIds, _process_opcode
 
 try:
     from frontrun._dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]
@@ -137,11 +144,6 @@ _in_trace_processing: contextvars.ContextVar[bool] = contextvars.ContextVar("_in
 # ---------------------------------------------------------------------------
 # Object key helper (shared with sync dpor.py)
 # ---------------------------------------------------------------------------
-
-
-def _make_object_key(obj_id: int, name: Any) -> int:
-    """Create a non-negative u64 object key for the Rust engine."""
-    return hash((obj_id, name)) & 0xFFFFFFFFFFFFFFFF
 
 
 # Synchronization acquisition points must still be explored even when the
@@ -751,106 +753,52 @@ class AsyncDporScheduler(InterleavedLoop):
     def remove_shadow_stack(self, frame_id: int) -> None:
         self._shadow_stacks.pop(frame_id, None)
 
-    def _trace_user_opcode(self, frame: Any) -> None:
-        task_id = _task_id_var.get()
-        if task_id is None or _scheduler_var.get() is not self or _in_trace_processing.get():
-            return
-        # When I/O detection (Redis/SQL) is active, skip opcode-level access
-        # reporting entirely.  The I/O-level reporters already capture the
-        # real key/table conflicts.  Running _process_opcode on user frames
-        # would still pick up shared Python state (module globals, class
-        # objects, connection pool internals) creating false DPOR wakeup tree
-        # entries and excess path exploration for independent I/O operations.
-        if self._detect_sql or self._detect_redis:
-            return
+    def _get_task_id(self) -> int | None:
+        if _task_id_var.get() is not None and _scheduler_var.get() is self:
+            return _task_id_var.get()
+        return None
+
+    def _on_opcode(self, code: Any, offset: int, frame: Any, task_id: int) -> bool:
+        if _in_trace_processing.get():
+            return False
         token = _in_trace_processing.set(True)
         try:
             with self._engine_lock:
                 _process_opcode(frame, self, task_id)  # type: ignore[arg-type]
         finally:
             _in_trace_processing.reset(token)
+        return False  # async never yields at opcode level
 
     def _setup_settrace(self) -> None:
-        def trace(frame: Any, event: str, arg: Any) -> Any:
-            if event == "call":
-                filename = frame.f_code.co_filename
-                if _should_trace_file(filename):
-                    if _is_dynamic_code(filename) and not _is_cmdline_user_code(filename, frame.f_globals):
-                        caller = frame.f_back
-                        if caller is None or not _should_trace_file(caller.f_code.co_filename):
-                            return None
-                    frame.f_trace_opcodes = True
-                    return trace
-                return None
-
-            if event == "opcode":
-                self._trace_user_opcode(frame)
-                return trace
-
-            if event == "return":
-                self.remove_shadow_stack(id(frame))
-                return trace
-
-            return trace
-
+        trace = make_settrace_callback(
+            get_thread_id=self._get_task_id,
+            on_opcode=self._on_opcode,
+            remove_shadow_stack=self.remove_shadow_stack,
+        )
         sys.settrace(trace)
 
     def _setup_monitoring(self) -> None:
         if not _USE_SYS_MONITORING:
             return
 
-        mon = sys.monitoring
-        tool_id = mon.PROFILER_ID  # type: ignore[attr-defined]
-        AsyncDporScheduler._TOOL_ID = tool_id
+        handle_py_start, handle_py_return, handle_instruction = make_monitoring_callbacks(
+            get_thread_id=self._get_task_id,
+            on_opcode=self._on_opcode,
+            remove_shadow_stack=self.remove_shadow_stack,
+        )
 
-        mon.use_tool_id(tool_id, "frontrun.async_dpor")  # type: ignore[attr-defined]
-        mon.set_events(tool_id, mon.events.PY_START | mon.events.PY_RETURN | mon.events.INSTRUCTION)  # type: ignore[attr-defined]
-
-        def handle_py_start(code: Any, instruction_offset: int) -> Any:
-            if not _should_trace_file(code.co_filename):
-                return mon.DISABLE  # type: ignore[attr-defined]
-            return None
-
-        def handle_py_return(code: Any, instruction_offset: int, retval: Any) -> Any:
-            if not _should_trace_file(code.co_filename):
-                return None
-            if _task_id_var.get() is None or _scheduler_var.get() is not self:
-                return None
-            frame = sys._getframe(1)
-            self.remove_shadow_stack(id(frame))
-            return None
-
-        def handle_instruction(code: Any, instruction_offset: int) -> Any:
-            if not _should_trace_file(code.co_filename):
-                return None
-            if _task_id_var.get() is None or _scheduler_var.get() is not self:
-                return None
-
-            frame = sys._getframe(1)
-            if _is_dynamic_code(code.co_filename) and not _is_cmdline_user_code(code.co_filename, frame.f_globals):
-                caller = frame.f_back
-                if caller is None or not _should_trace_file(caller.f_code.co_filename):
-                    return None
-
-            self._trace_user_opcode(frame)
-            return None
-
-        mon.register_callback(tool_id, mon.events.PY_START, handle_py_start)  # type: ignore[attr-defined]
-        mon.register_callback(tool_id, mon.events.PY_RETURN, handle_py_return)  # type: ignore[attr-defined]
-        mon.register_callback(tool_id, mon.events.INSTRUCTION, handle_instruction)  # type: ignore[attr-defined]
+        AsyncDporScheduler._TOOL_ID = setup_opcode_monitoring(
+            tool_name="frontrun.async_dpor",
+            handle_py_start=handle_py_start,
+            handle_py_return=handle_py_return,
+            handle_instruction=handle_instruction,
+        )
         self._monitoring_active = True
 
     def _teardown_monitoring(self) -> None:
         if not self._monitoring_active:
             return
-        mon = sys.monitoring
-        tool_id = AsyncDporScheduler._TOOL_ID
-        if tool_id is not None:
-            mon.set_events(tool_id, 0)  # type: ignore[attr-defined]
-            mon.register_callback(tool_id, mon.events.PY_START, None)  # type: ignore[attr-defined]
-            mon.register_callback(tool_id, mon.events.PY_RETURN, None)  # type: ignore[attr-defined]
-            mon.register_callback(tool_id, mon.events.INSTRUCTION, None)  # type: ignore[attr-defined]
-            mon.free_tool_id(tool_id)  # type: ignore[attr-defined]
+        teardown_opcode_monitoring(AsyncDporScheduler._TOOL_ID)
         self._monitoring_active = False
 
     def _row_lock_int_id(self, res_id: str) -> int:
