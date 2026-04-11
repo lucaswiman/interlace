@@ -8,6 +8,8 @@ Demonstrates both:
 
 import threading
 
+import pytest
+
 from frontrun import explore_interleavings as explore_interleavings_api
 from frontrun.bytecode import (
     BytecodeShuffler,
@@ -339,3 +341,45 @@ def test_scheduler_had_error():
 
     assert scheduler.had_error
     assert scheduler._error is error
+
+
+def test_run_thread_clears_runtime_state_after_error(monkeypatch: pytest.MonkeyPatch):
+    scheduler = OpcodeScheduler([0], num_threads=1)
+    runner = BytecodeShuffler(scheduler)
+    events: list[str] = []
+
+    monkeypatch.setattr("frontrun.bytecode._USE_SYS_MONITORING", False)
+    monkeypatch.setattr(
+        "frontrun.bytecode.set_context", lambda _scheduler, thread_id: events.append(f"context:{thread_id}")
+    )
+    monkeypatch.setattr("frontrun.bytecode.clear_context", lambda: events.append("clear_context"))
+    monkeypatch.setattr(
+        "frontrun.bytecode.set_dpor_scheduler", lambda value: events.append(f"scheduler:{value is not None}")
+    )
+    monkeypatch.setattr("frontrun.bytecode.set_dpor_thread_id", lambda value: events.append(f"thread_id:{value}"))
+    monkeypatch.setattr(
+        "frontrun.bytecode.sys.settrace", lambda value: events.append("trace:on" if value is not None else "trace:off")
+    )
+    monkeypatch.setattr(runner, "_setup_io_reporter", lambda thread_id: events.append(f"io:{thread_id}"))
+    monkeypatch.setattr(runner, "_teardown_io_reporter", lambda: events.append("io:off"))
+
+    def boom() -> None:
+        raise RuntimeError("boom")
+
+    runner._run_thread(0, boom, (), {})
+
+    assert isinstance(runner.errors[0], RuntimeError)
+    assert scheduler.had_error
+    assert scheduler._threads_done == {0}
+    assert events == [
+        "context:0",
+        "io:0",
+        "scheduler:True",
+        "thread_id:0",
+        "trace:on",
+        "trace:off",
+        "io:off",
+        "scheduler:False",
+        "thread_id:None",
+        "clear_context",
+    ]

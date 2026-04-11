@@ -42,7 +42,7 @@ an additional checkpoint.
 import asyncio
 import random
 from collections.abc import AsyncGenerator, Callable, Coroutine
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 # Lazy import for async SQL patching — shared with async_dpor.py
@@ -53,6 +53,7 @@ from frontrun._async_autopause import (
     await_point,  # noqa: F401
     wrap_auto_paused_tasks,
 )
+from frontrun._threaded_runner import PatchScope
 from frontrun.async_dpor import _sql_async_available, patch_sql_async, unpatch_sql_async
 from frontrun.async_scheduler import InterleavedLoop
 from frontrun.common import InterleavingResult, check_serializability_violation
@@ -168,6 +169,17 @@ class AsyncShuffler:
             pass  # match original behavior: swallow timeout in runner
 
 
+@contextmanager
+def _patch_async_runtime(*, detect_sql: bool = False, patch_sleep: bool = False):
+    with PatchScope() as patch_scope:
+        patch_scope.add(patch_sql_async, unpatch_sql_async, enabled=detect_sql and _sql_async_available)
+        if patch_sleep:
+            from frontrun.async_dpor import _patch_asyncio_sleep, _unpatch_asyncio_sleep
+
+            patch_scope.add(_patch_asyncio_sleep, _unpatch_asyncio_sleep)
+        yield
+
+
 @asynccontextmanager
 async def controlled_interleaving(schedule: list[int], num_tasks: int = 2) -> AsyncGenerator[AsyncShuffler, None]:
     """Context manager for running async code under a specific interleaving.
@@ -218,24 +230,16 @@ async def run_with_schedule(
     Returns:
         The state object after execution.
     """
-    if detect_sql and _sql_async_available:
-        patch_sql_async()
-    try:
+    with _patch_async_runtime(detect_sql=detect_sql):
         scheduler = AwaitScheduler(schedule, len(tasks), deadlock_timeout=deadlock_timeout)
         runner = AsyncShuffler(scheduler)
 
         state = setup()
         funcs: list[Callable[..., Coroutine[Any, Any, None]]] = [lambda s=state, t=t: t(s) for t in tasks]  # type: ignore[assignment]
 
-        try:
-            await runner.run(funcs, timeout=timeout)
-        except asyncio.TimeoutError:
-            pass
+        await runner.run(funcs, timeout=timeout)
 
         return state
-    finally:
-        if detect_sql and _sql_async_available:
-            unpatch_sql_async()
 
 
 async def explore_interleavings(
@@ -301,15 +305,7 @@ async def explore_interleavings(
         serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
         serial_valid_states = await compute_serializable_states_async(setup, tasks, state_hash=serial_hash_fn)
 
-    if detect_sql and _sql_async_available:
-        patch_sql_async()
-    _unpatch_asyncio_sleep_fn = None
-    if patch_sleep:
-        from frontrun.async_dpor import _patch_asyncio_sleep, _unpatch_asyncio_sleep
-
-        _patch_asyncio_sleep()
-        _unpatch_asyncio_sleep_fn = _unpatch_asyncio_sleep
-    try:
+    with _patch_async_runtime(detect_sql=detect_sql, patch_sleep=patch_sleep):
         rng = random.Random(seed)
         num_tasks = len(tasks)
         result = InterleavingResult(property_holds=True, num_explored=0)
@@ -349,11 +345,6 @@ async def explore_interleavings(
 
         result.unique_interleavings = len(seen_schedule_hashes)
         return result
-    finally:
-        if _unpatch_asyncio_sleep_fn is not None:
-            _unpatch_asyncio_sleep_fn()
-        if detect_sql and _sql_async_available:
-            unpatch_sql_async()
 
 
 def schedule_strategy(num_tasks: int, max_ops: int = 100) -> Any:  # type: ignore[name-defined]

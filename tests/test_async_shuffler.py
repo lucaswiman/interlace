@@ -8,6 +8,8 @@ Demonstrates both:
 
 import asyncio
 
+import pytest
+
 from frontrun import explore_interleavings as explore_interleavings_api
 from frontrun.async_shuffler import (
     AsyncShuffler,
@@ -356,6 +358,43 @@ def test_run_with_schedule_returns_state():
         assert state.value == 2
 
     asyncio.run(_test())
+
+
+def test_explore_interleavings_unwinds_patch_stack_in_reverse_order(monkeypatch: pytest.MonkeyPatch):
+    events: list[str] = []
+
+    def patch_sql() -> None:
+        events.append("patch_sql")
+
+    def unpatch_sql() -> None:
+        events.append("unpatch_sql")
+
+    def patch_sleep() -> None:
+        events.append("patch_sleep")
+
+    def unpatch_sleep() -> None:
+        events.append("unpatch_sleep")
+
+    monkeypatch.setattr("frontrun.async_shuffler._sql_async_available", True)
+    monkeypatch.setattr("frontrun.async_shuffler.patch_sql_async", patch_sql)
+    monkeypatch.setattr("frontrun.async_shuffler.unpatch_sql_async", unpatch_sql)
+    monkeypatch.setattr("frontrun.async_dpor._patch_asyncio_sleep", patch_sleep)
+    monkeypatch.setattr("frontrun.async_dpor._unpatch_asyncio_sleep", unpatch_sleep)
+
+    async def _test() -> None:
+        with pytest.raises(RuntimeError, match="setup boom"):
+            await explore_interleavings(
+                setup=lambda: (_ for _ in ()).throw(RuntimeError("setup boom")),
+                tasks=[lambda _state: asyncio.sleep(0)],
+                invariant=lambda _state: True,
+                max_attempts=1,
+                detect_sql=True,
+                patch_sleep=True,
+            )
+
+    asyncio.run(_test())
+
+    assert events == ["patch_sql", "patch_sleep", "unpatch_sleep", "unpatch_sql"]
 
 
 def test_explore_with_seed_is_reproducible():
