@@ -85,14 +85,7 @@ async def _intercept_execute_command_async(
         # Without this, every socket yield creates an empty DPOR step,
         # pushing adjacent Redis commands far apart in the trace and
         # preventing DPOR from exploring the gap between e.g. EXISTS and SET.
-        pause_var = _get_in_scheduler_pause()
-        depth = pause_var.get()
-        pause_var.set(depth + 1)
-        try:
-            with _suppress_endpoint_io():
-                return await original_method(self, *args, **kwargs)
-        finally:
-            pause_var.set(depth)
+        return await _run_reported_async_command(original_method, self, *args, **kwargs)
     return await original_method(self, *args, **kwargs)
 
 
@@ -115,15 +108,25 @@ async def _intercept_pipeline_execute_async(
                 await scheduler.pause(task_id)
 
     if reported:
-        pause_var = _get_in_scheduler_pause()
-        depth = pause_var.get()
-        pause_var.set(depth + 1)
-        try:
-            with _suppress_endpoint_io():
-                return await original_method(self, *args, **kwargs)
-        finally:
-            pause_var.set(depth)
+        return await _run_reported_async_command(original_method, self, *args, **kwargs)
     return await original_method(self, *args, **kwargs)
+
+
+async def _run_reported_async_command(
+    original_method: Any,
+    self: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Run a reported async Redis command while suppressing endpoint I/O."""
+    pause_var = _get_in_scheduler_pause()
+    depth = pause_var.get()
+    pause_var.set(depth + 1)
+    try:
+        with _suppress_endpoint_io():
+            return await original_method(self, *args, **kwargs)
+    finally:
+        pause_var.set(depth)
 
 
 # ---------------------------------------------------------------------------

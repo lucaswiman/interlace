@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 from collections.abc import Callable, Coroutine
+from contextlib import contextmanager
 from typing import Any, TypeVar
 
 T = TypeVar("T")
@@ -12,6 +13,26 @@ T = TypeVar("T")
 def make_current_connection_var(name: str) -> contextvars.ContextVar[Any]:
     """Create a context variable for exposing the active SQLAlchemy connection."""
     return contextvars.ContextVar(name)
+
+
+def _lock_timeout_statement(lock_timeout: int | None) -> str | None:
+    """Build the SQL statement used to set a per-connection lock timeout."""
+    if lock_timeout is None:
+        return None
+    return f"SET lock_timeout = '{int(lock_timeout)}ms'"
+
+
+@contextmanager
+def _current_connection_scope(
+    current_connection: contextvars.ContextVar[Any],
+    conn: Any,
+):
+    """Expose the active connection in a context variable."""
+    token = current_connection.set(conn)
+    try:
+        yield
+    finally:
+        current_connection.reset(token)
 
 
 def wrap_sync_setup(engine: Any, setup: Callable[[], T]) -> Callable[[], T]:
@@ -53,8 +74,9 @@ def wrap_sync_thread(
             raise
         # conn_ctx is now entered — guarantee __exit__ via outer finally.
         try:
-            if lock_timeout is not None:
-                conn.exec_driver_sql(f"SET lock_timeout = '{int(lock_timeout)}ms'")
+            lock_timeout_sql = _lock_timeout_statement(lock_timeout)
+            if lock_timeout_sql is not None:
+                conn.exec_driver_sql(lock_timeout_sql)
         except BaseException:
             unsuppress_sync_reporting()
             suppress_sync_reporting()
@@ -86,22 +108,21 @@ def wrap_sync_thread(
         conn.exec_driver_sql = _wrap_sa_method(_orig_exec_driver_sql)  # type: ignore[method-assign]
         conn.commit = _wrap_sa_method(_orig_commit)  # type: ignore[method-assign]
         conn.rollback = _wrap_sa_method(_orig_rollback)  # type: ignore[method-assign]
-        token = current_connection.set(conn)
         exc_info: tuple[type[BaseException], BaseException, object] | tuple[None, None, None] = (None, None, None)
-        try:
-            fn(state)
-        except BaseException:
-            import sys
-
-            exc_info = sys.exc_info()  # type: ignore[assignment]
-            raise
-        finally:
-            current_connection.reset(token)
-            suppress_sync_reporting()
+        with _current_connection_scope(current_connection, conn):
             try:
-                conn_ctx.__exit__(*exc_info)
+                fn(state)
+            except BaseException:
+                import sys
+
+                exc_info = sys.exc_info()  # type: ignore[assignment]
+                raise
             finally:
-                unsuppress_sync_reporting()
+                suppress_sync_reporting()
+                try:
+                    conn_ctx.__exit__(*exc_info)
+                finally:
+                    unsuppress_sync_reporting()
 
     return wrapper
 
@@ -126,12 +147,10 @@ def wrap_async_task(
 
     async def wrapper(state: T) -> None:
         async with engine.connect() as conn:
-            if lock_timeout is not None:
-                await conn.exec_driver_sql(f"SET lock_timeout = '{int(lock_timeout)}ms'")
-            token = current_connection.set(conn)
-            try:
+            lock_timeout_sql = _lock_timeout_statement(lock_timeout)
+            if lock_timeout_sql is not None:
+                await conn.exec_driver_sql(lock_timeout_sql)
+            with _current_connection_scope(current_connection, conn):
                 await fn(state)
-            finally:
-                current_connection.reset(token)
 
     return wrapper

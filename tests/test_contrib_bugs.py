@@ -1,6 +1,21 @@
-"""Tests for bugs in contrib SQLAlchemy wrappers."""
+"""Tests for bugs and simplification seams in contrib wrappers."""
 
 from __future__ import annotations
+
+import inspect
+
+
+class TestDjangoSharedConnectionWrapper:
+    """Django sync/async wrappers should share one connection helper."""
+
+    def test_wrappers_use_shared_connection_helper(self) -> None:
+        """Both Django wrappers should route through one shared helper."""
+        from frontrun.contrib.django import _shared as django_shared
+
+        source = inspect.getsource(django_shared)
+        assert "_fresh_connection" in source, "Expected a shared Django connection helper"
+        assert "with _fresh_connection(" in inspect.getsource(django_shared.wrap_sync_thread)
+        assert "with _fresh_connection(" in inspect.getsource(django_shared.wrap_async_task)
 
 
 class TestSqlalchemyAsyncLockTimeoutForwarding:
@@ -13,8 +28,6 @@ class TestSqlalchemyAsyncLockTimeoutForwarding:
         NOT present in **kwargs, so it was never forwarded (unlike the sync
         version which explicitly passes lock_timeout=lock_timeout).
         """
-        import inspect
-
         from frontrun.contrib.sqlalchemy._async import async_sqlalchemy_dpor
 
         source = inspect.getsource(async_sqlalchemy_dpor)
@@ -34,8 +47,6 @@ class TestSqlalchemySyncExitExceptionInfo:
         even when fn(state) raises. SQLAlchemy uses the exception info to decide
         whether to rollback. With (None, None, None), it may try to commit instead.
         """
-        import inspect
-
         from frontrun.contrib.sqlalchemy._sync import sqlalchemy_dpor
 
         source = inspect.getsource(sqlalchemy_dpor)
@@ -53,4 +64,31 @@ class TestSqlalchemySyncExitExceptionInfo:
             f"Found {exit_none_count} occurrences of __exit__(None, None, None) in sqlalchemy_dpor. "
             "The finally block after fn(state) should pass actual exception info to __exit__, "
             "not (None, None, None), so SQLAlchemy can decide whether to rollback."
+        )
+
+
+class TestSqlalchemyConnectionHelpers:
+    """SQLAlchemy wrappers should share connection-scope plumbing."""
+
+    def test_wrappers_use_shared_connection_scope(self) -> None:
+        """Both SQLAlchemy wrappers should route token handling through one helper."""
+        from frontrun.contrib.sqlalchemy import _shared as sa_shared
+
+        source = inspect.getsource(sa_shared)
+        assert "_current_connection_scope" in source, "Expected a shared SQLAlchemy connection-scope helper"
+        assert "_lock_timeout_statement" in source, "Expected a shared SQLAlchemy lock_timeout helper"
+
+
+class TestRedisAsyncReportedBranch:
+    """Async Redis interceptors should share reported-command handling."""
+
+    def test_async_interceptors_use_shared_reported_branch(self) -> None:
+        """Both async Redis interceptors should route the reported branch through one helper."""
+        from frontrun import _redis_client_async
+
+        source = inspect.getsource(_redis_client_async)
+        assert "_run_reported_async_command" in source, "Expected a shared async Redis reported-command helper"
+        assert "_run_reported_async_command(" in inspect.getsource(_redis_client_async._intercept_execute_command_async)
+        assert "_run_reported_async_command(" in inspect.getsource(
+            _redis_client_async._intercept_pipeline_execute_async
         )
