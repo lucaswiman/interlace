@@ -62,17 +62,17 @@ from frontrun._io_detection import (
     unpatch_io,
 )
 from frontrun._opcode_observer import (
-    _CALL_OPCODES,
     _USE_SYS_MONITORING,
     ShadowStack,
     StableObjectIds,
-    _call_might_report_access,
     _get_instructions,
-    _is_shared_opcode,
     _make_object_key,
     _process_opcode,
     clear_instr_cache,
     get_object_key_reverse_map,
+    make_monitoring_callbacks,
+    make_settrace_callback,
+    process_opcode_with_coarsening,
     set_object_key_reverse_map,
     setup_opcode_monitoring,
     teardown_opcode_monitoring,
@@ -94,8 +94,6 @@ from frontrun._sql_cursor import (
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
 from frontrun._tracing import TraceFilter as _TraceFilter
-from frontrun._tracing import is_cmdline_user_code as _is_cmdline_user_code
-from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.cli import require_active as _require_frontrun_env
@@ -1391,74 +1389,19 @@ class DporBytecodeRunner:
         scheduler = self.scheduler
         _detect_io = scheduler._detect_io
 
-        def trace(frame: Any, event: str, arg: Any) -> Any:
-            if scheduler._finished or scheduler._error:
-                return None
+        def _get_tid() -> int | None:
+            return thread_id
 
-            if event == "call":
-                filename = frame.f_code.co_filename
-                if _should_trace_file(filename):
-                    # Skip dynamically generated code (<string>, etc.)
-                    # unless its caller is user code.  In I/O mode, skip
-                    # all dynamic code unconditionally.  Exception: in
-                    # python -c mode, functions defined in the -c string
-                    # have filename "<string>" but ARE user code.
-                    if _is_dynamic_code(filename) and not _is_cmdline_user_code(filename, frame.f_globals):
-                        if _detect_io:
-                            return None
-                        caller = frame.f_back
-                        if caller is None or not _should_trace_file(caller.f_code.co_filename):
-                            return None
-                    frame.f_trace_opcodes = True
-                    return trace
-                return None
+        def _on_opcode(code: Any, offset: int, frame: Any, tid: int) -> bool:
+            return process_opcode_with_coarsening(code, offset, frame, scheduler, tid, _detect_io)
 
-            if event == "opcode":
-                # --- Scheduling coarsening ---
-                # Non-shared opcodes only manipulate thread-local state.
-                # Process the shadow stack directly without a scheduler yield.
-                # CALL opcodes need shadow stack inspection to decide.
-                # When detect_io is enabled, skip coarsening for CALL opcodes
-                # because I/O events arrive from C-level LD_PRELOAD interception
-                # and need scheduling points around open/read/write calls.
-                if not _is_shared_opcode(frame.f_code, frame.f_lasti):
-                    instrs = _get_instructions(frame.f_code)
-                    instr = instrs.get(frame.f_lasti)
-                    if instr is not None and instr.opname in _CALL_OPCODES:
-                        if _detect_io:
-                            scheduler.report_and_wait(frame, thread_id)
-                            frame.f_locals  # noqa: B018  — refresh f_locals before LocalsToFast
-                            return trace
-                        shadow = scheduler.get_shadow_stack(id(frame))
-                        argc = instr.arg or 0
-                        if _call_might_report_access(shadow, argc):
-                            scheduler.report_and_wait(frame, thread_id)
-                            frame.f_locals  # noqa: B018  — refresh f_locals before LocalsToFast
-                            return trace
-                    _process_opcode(frame, scheduler, thread_id)
-                    return trace
-                scheduler.report_and_wait(frame, thread_id)
-                # CPython 3.10-3.11 bug workaround: after our trace callback
-                # returns, CPython calls PyFrame_LocalsToFast(frame, 1) which
-                # copies f_locals dict values back to cell/free variable cells
-                # (see CPython ceval.c call_trace).  If this thread waited in
-                # report_and_wait while another thread modified a shared cell,
-                # the stale f_locals snapshot would overwrite the new value.
-                # Re-accessing frame.f_locals triggers PyFrame_FastToLocals
-                # (see CPython frameobject.c frame_getlocals), refreshing the
-                # snapshot so LocalsToFast writes back the current value.
-                # This is not needed on 3.12+ where PEP 667 replaced f_locals
-                # with a proxy and removed LocalsToFast from the trace path.
-                frame.f_locals  # noqa: B018  — refresh f_locals before LocalsToFast
-                return trace
-
-            if event == "return":
-                scheduler.remove_shadow_stack(id(frame))
-                return trace
-
-            return trace
-
-        return trace
+        return make_settrace_callback(
+            get_thread_id=_get_tid,
+            on_opcode=_on_opcode,
+            remove_shadow_stack=scheduler.remove_shadow_stack,
+            detect_io=_detect_io,
+            is_active=lambda: not (scheduler._finished or scheduler._error),
+        )
 
     # --- sys.monitoring backend (3.12+) ---
 
@@ -1469,105 +1412,23 @@ class DporBytecodeRunner:
 
         scheduler = self.scheduler
         _detect_io = scheduler._detect_io
-        mon = sys.monitoring
 
-        def handle_py_start(code: Any, instruction_offset: int) -> Any:
-            # Only use mon.DISABLE for code that should *never* be traced
-            # (stdlib, site-packages, frontrun internals).  Do NOT disable
-            # for transient conditions like scheduler._finished — DISABLE
-            # permanently removes INSTRUCTION events from the code object,
-            # corrupting monitoring state for subsequent DPOR iterations
-            # and tests that share the same tool ID.
-            if not _should_trace_file(code.co_filename):
-                return mon.DISABLE  # type: ignore[attr-defined]
-            # In I/O-detection mode, skip dynamically generated code
-            # (e.g. dataclass __init__ from exec/compile in libraries).
-            # These create thousands of extra scheduling points that
-            # drown out I/O-based wakeup tree entries.  Safe to DISABLE
-            # because each exec() creates a fresh code object.
-            if _detect_io and code.co_filename.startswith("<"):
-                return mon.DISABLE  # type: ignore[attr-defined]
+        def _get_tid() -> int | None:
+            tid = getattr(_dpor_tls, "thread_id", None)
+            if tid is not None and getattr(_dpor_tls, "scheduler", None) is scheduler:
+                return tid  # type: ignore[no-any-return]
             return None
 
-        def handle_py_return(code: Any, instruction_offset: int, retval: Any) -> Any:
-            if not _should_trace_file(code.co_filename):
-                return None
-            thread_id = getattr(_dpor_tls, "thread_id", None)
-            if thread_id is not None and getattr(_dpor_tls, "scheduler", None) is scheduler:
-                frame = sys._getframe(1)
-                scheduler.remove_shadow_stack(id(frame))
-            return None
+        def _on_opcode(code: Any, offset: int, frame: Any, tid: int) -> bool:
+            return process_opcode_with_coarsening(code, offset, frame, scheduler, tid, _detect_io)
 
-        def handle_instruction(code: Any, instruction_offset: int) -> Any:
-            if scheduler._finished or scheduler._error:
-                return None
-            if not _should_trace_file(code.co_filename):
-                return None
-            # Skip dynamically generated code (<string>, etc.) unless its
-            # caller is user code.  Libraries use exec/compile internally
-            # (dataclass __init__, SQLAlchemy methods) creating thousands
-            # of scheduling points in non-user code.  In I/O mode, skip
-            # all dynamic code unconditionally.  Exception: in python -c
-            # mode, functions defined in the -c string ARE user code.
-            if _is_dynamic_code(code.co_filename):
-                frame = sys._getframe(1)
-                if not _is_cmdline_user_code(code.co_filename, frame.f_globals):
-                    if _detect_io:
-                        return None
-                    caller = frame.f_back
-                    if caller is None or not _should_trace_file(caller.f_code.co_filename):
-                        return None
-
-            thread_id = getattr(_dpor_tls, "thread_id", None)
-            if thread_id is None:
-                return None
-
-            # Guard against zombie threads from a previous DporBytecodeRunner
-            # whose monitoring was torn down and replaced by ours.  The zombie
-            # still has TLS from the old scheduler, but this closure captures
-            # the *new* scheduler.  Letting it through would call engine
-            # methods on the wrong execution, causing PyO3 borrow conflicts.
-            if getattr(_dpor_tls, "scheduler", None) is not scheduler:
-                return None
-
-            # --- Scheduling coarsening ---
-            # Non-shared opcodes (LOAD_FAST, STORE_FAST, BINARY_OP +, COPY,
-            # SWAP, etc.) only manipulate thread-local state.  Process the
-            # shadow stack directly without entering the scheduler, avoiding
-            # a yield that would create an unnecessary DPOR scheduling point.
-            #
-            # CALL opcodes need special handling: _is_shared_opcode returns
-            # False for them so we check the shadow stack to see if the
-            # callable is a C-method that would report shared access.
-            if not _is_shared_opcode(code, instruction_offset):
-                # Check if this is a CALL opcode that needs shadow stack inspection.
-                # When detect_io is enabled, all CALL opcodes must yield because
-                # I/O events arrive from C-level LD_PRELOAD interception.
-                instrs = _get_instructions(code)
-                instr = instrs.get(instruction_offset)
-                frame = sys._getframe(1)
-                if instr is not None and instr.opname in _CALL_OPCODES:
-                    if _detect_io:
-                        scheduler.report_and_wait(frame, thread_id)
-                        return None
-                    shadow = scheduler.get_shadow_stack(id(frame))
-                    argc = instr.arg or 0
-                    if _call_might_report_access(shadow, argc):
-                        scheduler.report_and_wait(frame, thread_id)
-                        return None
-                    # No C-method detected; process shadow stack without yield
-                    _process_opcode(frame, scheduler, thread_id)
-                    return None
-                _process_opcode(frame, scheduler, thread_id)
-                return None
-
-            # Use sys._getframe() to get the actual frame for _process_opcode.
-            # report_and_wait runs _process_opcode and wait_for_turn under a
-            # single lock so that engine.report_access() and engine.schedule()
-            # cannot overlap on free-threaded builds.
-            frame = sys._getframe(1)
-            scheduler.report_and_wait(frame, thread_id)
-            return None
+        handle_py_start, handle_py_return, handle_instruction = make_monitoring_callbacks(
+            get_thread_id=_get_tid,
+            on_opcode=_on_opcode,
+            remove_shadow_stack=scheduler.remove_shadow_stack,
+            detect_io=_detect_io,
+            is_active=lambda: not (scheduler._finished or scheduler._error),
+        )
 
         DporBytecodeRunner._TOOL_ID = setup_opcode_monitoring(
             tool_name="frontrun._dpor",

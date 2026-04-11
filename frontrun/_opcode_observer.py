@@ -26,6 +26,9 @@ from typing import Any
 
 from frontrun._cooperative import CooperativeLock as _CooperativeLock
 from frontrun._cooperative import real_lock
+from frontrun._tracing import is_cmdline_user_code as _is_cmdline_user_code
+from frontrun._tracing import is_dynamic_code as _is_dynamic_code
+from frontrun._tracing import should_trace_file as _should_trace_file
 
 _PY_VERSION = sys.version_info[:2]
 
@@ -47,6 +50,9 @@ __all__ = [
     "_process_opcode",
     "clear_instr_cache",
     "get_object_key_reverse_map",
+    "make_monitoring_callbacks",
+    "make_settrace_callback",
+    "process_opcode_with_coarsening",
     "set_object_key_reverse_map",
     "setup_opcode_monitoring",
     "teardown_opcode_monitoring",
@@ -1417,3 +1423,213 @@ def teardown_opcode_monitoring(tool_id: int | None) -> None:
     mon.register_callback(tool_id, mon.events.PY_RETURN, None)  # type: ignore[attr-defined]
     mon.register_callback(tool_id, mon.events.INSTRUCTION, None)  # type: ignore[attr-defined]
     mon.free_tool_id(tool_id)  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# Scheduling coarsening helper
+# ---------------------------------------------------------------------------
+
+
+def process_opcode_with_coarsening(
+    code: Any,
+    offset: int,
+    frame: Any,
+    scheduler: Any,
+    thread_id: int,
+    detect_io: bool,
+) -> bool:
+    """Process an opcode with scheduling coarsening, returning whether we yielded.
+
+    Shared opcodes (LOAD_ATTR, STORE_ATTR, etc.) trigger
+    ``scheduler.report_and_wait`` which processes the shadow stack AND
+    yields to the scheduler.  Non-shared opcodes only update the shadow
+    stack via ``_process_opcode`` without yielding.
+
+    CALL opcodes get special treatment: they are non-shared by default but
+    may be upgraded to a scheduling point if the shadow stack indicates the
+    callable is a C-method that accesses shared state (e.g. ``list.append``).
+    When *detect_io* is True, ALL CALL opcodes yield because I/O events
+    arrive from C-level LD_PRELOAD interception.
+
+    Returns True if ``report_and_wait`` was called (the thread may have
+    waited), False if only shadow-stack processing occurred.
+    """
+    if not _is_shared_opcode(code, offset):
+        instrs = _get_instructions(code)
+        instr = instrs.get(offset)
+        if instr is not None and instr.opname in _CALL_OPCODES:
+            if detect_io:
+                scheduler.report_and_wait(frame, thread_id)
+                return True
+            shadow = scheduler.get_shadow_stack(id(frame))
+            argc = instr.arg or 0
+            if _call_might_report_access(shadow, argc):
+                scheduler.report_and_wait(frame, thread_id)
+                return True
+        _process_opcode(frame, scheduler, thread_id)
+        return False
+    scheduler.report_and_wait(frame, thread_id)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Unified settrace / sys.monitoring callback factories
+# ---------------------------------------------------------------------------
+#
+# Both dpor.py (sync threads) and async_dpor.py (async tasks) need
+# essentially the same instrumentation wiring for sys.settrace (3.10-3.11)
+# and sys.monitoring (3.12+).  The differences are parameterised:
+#
+#   get_thread_id()       — how to identify the current thread/task
+#   on_opcode(c,o,f,tid)  — what to do per opcode (coarsening or plain)
+#   remove_shadow_stack() — cleanup on frame return
+#   detect_io             — affects dynamic-code filtering
+#   is_active()           — early-out when scheduler is done (sync only)
+
+
+def make_settrace_callback(
+    *,
+    get_thread_id: Any,
+    on_opcode: Any,
+    remove_shadow_stack: Any,
+    detect_io: bool = False,
+    is_active: Any = None,
+) -> Any:
+    """Create a ``sys.settrace`` callback for opcode tracing.
+
+    Parameters
+    ----------
+    get_thread_id:
+        ``() -> int | None``.  Returns the current thread/task ID if we
+        are inside an active scheduler context, ``None`` otherwise.
+    on_opcode:
+        ``(code, offset, frame, thread_id) -> bool``.  Called for every
+        traced opcode.  Returns ``True`` if the thread yielded (triggers
+        ``frame.f_locals`` refresh on 3.10-3.11 to work around the
+        CPython LocalsToFast bug).
+    remove_shadow_stack:
+        ``(frame_id: int) -> None``.  Called on function return to clean
+        up the shadow stack for *frame_id*.
+    detect_io:
+        When True, dynamically generated code (``<string>`` etc.) is
+        skipped unconditionally rather than checking the caller chain.
+    is_active:
+        ``() -> bool`` or ``None``.  When provided, the trace function
+        returns ``None`` (disabling tracing) if ``is_active()`` is False.
+        Used by the sync scheduler to stop tracing when ``_finished`` or
+        ``_error`` is set.
+    """
+
+    def trace(frame: Any, event: str, arg: Any) -> Any:
+        if is_active is not None and not is_active():
+            return None
+
+        if event == "call":
+            filename = frame.f_code.co_filename
+            if _should_trace_file(filename):
+                if _is_dynamic_code(filename) and not _is_cmdline_user_code(filename, frame.f_globals):
+                    if detect_io:
+                        return None
+                    caller = frame.f_back
+                    if caller is None or not _should_trace_file(caller.f_code.co_filename):
+                        return None
+                frame.f_trace_opcodes = True
+                return trace
+            return None
+
+        if event == "opcode":
+            thread_id = get_thread_id()
+            if thread_id is not None:
+                yielded = on_opcode(frame.f_code, frame.f_lasti, frame, thread_id)
+                if yielded:
+                    # CPython 3.10-3.11 bug workaround: after the trace
+                    # callback returns, CPython calls
+                    # PyFrame_LocalsToFast(frame, 1) which copies f_locals
+                    # dict values back to cell/free variable cells.  If this
+                    # thread waited in report_and_wait while another thread
+                    # modified a shared cell, the stale f_locals snapshot
+                    # would overwrite the new value.  Re-accessing
+                    # frame.f_locals triggers PyFrame_FastToLocals, refreshing
+                    # the snapshot so LocalsToFast writes back the current
+                    # value.  Not needed on 3.12+ (PEP 667 removed
+                    # LocalsToFast from the trace path).
+                    frame.f_locals  # noqa: B018
+            return trace
+
+        if event == "return":
+            remove_shadow_stack(id(frame))
+            return trace
+
+        return trace
+
+    return trace
+
+
+def make_monitoring_callbacks(
+    *,
+    get_thread_id: Any,
+    on_opcode: Any,
+    remove_shadow_stack: Any,
+    detect_io: bool = False,
+    is_active: Any = None,
+) -> tuple[Any, Any, Any]:
+    """Create ``sys.monitoring`` callbacks for opcode tracing.
+
+    Returns ``(handle_py_start, handle_py_return, handle_instruction)``
+    suitable for passing to :func:`setup_opcode_monitoring`.
+
+    Parameters are the same as :func:`make_settrace_callback`.
+    """
+    mon = sys.monitoring
+
+    def handle_py_start(code: Any, instruction_offset: int) -> Any:
+        # Only use mon.DISABLE for code that should *never* be traced
+        # (stdlib, site-packages, frontrun internals).  Do NOT disable
+        # for transient conditions like scheduler._finished — DISABLE
+        # permanently removes INSTRUCTION events from the code object.
+        if not _should_trace_file(code.co_filename):
+            return mon.DISABLE  # type: ignore[attr-defined]
+        # In I/O-detection mode, skip dynamically generated code
+        # (e.g. dataclass __init__ from exec/compile in libraries).
+        if detect_io and code.co_filename.startswith("<"):
+            return mon.DISABLE  # type: ignore[attr-defined]
+        return None
+
+    def handle_py_return(code: Any, instruction_offset: int, retval: Any) -> Any:
+        if not _should_trace_file(code.co_filename):
+            return None
+        thread_id = get_thread_id()
+        if thread_id is not None:
+            frame = sys._getframe(1)
+            remove_shadow_stack(id(frame))
+        return None
+
+    def handle_instruction(code: Any, instruction_offset: int) -> Any:
+        if is_active is not None and not is_active():
+            return None
+        if not _should_trace_file(code.co_filename):
+            return None
+        # Skip dynamically generated code (<string>, etc.) unless its
+        # caller is user code.  Libraries use exec/compile internally
+        # (dataclass __init__, SQLAlchemy methods) creating thousands of
+        # scheduling points in non-user code.  In I/O mode, skip all
+        # dynamic code unconditionally.  Exception: python -c mode,
+        # where functions defined in the -c string ARE user code.
+        if _is_dynamic_code(code.co_filename):
+            frame = sys._getframe(1)
+            if not _is_cmdline_user_code(code.co_filename, frame.f_globals):
+                if detect_io:
+                    return None
+                caller = frame.f_back
+                if caller is None or not _should_trace_file(caller.f_code.co_filename):
+                    return None
+
+        thread_id = get_thread_id()
+        if thread_id is None:
+            return None
+
+        frame = sys._getframe(1)
+        on_opcode(code, instruction_offset, frame, thread_id)
+        return None
+
+    return handle_py_start, handle_py_return, handle_instruction

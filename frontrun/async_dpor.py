@@ -57,16 +57,15 @@ from frontrun._opcode_observer import (
     StableObjectIds,
     _make_object_key,
     _process_opcode,
+    make_monitoring_callbacks,
+    make_settrace_callback,
     setup_opcode_monitoring,
     teardown_opcode_monitoring,
 )
 from frontrun._sql_cursor import clear_sql_metadata, get_lock_timeout, set_lock_timeout
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._tracing import TraceFilter as _TraceFilter
-from frontrun._tracing import is_cmdline_user_code as _is_cmdline_user_code
-from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
-from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.async_scheduler import InterleavedLoop
 from frontrun.common import InterleavingResult, check_serializability_violation
 
@@ -754,76 +753,39 @@ class AsyncDporScheduler(InterleavedLoop):
     def remove_shadow_stack(self, frame_id: int) -> None:
         self._shadow_stacks.pop(frame_id, None)
 
-    def _trace_user_opcode(self, frame: Any) -> None:
-        task_id = _task_id_var.get()
-        if task_id is None or _scheduler_var.get() is not self or _in_trace_processing.get():
-            return
+    def _get_task_id(self) -> int | None:
+        if _task_id_var.get() is not None and _scheduler_var.get() is self:
+            return _task_id_var.get()
+        return None
+
+    def _on_opcode(self, code: Any, offset: int, frame: Any, task_id: int) -> bool:
+        if _in_trace_processing.get():
+            return False
         token = _in_trace_processing.set(True)
         try:
             with self._engine_lock:
                 _process_opcode(frame, self, task_id)  # type: ignore[arg-type]
         finally:
             _in_trace_processing.reset(token)
+        return False  # async never yields at opcode level
 
     def _setup_settrace(self) -> None:
-        def trace(frame: Any, event: str, arg: Any) -> Any:
-            if event == "call":
-                filename = frame.f_code.co_filename
-                if _should_trace_file(filename):
-                    if _is_dynamic_code(filename) and not _is_cmdline_user_code(filename, frame.f_globals):
-                        caller = frame.f_back
-                        if caller is None or not _should_trace_file(caller.f_code.co_filename):
-                            return None
-                    frame.f_trace_opcodes = True
-                    return trace
-                return None
-
-            if event == "opcode":
-                self._trace_user_opcode(frame)
-                return trace
-
-            if event == "return":
-                self.remove_shadow_stack(id(frame))
-                return trace
-
-            return trace
-
+        trace = make_settrace_callback(
+            get_thread_id=self._get_task_id,
+            on_opcode=self._on_opcode,
+            remove_shadow_stack=self.remove_shadow_stack,
+        )
         sys.settrace(trace)
 
     def _setup_monitoring(self) -> None:
         if not _USE_SYS_MONITORING:
             return
 
-        mon = sys.monitoring
-
-        def handle_py_start(code: Any, instruction_offset: int) -> Any:
-            if not _should_trace_file(code.co_filename):
-                return mon.DISABLE  # type: ignore[attr-defined]
-            return None
-
-        def handle_py_return(code: Any, instruction_offset: int, retval: Any) -> Any:
-            if not _should_trace_file(code.co_filename):
-                return None
-            if _task_id_var.get() is None or _scheduler_var.get() is not self:
-                return None
-            frame = sys._getframe(1)
-            self.remove_shadow_stack(id(frame))
-            return None
-
-        def handle_instruction(code: Any, instruction_offset: int) -> Any:
-            if not _should_trace_file(code.co_filename):
-                return None
-            if _task_id_var.get() is None or _scheduler_var.get() is not self:
-                return None
-
-            frame = sys._getframe(1)
-            if _is_dynamic_code(code.co_filename) and not _is_cmdline_user_code(code.co_filename, frame.f_globals):
-                caller = frame.f_back
-                if caller is None or not _should_trace_file(caller.f_code.co_filename):
-                    return None
-
-            self._trace_user_opcode(frame)
-            return None
+        handle_py_start, handle_py_return, handle_instruction = make_monitoring_callbacks(
+            get_thread_id=self._get_task_id,
+            on_opcode=self._on_opcode,
+            remove_shadow_stack=self.remove_shadow_stack,
+        )
 
         AsyncDporScheduler._TOOL_ID = setup_opcode_monitoring(
             tool_name="frontrun.async_dpor",
