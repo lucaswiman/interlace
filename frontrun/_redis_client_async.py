@@ -13,14 +13,17 @@ Supported async clients:
 
 from __future__ import annotations
 
+import importlib
 from typing import Any
 
 from frontrun._io_detection import get_dpor_context as _get_dpor_context
+from frontrun._patching import patch_method, restore_patches, wrap_method_metadata
 from frontrun._redis_client import (
     _report_pipeline_commands,
     _report_redis_access,
     _suppress_endpoint_io,
 )
+from frontrun._redis_patch_registry import ASYNC_REDIS_TARGETS
 
 # Lazy imports to avoid circular dependency — resolved at first use.
 _in_scheduler_pause = None
@@ -144,48 +147,34 @@ def _patch_redis_asyncio() -> None:
     except ImportError:
         return
 
-    client_cls = aioredis.Redis
-    key = (client_cls, "execute_command")
-    if key not in _ASYNC_ORIGINAL_METHODS:
-        original = getattr(client_cls, "execute_command", None)
-        if original is not None:
-            _ASYNC_ORIGINAL_METHODS[key] = original
+    for target in ASYNC_REDIS_TARGETS:
+        try:
+            module = aioredis if target.module_name == "redis.asyncio" else importlib.import_module(target.module_name)
+            target_cls = getattr(module, target.class_name)
+        except (ImportError, AttributeError):
+            continue
 
-            def _make_patched(orig: Any) -> Any:
+        def _make_patched(
+            orig: Any, *, _method_name: str = target.method_name, _class_name: str = target.class_name
+        ) -> Any:
+            if _class_name == "Pipeline":
+
+                async def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
+                    return await _intercept_pipeline_execute_async(orig, self, *args, **kwargs)
+            else:
+
                 async def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
                     return await _intercept_execute_command_async(orig, self, *args, **kwargs)
 
-                _patched.__name__ = orig.__name__
-                _patched.__qualname__ = getattr(orig, "__qualname__", orig.__name__)
-                return _patched
+            return wrap_method_metadata(_patched, orig, name=_method_name)
 
-            setattr(client_cls, "execute_command", _make_patched(original))
-            _ASYNC_PATCHES.append((client_cls, "execute_command", original))
-
-    # Patch async Pipeline.
-    pipeline_cls = getattr(aioredis, "Pipeline", None)
-    if pipeline_cls is None:
-        # redis.asyncio.client.Pipeline
-        client_mod = getattr(aioredis, "client", None)
-        if client_mod is not None:
-            pipeline_cls = getattr(client_mod, "Pipeline", None)
-    if pipeline_cls is not None:
-        key = (pipeline_cls, "execute")
-        if key not in _ASYNC_ORIGINAL_METHODS:
-            original = getattr(pipeline_cls, "execute", None)
-            if original is not None:
-                _ASYNC_ORIGINAL_METHODS[key] = original
-
-                def _make_patched_pipe(orig: Any) -> Any:
-                    async def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
-                        return await _intercept_pipeline_execute_async(orig, self, *args, **kwargs)
-
-                    _patched.__name__ = orig.__name__
-                    _patched.__qualname__ = getattr(orig, "__qualname__", orig.__name__)
-                    return _patched
-
-                setattr(pipeline_cls, "execute", _make_patched_pipe(original))
-                _ASYNC_PATCHES.append((pipeline_cls, "execute", original))
+        patch_method(
+            target_cls,
+            target.method_name,
+            originals=_ASYNC_ORIGINAL_METHODS,
+            patches=_ASYNC_PATCHES,
+            make_wrapper=_make_patched,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -200,23 +189,21 @@ def _patch_coredis() -> None:
     except ImportError:
         return
 
-    client_cls = coredis.Redis
-    key = (client_cls, "execute_command")
-    if key not in _ASYNC_ORIGINAL_METHODS:
-        original = getattr(client_cls, "execute_command", None)
-        if original is not None:
-            _ASYNC_ORIGINAL_METHODS[key] = original
+    target_cls = coredis.Redis
 
-            def _make_patched(orig: Any) -> Any:
-                async def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
-                    return await _intercept_execute_command_async(orig, self, *args, **kwargs)
+    def _make_patched(orig: Any) -> Any:
+        async def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
+            return await _intercept_execute_command_async(orig, self, *args, **kwargs)
 
-                _patched.__name__ = orig.__name__
-                _patched.__qualname__ = getattr(orig, "__qualname__", orig.__name__)
-                return _patched
+        return wrap_method_metadata(_patched, orig, name="execute_command")
 
-            setattr(client_cls, "execute_command", _make_patched(original))
-            _ASYNC_PATCHES.append((client_cls, "execute_command", original))
+    patch_method(
+        target_cls,
+        "execute_command",
+        originals=_ASYNC_ORIGINAL_METHODS,
+        patches=_ASYNC_PATCHES,
+        make_wrapper=_make_patched,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -239,8 +226,7 @@ def unpatch_redis_async() -> None:
     global _redis_async_patched  # noqa: PLW0603
     if not _redis_async_patched:
         return
-    for obj, attr, original in _ASYNC_PATCHES:
-        setattr(obj, attr, original)
+    restore_patches(_ASYNC_PATCHES)
     _ASYNC_PATCHES.clear()
     _ASYNC_ORIGINAL_METHODS.clear()
     _redis_async_patched = False

@@ -31,6 +31,7 @@ from typing import Any
 from frontrun import _real_threading as _rt
 from frontrun._io_detection import _io_tls, get_io_reporter
 from frontrun._io_detection import get_dpor_context as _get_dpor_context
+from frontrun._patching import patch_method, restore_patches, wrap_method_metadata
 from frontrun._schema import get_schema
 from frontrun._sql_insert_tracker import record_insert, resolve_alias
 from frontrun._sql_parsing import (
@@ -41,6 +42,7 @@ from frontrun._sql_parsing import (
     TxOp,
     parse_sql_access,
 )
+from frontrun._sql_patch_registry import CONNECT_FACTORY_TARGETS, PYTHON_CURSOR_TARGETS
 from frontrun._trace_format import build_call_chain
 from frontrun._tracing import should_trace_file as _should_trace_file
 
@@ -1051,7 +1053,7 @@ def _patch_sqlite3() -> None:
         _register_connection_db_scope(conn, identity)
         return conn
 
-    sqlite3.connect = patched_connect  # type: ignore[assignment]
+    sqlite3.connect = wrap_method_metadata(patched_connect, orig_connect, name="connect")  # type: ignore[assignment]
     _PATCHES.append((sqlite3, "connect", orig_connect))
     # Expose for tests via _ORIGINAL_METHODS — key by (cursor_class, method_name)
     _ORIGINAL_METHODS[(sqlite3.Cursor, "execute")] = sqlite3.Cursor.execute
@@ -1066,27 +1068,23 @@ def _patch_sqlite3() -> None:
 def _patch_class_methods(cls: type, paramstyle: str) -> None:
     """Directly patch execute/executemany on a Python cursor class."""
     for method_name in ("execute", "executemany"):
-        original = getattr(cls, method_name, None)
-        if original is None:
-            continue
-        key = (cls, method_name)
-        if key in _ORIGINAL_METHODS:
-            continue
-        _ORIGINAL_METHODS[key] = original
+        _is_executemany = method_name == "executemany"
 
-        def _make_patched(orig: Any, mname: str, ps: str) -> Any:
-            _is_executemany = mname == "executemany"
-
+        def _make_patched(orig: Any, mname: str = method_name, ps: str = paramstyle) -> Any:
             def _patched(self: Any, operation: Any, parameters: Any = None, *args: Any, **kwargs: Any) -> Any:
                 return _intercept_execute(
                     orig, self, operation, parameters, is_executemany=_is_executemany, paramstyle=ps
                 )
 
-            _patched.__name__ = mname
-            return _patched
+            return wrap_method_metadata(_patched, orig, name=mname)
 
-        setattr(cls, method_name, _make_patched(original, method_name, paramstyle))
-        _PATCHES.append((cls, method_name, original))
+        patch_method(
+            cls,
+            method_name,
+            originals=_ORIGINAL_METHODS,
+            patches=_PATCHES,
+            make_wrapper=_make_patched,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1111,11 +1109,11 @@ def patch_sql() -> None:
     _patch_sqlite3()
 
     # Pure-Python drivers can be patched directly
-    for module_path, class_name, paramstyle_module in _PYTHON_CURSOR_TARGETS:
+    for target in PYTHON_CURSOR_TARGETS:
         try:
-            mod = importlib.import_module(module_path)
-            cls = getattr(mod, class_name)
-            driver_mod = importlib.import_module(paramstyle_module)
+            mod = importlib.import_module(target.module_path)
+            cls = getattr(mod, target.class_name)
+            driver_mod = importlib.import_module(target.paramstyle_module)
             paramstyle = getattr(driver_mod, "paramstyle", "format")
             _patch_class_methods(cls, paramstyle)
         except (ImportError, AttributeError):
@@ -1188,40 +1186,24 @@ def patch_sql() -> None:
         return patched_connect
 
     # psycopg2: patch via cursor_factory injection into connect()
-    try:
-        import psycopg2 as _pg2mod  # type: ignore[import-untyped]
-        import psycopg2.extensions as _pg2ext  # type: ignore[import-untyped]
-
-        orig_cursor_cls = _pg2ext.cursor
-        orig_connect = _pg2mod.connect
-        setattr(
-            _pg2mod,
-            "connect",
-            _make_patched_connect(orig_connect, orig_cursor_cls, paramstyle="pyformat", driver="psycopg2"),
-        )
-        _PATCHES.append((_pg2mod, "connect", orig_connect))
-        _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
-        _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
-    except (ImportError, AttributeError):
-        pass
-
-    # psycopg (v3): patch via cursor_factory injection into connect()
-    try:
-        import psycopg as _pg3mod  # type: ignore[import-untyped]
-
-        orig_cursor_cls = _pg3mod.Cursor
-        orig_connect = _pg3mod.connect
-        # Psycopg 3 uses 'format' as default paramstyle (client-side)
-        setattr(
-            _pg3mod,
-            "connect",
-            _make_patched_connect(orig_connect, orig_cursor_cls, paramstyle="format", driver="psycopg"),
-        )
-        _PATCHES.append((_pg3mod, "connect", orig_connect))
-        _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
-        _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
-    except (ImportError, AttributeError):
-        pass
+    for target in CONNECT_FACTORY_TARGETS:
+        try:
+            driver_mod = importlib.import_module(target.module_name)
+            cursor_mod = importlib.import_module(target.cursor_module_name)
+            orig_cursor_cls = getattr(cursor_mod, target.cursor_attr_name)
+            orig_connect = driver_mod.connect
+            setattr(
+                driver_mod,
+                "connect",
+                _make_patched_connect(
+                    orig_connect, orig_cursor_cls, paramstyle=target.paramstyle, driver=target.driver
+                ),
+            )
+            _PATCHES.append((driver_mod, "connect", orig_connect))
+            _ORIGINAL_METHODS[(orig_cursor_cls, "execute")] = orig_cursor_cls.execute
+            _ORIGINAL_METHODS[(orig_cursor_cls, "executemany")] = orig_cursor_cls.executemany
+        except (ImportError, AttributeError):
+            pass
 
     _sql_patched = True
 
@@ -1253,8 +1235,7 @@ def unpatch_sql() -> None:
     global _sql_patched  # noqa: PLW0603
     if not _sql_patched:
         return
-    for obj, attr, original in _PATCHES:
-        setattr(obj, attr, original)
+    restore_patches(_PATCHES)
     _PATCHES.clear()
     _ORIGINAL_METHODS.clear()
     _sql_patched = False

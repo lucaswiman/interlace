@@ -310,11 +310,7 @@ def explore_dpor(
             )
             runner = DporBytecodeRunner(scheduler, detect_io=detect_io, preload_bridge=preload_bridge)
 
-            runner._patch_locks()
-            runner._patch_io()
-            if patch_sleep:
-                runner._patch_sleep()
-            try:
+            with runner.patch_scope(patch_sleep=patch_sleep):
                 state = setup()
 
                 def make_thread_func(thread_func: Callable[[T], None], s: T) -> Callable[[], None]:
@@ -328,10 +324,6 @@ def explore_dpor(
                     runner.run(funcs, timeout=timeout_per_run)
                 except TimeoutError:
                     pass
-            finally:
-                runner._unpatch_sleep()
-                runner._unpatch_io()
-                runner._unpatch_locks()
 
             result.num_explored += 1
 

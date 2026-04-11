@@ -20,6 +20,7 @@ operation is captured regardless of whether the user calls ``r.get()``,
 from __future__ import annotations
 
 import contextlib
+import importlib
 import threading
 from collections.abc import Generator
 from typing import Any
@@ -27,7 +28,9 @@ from typing import Any
 from frontrun import _real_threading as _rt
 from frontrun._io_detection import _io_tls, get_io_reporter
 from frontrun._io_detection import get_dpor_context as _get_dpor_context
+from frontrun._patching import patch_method, restore_patches, wrap_method_metadata
 from frontrun._redis_parsing import parse_redis_access
+from frontrun._redis_patch_registry import SYNC_REDIS_TARGETS
 
 _suppress_tids: set[int] = set()
 _suppress_lock = _rt.lock()
@@ -264,66 +267,32 @@ def _patch_redis_py() -> None:
     except ImportError:
         return
 
-    # Patch Redis.execute_command (the central command dispatch).
-    client_cls = redis_lib.Redis
-    key = (client_cls, "execute_command")
-    if key not in _ORIGINAL_METHODS:
-        original = getattr(client_cls, "execute_command", None)
-        if original is not None:
-            _ORIGINAL_METHODS[key] = original
+    for target in SYNC_REDIS_TARGETS:
+        try:
+            module = redis_lib if target.module_name == "redis" else importlib.import_module(target.module_name)
+            target_cls = getattr(module, target.class_name)
+        except (ImportError, AttributeError):
+            continue
 
-            def _make_patched_exec(orig: Any) -> Any:
+        def _make_patched(orig: Any, *, _target: Any = target_cls, _method_name: str = target.method_name) -> Any:
+            if _method_name == "execute":
+
+                def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
+                    return _intercept_pipeline_execute(orig, self, *args, **kwargs)
+            else:
+
                 def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
                     return _intercept_execute_command(orig, self, *args, **kwargs)
 
-                _patched.__name__ = orig.__name__
-                _patched.__qualname__ = getattr(orig, "__qualname__", orig.__name__)
-                return _patched
+            return wrap_method_metadata(_patched, orig, name=_method_name)
 
-            setattr(client_cls, "execute_command", _make_patched_exec(original))
-            _PATCHES.append((client_cls, "execute_command", original))
-
-    # Also patch StrictRedis if it's a separate class.
-    strict_cls = getattr(redis_lib, "StrictRedis", None)
-    if strict_cls is not None and strict_cls is not client_cls:
-        key = (strict_cls, "execute_command")
-        if key not in _ORIGINAL_METHODS:
-            original = getattr(strict_cls, "execute_command", None)
-            if original is not None:
-                _ORIGINAL_METHODS[key] = original
-
-                def _make_patched_strict(orig: Any) -> Any:
-                    def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
-                        return _intercept_execute_command(orig, self, *args, **kwargs)
-
-                    _patched.__name__ = orig.__name__
-                    _patched.__qualname__ = getattr(orig, "__qualname__", orig.__name__)
-                    return _patched
-
-                setattr(strict_cls, "execute_command", _make_patched_strict(original))
-                _PATCHES.append((strict_cls, "execute_command", original))
-
-    # Patch Pipeline.execute for pipelined commands.
-    pipeline_cls = getattr(redis_lib.client, "Pipeline", None)
-    if pipeline_cls is None:
-        pipeline_cls = getattr(redis_lib, "Pipeline", None)
-    if pipeline_cls is not None:
-        key = (pipeline_cls, "execute")
-        if key not in _ORIGINAL_METHODS:
-            original = getattr(pipeline_cls, "execute", None)
-            if original is not None:
-                _ORIGINAL_METHODS[key] = original
-
-                def _make_patched_pipe(orig: Any) -> Any:
-                    def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
-                        return _intercept_pipeline_execute(orig, self, *args, **kwargs)
-
-                    _patched.__name__ = orig.__name__
-                    _patched.__qualname__ = getattr(orig, "__qualname__", orig.__name__)
-                    return _patched
-
-                setattr(pipeline_cls, "execute", _make_patched_pipe(original))
-                _PATCHES.append((pipeline_cls, "execute", original))
+        patch_method(
+            target_cls,
+            target.method_name,
+            originals=_ORIGINAL_METHODS,
+            patches=_PATCHES,
+            make_wrapper=_make_patched,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -345,8 +314,7 @@ def unpatch_redis() -> None:
     global _redis_patched  # noqa: PLW0603
     if not _redis_patched:
         return
-    for obj, attr, original in _PATCHES:
-        setattr(obj, attr, original)
+    restore_patches(_PATCHES)
     _PATCHES.clear()
     _ORIGINAL_METHODS.clear()
     _redis_patched = False
