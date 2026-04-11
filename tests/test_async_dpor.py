@@ -959,6 +959,60 @@ class TestAsyncDporCleanup:
             f"Explanation should mention the crash, but got: {result.explanation}"
         )
 
+    def test_explore_async_dpor_unwinds_patch_stack_in_reverse_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Patch cleanup should unwind in reverse order on early failure."""
+        from frontrun import async_dpor as async_dpor_mod
+
+        events: list[str] = []
+
+        def _record(name: str):
+            def _fn() -> None:
+                events.append(name)
+
+            return _fn
+
+        monkeypatch.setattr(async_dpor_mod, "_sql_async_available", True)
+        monkeypatch.setattr(async_dpor_mod, "_redis_async_available", True)
+        monkeypatch.setattr(async_dpor_mod, "patch_sql_async", _record("patch_sql"))
+        monkeypatch.setattr(async_dpor_mod, "unpatch_sql_async", _record("unpatch_sql"))
+        monkeypatch.setattr(async_dpor_mod, "patch_redis_async", _record("patch_redis"))
+        monkeypatch.setattr(async_dpor_mod, "unpatch_redis_async", _record("unpatch_redis"))
+        monkeypatch.setattr(async_dpor_mod, "_patch_asyncio_lock", _record("patch_lock"))
+        monkeypatch.setattr(async_dpor_mod, "_unpatch_asyncio_lock", _record("unpatch_lock"))
+        monkeypatch.setattr(async_dpor_mod, "_patch_asyncio_sleep", _record("patch_sleep"))
+        monkeypatch.setattr(async_dpor_mod, "_unpatch_asyncio_sleep", _record("unpatch_sleep"))
+
+        async def _run() -> None:
+            async def task(_state: object) -> None:
+                return None
+
+            def broken_setup() -> object:
+                raise RuntimeError("boom")
+
+            with pytest.raises(RuntimeError, match="boom"):
+                await async_dpor_mod.explore_async_dpor(
+                    setup=broken_setup,
+                    tasks=[task],
+                    invariant=lambda _: True,
+                    detect_sql=True,
+                    detect_redis=True,
+                    patch_sleep=True,
+                    max_executions=1,
+                )
+
+        asyncio.run(_run())
+
+        assert events == [
+            "patch_sql",
+            "patch_redis",
+            "patch_lock",
+            "patch_sleep",
+            "unpatch_sleep",
+            "unpatch_lock",
+            "unpatch_redis",
+            "unpatch_sql",
+        ]
+
 
 class TestAsyncDporExplanation:
     """Tests for human-readable explanations of invariant violations."""
