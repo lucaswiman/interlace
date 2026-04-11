@@ -30,13 +30,13 @@ Example usage:
 
 import linecache
 import re
-import sys
 import threading
 from collections.abc import Callable
 from typing import Any
 
 from frontrun._cooperative import real_condition, real_lock
 from frontrun._threaded_runner import join_threads_with_deadline
+from frontrun._trace_marker_runtime import build_trace_function, run_traced_callable
 from frontrun.common import InterleavingResult, Schedule, Step
 
 MARKER_PATTERN = re.compile(r"#\s*frontrun:\s*(\w+)")
@@ -227,52 +227,12 @@ class _ThreadTraceExecutor:
         self.thread_errors: dict[str, Exception] = {}
 
     def _create_trace_function(self, execution_name: str) -> Callable[[Any, str, Any], Any]:  # type: ignore[return-value]
-        """Create a trace function for a specific execution unit.
-
-        Args:
-            execution_name: The name of the execution unit this trace function is for
-
-        Returns:
-            A trace function suitable for sys.settrace
-        """
-
-        def trace_function(frame: Any, event: str, arg: Any) -> Any:  # type: ignore[name-defined]
-            try:
-                # Only care about 'line' events
-                if event != "line":
-                    return trace_function
-
-                # Scan this file for markers if we haven't already
-                self.marker_registry.scan_frame(frame)
-
-                # Check if this line has a marker
-                filename = frame.f_code.co_filename
-                lineno = frame.f_lineno
-                marker_name = self.marker_registry.get_marker(filename, lineno)
-
-                if marker_name:
-                    # Release execution lock while waiting (let other threads run).
-                    # wait_for_turn reacquires it before returning.
-                    self.coordinator._execution_lock.release()
-                    self.coordinator.wait_for_turn(execution_name, marker_name, _reacquire_execution_lock=True)
-
-                    # Check if an error occurred in another execution unit
-                    if self.coordinator.error:
-                        raise self.coordinator.error
-
-                return trace_function
-            except Exception as e:
-                # Release execution lock before reporting to avoid deadlock
-                # (report_error needs the condition lock, which another thread
-                # may hold while waiting for _execution_lock in wait_for_turn).
-                try:
-                    self.coordinator._execution_lock.release()
-                except RuntimeError:
-                    pass
-                self.coordinator.report_error(e)
-                return None
-
-        return trace_function
+        return build_trace_function(
+            self.coordinator,
+            self.marker_registry,
+            execution_name,
+            include_previous_line=False,
+        )
 
     def _thread_wrapper(
         self,
@@ -289,30 +249,13 @@ class _ThreadTraceExecutor:
             args: Positional arguments for the target
             kwargs: Keyword arguments for the target
         """
-        error: Exception | None = None
-        try:
-            # Install trace function for this execution unit
-            trace_fn = self._create_trace_function(execution_name)
-            # Acquire execution lock before running (serializes with other threads)
-            self.coordinator._execution_lock.acquire()
-            sys.settrace(trace_fn)
-
-            # Execute the target function
-            target(*args, **kwargs)
-        except Exception as e:
-            # Store the error but don't call report_error yet — we may still
-            # hold _execution_lock and report_error needs the condition lock,
-            # which risks deadlock against wait_for_turn's lock ordering.
-            error = e
-            self.thread_errors[execution_name] = e
-        finally:
-            sys.settrace(None)
-            try:
-                self.coordinator._execution_lock.release()
-            except RuntimeError:
-                pass
-            if error is not None:
-                self.coordinator.report_error(error)
+        run_traced_callable(
+            coordinator=self.coordinator,
+            execution_name=execution_name,
+            trace_function=self._create_trace_function(execution_name),
+            body=lambda: target(*args, **kwargs),
+            error_sink=self.thread_errors,
+        )
 
     def run(
         self,
