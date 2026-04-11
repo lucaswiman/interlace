@@ -1,0 +1,525 @@
+# ruff: noqa: F403, F405
+
+from __future__ import annotations
+
+from ._shared import *
+from ._shared import _require_frontrun_env, _set_active_trace_filter, _TraceFilter
+from .preload_bridge import _PreloadBridge
+from .replay import _reproduce_dpor_counterexample
+from .runner import DporBytecodeRunner
+from .scheduler import DporScheduler
+
+
+def explore_dpor(
+    setup: Callable[[], T],
+    threads: list[Callable[[T], None]],
+    invariant: Callable[[T], bool],
+    max_executions: int | None = None,
+    preemption_bound: int | None = 2,
+    max_branches: int = 100_000,
+    timeout_per_run: float = 5.0,
+    stop_on_first: bool = True,
+    detect_io: bool = True,
+    deadlock_timeout: float = 5.0,
+    reproduce_on_failure: int = 10,
+    total_timeout: float | None = None,
+    warn_nondeterministic_sql: bool = True,
+    lock_timeout: int | None = None,
+    trace_packages: list[str] | None = None,
+    track_dunder_dict_accesses: bool = False,
+    search: str | None = None,
+    patch_sleep: bool = True,
+    serializable_invariant: Callable[[T], Any] | bool = False,
+    error_on_any_race: bool = False,
+) -> InterleavingResult:
+    """Systematically explore interleavings using DPOR.
+
+    This is the DPOR replacement for ``explore_interleavings()``. Instead of
+    random sampling, it uses the DPOR algorithm to explore only distinct
+    interleavings (modulo independent operation reordering).
+
+    Args:
+        setup: Creates fresh shared state for each execution.
+        threads: List of callables, each receiving the shared state.
+        invariant: Predicate over shared state; must be True after all
+            threads complete.
+        max_executions: Safety limit on total executions (None = unlimited).
+        preemption_bound: Limit on preemptions per execution. 2 catches most
+            bugs. None = unbounded (full DPOR).
+        max_branches: Maximum scheduling points per execution.
+        timeout_per_run: Timeout for each individual run.
+        stop_on_first: If True (default), stop exploring as soon as the
+            first invariant violation is found.  Set to False to collect
+            all failing interleavings.
+        detect_io: Automatically detect socket/file I/O operations and
+            report them as resource accesses (default True).  Two threads
+            accessing the same endpoint or file will be treated as
+            conflicting, enabling DPOR to explore their orderings.
+        deadlock_timeout: Seconds to wait before declaring a deadlock
+            (default 5.0).  Increase for code that legitimately blocks
+            in C extensions (NumPy, database queries, network I/O).
+        reproduce_on_failure: When a counterexample is found, replay the
+            same schedule this many times to measure reproducibility
+            (default 10).  Set to 0 to skip reproduction testing.
+        total_timeout: Maximum total time in seconds for the entire
+            exploration (default None = unlimited).  When exceeded, returns
+            results gathered so far.
+        warn_nondeterministic_sql: If True (default), raise
+            :class:`~frontrun.common.NondeterministicSQLError` when SQL
+            INSERT statements are detected but ``lastrowid`` capture
+            failed (e.g. psycopg2 without RETURNING).  Set to False to
+            suppress.  When capture succeeds, INSERTs use stable
+            indexical resource IDs automatically.
+        lock_timeout: If set, automatically execute
+            ``SET lock_timeout = '<N>ms'`` on every new PostgreSQL
+            connection created through the patched ``psycopg2.connect``
+            (or ``psycopg.connect``).  This prevents the cooperative
+            scheduler from deadlocking when two threads contend on the
+            same PostgreSQL row lock (defect #6).  Value is in
+            milliseconds; 2000 (2 seconds) is a good default.
+        trace_packages: List of package name patterns (fnmatch syntax) to
+            trace in addition to user code.  By default, code in
+            site-packages is skipped.  Use this to include specific
+            installed packages, e.g. ``["django_*", "mylib.*"]``.
+        track_dunder_dict_accesses: If True, report accesses on ``obj.__dict__``
+            in addition to direct attribute accesses.  This catches the
+            rare case where one thread uses ``self.x = v`` and another
+            uses ``self.__dict__['x'] = v``, but doubles wakeup tree
+            insertions and can cause combinatorial explosion.  Default
+            False.
+        search: Controls the order in which wakeup tree branches are
+            explored.  All strategies visit the same set of Mazurkiewicz
+            trace equivalence classes; only the order differs.  Accepted
+            values:
+
+            - ``None`` or ``"dfs"`` — classic DFS, lowest thread ID first
+              (default, matches the paper's Algorithm 2).  **Best for
+              exhaustive exploration** (``stop_on_first=False``): produces
+              the optimal (minimum) number of executions.
+            - ``"bit-reversal"`` or ``"bit-reversal:<seed>"`` — visit
+              children in bit-reversal permutation order for maximal
+              spread across distinct conflict points early.
+            - ``"round-robin"`` or ``"round-robin:<seed>"`` — cycle
+              through available threads in rotating order.
+            - ``"stride"`` or ``"stride:<seed>"`` — visit every s-th
+              sibling (s coprime to branching factor, derived from seed).
+            - ``"conflict-first"`` — reverse of DFS (highest thread ID
+              first), preferring threads added by race reversals.
+
+            **Use a non-DFS strategy when the trace space is large and
+            you have a limited execution budget** (``stop_on_first=True``
+            or a low ``max_executions``).  DFS explores traces in a fixed
+            order and may spend many executions on similar interleavings
+            before reaching a bug.  The alternative strategies spread
+            exploration across different conflict points earlier, finding
+            bugs faster on average.
+        patch_sleep: If True (default), replace ``time.sleep`` with a
+            no-op that yields to the scheduler.  This prevents threads
+            from actually sleeping during exploration (which would be
+            extremely slow) while preserving sleep calls as scheduling
+            points.  Set to False if your code depends on real delays.
+
+    Returns:
+        InterleavingResult with exploration statistics and any counterexample found.
+
+    .. note::
+
+       When running under **pytest**, this function requires the
+       ``frontrun`` CLI wrapper (``frontrun pytest ...``) or the
+       ``--frontrun-patch-locks`` flag.  Without it, the test is
+       automatically skipped.
+    """
+    _require_frontrun_env("explore_dpor")
+    if trace_packages is not None:
+        _set_active_trace_filter(_TraceFilter(trace_packages))
+
+    # Compute serializable baseline if requested.
+    serial_valid_states: set[Any] | None = None
+    serial_hash_fn: Callable[[Any], Any] = repr
+    if serializable_invariant is not False:
+        try:
+            from frontrun.common import compute_serializable_states, resolve_serializable_hash_fn
+
+            serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
+            serial_valid_states = compute_serializable_states(setup, threads, state_hash=serial_hash_fn)
+        except BaseException:
+            _set_active_trace_filter(None)
+            raise
+
+    num_threads = len(threads)
+    engine = PyDporEngine(
+        num_threads=num_threads,
+        preemption_bound=preemption_bound,
+        max_branches=max_branches,
+        max_executions=max_executions,
+        search=search,
+    )
+
+    result = InterleavingResult(property_holds=True)
+    stable_ids = StableObjectIds()
+    # Shared lock serialising ALL PyO3 calls to engine/execution objects.
+    # On free-threaded Python, PyO3 &mut self borrows panic rather than
+    # block when contested, so we need a Python-level lock shared across
+    # worker threads, the sync reporter, and the main loop.
+    engine_lock = real_lock()
+    total_deadline = time.monotonic() + total_timeout if total_timeout is not None else None
+
+    # Set up the LD_PRELOAD → DPOR bridge for C-level I/O detection.
+    # When code under test uses C extensions that call libc send()/recv()
+    # directly (e.g. psycopg2/libpq), the Python-level monkey-patches in
+    # _io_detection can't see those calls.  The LD_PRELOAD library
+    # intercepts them at the C level and writes events to a pipe.  The
+    # IOEventDispatcher reads the pipe in a background thread and the
+    # _PreloadBridge routes events to the correct DPOR thread for
+    # conflict analysis.
+    preload_dispatcher = None
+    preload_bridge: _PreloadBridge | None = None
+    if detect_io:
+        from frontrun._preload_io import IOEventDispatcher
+
+        preload_dispatcher = IOEventDispatcher()
+        preload_bridge = _PreloadBridge(dispatcher=preload_dispatcher)
+        preload_dispatcher.add_listener(preload_bridge.listener)
+        preload_dispatcher.start()
+
+    clear_sql_metadata()
+
+    # Warm SQL parsers (sqlglot) BEFORE the first _patch_locks() call.
+    # sqlglot creates a module-level _import_lock = threading.RLock() on
+    # first import.  If that import happens after _patch_locks() replaces
+    # threading.RLock with CooperativeRLock, the lock becomes cooperative.
+    # If a worker thread is then killed while holding it (e.g. timeout),
+    # the underlying real lock stays locked forever, causing deadlocks in
+    # later phases (_reproduce_dpor_counterexample).  Warming here ensures
+    # the lock is a real RLock.
+    if detect_io:
+        from frontrun._sql_cursor import _warm_sql_parsers
+
+        _warm_sql_parsers()
+
+    # Inject SET lock_timeout on new PG connections (defect #6 workaround).
+    from frontrun._sql_cursor import get_lock_timeout, set_lock_timeout
+
+    prev_lock_timeout = get_lock_timeout()
+    if lock_timeout is not None:
+        set_lock_timeout(lock_timeout)
+
+    # Set up report collection if --frontrun-report is active
+    from frontrun._report import (
+        _MAX_RECORDED_EXECUTIONS,
+        ExecutionRecord,
+        ExplorationReport,
+        _global_report_path,
+        generate_html_report,
+    )
+
+    def _build_race_info(raw_races: list[tuple[int, int, int, int | None]]) -> list[dict[str, Any]] | None:
+        if not raw_races:
+            return None
+        rmap = get_object_key_reverse_map() or {}
+        result = []
+        # Track (prev_step, current_step, thread_id) to deduplicate dict.__dict__
+        # shadows of real attribute accesses
+        seen_steps: set[tuple[int, int, int]] = set()
+        for r in raw_races:
+            obj_name = rmap.get(r[3], f"object {r[3]}") if r[3] is not None else None
+            key = (r[0], r[1], r[2])
+            # Skip dict.X entries when we already have a Type.X entry for the same steps
+            if obj_name and obj_name.startswith("dict."):
+                if key in seen_steps:
+                    continue
+            seen_steps.add(key)
+            result.append(
+                {
+                    "prev_step": r[0],
+                    "current_step": r[1],
+                    "thread_id": r[2],
+                    "object": obj_name,
+                }
+            )
+        return result or None
+
+    report_path = _global_report_path
+    report: ExplorationReport | None = None
+    if report_path is not None:
+        report = ExplorationReport(
+            num_threads=num_threads,
+            thread_names=[f"Thread {i}" for i in range(num_threads)],
+        )
+        set_object_key_reverse_map({})
+
+    def _record_and_emit_report(*, was_deadlock: bool = False) -> None:
+        """Record the current execution to the report and write the HTML file."""
+        if report is None or report_path is None:
+            return
+        if not _collecting_report:
+            generate_html_report(report, report_path)
+            return
+        with engine_lock:
+            sched = list(execution.schedule_trace)
+            races = engine.pending_races()
+        report.executions.append(
+            ExecutionRecord(
+                index=len(report.executions),
+                schedule_trace=sched,
+                switch_points=switch_points,
+                invariant_held=False,
+                was_deadlock=was_deadlock,
+                race_info=_build_race_info(races),
+                step_events=scheduler._step_event_collector or {},
+                lock_events=scheduler._lock_event_collector or [],
+                deadlock_at=scheduler._deadlock_at,
+                deadlock_cycle_description=getattr(scheduler._error, "cycle_description", None)
+                if was_deadlock
+                else None,
+            )
+        )
+        generate_html_report(report, report_path)
+
+    try:
+        while True:
+            if total_deadline is not None and time.monotonic() > total_deadline:
+                break
+            clear_insert_tracker()
+            stable_ids.reset_for_execution()
+            with engine_lock:
+                execution = engine.begin_execution()
+            recorder = TraceRecorder()
+            # Clear bridge state for this new execution.
+            if preload_bridge is not None:
+                preload_bridge.clear()
+            # Clear persistent SQL suppression flags from previous execution.
+            from frontrun._sql_cursor import clear_permanent_suppressions
+
+            clear_permanent_suppressions()
+            # Set up switch point collection for the report
+            _collecting_report = report is not None and len(report.executions) < _MAX_RECORDED_EXECUTIONS
+            switch_points: list[Any] = []
+            scheduler = DporScheduler(
+                engine,
+                execution,
+                num_threads,
+                engine_lock=engine_lock,
+                deadlock_timeout=deadlock_timeout,
+                trace_recorder=recorder,
+                preload_bridge=preload_bridge,
+                detect_io=detect_io,
+                stable_ids=stable_ids,
+                switch_point_collector=switch_points if _collecting_report else None,
+                track_dunder_dict_accesses=track_dunder_dict_accesses,
+            )
+            runner = DporBytecodeRunner(scheduler, detect_io=detect_io, preload_bridge=preload_bridge)
+
+            runner._patch_locks()
+            runner._patch_io()
+            if patch_sleep:
+                runner._patch_sleep()
+            try:
+                state = setup()
+
+                def make_thread_func(thread_func: Callable[[T], None], s: T) -> Callable[[], None]:
+                    def wrapper() -> None:
+                        thread_func(s)
+
+                    return wrapper
+
+                funcs = [make_thread_func(t, state) for t in threads]
+                try:
+                    runner.run(funcs, timeout=timeout_per_run)
+                except TimeoutError:
+                    pass
+            finally:
+                runner._unpatch_sleep()
+                runner._unpatch_io()
+                runner._unpatch_locks()
+
+            result.num_explored += 1
+
+            # Check for deadlock before running the invariant — a deadlock
+            # means the program never completed, so the invariant can never be
+            # satisfied.  Report it as a property violation with a clear message.
+            _deadlock_err = scheduler._error if isinstance(scheduler._error, DeadlockError) else None
+            is_deadlock = _deadlock_err is not None
+            if _deadlock_err is not None:
+                result.property_holds = False
+                with engine_lock:
+                    schedule = execution.schedule_trace
+                schedule_list = list(schedule)
+                result.failures.append((result.num_explored, schedule_list))
+                if result.counterexample is None:
+                    result.counterexample = schedule_list
+                if result.explanation is None:
+                    result.explanation = (
+                        f"Deadlock detected after {result.num_explored} interleaving(s).\n\n"
+                        f"{_deadlock_err.cycle_description}"
+                    )
+
+                # Replay the counterexample to measure reproducibility
+                if reproduce_on_failure > 0 and result.reproduction_attempts == 0:
+                    attempts, successes = _reproduce_dpor_counterexample(
+                        schedule_list=schedule_list,
+                        setup=setup,
+                        threads=threads,
+                        timeout_per_run=timeout_per_run,
+                        deadlock_timeout=deadlock_timeout,
+                        reproduce_on_failure=reproduce_on_failure,
+                        lock_timeout=lock_timeout,
+                        invariant=None,
+                        detect_io=detect_io,
+                        io_schedule=list(scheduler._io_trace) if detect_io and scheduler._io_trace else None,
+                        patch_sleep=patch_sleep,
+                    )
+                    result.reproduction_attempts = attempts
+                    result.reproduction_successes = successes
+
+                    from frontrun._preload_io import _set_preload_pipe_fd
+
+                    if preload_dispatcher is not None and preload_dispatcher._write_fd is not None:
+                        _set_preload_pipe_fd(preload_dispatcher._write_fd)
+
+                if stop_on_first:
+                    clear_instr_cache()
+                    _record_and_emit_report(was_deadlock=True)
+                    return result
+
+            if warn_nondeterministic_sql:
+                check_uncaptured_inserts()
+
+            # --- error_on_any_race: treat unsynchronized races as failures ---
+            if error_on_any_race and not is_deadlock:
+                with engine_lock:
+                    raw_races_check = engine.attribute_races()
+                if raw_races_check:
+                    result.property_holds = False
+                    result.races_detected = True
+                    with engine_lock:
+                        schedule = execution.schedule_trace
+                    schedule_list = list(schedule)
+                    result.failures.append((result.num_explored, schedule_list))
+                    if result.counterexample is None:
+                        result.counterexample = schedule_list
+                    if result.explanation is None:
+                        result.explanation = (
+                            f"Unsynchronized race detected in execution {result.num_explored}.\n"
+                            f"{len(raw_races_check)} race(s) found between threads on shared objects."
+                        )
+                    if stop_on_first:
+                        clear_instr_cache()
+                        _record_and_emit_report()
+                        return result
+
+            # --- serializable_invariant: check against sequential baselines ---
+            if serial_valid_states is not None and not is_deadlock:
+                ser_explanation = check_serializability_violation(
+                    state, serial_valid_states, serial_hash_fn, result.num_explored
+                )
+                if ser_explanation is not None:
+                    result.property_holds = False
+                    with engine_lock:
+                        schedule = execution.schedule_trace
+                    schedule_list = list(schedule)
+                    result.failures.append((result.num_explored, schedule_list))
+                    if result.counterexample is None:
+                        result.counterexample = schedule_list
+                    if result.explanation is None:
+                        result.explanation = ser_explanation
+                    if stop_on_first:
+                        clear_instr_cache()
+                        _record_and_emit_report()
+                        return result
+
+            if not is_deadlock and not invariant(state):
+                result.property_holds = False
+                with engine_lock:
+                    schedule = execution.schedule_trace
+                schedule_list = list(schedule)
+                result.failures.append((result.num_explored, schedule_list))
+                if result.counterexample is None:
+                    result.counterexample = schedule_list
+
+                # Replay the counterexample to measure reproducibility
+                if reproduce_on_failure > 0 and result.reproduction_attempts == 0:
+                    attempts, successes = _reproduce_dpor_counterexample(
+                        schedule_list=schedule_list,
+                        setup=setup,
+                        threads=threads,
+                        timeout_per_run=timeout_per_run,
+                        deadlock_timeout=deadlock_timeout,
+                        reproduce_on_failure=reproduce_on_failure,
+                        lock_timeout=lock_timeout,
+                        invariant=invariant,
+                        detect_io=detect_io,
+                        io_schedule=list(scheduler._io_trace) if detect_io and scheduler._io_trace else None,
+                        patch_sleep=patch_sleep,
+                    )
+                    result.reproduction_attempts = attempts
+                    result.reproduction_successes = successes
+
+                    # Re-enable pipe writes for subsequent DPOR executions.
+                    from frontrun._preload_io import _set_preload_pipe_fd
+
+                    if preload_dispatcher is not None and preload_dispatcher._write_fd is not None:
+                        _set_preload_pipe_fd(preload_dispatcher._write_fd)
+
+                if result.explanation is None:
+                    result.explanation = format_trace(
+                        recorder.events,
+                        num_threads=num_threads,
+                        num_explored=result.num_explored,
+                        reproduction_attempts=result.reproduction_attempts,
+                        reproduction_successes=result.reproduction_successes,
+                    )
+                if result.sql_anomaly is None:
+                    result.sql_anomaly = classify_sql_anomaly(recorder.events)
+                if stop_on_first:
+                    clear_instr_cache()
+                    _record_and_emit_report()
+                    return result
+
+            # Clear instruction cache between executions to avoid stale code ids
+            clear_instr_cache()
+
+            # Collect report data before next_execution() consumes pending races
+            if _collecting_report and report is not None:
+                with engine_lock:
+                    schedule_trace = list(execution.schedule_trace)
+                    raw_races = engine.pending_races()
+                race_info = _build_race_info(raw_races)
+                was_deadlock = isinstance(scheduler._error, DeadlockError)
+                # Check if this specific execution failed: it was appended to failures
+                # with the current num_explored as its execution number
+                this_exec_failed = any(n == result.num_explored for n, _ in result.failures)
+                invariant_held = not was_deadlock and not this_exec_failed
+                report.executions.append(
+                    ExecutionRecord(
+                        index=len(report.executions),
+                        schedule_trace=schedule_trace,
+                        switch_points=switch_points,
+                        invariant_held=invariant_held,
+                        was_deadlock=was_deadlock,
+                        race_info=race_info,
+                        step_events=scheduler._step_event_collector or {},
+                        lock_events=scheduler._lock_event_collector or [],
+                        deadlock_at=scheduler._deadlock_at,
+                        deadlock_cycle_description=getattr(scheduler._error, "cycle_description", None)
+                        if was_deadlock
+                        else None,
+                    )
+                )
+
+            with engine_lock:
+                if not engine.next_execution():
+                    break
+    finally:
+        if trace_packages is not None:
+            _set_active_trace_filter(None)
+        set_lock_timeout(prev_lock_timeout)
+        if preload_dispatcher is not None:
+            preload_dispatcher.stop()
+        set_object_key_reverse_map(None)
+
+    # Generate HTML report if requested
+    if report is not None and report_path is not None:
+        generate_html_report(report, report_path)
+
+    return result
