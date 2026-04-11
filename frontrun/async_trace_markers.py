@@ -67,11 +67,11 @@ Or using the convenience function::
 """
 
 import asyncio
-import sys
 import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+from frontrun._trace_marker_runtime import build_trace_function, run_traced_callable
 from frontrun.common import Schedule
 from frontrun.trace_markers import MarkerRegistry, ThreadCoordinator
 
@@ -103,79 +103,12 @@ class AsyncTraceExecutor:
         self.task_errors: dict[str, Exception] = {}
 
     def _create_trace_function(self, execution_name: str) -> Callable[[Any, str, Any], Any]:
-        """Create a trace function for a specific async task.
-
-        This trace function checks both the current line and previous line for markers
-        (to support both inline and separate-line markers) and blocks the thread when
-        a marker is detected.
-
-        Args:
-            execution_name: The name of the task this trace function is for
-
-        Returns:
-            A trace function suitable for sys.settrace
-        """
-
-        # Track the most recent line that triggered as a current-line marker.
-        # This prevents the "check previous line" logic from double-firing
-        # when an inline marker (code + comment) is followed by a non-marker
-        # line.  Using a single-value tracker (not a set) ensures markers in
-        # loops still fire on every iteration.
-        _last_current_line_marker: list[tuple[str, int] | None] = [None]
-
-        def trace_function(frame: Any, event: str, arg: Any) -> Any:
-            try:
-                # Only care about 'line' events
-                if event != "line":
-                    return trace_function
-
-                # Scan this file for markers if we haven't already
-                self.marker_registry.scan_frame(frame)
-
-                filename = frame.f_code.co_filename
-                lineno = frame.f_lineno
-
-                # Check current line (for inline markers like: x = 1  # frontrun: marker)
-                marker_name = self.marker_registry.get_marker(filename, lineno)
-                if marker_name:
-                    _last_current_line_marker[0] = (filename, lineno)
-                    # Release execution lock while waiting (let other threads run).
-                    # wait_for_turn reacquires it before returning.
-                    self.coordinator._execution_lock.release()
-                    self.coordinator.wait_for_turn(execution_name, marker_name, _reacquire_execution_lock=True)
-                    # Check if an error occurred in another task
-                    if self.coordinator.error:
-                        raise self.coordinator.error
-                    return trace_function
-
-                # Check previous line (for separate-line markers like:
-                #   # frontrun: marker
-                #   x = 1
-                # Skip if the previous line was just triggered as an inline marker.)
-                if lineno > 1 and _last_current_line_marker[0] != (filename, lineno - 1):
-                    prev_marker = self.marker_registry.get_marker(filename, lineno - 1)
-                    if prev_marker:
-                        # Release execution lock while waiting (let other threads run).
-                        # wait_for_turn reacquires it before returning.
-                        self.coordinator._execution_lock.release()
-                        self.coordinator.wait_for_turn(execution_name, prev_marker, _reacquire_execution_lock=True)
-                        # Check if an error occurred in another task
-                        if self.coordinator.error:
-                            raise self.coordinator.error
-
-                return trace_function
-            except Exception as e:
-                # Release execution lock before reporting to avoid deadlock
-                # (report_error needs the condition lock, which another thread
-                # may hold while waiting for _execution_lock in wait_for_turn).
-                try:
-                    self.coordinator._execution_lock.release()
-                except RuntimeError:
-                    pass
-                self.coordinator.report_error(e)
-                return None
-
-        return trace_function
+        return build_trace_function(
+            self.coordinator,
+            self.marker_registry,
+            execution_name,
+            include_previous_line=True,
+        )
 
     def _thread_wrapper(self, execution_name: str, task_fn: Callable[[], Coroutine[Any, Any, None]]) -> None:
         """Wrapper that runs an async task in its own event loop with tracing.
@@ -184,30 +117,13 @@ class AsyncTraceExecutor:
             execution_name: The name of this task
             task_fn: The async function to execute
         """
-        error: Exception | None = None
-        try:
-            # Install trace function for this task
-            trace_fn = self._create_trace_function(execution_name)
-            # Acquire execution lock before running (serializes with other threads)
-            self.coordinator._execution_lock.acquire()
-            sys.settrace(trace_fn)
-
-            # Run the async task in its own event loop
-            asyncio.run(task_fn())
-        except Exception as e:
-            # Store the error but don't call report_error yet — we may still
-            # hold _execution_lock and report_error needs the condition lock,
-            # which risks deadlock against wait_for_turn's lock ordering.
-            error = e
-            self.task_errors[execution_name] = e
-        finally:
-            sys.settrace(None)
-            try:
-                self.coordinator._execution_lock.release()
-            except RuntimeError:
-                pass
-            if error is not None:
-                self.coordinator.report_error(error)
+        run_traced_callable(
+            coordinator=self.coordinator,
+            execution_name=execution_name,
+            trace_function=self._create_trace_function(execution_name),
+            body=lambda: asyncio.run(task_fn()),
+            error_sink=self.task_errors,
+        )
 
     def run(self, tasks: dict[str, Callable[[], Coroutine[Any, Any, None]]], timeout: float = 10.0) -> None:
         """Run all tasks with controlled interleaving based on comment markers.

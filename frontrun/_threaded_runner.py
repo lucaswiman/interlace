@@ -50,6 +50,15 @@ def join_threads_with_deadline(
     return [thread for thread in threads if thread.is_alive()]
 
 
+def notify_scheduler_timeout(scheduler: Any, alive: list[threading.Thread]) -> None:
+    """Report a thread-group timeout to a scheduler and wake waiters."""
+    scheduler._error = TimeoutError(f"Timed out waiting for {len(alive)} thread(s) to complete")
+    with scheduler._condition:
+        scheduler._condition.notify_all()
+    for thread in alive:
+        thread.join(timeout=0.5)
+
+
 def run_thread_group(
     *,
     funcs: Sequence[Callable[..., None]],

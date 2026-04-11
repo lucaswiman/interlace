@@ -424,3 +424,56 @@ def test_wait_timeout_is_total_not_per_thread():
     # With per-thread timeout, elapsed would be ~2s (1s per thread).
     # With a proper total deadline, it should be ~1s.
     assert elapsed < 1.8, f"wait() took {elapsed:.1f}s — timeout is per-thread, not total"
+
+
+def test_trace_runtime_clears_trace_and_reports_errors(monkeypatch):
+    """Shared trace-runtime cleanup should clear tracing and report errors."""
+
+    from frontrun._trace_marker_runtime import run_traced_callable
+
+    trace_calls: list[object | None] = []
+
+    def fake_settrace(value):
+        trace_calls.append(value)
+
+    monkeypatch.setattr(sys, "settrace", fake_settrace)
+
+    class FakeLock:
+        def __init__(self):
+            self.locked = False
+
+        def acquire(self):
+            assert not self.locked
+            self.locked = True
+
+        def release(self):
+            assert self.locked
+            self.locked = False
+
+    class FakeCoordinator:
+        def __init__(self):
+            self._execution_lock = FakeLock()
+            self.reported: list[Exception] = []
+
+        def report_error(self, error):
+            self.reported.append(error)
+
+    coordinator = FakeCoordinator()
+    errors: dict[str, Exception] = {}
+
+    def body():
+        raise ValueError("boom")
+
+    run_traced_callable(
+        coordinator=coordinator,
+        execution_name="worker",
+        body=body,
+        error_sink=errors,
+    )
+
+    assert len(trace_calls) == 2
+    assert trace_calls[1] is None
+    assert coordinator._execution_lock.locked is False
+    assert "worker" in errors
+    assert isinstance(errors["worker"], ValueError)
+    assert len(coordinator.reported) == 1

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from frontrun._threaded_runner import PatchScope, run_thread_group
+from contextlib import contextmanager
+
+from frontrun._threaded_runner import PatchScope, notify_scheduler_timeout, run_thread_group
 
 from ._shared import *
 from ._shared import (
@@ -407,48 +409,40 @@ class DporBytecodeRunner:
             self.scheduler._lock_depth_by_thread.pop(_tid, None)
             self.scheduler._pending_io_by_thread.pop(_tid, None)
 
-    def _run_thread_settrace(
+    @contextmanager
+    def _thread_runtime(
         self,
         thread_id: int,
-        func: Callable[..., None],
-        args: tuple[Any, ...],
-    ) -> None:
-        """Thread entry using sys.settrace (3.10-3.11)."""
-        try:
-            self._setup_dpor_tls(thread_id)
-
-            trace_fn = self._make_trace(thread_id)
+        *,
+        trace_fn: Callable[..., Any] | None = None,
+    ):
+        self._setup_dpor_tls(thread_id)
+        if trace_fn is not None:
             sys.settrace(trace_fn)
-            func(*args)
-        except SchedulerAbort:
-            pass  # scheduler already has the error; just exit cleanly
-        except Exception as e:
-            self.errors[thread_id] = e
-            self.scheduler.report_error(e)
+        try:
+            yield
         finally:
-            sys.settrace(None)
+            if trace_fn is not None:
+                sys.settrace(None)
             self._teardown_dpor_tls()
             self.scheduler.mark_done(thread_id)
 
-    def _run_thread_monitoring(
+    def _run_thread(
         self,
         thread_id: int,
         func: Callable[..., None],
         args: tuple[Any, ...],
+        *,
+        trace_fn: Callable[..., Any] | None = None,
     ) -> None:
-        """Thread entry using sys.monitoring (3.12+)."""
         try:
-            self._setup_dpor_tls(thread_id)
-
-            func(*args)
+            with self._thread_runtime(thread_id, trace_fn=trace_fn):
+                func(*args)
         except SchedulerAbort:
             pass  # scheduler already has the error; just exit cleanly
         except Exception as e:
             self.errors[thread_id] = e
             self.scheduler.report_error(e)
-        finally:
-            self._teardown_dpor_tls()
-            self.scheduler.mark_done(thread_id)
 
     def run(
         self,
@@ -462,9 +456,7 @@ class DporBytecodeRunner:
         use_monitoring = _USE_SYS_MONITORING
         if use_monitoring:
             self._setup_monitoring()
-            run_thread = self._run_thread_monitoring
-        else:
-            run_thread = self._run_thread_settrace
+        run_thread = self._run_thread
 
         def make_thread_target(
             thread_id: int,
@@ -472,19 +464,17 @@ class DporBytecodeRunner:
             thread_args: tuple[Any, ...],
         ) -> Callable[[], None]:
             def target() -> None:
-                run_thread(thread_id, func, thread_args)
+                run_thread(
+                    thread_id,
+                    func,
+                    thread_args,
+                    trace_fn=None if use_monitoring else self._make_trace(thread_id),
+                )
 
             return target
 
         def on_timeout(alive: list[threading.Thread]) -> None:
-            # Signal scheduler to abort if any threads are still alive.
-            # On free-threaded Python, condition notifications can be lost
-            # and threads may still be blocked in wait_for_turn.
-            self.scheduler._error = TimeoutError(f"Timed out waiting for {len(alive)} thread(s) to complete")
-            with self.scheduler._condition:
-                self.scheduler._condition.notify_all()
-            for thread in alive:
-                thread.join(timeout=0.5)
+            notify_scheduler_timeout(self.scheduler, alive)
 
         run_thread_group(
             funcs=funcs,

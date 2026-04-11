@@ -51,12 +51,11 @@ from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, TypeVar
 
 from frontrun._async_autopause import (
-    _auto_pause_active,
-    _AutoPauseCoroutine,
     _in_scheduler_pause,
     _scheduler_var,
     _task_id_var,
     await_point,  # noqa: F401
+    wrap_auto_paused_tasks,
 )
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
 from frontrun._opcode_observer import (
@@ -72,6 +71,7 @@ from frontrun._opcode_observer import (
 )
 from frontrun._sql_cursor import clear_sql_metadata, get_lock_timeout, set_lock_timeout
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
+from frontrun._threaded_runner import PatchScope
 from frontrun._tracing import TraceFilter as _TraceFilter
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun.async_scheduler import InterleavedLoop
@@ -534,16 +534,7 @@ class AsyncDporScheduler(InterleavedLoop):
         if isinstance(task_funcs, list):
             task_funcs = dict(enumerate(task_funcs))
 
-        # Wrap each user function so every await becomes a DPOR scheduling point
-        wrapped: dict[Any, Callable[..., Awaitable[None]]] = {}
-        for tid, func in task_funcs.items():
-
-            async def _wrapped(f: Callable[..., Awaitable[None]] = func, t: Any = tid) -> None:
-                _auto_pause_active.set(True)
-                await _AutoPauseCoroutine(f(), t, self)
-
-            wrapped[tid] = _wrapped
-
+        wrapped = wrap_auto_paused_tasks(task_funcs, self)
         if _USE_SYS_MONITORING:
             self._setup_monitoring()
             try:
@@ -948,20 +939,22 @@ async def _reproduce_async_counterexample(
     for _ in range(reproduce_on_failure):
         scheduler = _ReplayAsyncScheduler(schedule_list, num_tasks, deadlock_timeout=deadlock_timeout)
         state = setup()
-        # Wrap tasks with _AutoPauseCoroutine so every await becomes a
-        # scheduling point that the replay scheduler can control.
-        task_funcs: dict[int, Callable[..., Coroutine[Any, Any, None]]] = {}
-        for i, t in enumerate(tasks):
+        task_funcs: dict[int, Callable[..., Awaitable[None]]] = {}
+        for i, task in enumerate(tasks):
 
-            async def _wrapped(s: Any = state, fn: Any = t, tid: int = i) -> None:
-                _auto_pause_active.set(True)
-                await _AutoPauseCoroutine(fn(s), tid, scheduler)  # type: ignore[arg-type]
+            def _make_task(task_fn: Callable[[T], Coroutine[Any, Any, None]]) -> Callable[..., Awaitable[None]]:
+                def _wrapped_task() -> Awaitable[None]:
+                    return task_fn(state)
 
-            task_funcs[i] = _wrapped
+                return _wrapped_task
+
+            task_funcs[i] = _make_task(task)
+
+        task_funcs = wrap_auto_paused_tasks(task_funcs, scheduler)
 
         deadlocked = False
         try:
-            await scheduler.run_all(task_funcs, timeout=timeout_per_run)  # type: ignore[arg-type]
+            await scheduler.run_all(task_funcs, timeout=timeout_per_run)
         except DeadlockError:
             if invariant is None:
                 successes += 1
@@ -1082,12 +1075,6 @@ async def explore_async_dpor(
     stable_ids = StableObjectIds()
     total_deadline = time.monotonic() + total_timeout if total_timeout is not None else None
 
-    if detect_sql and _sql_async_available:
-        patch_sql_async()
-
-    if detect_redis and _redis_async_available:
-        patch_redis_async()
-
     clear_sql_metadata()
 
     # Inject SET lock_timeout on new PG connections (defect #6 workaround).
@@ -1095,190 +1082,173 @@ async def explore_async_dpor(
     if lock_timeout is not None:
         set_lock_timeout(lock_timeout)
 
-    _patch_asyncio_lock()
-    if patch_sleep:
-        _patch_asyncio_sleep()
+    def _record_failure(execution: PyExecution, explanation: str, *, races_detected: bool = False) -> list[int]:
+        result.property_holds = False
+        result.races_detected = result.races_detected or races_detected
+        schedule_list = list(execution.schedule_trace)
+        result.failures.append((result.num_explored, schedule_list))
+        if result.counterexample is None:
+            result.counterexample = schedule_list
+            result.explanation = explanation
+        return schedule_list
+
+    async def _record_reproduction(
+        schedule_list: list[int],
+        invariant_fn: Callable[[T], bool] | None,
+    ) -> None:
+        if reproduce_on_failure <= 0 or result.reproduction_attempts != 0:
+            return
+        attempts, successes = await _reproduce_async_counterexample(
+            schedule_list=schedule_list,
+            setup=setup,
+            tasks=tasks,
+            invariant=invariant_fn,
+            num_tasks=num_tasks,
+            reproduce_on_failure=reproduce_on_failure,
+            timeout_per_run=timeout_per_run,
+            deadlock_timeout=deadlock_timeout,
+        )
+        result.reproduction_attempts = attempts
+        result.reproduction_successes = successes
 
     try:
-        while True:
-            if total_deadline is not None and time.monotonic() > total_deadline:
-                break
-            clear_insert_tracker()
-            stable_ids.reset_for_execution()
-            execution = engine.begin_execution()
+        with PatchScope() as patch_scope:
+            patch_scope.add(patch_sql_async, unpatch_sql_async, enabled=detect_sql and _sql_async_available)
+            patch_scope.add(patch_redis_async, unpatch_redis_async, enabled=detect_redis and _redis_async_available)
+            patch_scope.add(_patch_asyncio_lock, _unpatch_asyncio_lock)
+            patch_scope.add(_patch_asyncio_sleep, _unpatch_asyncio_sleep, enabled=patch_sleep)
 
-            # Clear wait-for graph and held-locks tracking between executions
-            if _async_wait_graph is not None:
-                _async_wait_graph.clear()
-            _async_lock_owners.clear()
-            _async_task_held_locks.clear()
+            while True:
+                if total_deadline is not None and time.monotonic() > total_deadline:
+                    break
+                clear_insert_tracker()
+                stable_ids.reset_for_execution()
+                execution = engine.begin_execution()
 
-            scheduler = AsyncDporScheduler(
-                engine,
-                execution,
-                num_tasks,
-                deadlock_timeout=deadlock_timeout,
-                detect_sql=detect_sql,
-                detect_redis=detect_redis,
-                stable_ids=stable_ids,
-            )
+                # Clear wait-for graph and held-locks tracking between executions
+                if _async_wait_graph is not None:
+                    _async_wait_graph.clear()
+                _async_lock_owners.clear()
+                _async_task_held_locks.clear()
 
-            state = setup()
-
-            task_funcs: dict[int, Callable[..., Coroutine[Any, Any, None]]] = {
-                i: (lambda s=state, t=t: t(s))  # type: ignore[assignment]
-                for i, t in enumerate(tasks)
-            }
-
-            deadlock_error: DeadlockError | None = None
-            task_error: Exception | None = None
-            timed_out = False
-            try:
-                await scheduler.run_all(task_funcs, timeout=timeout_per_run)  # type: ignore[arg-type]
-            except DeadlockError as e:
-                deadlock_error = e
-            except TimeoutError:
-                timed_out = True
-            except Exception as e:
-                # Task raised an exception (not deadlock/timeout).
-                # This is a valid exploration outcome — the cleanup already
-                # happened in _run's finally block, so lock state is clean.
-                # Record it and check the invariant below.
-                task_error = e
-
-            # Mark any unfinished tasks as done in the DPOR engine
-            unfinished = [i for i in range(num_tasks) if i not in scheduler._tasks_done]
-            for i in unfinished:
-                scheduler.finish_task(i)
-
-            result.num_explored += 1
-
-            # Check for deadlock: explicit DeadlockError from wait-for
-            # graph cycle detection, or timeout (tasks blocked on locks
-            # get cancelled by run_all and appear "done" via _mark_done
-            # in the finally block, so we can't rely on unfinished alone).
-            is_deadlock = False
-            deadlock_explanation = ""
-            if deadlock_error is not None:
-                is_deadlock = True
-                deadlock_explanation = f"Deadlock detected: {deadlock_error.cycle_description}"
-            elif timed_out:
-                is_deadlock = True
-                if unfinished:
-                    stuck = ", ".join(str(t) for t in unfinished)
-                    deadlock_explanation = (
-                        f"Deadlock detected: tasks [{stuck}] did not complete. "
-                        f"All tasks were blocked and could not make progress."
-                    )
-                else:
-                    deadlock_explanation = (
-                        "Deadlock detected: all tasks were blocked and timed out. "
-                        "Tasks could not make progress (likely waiting on locks held by each other)."
-                    )
-
-            if is_deadlock:
-                result.property_holds = False
-                schedule_list = list(execution.schedule_trace)
-                result.failures.append((result.num_explored, schedule_list))
-                if result.counterexample is None:
-                    result.counterexample = schedule_list
-                    result.explanation = deadlock_explanation
-                if reproduce_on_failure > 0 and result.reproduction_attempts == 0:
-                    attempts, successes = await _reproduce_async_counterexample(
-                        schedule_list=schedule_list,
-                        setup=setup,
-                        tasks=tasks,
-                        invariant=None,
-                        num_tasks=num_tasks,
-                        reproduce_on_failure=reproduce_on_failure,
-                        timeout_per_run=timeout_per_run,
-                        deadlock_timeout=deadlock_timeout,
-                    )
-                    result.reproduction_attempts = attempts
-                    result.reproduction_successes = successes
-                if stop_on_first:
-                    return result
-            elif task_error is not None:
-                result.property_holds = False
-                schedule_list = list(execution.schedule_trace)
-                result.failures.append((result.num_explored, schedule_list))
-                if result.counterexample is None:
-                    result.counterexample = schedule_list
-                    exc_type = type(task_error).__name__
-                    result.explanation = f"Task crash in execution {result.num_explored}: {exc_type}: {task_error}"
-                if stop_on_first:
-                    return result
-
-            if warn_nondeterministic_sql:
-                check_uncaptured_inserts()
-
-            # --- error_on_any_race: treat unsynchronized races as failures ---
-            if error_on_any_race and not is_deadlock and task_error is None:
-                raw_races_check = engine.attribute_races()
-                if raw_races_check:
-                    result.property_holds = False
-                    result.races_detected = True
-                    schedule_list = list(execution.schedule_trace)
-                    result.failures.append((result.num_explored, schedule_list))
-                    if result.counterexample is None:
-                        result.counterexample = schedule_list
-                        result.explanation = (
-                            f"Unsynchronized race detected in execution {result.num_explored}.\n"
-                            f"{len(raw_races_check)} race(s) found between tasks on shared objects."
-                        )
-                    if stop_on_first:
-                        return result
-
-            # --- serializable_invariant: check against sequential baselines ---
-            if serial_valid_states is not None and not is_deadlock and task_error is None:
-                ser_explanation = check_serializability_violation(
-                    state, serial_valid_states, serial_hash_fn, result.num_explored
+                scheduler = AsyncDporScheduler(
+                    engine,
+                    execution,
+                    num_tasks,
+                    deadlock_timeout=deadlock_timeout,
+                    detect_sql=detect_sql,
+                    detect_redis=detect_redis,
+                    stable_ids=stable_ids,
                 )
-                if ser_explanation is not None:
-                    result.property_holds = False
-                    schedule_list = list(execution.schedule_trace)
-                    result.failures.append((result.num_explored, schedule_list))
-                    if result.counterexample is None:
-                        result.counterexample = schedule_list
-                        result.explanation = ser_explanation
+
+                state = setup()
+
+                task_funcs: dict[int, Callable[..., Coroutine[Any, Any, None]]] = {
+                    i: (lambda s=state, t=t: t(s))  # type: ignore[assignment]
+                    for i, t in enumerate(tasks)
+                }
+
+                deadlock_error: DeadlockError | None = None
+                task_error: Exception | None = None
+                timed_out = False
+                try:
+                    await scheduler.run_all(task_funcs, timeout=timeout_per_run)  # type: ignore[arg-type]
+                except DeadlockError as e:
+                    deadlock_error = e
+                except TimeoutError:
+                    timed_out = True
+                except Exception as e:
+                    # Task raised an exception (not deadlock/timeout).
+                    # This is a valid exploration outcome — the cleanup already
+                    # happened in _run's finally block, so lock state is clean.
+                    # Record it and check the invariant below.
+                    task_error = e
+
+                # Mark any unfinished tasks as done in the DPOR engine
+                unfinished = [i for i in range(num_tasks) if i not in scheduler._tasks_done]
+                for i in unfinished:
+                    scheduler.finish_task(i)
+
+                result.num_explored += 1
+
+                # Check for deadlock: explicit DeadlockError from wait-for
+                # graph cycle detection, or timeout (tasks blocked on locks
+                # get cancelled by run_all and appear "done" via _mark_done
+                # in the finally block, so we can't rely on unfinished alone).
+                is_deadlock = False
+                deadlock_explanation = ""
+                if deadlock_error is not None:
+                    is_deadlock = True
+                    deadlock_explanation = f"Deadlock detected: {deadlock_error.cycle_description}"
+                elif timed_out:
+                    is_deadlock = True
+                    if unfinished:
+                        stuck = ", ".join(str(t) for t in unfinished)
+                        deadlock_explanation = (
+                            f"Deadlock detected: tasks [{stuck}] did not complete. "
+                            f"All tasks were blocked and could not make progress."
+                        )
+                    else:
+                        deadlock_explanation = (
+                            "Deadlock detected: all tasks were blocked and timed out. "
+                            "Tasks could not make progress (likely waiting on locks held by each other)."
+                        )
+
+                if is_deadlock:
+                    schedule_list = _record_failure(execution, deadlock_explanation)
+                    await _record_reproduction(schedule_list, None)
+                    if stop_on_first:
+                        return result
+                elif task_error is not None:
+                    exc_type = type(task_error).__name__
+                    _record_failure(
+                        execution,
+                        f"Task crash in execution {result.num_explored}: {exc_type}: {task_error}",
+                    )
                     if stop_on_first:
                         return result
 
-            if not is_deadlock and task_error is None and not invariant(state):
-                result.property_holds = False
-                schedule_list = list(execution.schedule_trace)
-                result.failures.append((result.num_explored, schedule_list))
-                if result.counterexample is None:
-                    result.counterexample = schedule_list
-                    result.explanation = _format_async_trace(schedule_list, num_tasks)
-                if reproduce_on_failure > 0 and result.reproduction_attempts == 0:
-                    attempts, successes = await _reproduce_async_counterexample(
-                        schedule_list=schedule_list,
-                        setup=setup,
-                        tasks=tasks,
-                        invariant=invariant,
-                        num_tasks=num_tasks,
-                        reproduce_on_failure=reproduce_on_failure,
-                        timeout_per_run=timeout_per_run,
-                        deadlock_timeout=deadlock_timeout,
-                    )
-                    result.reproduction_attempts = attempts
-                    result.reproduction_successes = successes
-                if stop_on_first:
-                    return result
+                if warn_nondeterministic_sql:
+                    check_uncaptured_inserts()
 
-            if not engine.next_execution():
-                break
+                # --- error_on_any_race: treat unsynchronized races as failures ---
+                if error_on_any_race and not is_deadlock and task_error is None:
+                    raw_races_check = engine.attribute_races()
+                    if raw_races_check:
+                        _record_failure(
+                            execution,
+                            (
+                                f"Unsynchronized race detected in execution {result.num_explored}.\n"
+                                f"{len(raw_races_check)} race(s) found between tasks on shared objects."
+                            ),
+                            races_detected=True,
+                        )
+                        if stop_on_first:
+                            return result
+
+                # --- serializable_invariant: check against sequential baselines ---
+                if serial_valid_states is not None and not is_deadlock and task_error is None:
+                    ser_explanation = check_serializability_violation(
+                        state, serial_valid_states, serial_hash_fn, result.num_explored
+                    )
+                    if ser_explanation is not None:
+                        _record_failure(execution, ser_explanation)
+                        if stop_on_first:
+                            return result
+
+                if not is_deadlock and task_error is None and not invariant(state):
+                    schedule_list = _record_failure(
+                        execution, _format_async_trace(list(execution.schedule_trace), num_tasks)
+                    )
+                    await _record_reproduction(schedule_list, invariant)
+                    if stop_on_first:
+                        return result
+
+                if not engine.next_execution():
+                    break
     finally:
         if trace_packages is not None:
             _set_active_trace_filter(None)
         set_lock_timeout(prev_lock_timeout)
-        if patch_sleep:
-            _unpatch_asyncio_sleep()
-        _unpatch_asyncio_lock()
-        if detect_sql and _sql_async_available:
-            unpatch_sql_async()
-        if detect_redis and _redis_async_available:
-            unpatch_redis_async()
 
     return result

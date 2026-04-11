@@ -26,6 +26,11 @@ Inside async tasks, use :func:`get_async_connection`.
 
 from typing import Any
 
+from frontrun.contrib._shared import dispatch_threads_or_tasks
+from frontrun.contrib.sqlalchemy._async import async_sqlalchemy_dpor, get_async_connection
+from frontrun.contrib.sqlalchemy._sync import get_connection
+from frontrun.contrib.sqlalchemy._sync import sqlalchemy_dpor as _sync_sqlalchemy_dpor
+
 
 def sqlalchemy_dpor(*args: Any, **kwargs: Any) -> Any:
     """Run DPOR with per-thread/task SQLAlchemy connection management.
@@ -33,23 +38,13 @@ def sqlalchemy_dpor(*args: Any, **kwargs: Any) -> Any:
     Use ``threads=[...]`` for sync code or ``tasks=[...]`` for async code.
     The async form returns an awaitable.
     """
-    has_threads = "threads" in kwargs
-    has_tasks = "tasks" in kwargs
-    if has_threads == has_tasks:
-        raise TypeError("sqlalchemy_dpor() requires exactly one of 'threads' or 'tasks'")
+    return dispatch_threads_or_tasks(
+        _sync_sqlalchemy_dpor,
+        async_sqlalchemy_dpor,
+        *args,
+        api_name="sqlalchemy_dpor",
+        **kwargs,
+    )
 
-    if has_tasks:
-        from frontrun.contrib.sqlalchemy._async import async_sqlalchemy_dpor
-
-        return async_sqlalchemy_dpor(*args, **kwargs)
-
-    from frontrun.contrib.sqlalchemy._sync import sqlalchemy_dpor as _sync_sqlalchemy_dpor
-
-    return _sync_sqlalchemy_dpor(*args, **kwargs)
-
-
-# Keep async_sqlalchemy_dpor importable for backward compatibility.
-from frontrun.contrib.sqlalchemy._async import async_sqlalchemy_dpor, get_async_connection  # noqa: E402, F811
-from frontrun.contrib.sqlalchemy._sync import get_connection  # noqa: E402
 
 __all__ = ["async_sqlalchemy_dpor", "get_async_connection", "get_connection", "sqlalchemy_dpor"]

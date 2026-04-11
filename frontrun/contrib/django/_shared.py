@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
+from contextlib import contextmanager
 from typing import Any, TypeVar
 
 T = TypeVar("T")
@@ -24,6 +25,21 @@ def wrap_setup(setup: Callable[[], T], close_all: Callable[[], None]) -> Callabl
     return wrapped_setup
 
 
+@contextmanager
+def _fresh_connection(connections: Any, db_alias: str, lock_timeout: int | None):
+    """Open a fresh Django connection for the duration of one task."""
+    conn = connections[db_alias]
+    conn.close()
+    conn.ensure_connection()
+    if lock_timeout is not None:
+        with conn.cursor() as cursor:
+            cursor.execute(f"SET lock_timeout = '{int(lock_timeout)}ms'")
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def wrap_sync_thread(
     fn: Callable[[T], None],
     *,
@@ -34,16 +50,8 @@ def wrap_sync_thread(
     """Return a thread wrapper that opens a fresh Django connection."""
 
     def wrapper(state: T) -> None:
-        conn = connections[db_alias]
-        conn.close()
-        conn.ensure_connection()
-        if lock_timeout is not None:
-            with conn.cursor() as cursor:
-                cursor.execute(f"SET lock_timeout = '{int(lock_timeout)}ms'")
-        try:
+        with _fresh_connection(connections, db_alias, lock_timeout):
             fn(state)
-        finally:
-            conn.close()
 
     return wrapper
 
@@ -58,15 +66,7 @@ def wrap_async_task(
     """Return a task wrapper that opens a fresh Django connection."""
 
     async def wrapper(state: T) -> None:
-        conn = connections[db_alias]
-        conn.close()
-        conn.ensure_connection()
-        if lock_timeout is not None:
-            with conn.cursor() as cursor:
-                cursor.execute(f"SET lock_timeout = '{int(lock_timeout)}ms'")
-        try:
+        with _fresh_connection(connections, db_alias, lock_timeout):
             await fn(state)
-        finally:
-            conn.close()
 
     return wrapper

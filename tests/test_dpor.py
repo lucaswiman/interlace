@@ -16,6 +16,8 @@ import threading
 
 from frontrun._dpor import PyDporEngine
 
+from frontrun._deadlock import SchedulerAbort
+from frontrun._dpor_runtime.runner import DporBytecodeRunner
 from frontrun.common import InterleavingResult
 from frontrun.dpor import explore_dpor
 
@@ -213,6 +215,75 @@ class TestPyDporEngine:
                 break
 
         assert found_bug
+
+
+def test_dpor_runner_cleans_up_runtime_state_after_error(monkeypatch) -> None:
+    class _StubScheduler:
+        def __init__(self) -> None:
+            self.error: Exception | None = None
+            self.done: list[int] = []
+
+        def report_error(self, error: Exception) -> None:
+            self.error = error
+
+        def mark_done(self, thread_id: int) -> None:
+            self.done.append(thread_id)
+
+    scheduler = _StubScheduler()
+    runner = DporBytecodeRunner(scheduler)  # type: ignore[arg-type]
+    events: list[str] = []
+
+    monkeypatch.setattr(runner, "_setup_dpor_tls", lambda thread_id: events.append(f"setup:{thread_id}"))
+    monkeypatch.setattr(runner, "_teardown_dpor_tls", lambda: events.append("teardown"))
+    monkeypatch.setattr(runner, "_make_trace", lambda thread_id: f"trace:{thread_id}")
+    monkeypatch.setattr(
+        "frontrun._dpor_runtime.runner.sys.settrace",
+        lambda value: events.append("trace:on" if value is not None else "trace:off"),
+    )
+
+    def boom() -> None:
+        raise RuntimeError("boom")
+
+    runner._run_thread(0, boom, (), trace_fn=runner._make_trace(0))
+
+    assert isinstance(runner.errors[0], RuntimeError)
+    assert isinstance(scheduler.error, RuntimeError)
+    assert scheduler.done == [0]
+    assert events == ["setup:0", "trace:on", "trace:off", "teardown"]
+
+
+def test_dpor_runner_swallows_scheduler_abort(monkeypatch) -> None:
+    class _StubScheduler:
+        def __init__(self) -> None:
+            self.error: Exception | None = None
+            self.done: list[int] = []
+
+        def report_error(self, error: Exception) -> None:
+            self.error = error
+
+        def mark_done(self, thread_id: int) -> None:
+            self.done.append(thread_id)
+
+    scheduler = _StubScheduler()
+    runner = DporBytecodeRunner(scheduler)  # type: ignore[arg-type]
+    events: list[str] = []
+
+    monkeypatch.setattr(runner, "_setup_dpor_tls", lambda thread_id: events.append(f"setup:{thread_id}"))
+    monkeypatch.setattr(runner, "_teardown_dpor_tls", lambda: events.append("teardown"))
+    monkeypatch.setattr(
+        "frontrun._dpor_runtime.runner.sys.settrace",
+        lambda value: events.append("trace:on" if value is not None else "trace:off"),
+    )
+
+    def abort() -> None:
+        raise SchedulerAbort()
+
+    runner._run_thread(0, abort, (), trace_fn=None)
+
+    assert runner.errors == {}
+    assert scheduler.error is None
+    assert scheduler.done == [0]
+    assert events == ["setup:0", "teardown"]
 
 
 # ---------------------------------------------------------------------------
