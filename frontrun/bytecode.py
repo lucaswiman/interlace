@@ -59,6 +59,7 @@ from frontrun._io_detection import (
 )
 from frontrun._sql_cursor import patch_sql, unpatch_sql
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
+from frontrun._threaded_runner import PatchScope, run_thread_group
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
 from frontrun._tracing import TraceFilter as _TraceFilter
 from frontrun._tracing import is_cmdline_user_code as _is_cmdline_user_code
@@ -266,6 +267,13 @@ class BytecodeShuffler:
             unpatch_sql()
             unpatch_io()
             self._io_patched = False
+
+    def patch_scope(self, *, patch_sleep: bool = True) -> PatchScope:
+        scope = PatchScope()
+        scope.add(self._patch_locks, self._unpatch_locks)
+        scope.add(self._patch_io, self._unpatch_io)
+        scope.add(self._patch_sleep, self._unpatch_sleep, enabled=patch_sleep)
+        return scope
 
     def _make_trace(self, thread_id: int) -> Callable[[Any, str, Any], Any]:  # type: ignore[return-value]
         """Create a sys.settrace function for the given thread."""
@@ -501,38 +509,40 @@ class BytecodeShuffler:
         else:
             run_thread = self._run_thread_settrace
 
-        try:
-            for i, (func, a, kw) in enumerate(zip(funcs, args, kwargs)):
-                t = threading.Thread(
-                    target=run_thread,
-                    args=(i, func, a, kw),
-                    name=f"frontrun-{i}",
-                    daemon=True,
-                )
-                self.threads.append(t)
+        thread_args = [(a, kw) for a, kw in zip(args, kwargs)]
 
-            for t in self.threads:
-                t.start()
+        def make_thread_target(
+            thread_id: int,
+            func: Callable[..., None],
+            packed_args: tuple[Any, ...],
+        ) -> Callable[[], None]:
+            a, kw = packed_args
 
-            deadline = time.monotonic() + timeout
-            for t in self.threads:
-                remaining = max(0, deadline - time.monotonic())
-                t.join(timeout=remaining)
+            def target() -> None:
+                run_thread(thread_id, func, a, kw)
 
+            return target
+
+        def on_timeout(alive: list[threading.Thread]) -> None:
             # Signal scheduler to abort if any threads are still alive.
             # On free-threaded Python, condition notifications can be lost
             # and threads may still be blocked in wait_for_turn.
-            alive = [t for t in self.threads if t.is_alive()]
-            if alive:
-                self.scheduler._error = TimeoutError(f"Timed out waiting for {len(alive)} thread(s) to complete")
-                with self.scheduler._condition:
-                    self.scheduler._condition.notify_all()
-                # Give threads a brief grace period to notice the error
-                for t in alive:
-                    t.join(timeout=0.5)
-        finally:
-            if use_monitoring:
-                self._teardown_monitoring()
+            self.scheduler._error = TimeoutError(f"Timed out waiting for {len(alive)} thread(s) to complete")
+            with self.scheduler._condition:
+                self.scheduler._condition.notify_all()
+            for thread in alive:
+                thread.join(timeout=0.5)
+
+        run_thread_group(
+            funcs=funcs,
+            args=thread_args,
+            make_thread_target=make_thread_target,
+            name_prefix="frontrun",
+            timeout=timeout,
+            thread_store=self.threads,
+            teardown=self._teardown_monitoring if use_monitoring else None,
+            on_timeout=on_timeout,
+        )
 
         if self.errors:
             raise list(self.errors.values())[0]
@@ -599,11 +609,7 @@ def run_with_schedule(
     runner = BytecodeShuffler(scheduler, detect_io=detect_io)
 
     # Patch locks BEFORE setup() so any locks created there are cooperative
-    runner._patch_locks()
-    runner._patch_io()
-    if patch_sleep:
-        runner._patch_sleep()
-    try:
+    with runner.patch_scope(patch_sleep=patch_sleep):
         state = setup()
 
         def make_thread_func(thread_func: Callable[[T], None], thread_state: T) -> Callable[[], None]:
@@ -622,10 +628,6 @@ def run_with_schedule(
         # detect that a deadlock occurred during replay.
         if isinstance(scheduler._error, DeadlockError):
             raise scheduler._error
-    finally:
-        runner._unpatch_sleep()
-        runner._unpatch_io()
-        runner._unpatch_locks()
     return state
 
 

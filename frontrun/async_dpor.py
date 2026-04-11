@@ -47,9 +47,17 @@ import asyncio
 import contextvars
 import sys
 import time
-from collections.abc import Awaitable, Callable, Coroutine, Generator
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, TypeVar
 
+from frontrun._async_autopause import (
+    _auto_pause_active,
+    _AutoPauseCoroutine,
+    _in_scheduler_pause,
+    _scheduler_var,
+    _task_id_var,
+    await_point,  # noqa: F401
+)
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
 from frontrun._opcode_observer import (
     _USE_SYS_MONITORING,
@@ -120,21 +128,6 @@ class _NoOpLock:
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         return None
 
-
-# Context variables to track the active scheduler and task ID
-_scheduler_var: contextvars.ContextVar[AsyncDporScheduler | None] = contextvars.ContextVar(
-    "_async_dpor_scheduler", default=None
-)
-_task_id_var: contextvars.ContextVar[int | None] = contextvars.ContextVar("_async_dpor_task_id", default=None)
-
-# When True, the coroutine wrapper handles scheduling automatically.
-# _CooperativeAsyncLock checks this to avoid double-scheduling.
-_auto_pause_active: contextvars.ContextVar[bool] = contextvars.ContextVar("_auto_pause_active", default=False)
-
-# When >0, the _AutoPauseIterator should NOT insert scheduling points.
-# Incremented by scheduler.pause() so the wrapper doesn't double-schedule
-# on the pause's own yields (sleep(0), condition.wait()).
-_in_scheduler_pause: contextvars.ContextVar[int] = contextvars.ContextVar("_in_scheduler_pause", default=0)
 
 # Guards against re-entering async opcode tracing while _process_opcode()
 # is already running for the current task.
@@ -357,124 +350,6 @@ def _unpatch_asyncio_sleep() -> None:
         return
     asyncio.sleep = _real_asyncio_sleep  # type: ignore[assignment]
     _async_sleep_patched = False
-
-
-# ---------------------------------------------------------------------------
-# Await point
-# ---------------------------------------------------------------------------
-
-
-async def await_point() -> None:
-    """Yield to the DPOR scheduler at an await point.
-
-    When auto-pause is active (the default in ``explore_async_dpor``),
-    this is equivalent to ``await asyncio.sleep(0)`` — the coroutine
-    wrapper handles scheduling automatically.  Kept for backward
-    compatibility with code that uses explicit scheduling markers.
-
-    If no scheduler is active, this function returns immediately.
-    """
-    if _auto_pause_active.get():
-        # The coroutine wrapper intercepts all yields, so a simple
-        # sleep(0) is sufficient to create a scheduling point.
-        await asyncio.sleep(0)
-        return
-    scheduler = _scheduler_var.get()
-    if scheduler is not None:
-        task_id = _task_id_var.get()
-        if task_id is not None:
-            await scheduler.pause(task_id)
-
-
-# ---------------------------------------------------------------------------
-# Auto-pause coroutine wrapper
-# ---------------------------------------------------------------------------
-
-
-class _AutoPauseIterator:
-    """Wraps a coroutine to insert DPOR scheduling points at every yield.
-
-    Intercepts the coroutine's send/throw protocol.  Before each step of the
-    inner coroutine (i.e. before forwarding a ``send()`` call), the wrapper
-    drives a ``scheduler.pause(task_id)`` coroutine.  This gives the DPOR
-    engine a scheduling decision point at every natural ``await`` expression
-    in user code, without requiring explicit ``await await_point()`` calls.
-
-    The wrapper alternates between two phases:
-    - **Pause phase**: driving the pause coroutine, yielding its futures to
-      the event loop.
-    - **Inner phase**: forwarding the buffered value to the inner coroutine,
-      yielding the inner's future to the event loop.
-
-    There is no recursion risk because the pause coroutine's yields go
-    directly to the event loop (via the wrapper's own ``send`` return),
-    not back through the inner coroutine.
-    """
-
-    __slots__ = ("_inner", "_task_id", "_scheduler", "_pause_iter", "_buffered_value")
-
-    def __init__(self, inner_coro: Any, task_id: int, scheduler: AsyncDporScheduler) -> None:
-        self._inner = inner_coro
-        self._task_id = task_id
-        self._scheduler = scheduler
-        self._pause_iter: Any | None = None
-        self._buffered_value: Any = None
-
-    def __next__(self) -> Any:
-        return self.send(None)
-
-    def send(self, value: Any) -> Any:
-        # Continue an active pause coroutine
-        if self._pause_iter is not None:
-            try:
-                return self._pause_iter.send(value)
-            except StopIteration:
-                self._pause_iter = None
-                # Pause completed — forward the buffered value to inner
-                return self._inner.send(self._buffered_value)
-
-        # If we're inside a scheduler.pause() call (e.g. from
-        # _CooperativeAsyncLock), don't insert another pause — just
-        # forward to the inner coroutine.
-        if _in_scheduler_pause.get() > 0:
-            return self._inner.send(value)
-
-        # Buffer the incoming value and start a new pause
-        self._buffered_value = value
-        pause_coro = self._scheduler.pause(self._task_id)
-        self._pause_iter = pause_coro.__await__()
-        try:
-            return next(self._pause_iter)
-        except StopIteration:
-            # Pause completed immediately (no scheduler active)
-            self._pause_iter = None
-            return self._inner.send(self._buffered_value)
-
-    def throw(self, typ: Any, val: Any = None, tb: Any = None) -> Any:
-        if self._pause_iter is not None:
-            self._pause_iter.close()
-            self._pause_iter = None
-        if val is None and tb is None:
-            return self._inner.throw(typ)
-        return self._inner.throw(typ, val, tb)
-
-    def close(self) -> None:
-        if self._pause_iter is not None:
-            self._pause_iter.close()
-            self._pause_iter = None
-        self._inner.close()
-
-
-class _AutoPauseCoroutine:
-    """Awaitable wrapper that makes a coroutine auto-schedule via DPOR."""
-
-    __slots__ = ("_iter",)
-
-    def __init__(self, coro: Any, task_id: int, scheduler: AsyncDporScheduler) -> None:
-        self._iter = _AutoPauseIterator(coro, task_id, scheduler)
-
-    def __await__(self) -> Generator[Any, Any, None]:
-        return self._iter  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------

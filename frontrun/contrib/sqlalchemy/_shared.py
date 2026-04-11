@@ -1,0 +1,137 @@
+"""Shared helpers for SQLAlchemy contrib adapters."""
+
+from __future__ import annotations
+
+import contextvars
+from collections.abc import Callable, Coroutine
+from typing import Any, TypeVar
+
+T = TypeVar("T")
+
+
+def make_current_connection_var(name: str) -> contextvars.ContextVar[Any]:
+    """Create a context variable for exposing the active SQLAlchemy connection."""
+    return contextvars.ContextVar(name)
+
+
+def wrap_sync_setup(engine: Any, setup: Callable[[], T]) -> Callable[[], T]:
+    """Return a setup wrapper that disposes the engine before setup runs."""
+
+    def wrapped_setup() -> T:
+        from frontrun._cooperative import suppress_sync_reporting, unsuppress_sync_reporting
+
+        suppress_sync_reporting()
+        try:
+            engine.dispose()
+            return setup()
+        finally:
+            unsuppress_sync_reporting()
+
+    return wrapped_setup
+
+
+def wrap_sync_thread(
+    engine: Any,
+    current_connection: contextvars.ContextVar[Any],
+    lock_timeout: int | None,
+    fn: Callable[[T], None],
+) -> Callable[[T], None]:
+    """Return a thread wrapper that manages a per-thread SQLAlchemy connection."""
+
+    def wrapper(state: T) -> None:
+        from frontrun._cooperative import suppress_sync_reporting, unsuppress_sync_reporting
+
+        # Suppress cooperative lock sync events during connection setup
+        # and teardown.  Internal SQLAlchemy/psycopg2 locks are implementation
+        # details that shouldn't create DPOR sync events.
+        suppress_sync_reporting()
+        try:
+            conn_ctx = engine.connect()
+            conn = conn_ctx.__enter__()
+        except BaseException:
+            unsuppress_sync_reporting()
+            raise
+        # conn_ctx is now entered — guarantee __exit__ via outer finally.
+        try:
+            if lock_timeout is not None:
+                conn.exec_driver_sql(f"SET lock_timeout = '{int(lock_timeout)}ms'")
+        except BaseException:
+            unsuppress_sync_reporting()
+            suppress_sync_reporting()
+            try:
+                conn_ctx.__exit__(None, None, None)
+            finally:
+                unsuppress_sync_reporting()
+            raise
+        unsuppress_sync_reporting()
+        # Wrap SA Connection methods that trigger internal locks.
+        # conn.execute() acquires statement compilation locks.
+        # conn.commit()/rollback() acquires transaction state locks.
+        _orig_execute = conn.execute
+        _orig_exec_driver_sql = conn.exec_driver_sql
+        _orig_commit = conn.commit
+        _orig_rollback = conn.rollback
+
+        def _wrap_sa_method(method: Any) -> Any:
+            def wrapped(*args: Any, **kw: Any) -> Any:
+                suppress_sync_reporting()
+                try:
+                    return method(*args, **kw)
+                finally:
+                    unsuppress_sync_reporting()
+
+            return wrapped
+
+        conn.execute = _wrap_sa_method(_orig_execute)  # type: ignore[method-assign]
+        conn.exec_driver_sql = _wrap_sa_method(_orig_exec_driver_sql)  # type: ignore[method-assign]
+        conn.commit = _wrap_sa_method(_orig_commit)  # type: ignore[method-assign]
+        conn.rollback = _wrap_sa_method(_orig_rollback)  # type: ignore[method-assign]
+        token = current_connection.set(conn)
+        exc_info: tuple[type[BaseException], BaseException, object] | tuple[None, None, None] = (None, None, None)
+        try:
+            fn(state)
+        except BaseException:
+            import sys
+
+            exc_info = sys.exc_info()  # type: ignore[assignment]
+            raise
+        finally:
+            current_connection.reset(token)
+            suppress_sync_reporting()
+            try:
+                conn_ctx.__exit__(*exc_info)
+            finally:
+                unsuppress_sync_reporting()
+
+    return wrapper
+
+
+def wrap_async_setup(engine: Any, setup: Callable[[], T]) -> Callable[[], T]:
+    """Return a setup wrapper that disposes the async engine before setup runs."""
+
+    def wrapped_setup() -> T:
+        engine.sync_engine.dispose()
+        return setup()
+
+    return wrapped_setup
+
+
+def wrap_async_task(
+    engine: Any,
+    current_connection: contextvars.ContextVar[Any],
+    lock_timeout: int | None,
+    fn: Callable[[T], Coroutine[Any, Any, None]],
+) -> Callable[[T], Coroutine[Any, Any, None]]:
+    """Return a task wrapper that manages a per-task async SQLAlchemy connection."""
+
+    async def wrapper(state: T) -> None:
+        async with engine.connect() as conn:
+            if lock_timeout is not None:
+                await conn.exec_driver_sql(f"SET lock_timeout = '{int(lock_timeout)}ms'")
+            token = current_connection.set(conn)
+            try:
+                await fn(state)
+            finally:
+                current_connection.reset(token)
+
+    return wrapper

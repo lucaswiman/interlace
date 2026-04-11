@@ -22,7 +22,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
 from frontrun.common import InterleavingResult
-from frontrun.contrib.django._sync import DJANGO_TRACE_PACKAGES
+from frontrun.contrib.django._shared import DJANGO_TRACE_PACKAGES, wrap_async_task, wrap_setup
 
 T = TypeVar("T")
 
@@ -65,27 +65,10 @@ async def async_django_dpor(
 
     if trace_packages is None:
         trace_packages = list(DJANGO_TRACE_PACKAGES)
-
-    def wrapped_setup() -> T:
-        connections.close_all()
-        return setup()
-
-    def wrap_task(fn: Callable[[T], Coroutine[Any, Any, None]]) -> Callable[[T], Coroutine[Any, Any, None]]:
-        async def wrapper(state: T) -> None:
-            conn = connections[db_alias]
-            conn.close()
-            conn.ensure_connection()
-            if lock_timeout is not None:
-                with conn.cursor() as cursor:
-                    cursor.execute(f"SET lock_timeout = '{int(lock_timeout)}ms'")
-            try:
-                await fn(state)
-            finally:
-                conn.close()
-
-        return wrapper
-
-    wrapped_tasks = [wrap_task(fn) for fn in tasks]
+    wrapped_setup = wrap_setup(setup, connections.close_all)
+    wrapped_tasks = [
+        wrap_async_task(fn, connections=connections, db_alias=db_alias, lock_timeout=lock_timeout) for fn in tasks
+    ]
 
     return await explore_async_dpor(
         setup=wrapped_setup,

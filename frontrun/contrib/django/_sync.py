@@ -21,13 +21,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-T = TypeVar("T")
+from frontrun.contrib.django._shared import DJANGO_TRACE_PACKAGES, wrap_setup, wrap_sync_thread
 
-#: Default ``trace_packages`` for Django projects.  Traces code inside any
-#: ``django_*`` third-party app (e.g. ``django_filters``, ``django_rest_framework``)
-#: and ``django.contrib.sites`` submodules, since these commonly participate
-#: in race conditions visible during integration tests.
-DJANGO_TRACE_PACKAGES: list[str] = ["django_*", "django.contrib.sites.*"]
+T = TypeVar("T")
 
 
 def django_dpor(
@@ -70,27 +66,10 @@ def django_dpor(
 
     if trace_packages is None:
         trace_packages = list(DJANGO_TRACE_PACKAGES)
-
-    def wrapped_setup() -> T:
-        connections.close_all()
-        return setup()
-
-    def wrap_thread(fn: Callable[[T], None]) -> Callable[[T], None]:
-        def wrapper(state: T) -> None:
-            conn = connections[db_alias]
-            conn.close()
-            conn.ensure_connection()
-            if lock_timeout is not None:
-                with conn.cursor() as cursor:
-                    cursor.execute(f"SET lock_timeout = '{int(lock_timeout)}ms'")
-            try:
-                fn(state)
-            finally:
-                conn.close()
-
-        return wrapper
-
-    wrapped_threads = [wrap_thread(fn) for fn in threads]
+    wrapped_setup = wrap_setup(setup, connections.close_all)
+    wrapped_threads = [
+        wrap_sync_thread(fn, connections=connections, db_alias=db_alias, lock_timeout=lock_timeout) for fn in threads
+    ]
 
     return explore_dpor(
         setup=wrapped_setup,

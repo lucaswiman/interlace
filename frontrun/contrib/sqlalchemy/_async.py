@@ -28,10 +28,15 @@ from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
 from frontrun.common import InterleavingResult
+from frontrun.contrib.sqlalchemy._shared import (
+    make_current_connection_var,
+    wrap_async_setup,
+    wrap_async_task,
+)
 
 T = TypeVar("T")
 
-_current_connection: contextvars.ContextVar[Any] = contextvars.ContextVar("_async_sa_connection")
+_current_connection: contextvars.ContextVar[Any] = make_current_connection_var("_async_sa_connection")
 
 
 def get_async_connection() -> Any:
@@ -65,24 +70,8 @@ async def async_sqlalchemy_dpor(
     """
     from frontrun.async_dpor import explore_async_dpor
 
-    def wrapped_setup() -> T:
-        engine.sync_engine.dispose()
-        return setup()
-
-    def wrap_task(fn: Callable[[T], Coroutine[Any, Any, None]]) -> Callable[[T], Coroutine[Any, Any, None]]:
-        async def wrapper(state: T) -> None:
-            async with engine.connect() as conn:
-                if lock_timeout is not None:
-                    await conn.exec_driver_sql(f"SET lock_timeout = '{int(lock_timeout)}ms'")
-                token = _current_connection.set(conn)
-                try:
-                    await fn(state)
-                finally:
-                    _current_connection.reset(token)
-
-        return wrapper
-
-    wrapped_tasks = [wrap_task(fn) for fn in tasks]
+    wrapped_setup = wrap_async_setup(engine, setup)
+    wrapped_tasks = [wrap_async_task(engine, _current_connection, lock_timeout, fn) for fn in tasks]
 
     return await explore_async_dpor(
         setup=wrapped_setup,

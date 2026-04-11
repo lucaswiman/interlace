@@ -36,6 +36,7 @@ from collections.abc import Callable
 from typing import Any
 
 from frontrun._cooperative import real_condition, real_lock
+from frontrun._threaded_runner import join_threads_with_deadline
 from frontrun.common import InterleavingResult, Schedule, Step
 
 MARKER_PATTERN = re.compile(r"#\s*frontrun:\s*(\w+)")
@@ -347,18 +348,7 @@ class _ThreadTraceExecutor:
             TimeoutError: If threads don't complete within the timeout
             Any exception that occurred in a thread during execution
         """
-        import time as _time
-
-        deadline = _time.monotonic() + timeout if timeout is not None else None
-        for thread in self.threads:
-            if deadline is not None:
-                remaining = deadline - _time.monotonic()
-                thread.join(timeout=max(0, remaining))
-            else:
-                thread.join()
-
-        # Check if any threads are still alive after timeout
-        alive_threads = [thread for thread in self.threads if thread.is_alive()]
+        alive_threads = join_threads_with_deadline(self.threads, timeout)
         if alive_threads:
             thread_names = ", ".join(thread.name for thread in alive_threads)
             raise TimeoutError(f"Threads did not complete within timeout: {thread_names}")

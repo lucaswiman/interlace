@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from frontrun._threaded_runner import PatchScope, run_thread_group
+
 from ._shared import *
 from ._shared import (
     _USE_SYS_MONITORING,
@@ -74,6 +76,13 @@ class DporBytecodeRunner:
             unpatch_sql()
             unpatch_io()
             self._io_patched = False
+
+    def patch_scope(self, *, patch_sleep: bool = True) -> PatchScope:
+        scope = PatchScope()
+        scope.add(self._patch_locks, self._unpatch_locks)
+        scope.add(self._patch_io, self._unpatch_io)
+        scope.add(self._patch_sleep, self._unpatch_sleep, enabled=patch_sleep)
+        return scope
 
     # --- sys.settrace backend (3.10-3.11) ---
 
@@ -457,38 +466,36 @@ class DporBytecodeRunner:
         else:
             run_thread = self._run_thread_settrace
 
-        try:
-            for i, (func, a) in enumerate(zip(funcs, args)):
-                t = threading.Thread(
-                    target=run_thread,
-                    args=(i, func, a),
-                    name=f"dpor-{i}",
-                    daemon=True,
-                )
-                self.threads.append(t)
+        def make_thread_target(
+            thread_id: int,
+            func: Callable[..., None],
+            thread_args: tuple[Any, ...],
+        ) -> Callable[[], None]:
+            def target() -> None:
+                run_thread(thread_id, func, thread_args)
 
-            for t in self.threads:
-                t.start()
+            return target
 
-            deadline = time.monotonic() + timeout
-            for t in self.threads:
-                remaining = max(0, deadline - time.monotonic())
-                t.join(timeout=remaining)
-
+        def on_timeout(alive: list[threading.Thread]) -> None:
             # Signal scheduler to abort if any threads are still alive.
             # On free-threaded Python, condition notifications can be lost
             # and threads may still be blocked in wait_for_turn.
-            alive = [t for t in self.threads if t.is_alive()]
-            if alive:
-                self.scheduler._error = TimeoutError(f"Timed out waiting for {len(alive)} thread(s) to complete")
-                with self.scheduler._condition:
-                    self.scheduler._condition.notify_all()
-                # Give threads a brief grace period to notice the error
-                for t in alive:
-                    t.join(timeout=0.5)
-        finally:
-            if use_monitoring:
-                self._teardown_monitoring()
+            self.scheduler._error = TimeoutError(f"Timed out waiting for {len(alive)} thread(s) to complete")
+            with self.scheduler._condition:
+                self.scheduler._condition.notify_all()
+            for thread in alive:
+                thread.join(timeout=0.5)
+
+        run_thread_group(
+            funcs=funcs,
+            args=args,
+            make_thread_target=make_thread_target,
+            name_prefix="dpor",
+            timeout=timeout,
+            thread_store=self.threads,
+            teardown=self._teardown_monitoring if use_monitoring else None,
+            on_timeout=on_timeout,
+        )
 
         if self.errors:
             first_error = next(iter(self.errors.values()))

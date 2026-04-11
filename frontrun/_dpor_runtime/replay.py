@@ -44,11 +44,7 @@ def _run_dpor_schedule(
         )
     runner = DporBytecodeRunner(scheduler, detect_io=detect_io)
 
-    runner._patch_locks()
-    runner._patch_io()
-    if patch_sleep:
-        runner._patch_sleep()
-    try:
+    with runner.patch_scope(patch_sleep=patch_sleep):
         state = setup()
 
         def make_thread_func(thread_func: Callable[[T], None], thread_state: T) -> Callable[[], None]:
@@ -64,10 +60,6 @@ def _run_dpor_schedule(
             pass
         if isinstance(scheduler._error, DeadlockError):
             raise scheduler._error
-    finally:
-        runner._unpatch_sleep()
-        runner._unpatch_io()
-        runner._unpatch_locks()
     return state
 
 

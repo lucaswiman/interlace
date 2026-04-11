@@ -40,110 +40,23 @@ an additional checkpoint.
 """
 
 import asyncio
-import contextvars
 import random
-from collections.abc import AsyncGenerator, Callable, Coroutine, Generator
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from typing import Any
 
 # Lazy import for async SQL patching — shared with async_dpor.py
+from frontrun._async_autopause import (
+    _auto_pause_active,
+    _AutoPauseCoroutine,
+    _in_scheduler_pause,
+    _scheduler_var,
+    _task_id_var,
+    await_point,  # noqa: F401
+)
 from frontrun.async_dpor import _sql_async_available, patch_sql_async, unpatch_sql_async
 from frontrun.async_scheduler import InterleavedLoop
 from frontrun.common import InterleavingResult, check_serializability_violation
-
-# Context variable to track the active scheduler and task ID
-_scheduler_var: contextvars.ContextVar[Optional["AwaitScheduler"]] = contextvars.ContextVar("_scheduler", default=None)
-_task_id_var: contextvars.ContextVar[int | None] = contextvars.ContextVar("_task_id", default=None)
-
-# When True, the coroutine wrapper handles scheduling automatically.
-_auto_pause_active: contextvars.ContextVar[bool] = contextvars.ContextVar("_auto_pause_active", default=False)
-
-# When >0, the auto-pause wrapper should not insert a second scheduling point.
-_in_scheduler_pause: contextvars.ContextVar[int] = contextvars.ContextVar("_in_scheduler_pause", default=0)
-
-
-async def await_point():
-    """Yield to the scheduler at an await point.
-
-    Use this when you want an *extra* explicit yield in addition to the
-    natural ``await`` expressions already present in the coroutine.
-
-    When auto-pause is active (the default in ``AsyncShuffler``), this is
-    equivalent to ``await asyncio.sleep(0)`` — the coroutine wrapper
-    already treats every natural ``await`` as a scheduling boundary.
-
-    If no scheduler is active, this function returns immediately without blocking.
-    """
-    if _auto_pause_active.get():
-        await asyncio.sleep(0)
-        return
-    scheduler = _scheduler_var.get()
-    if scheduler is not None:
-        task_id = _task_id_var.get()
-        if task_id is not None:
-            await scheduler.pause(task_id)
-
-
-class _AutoPauseIterator:
-    """Wrap a coroutine so every natural await becomes a scheduling boundary."""
-
-    __slots__ = ("_inner", "_task_id", "_scheduler", "_pause_iter", "_buffered_value")
-
-    def __init__(self, inner_coro: Any, task_id: int, scheduler: "AwaitScheduler") -> None:
-        self._inner = inner_coro
-        self._task_id = task_id
-        self._scheduler = scheduler
-        self._pause_iter: Any | None = None
-        self._buffered_value: Any = None
-
-    def __next__(self) -> Any:
-        return self.send(None)
-
-    def send(self, value: Any) -> Any:
-        if self._pause_iter is not None:
-            try:
-                return self._pause_iter.send(value)
-            except StopIteration:
-                self._pause_iter = None
-                return self._inner.send(self._buffered_value)
-
-        if _in_scheduler_pause.get() > 0:
-            return self._inner.send(value)
-
-        self._buffered_value = value
-        pause_coro = self._scheduler.pause(self._task_id)
-        self._pause_iter = pause_coro.__await__()
-        try:
-            return next(self._pause_iter)
-        except StopIteration:
-            self._pause_iter = None
-            return self._inner.send(self._buffered_value)
-
-    def throw(self, typ: Any, val: Any = None, tb: Any = None) -> Any:
-        if self._pause_iter is not None:
-            self._pause_iter.close()
-            self._pause_iter = None
-        if val is None and tb is None:
-            return self._inner.throw(typ)
-        return self._inner.throw(typ, val, tb)
-
-    def close(self) -> None:
-        if self._pause_iter is not None:
-            self._pause_iter.close()
-            self._pause_iter = None
-        self._inner.close()
-
-
-class _AutoPauseCoroutine:
-    """Awaitable wrapper that auto-schedules on natural awaits."""
-
-    __slots__ = ("_iter",)
-
-    def __init__(self, coro: Any, task_id: int, scheduler: "AwaitScheduler") -> None:
-        self._iter = _AutoPauseIterator(coro, task_id, scheduler)
-
-    def __await__(self) -> Generator[Any, Any, None]:
-        return self._iter  # type: ignore[return-value]
 
 
 class AwaitScheduler(InterleavedLoop):
