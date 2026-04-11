@@ -1,63 +1,43 @@
-# Frontrun Roadmap
+# Refactoring Roadmap
 
-Last reviewed: 2026-03-28.
+This roadmap is focused on reducing code size and making the implementation easier to understand without changing the public behavior of `frontrun`.
 
-## Documents
+The first phase is intentionally structural rather than feature-oriented: split the current `frontrun/dpor.py` monolith into smaller modules with clearer ownership. The later phases then build on those boundaries to remove near-duplicate code across sync and async paths.
 
-| Document | Scope |
-|----------|-------|
-| [dpor-improvements.md](dpor-improvements.md) | Wakeup tree equivalence, per-step independence, redundant opcode suppression |
-| [integrations-and-detection.md](integrations-and-detection.md) | SQL/Redis/resource detection layers, FK analysis |
-| [formal-methods.md](formal-methods.md) | TLA+/Quint integration, spec-guided exploration, counterexample replay |
-| [testing-strategies.md](testing-strategies.md) | Marker schedule extensions, hybrid exploration, pytest plugin |
-| [../random_dpor.md](../random_dpor.md) | Literature survey + 4 proposals for randomized/hybrid DPOR exploration |
+## Goals
 
-## Implemented (not active)
+- Reduce the amount of logic any one file is responsible for.
+- Make execution, scheduling, replay, instrumentation, and patching boundaries explicit.
+- Lower the cost of future fixes by removing duplicated lifecycle code.
+- Preserve the existing public API until a later, explicit API-cleanup phase.
 
-Position-sensitive future access cache (Fix 3), provenance-tagged access summaries (Fix 4),
-WeakWrite+WeakRead merge (Fix 5), per-step independence check (Fix 6), operation coalescing
-for SQL tables (Defect #15), all 5 search strategies, async/await marker support.
+## Non-goals
 
-## Priority overview
+- No semantic changes to DPOR exploration behavior during phase 1.
+- No user-facing API redesign during the initial refactors.
+- No Rust engine rewrite as part of this roadmap.
 
-### P1 -- Valuable, moderate effort
+## Phase order
 
-1. **Cross-table FK analysis** (integrations-and-detection) -- Schema introspection for foreign
-   key dependencies. Catches referential integrity races. ~150 LOC + 25 tests.
-3. **Counterexample replay from TLC** (formal-methods: 2.1) -- TLC finds invariant violation,
-   frontrun replays it against real Python code. Agent-driven pipeline.
-3. **Invariant assertion bridge** (formal-methods: 1.2) -- TLA+ invariants become Python
-   assertions checked after every DPOR step.
-4. **Hybrid marker + bytecode exploration** (testing-strategies: Extension 3) -- Two-level
-   search: coarse markers + fine bytecode within each window.
-5. **Randomized wakeup tree ordering** (random_dpor.md: Proposal A) -- Different seeds explore
-   different trace space regions. Low effort, high value for `stop_on_first=True` use cases.
+1. [Phase 1: Split `frontrun/dpor.py`](./phase-1-split-dpor.md)
+2. [Phase 2: Share async auto-pause machinery](./phase-2-shared-async-autopause.md)
+3. [Phase 3: Consolidate framework adapters](./phase-3-framework-adapters.md)
+4. [Phase 4: Replace hand-written patching with registries](./phase-4-driver-patching.md)
+5. [Phase 5: Unify threaded runner lifecycle](./phase-5-threaded-runner-harness.md)
 
-### P2 -- Nice to have, lower effort
+## Cross-phase constraints
 
-6. **Wakeup tree equivalence checking** (dpor-improvements: Phase 4c) -- Sound optimization;
-    benefit depends on workload.
-7. **RETURNING clause injection** (integrations-and-detection) -- Captures autoincrement IDs
-    from PostgreSQL INSERTs.
-8. **sys.addaudithook integration** (integrations-and-detection) -- Zero-config I/O safety net.
-9. **sys.monitoring CALL events** (integrations-and-detection) -- Lower-overhead resource
-    detection on Python 3.12+.
-10. **Pytest marker plugin** (testing-strategies: Extension 9) -- `@pytest.mark.frontrun_markers`
-    for native test integration.
-11. **Marker coverage tracking** (testing-strategies: Extension 8) -- Report which interleavings
-    were actually exercised.
+- Preserve `from frontrun.dpor import explore_dpor` and the current top-level imports throughout the roadmap.
+- Keep changes reviewable. Prefer one structural move per PR over one very large rewrite.
+- Land behavior-preserving extraction PRs before simplification PRs.
+- Keep test coverage broad for every phase:
+  - `make test-3.14`
+  - `make check`
 
-### P3 -- Deferred / exploratory
+## Suggested PR strategy
 
-12. **Spec-guided schedule generation from TLC** (formal-methods: 2.3) -- Replace random
-    exploration with TLC-enumerated behaviors.
-13. **Refinement checking** (formal-methods: 3.1) -- Mathematical proof that code implements
-    spec. Requires solid foundation from P1 formal-methods items.
-14. **Record/replay of external state** (integrations-and-detection) -- Deterministic I/O replay.
-    High complexity; most tests use isolated DBs anyway.
-15. **Wire-protocol parsing at LD_PRELOAD level** (integrations-and-detection) -- For non-Python
-    drivers. Niche use case.
-16. **Trace fingerprinting with coverage feedback** (random_dpor.md: Proposal B) -- Hash
-    reads-from relations; adaptively skip stale backtrack points. Medium effort.
-17. **Depth-biased backtrack selection** (random_dpor.md: Proposal D) -- Explore/exploit
-    trade-off across search phases. Low effort.
+- PR 1: introduce new internal modules and move code with compatibility re-exports.
+- PR 2: simplify imports and remove stale forwarding code once the new layout settles.
+- PR 3+: start removing duplicated logic using the new internal boundaries.
+
+The phase documents below assume that strategy.
