@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-from collections.abc import Generator
+from collections.abc import Awaitable, Callable, Generator, Mapping
 from typing import Any, cast
 
 _scheduler_var: contextvars.ContextVar[Any | None] = contextvars.ContextVar("_scheduler", default=None)
@@ -87,6 +87,22 @@ class _AutoPauseCoroutine:
         return self._iter  # type: ignore[return-value]
 
 
+def wrap_auto_paused_tasks(
+    task_funcs: Mapping[Any, Callable[..., Awaitable[None]]],
+    scheduler: Any,
+) -> dict[Any, Callable[..., Awaitable[None]]]:
+    """Wrap task callables so every natural await becomes a scheduling point."""
+    wrapped: dict[Any, Callable[..., Awaitable[None]]] = {}
+    for task_id, func in task_funcs.items():
+
+        async def _wrapped(f: Callable[..., Awaitable[None]] = func, t: Any = task_id) -> None:
+            _auto_pause_active.set(True)
+            await _AutoPauseCoroutine(f(), t, scheduler)
+
+        wrapped[task_id] = _wrapped
+    return wrapped
+
+
 __all__ = [
     "_scheduler_var",
     "_task_id_var",
@@ -95,4 +111,5 @@ __all__ = [
     "await_point",
     "_AutoPauseIterator",
     "_AutoPauseCoroutine",
+    "wrap_auto_paused_tasks",
 ]

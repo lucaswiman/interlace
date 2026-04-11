@@ -21,6 +21,11 @@ Async (tasks)::
 
 from typing import Any
 
+from frontrun.contrib._shared import dispatch_threads_or_tasks
+from frontrun.contrib.django._async import async_django_dpor
+from frontrun.contrib.django._sync import DJANGO_TRACE_PACKAGES
+from frontrun.contrib.django._sync import django_dpor as _sync_django_dpor
+
 
 def django_dpor(*args: Any, **kwargs: Any) -> Any:
     """Run DPOR with per-thread/task Django connection management.
@@ -28,23 +33,7 @@ def django_dpor(*args: Any, **kwargs: Any) -> Any:
     Use ``threads=[...]`` for sync code or ``tasks=[...]`` for async code.
     The async form returns an awaitable.
     """
-    has_threads = "threads" in kwargs
-    has_tasks = "tasks" in kwargs
-    if has_threads == has_tasks:
-        raise TypeError("django_dpor() requires exactly one of 'threads' or 'tasks'")
+    return dispatch_threads_or_tasks(_sync_django_dpor, async_django_dpor, *args, api_name="django_dpor", **kwargs)
 
-    if has_tasks:
-        from frontrun.contrib.django._async import async_django_dpor
-
-        return async_django_dpor(*args, **kwargs)
-
-    from frontrun.contrib.django._sync import django_dpor as _sync_django_dpor
-
-    return _sync_django_dpor(*args, **kwargs)
-
-
-# Keep async_django_dpor importable for backward compatibility.
-from frontrun.contrib.django._async import async_django_dpor  # noqa: E402, F811
-from frontrun.contrib.django._sync import DJANGO_TRACE_PACKAGES  # noqa: E402
 
 __all__ = ["DJANGO_TRACE_PACKAGES", "async_django_dpor", "django_dpor"]

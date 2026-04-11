@@ -47,12 +47,11 @@ from typing import Any
 
 # Lazy import for async SQL patching — shared with async_dpor.py
 from frontrun._async_autopause import (
-    _auto_pause_active,
-    _AutoPauseCoroutine,
     _in_scheduler_pause,
     _scheduler_var,
     _task_id_var,
     await_point,  # noqa: F401
+    wrap_auto_paused_tasks,
 )
 from frontrun.async_dpor import _sql_async_available, patch_sql_async, unpatch_sql_async
 from frontrun.async_scheduler import InterleavedLoop
@@ -163,17 +162,8 @@ class AsyncShuffler:
             for i, (func, a, kw) in enumerate(zip(funcs, args, kwargs))
         }
 
-        wrapped_funcs: dict[int, Callable[..., Coroutine[Any, Any, None]]] = {}
-        for tid, func in task_funcs.items():
-
-            async def _wrapped(f: Callable[..., Coroutine[Any, Any, None]] = func, t: int = tid) -> None:
-                _auto_pause_active.set(True)
-                await _AutoPauseCoroutine(f(), t, self.scheduler)
-
-            wrapped_funcs[tid] = _wrapped
-
         try:
-            await self.scheduler.run_all(wrapped_funcs, timeout=timeout)  # type: ignore[arg-type]
+            await self.scheduler.run_all(wrap_auto_paused_tasks(task_funcs, self.scheduler), timeout=timeout)
         except TimeoutError:
             pass  # match original behavior: swallow timeout in runner
 

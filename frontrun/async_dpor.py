@@ -51,12 +51,11 @@ from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, TypeVar
 
 from frontrun._async_autopause import (
-    _auto_pause_active,
-    _AutoPauseCoroutine,
     _in_scheduler_pause,
     _scheduler_var,
     _task_id_var,
     await_point,  # noqa: F401
+    wrap_auto_paused_tasks,
 )
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
 from frontrun._opcode_observer import (
@@ -534,16 +533,7 @@ class AsyncDporScheduler(InterleavedLoop):
         if isinstance(task_funcs, list):
             task_funcs = dict(enumerate(task_funcs))
 
-        # Wrap each user function so every await becomes a DPOR scheduling point
-        wrapped: dict[Any, Callable[..., Awaitable[None]]] = {}
-        for tid, func in task_funcs.items():
-
-            async def _wrapped(f: Callable[..., Awaitable[None]] = func, t: Any = tid) -> None:
-                _auto_pause_active.set(True)
-                await _AutoPauseCoroutine(f(), t, self)
-
-            wrapped[tid] = _wrapped
-
+        wrapped = wrap_auto_paused_tasks(task_funcs, self)
         if _USE_SYS_MONITORING:
             self._setup_monitoring()
             try:
@@ -948,20 +938,22 @@ async def _reproduce_async_counterexample(
     for _ in range(reproduce_on_failure):
         scheduler = _ReplayAsyncScheduler(schedule_list, num_tasks, deadlock_timeout=deadlock_timeout)
         state = setup()
-        # Wrap tasks with _AutoPauseCoroutine so every await becomes a
-        # scheduling point that the replay scheduler can control.
-        task_funcs: dict[int, Callable[..., Coroutine[Any, Any, None]]] = {}
-        for i, t in enumerate(tasks):
+        task_funcs: dict[int, Callable[..., Awaitable[None]]] = {}
+        for i, task in enumerate(tasks):
 
-            async def _wrapped(s: Any = state, fn: Any = t, tid: int = i) -> None:
-                _auto_pause_active.set(True)
-                await _AutoPauseCoroutine(fn(s), tid, scheduler)  # type: ignore[arg-type]
+            def _make_task(task_fn: Callable[[T], Coroutine[Any, Any, None]]) -> Callable[..., Awaitable[None]]:
+                def _wrapped_task() -> Awaitable[None]:
+                    return task_fn(state)
 
-            task_funcs[i] = _wrapped
+                return _wrapped_task
+
+            task_funcs[i] = _make_task(task)
+
+        task_funcs = wrap_auto_paused_tasks(task_funcs, scheduler)
 
         deadlocked = False
         try:
-            await scheduler.run_all(task_funcs, timeout=timeout_per_run)  # type: ignore[arg-type]
+            await scheduler.run_all(task_funcs, timeout=timeout_per_run)
         except DeadlockError:
             if invariant is None:
                 successes += 1
