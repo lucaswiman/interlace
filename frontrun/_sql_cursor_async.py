@@ -147,6 +147,22 @@ _ASYNC_PATCHES: list[tuple[Any, str, Any]] = []
 _ASYNC_ORIGINAL_METHODS: dict[tuple[type, str], Any] = {}
 
 
+def _patch_async_methods(
+    target_cls: Any,
+    method_names: tuple[str, ...],
+    make_wrapper: Callable[[Any, str], Any],
+) -> None:
+    """Patch several async methods on one target class."""
+    for method_name in method_names:
+        patch_method(
+            target_cls,
+            method_name,
+            originals=_ASYNC_ORIGINAL_METHODS,
+            patches=_ASYNC_PATCHES,
+            make_wrapper=lambda orig, _method_name=method_name: make_wrapper(orig, _method_name),
+        )
+
+
 # ---------------------------------------------------------------------------
 # aiosqlite patching
 # ---------------------------------------------------------------------------
@@ -161,24 +177,16 @@ def _patch_aiosqlite() -> None:
 
     # Patch both Cursor and Connection — users commonly use conn.execute()
     for target_cls in (aiosqlite.Cursor, aiosqlite.Connection):
-        for method_name in ("execute", "executemany"):
-            _is_executemany = method_name == "executemany"
 
-            def _make_patched(orig: Any, is_em: bool) -> Any:
-                async def _patched(self: Any, sql: Any, parameters: Any = None, /) -> Any:
-                    return await _intercept_execute_async(
-                        orig, self, sql, parameters, is_executemany=is_em, paramstyle="qmark"
-                    )
+        def _make_patched(orig: Any, method_name: str) -> Any:
+            async def _patched(self: Any, sql: Any, parameters: Any = None, /) -> Any:
+                return await _intercept_execute_async(
+                    orig, self, sql, parameters, is_executemany=method_name == "executemany", paramstyle="qmark"
+                )
 
-                return wrap_method_metadata(_patched, orig, name=method_name)
+            return wrap_method_metadata(_patched, orig, name=method_name)
 
-            patch_method(
-                target_cls,
-                method_name,
-                originals=_ASYNC_ORIGINAL_METHODS,
-                patches=_ASYNC_PATCHES,
-                make_wrapper=lambda orig, is_em=_is_executemany: _make_patched(orig, is_em),
-            )
+        _patch_async_methods(target_cls, ("execute", "executemany"), _make_patched)
 
 
 # ---------------------------------------------------------------------------
@@ -197,23 +205,16 @@ def _patch_psycopg_async() -> None:
     if cursor_cls is None:
         return
 
-    for method_name in ("execute", "executemany"):
-        _is_executemany = method_name == "executemany"
+    def _make_patched(orig: Any, method_name: str) -> Any:
+        async def _patched(self: Any, query: Any, params: Any = None, /, **kwargs: Any) -> Any:
+            reported = _report_sql_access(
+                query, params, db_obj=self, is_executemany=method_name == "executemany", paramstyle="format"
+            )
+            return await _dpor_schedule_and_suppress_async(reported, lambda: orig(self, query, params, **kwargs))
 
-        def _make_patched(orig: Any, is_em: bool) -> Any:
-            async def _patched(self: Any, query: Any, params: Any = None, /, **kwargs: Any) -> Any:
-                reported = _report_sql_access(query, params, db_obj=self, is_executemany=is_em, paramstyle="format")
-                return await _dpor_schedule_and_suppress_async(reported, lambda: orig(self, query, params, **kwargs))
+        return wrap_method_metadata(_patched, orig, name=method_name)
 
-            return wrap_method_metadata(_patched, orig, name=method_name)
-
-        patch_method(
-            cursor_cls,
-            method_name,
-            originals=_ASYNC_ORIGINAL_METHODS,
-            patches=_ASYNC_PATCHES,
-            make_wrapper=lambda orig, is_em=_is_executemany: _make_patched(orig, is_em),
-        )
+    _patch_async_methods(cursor_cls, ("execute", "executemany"), _make_patched)
 
 
 # ---------------------------------------------------------------------------
@@ -232,25 +233,16 @@ def _patch_aiomysql() -> None:
     if cursor_cls is None:
         return
 
-    for method_name in ("execute", "executemany"):
-        _is_executemany = method_name == "executemany"
+    def _make_patched(orig: Any, method_name: str) -> Any:
+        async def _patched(self: Any, query: Any, args: Any = None, *extra: Any, **kwargs: Any) -> Any:
+            reported = _report_sql_access(
+                query, args, db_obj=self, is_executemany=method_name == "executemany", paramstyle="pyformat"
+            )
+            return await _dpor_schedule_and_suppress_async(reported, lambda: orig(self, query, args, *extra, **kwargs))
 
-        def _make_patched(orig: Any, is_em: bool) -> Any:
-            async def _patched(self: Any, query: Any, args: Any = None, *extra: Any, **kwargs: Any) -> Any:
-                reported = _report_sql_access(query, args, db_obj=self, is_executemany=is_em, paramstyle="pyformat")
-                return await _dpor_schedule_and_suppress_async(
-                    reported, lambda: orig(self, query, args, *extra, **kwargs)
-                )
+        return wrap_method_metadata(_patched, orig, name=method_name)
 
-            return wrap_method_metadata(_patched, orig, name=method_name)
-
-        patch_method(
-            cursor_cls,
-            method_name,
-            originals=_ASYNC_ORIGINAL_METHODS,
-            patches=_ASYNC_PATCHES,
-            make_wrapper=lambda orig, is_em=_is_executemany: _make_patched(orig, is_em),
-        )
+    _patch_async_methods(cursor_cls, ("execute", "executemany"), _make_patched)
 
 
 # ---------------------------------------------------------------------------
@@ -269,21 +261,13 @@ def _patch_asyncpg() -> None:
 
     # asyncpg methods all take (query, *args) — no separate params arg.
     # execute returns command tag, fetch/fetchrow/fetchval return results.
-    for method_name in ("execute", "fetch", "fetchrow", "fetchval"):
+    def _make_patched(orig: Any, method_name: str) -> Any:
+        async def _patched(self: Any, query: Any, *args: Any, **kwargs: Any) -> Any:
+            return await _intercept_asyncpg_execute(orig, self, query, *args, **kwargs)
 
-        def _make_patched(orig: Any) -> Any:
-            async def _patched(self: Any, query: Any, *args: Any, **kwargs: Any) -> Any:
-                return await _intercept_asyncpg_execute(orig, self, query, *args, **kwargs)
+        return wrap_method_metadata(_patched, orig, name=method_name)
 
-            return wrap_method_metadata(_patched, orig, name=method_name)
-
-        patch_method(
-            conn_cls,
-            method_name,
-            originals=_ASYNC_ORIGINAL_METHODS,
-            patches=_ASYNC_PATCHES,
-            make_wrapper=_make_patched,
-        )
+    _patch_async_methods(conn_cls, ("execute", "fetch", "fetchrow", "fetchval"), _make_patched)
 
     # executemany on asyncpg takes (command, args) where args is a list of tuples
     orig_em = getattr(conn_cls, "executemany", None)

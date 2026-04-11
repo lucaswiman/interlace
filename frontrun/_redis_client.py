@@ -262,14 +262,9 @@ _ORIGINAL_METHODS: dict[tuple[type, str], Any] = {}
 
 def _patch_redis_py() -> None:
     """Patch redis-py ``Redis.execute_command`` and ``Pipeline.execute``."""
-    try:
-        import redis as redis_lib  # type: ignore[import-untyped]
-    except ImportError:
-        return
-
     for target in SYNC_REDIS_TARGETS:
         try:
-            module = redis_lib if target.module_name == "redis" else importlib.import_module(target.module_name)
+            module = importlib.import_module(target.module_name)
             target_cls = getattr(module, target.class_name)
         except (ImportError, AttributeError):
             continue

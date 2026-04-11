@@ -136,20 +136,15 @@ _ASYNC_ORIGINAL_METHODS: dict[tuple[type, str], Any] = {}
 
 
 # ---------------------------------------------------------------------------
-# redis.asyncio patching (redis-py 4.2+ / aioredis merged)
+# Patching
 # ---------------------------------------------------------------------------
 
 
-def _patch_redis_asyncio() -> None:
-    """Patch ``redis.asyncio.Redis.execute_command`` and ``Pipeline.execute``."""
-    try:
-        import redis.asyncio as aioredis  # type: ignore[import-untyped]
-    except ImportError:
-        return
-
+def _patch_async_redis_targets() -> None:
+    """Patch known async Redis client methods."""
     for target in ASYNC_REDIS_TARGETS:
         try:
-            module = aioredis if target.module_name == "redis.asyncio" else importlib.import_module(target.module_name)
+            module = importlib.import_module(target.module_name)
             target_cls = getattr(module, target.class_name)
         except (ImportError, AttributeError):
             continue
@@ -178,35 +173,6 @@ def _patch_redis_asyncio() -> None:
 
 
 # ---------------------------------------------------------------------------
-# coredis patching
-# ---------------------------------------------------------------------------
-
-
-def _patch_coredis() -> None:
-    """Patch ``coredis.Redis.execute_command``."""
-    try:
-        import coredis  # type: ignore[import-untyped]
-    except ImportError:
-        return
-
-    target_cls = coredis.Redis
-
-    def _make_patched(orig: Any) -> Any:
-        async def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
-            return await _intercept_execute_command_async(orig, self, *args, **kwargs)
-
-        return wrap_method_metadata(_patched, orig, name="execute_command")
-
-    patch_method(
-        target_cls,
-        "execute_command",
-        originals=_ASYNC_ORIGINAL_METHODS,
-        patches=_ASYNC_PATCHES,
-        make_wrapper=_make_patched,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -216,8 +182,7 @@ def patch_redis_async() -> None:
     global _redis_async_patched  # noqa: PLW0603
     if _redis_async_patched:
         return
-    _patch_redis_asyncio()
-    _patch_coredis()
+    _patch_async_redis_targets()
     _redis_async_patched = True
 
 
