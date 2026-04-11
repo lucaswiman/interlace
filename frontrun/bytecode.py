@@ -59,7 +59,7 @@ from frontrun._io_detection import (
 )
 from frontrun._sql_cursor import patch_sql, unpatch_sql
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
-from frontrun._threaded_runner import PatchScope, run_thread_group
+from frontrun._threaded_runner import PatchScope, notify_scheduler_timeout, run_thread_group
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
 from frontrun._tracing import TraceFilter as _TraceFilter
 from frontrun._tracing import is_cmdline_user_code as _is_cmdline_user_code
@@ -503,14 +503,7 @@ class BytecodeShuffler:
             return target
 
         def on_timeout(alive: list[threading.Thread]) -> None:
-            # Signal scheduler to abort if any threads are still alive.
-            # On free-threaded Python, condition notifications can be lost
-            # and threads may still be blocked in wait_for_turn.
-            self.scheduler._error = TimeoutError(f"Timed out waiting for {len(alive)} thread(s) to complete")
-            with self.scheduler._condition:
-                self.scheduler._condition.notify_all()
-            for thread in alive:
-                thread.join(timeout=0.5)
+            notify_scheduler_timeout(self.scheduler, alive)
 
         run_thread_group(
             funcs=funcs,
