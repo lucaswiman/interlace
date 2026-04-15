@@ -94,6 +94,38 @@ class TestSqlglotParseNonDml:
         r = _sqlglot_parse("END")
         assert r is not None and r.tx_op is TxOp.COMMIT
 
+    def test_end_transaction_as_commit(self):
+        """``END TRANSACTION`` is a PostgreSQL alias for COMMIT.
+
+        sqlglot misparses it as ``Alias`` (``END AS TRANSACTION``), so the
+        parser must detect it via the string pre-checks alongside the bare
+        ``END``.
+        """
+        r = _sqlglot_parse("END TRANSACTION")
+        assert r is not None and r.tx_op is TxOp.COMMIT
+
+    def test_end_work_as_commit(self):
+        """``END WORK`` is a PostgreSQL alias for COMMIT."""
+        r = _sqlglot_parse("END WORK")
+        assert r is not None and r.tx_op is TxOp.COMMIT
+
+    def test_abort_as_rollback(self):
+        """``ABORT`` is a PostgreSQL alias for ROLLBACK.
+
+        sqlglot parses bare ``ABORT`` as a ``Column`` identifier, so the
+        parser must recognise it via the string pre-checks.
+        """
+        r = _sqlglot_parse("ABORT")
+        assert r is not None and r.tx_op is TxOp.ROLLBACK
+
+    def test_abort_work_as_rollback(self):
+        r = _sqlglot_parse("ABORT WORK")
+        assert r is not None and r.tx_op is TxOp.ROLLBACK
+
+    def test_abort_transaction_as_rollback(self):
+        r = _sqlglot_parse("ABORT TRANSACTION")
+        assert r is not None and r.tx_op is TxOp.ROLLBACK
+
     def test_savepoint(self):
         r = _sqlglot_parse("SAVEPOINT sp1")
         from frontrun._sql_parsing import Savepoint
