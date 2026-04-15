@@ -150,9 +150,18 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
         if upper == "START TRANSACTION" or upper.startswith("START TRANSACTION "):
             return SqlAccessResult(set(), set(), None, TxOp.BEGIN, None)
 
-        # END — sqlglot parses as a Column identifier
-        if upper == "END":
+        # END / END TRANSACTION / END WORK — PostgreSQL aliases for COMMIT.
+        # sqlglot parses bare ``END`` as a Column identifier and
+        # ``END TRANSACTION`` / ``END WORK`` as an Alias, so none of them
+        # reach the normal ``exp.Commit`` path.
+        if upper == "END" or upper in ("END TRANSACTION", "END WORK"):
             return SqlAccessResult(set(), set(), None, TxOp.COMMIT, None)
+
+        # ABORT / ABORT TRANSACTION / ABORT WORK — PostgreSQL aliases for
+        # ROLLBACK.  sqlglot parses bare ``ABORT`` as a Column identifier
+        # and the multi-word variants as Alias.
+        if upper == "ABORT" or upper in ("ABORT TRANSACTION", "ABORT WORK"):
+            return SqlAccessResult(set(), set(), None, TxOp.ROLLBACK, None)
 
         # SAVEPOINT <name> — sqlglot misparses as Alias
         if upper.startswith("SAVEPOINT "):
