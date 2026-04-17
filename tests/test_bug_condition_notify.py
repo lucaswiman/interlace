@@ -240,7 +240,7 @@ def test_notify_caps_real_cond_to_actual():
     the ticket advancement, but passes the uncapped `n` to self._real_cond.notify(n).
     This wakes more non-cooperative threads than there are available tickets.
     """
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock
 
     lock = CooperativeLock()
     cond = CooperativeCondition(lock)
