@@ -231,3 +231,35 @@ def test_notify_all_does_not_over_advance_served():
     )
 
     lock.release()
+
+
+def test_notify_caps_real_cond_to_actual():
+    """notify(n) must cap the real_cond.notify() call to the actual number of served tickets.
+
+    Bug: CooperativeCondition.notify() computes actual = min(n, unserved) to cap
+    the ticket advancement, but passes the uncapped `n` to self._real_cond.notify(n).
+    This wakes more non-cooperative threads than there are available tickets.
+    """
+    from unittest.mock import patch, MagicMock
+
+    lock = CooperativeLock()
+    cond = CooperativeCondition(lock)
+
+    lock.acquire()
+
+    cond._waiters = 2
+    cond._next_ticket = 2
+
+    mock_real_cond = MagicMock()
+    mock_real_cond.__enter__ = MagicMock(return_value=mock_real_cond)
+    mock_real_cond.__exit__ = MagicMock(return_value=False)
+
+    cond._real_cond = mock_real_cond
+
+    cond.notify(5)
+
+    actual = min(5, 2)
+    assert actual == 2
+    mock_real_cond.notify.assert_called_once_with(actual)
+
+    lock.release()
