@@ -131,7 +131,7 @@ _COMMAND_KEY_SPECS: dict[str, list[_KeySpec]] = {
     "PEXPIREAT": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
     "PEXPIRETIME": [(("idx", 1), ("rng", 0, 1, 0), True, False)],
     "PFADD": [(("idx", 1), ("rng", 0, 1, 0), True, True)],
-    "PFCOUNT": [(("idx", 1), ("rng", -1, 1, 0), True, True)],
+    "PFCOUNT": [(("idx", 1), ("rng", -1, 1, 0), True, False)],
     "PFDEBUG": [(("idx", 2), ("rng", 0, 1, 0), True, True)],
     "PFMERGE": [(("idx", 1), ("rng", 0, 1, 0), True, True), (("idx", 2), ("rng", -1, 1, 0), True, False)],
     "PSETEX": [(("idx", 1), ("rng", 0, 1, 0), False, True)],

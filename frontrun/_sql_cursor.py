@@ -77,7 +77,7 @@ except ImportError:
 _RE_INSERT_TABLE = re.compile(
     r"^\s*INSERT\s+(?:OR\s+\w+\s+|IGNORE\s+)?INTO\s+(?:[`\"\[]?\w+[`\"\]]?\s*\.\s*)?[`\"\[]?(\w+)", re.I
 )
-_RE_UPDATE_TABLE = re.compile(r"^\s*UPDATE\s+[`\"\[]?(\w+)", re.I)
+_RE_UPDATE_TABLE = re.compile(r"^\s*UPDATE\s+(?:[`\"\[]?\w+[`\"\]]?\s*\.\s*)?[`\"\[]?(\w+)", re.I)
 
 
 # ---------------------------------------------------------------------------

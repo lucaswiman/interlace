@@ -688,12 +688,12 @@ class TestUpdateTableRegex:
 
 class TestPyformatEscapedPercentWithPlaceholder:
     def test_escaped_percent_followed_by_placeholder(self):
-        """%%%s (literal percent + placeholder) must parse correctly.
+        """%%%s (literal percent + placeholder) in LIKE must parse correctly.
 
-        In pyformat, %%%s means: literal %% (escaped percent) followed by
-        %s (placeholder).  The preprocessing should produce '%?' so sqlglot
-        sees a literal percent and a question-mark placeholder.
+        In pyformat, '%%%s' means: literal %% (escaped percent) followed by
+        %s (placeholder).  The preprocessing should produce '%?' inside the
+        string literal so sqlglot sees a LIKE pattern, not a stray '%s'.
         """
-        sql = "SELECT * FROM t WHERE x = %%%s"
+        sql = "SELECT * FROM t WHERE name LIKE '%%%s'"
         result = parse_sql_access(sql)
         assert "t" in result.read_tables
