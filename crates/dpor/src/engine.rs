@@ -409,7 +409,6 @@ impl DporEngine {
             SyncEvent::LockAcquire { lock_id } => {
                 if let Some(release_vv) = execution.lock_release_vv.get(&lock_id) {
                     let release_vv = release_vv.clone();
-                    execution.threads[thread_id].causality.join(&release_vv);
                     execution.threads[thread_id].dpor_vv.join(&release_vv);
                 }
                 let lock_obj_id = lock_id ^ Self::LOCK_OBJECT_XOR;
@@ -451,18 +450,14 @@ impl DporEngine {
                 });
             }
             SyncEvent::ThreadJoin { joined_thread } => {
-                let joined_causality = execution.threads[joined_thread].causality.clone();
                 let joined_dpor_vv = execution.threads[joined_thread].dpor_vv.clone();
                 let joined_io_vv = execution.threads[joined_thread].io_vv.clone();
-                execution.threads[thread_id].causality.join(&joined_causality);
                 execution.threads[thread_id].dpor_vv.join(&joined_dpor_vv);
                 execution.threads[thread_id].io_vv.join(&joined_io_vv);
             }
             SyncEvent::ThreadSpawn { child_thread } => {
-                let parent_causality = execution.threads[thread_id].causality.clone();
                 let parent_dpor_vv = execution.threads[thread_id].dpor_vv.clone();
                 let parent_io_vv = execution.threads[thread_id].io_vv.clone();
-                execution.threads[child_thread].causality.join(&parent_causality);
                 execution.threads[child_thread].dpor_vv.join(&parent_dpor_vv);
                 execution.threads[child_thread].io_vv.join(&parent_io_vv);
             }
@@ -1486,24 +1481,20 @@ mod tests {
         );
     }
 
-    /// Run a dining philosopher model with the given operations per thread.
-    /// Each op is ("lock_acquire"|"lock_release"|"write"|"read", object_id).
-    /// Returns (executions_explored, deadlock_found).
-    fn run_philosopher_model(
+    /// Run a dining-philosopher model until a lock-order deadlock is found
+    /// or exploration finishes.  `thread_ops[t]` is the op sequence for thread `t`;
+    /// each op is `("lock_acquire"|"lock_release"|"write", object_id)`.
+    /// Returns `(executions_explored_including_the_deadlocked_one, deadlock_found)`.
+    fn run_philosopher_until_deadlock(
         engine: &mut DporEngine,
         thread_ops: &[Vec<(&str, u64)>],
-        num_threads: usize,
-        stop_on_first: bool,
     ) -> (u64, bool) {
+        let num_threads = thread_ops.len();
         let mut exec_count: u64 = 0;
-        let mut deadlock_found = false;
-
         loop {
             let mut execution = engine.begin_execution();
             let mut pcs = vec![0usize; num_threads];
-            let mut locks_held: std::collections::HashMap<u64, usize> =
-                std::collections::HashMap::new();
-
+            let mut locks_held: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
             loop {
                 for i in 0..num_threads {
                     if pcs[i] >= thread_ops[i].len() {
@@ -1513,15 +1504,11 @@ mod tests {
                 if execution.runnable_threads().is_empty() {
                     break;
                 }
-                let chosen = match engine.schedule(&mut execution) {
-                    Some(t) => t,
-                    None => break,
-                };
+                let Some(chosen) = engine.schedule(&mut execution) else { break };
                 let pc = pcs[chosen];
                 if pc >= thread_ops[chosen].len() {
                     break;
                 }
-
                 let (op_type, obj_id) = thread_ops[chosen][pc];
                 match op_type {
                     "lock_acquire" => {
@@ -1532,72 +1519,34 @@ mod tests {
                             }
                         }
                         locks_held.insert(obj_id, chosen);
-                        engine.process_sync(
-                            &mut execution,
-                            chosen,
-                            SyncEvent::LockAcquire { lock_id: obj_id },
-                            None,
-                        );
+                        engine.process_sync(&mut execution, chosen, SyncEvent::LockAcquire { lock_id: obj_id }, None);
                     }
                     "lock_release" => {
                         locks_held.remove(&obj_id);
-                        engine.process_sync(
-                            &mut execution,
-                            chosen,
-                            SyncEvent::LockRelease { lock_id: obj_id },
-                            None,
-                        );
+                        engine.process_sync(&mut execution, chosen, SyncEvent::LockRelease { lock_id: obj_id }, None);
                         for tid in 0..num_threads {
-                            if tid != chosen && execution.threads[tid].blocked {
-                                if pcs[tid] < thread_ops[tid].len() {
-                                    let (t_op, t_id) = thread_ops[tid][pcs[tid]];
-                                    if t_op == "lock_acquire" && t_id == obj_id {
-                                        execution.unblock_thread(tid);
-                                    }
+                            if tid != chosen && execution.threads[tid].blocked && pcs[tid] < thread_ops[tid].len() {
+                                let (t_op, t_id) = thread_ops[tid][pcs[tid]];
+                                if t_op == "lock_acquire" && t_id == obj_id {
+                                    execution.unblock_thread(tid);
                                 }
                             }
                         }
                     }
-                    "write" => {
-                        engine.process_access(
-                            &mut execution,
-                            chosen,
-                            obj_id,
-                            AccessKind::Write,
-                        );
-                    }
-                    "read" => {
-                        engine.process_access(
-                            &mut execution,
-                            chosen,
-                            obj_id,
-                            AccessKind::Read,
-                        );
-                    }
+                    "write" => engine.process_access(&mut execution, chosen, obj_id, AccessKind::Write),
                     _ => panic!("Unknown op: {op_type}"),
                 }
                 pcs[chosen] += 1;
             }
-
-            let all_done = pcs
-                .iter()
-                .enumerate()
-                .all(|(i, pc)| *pc >= thread_ops[i].len());
-            if !all_done {
-                deadlock_found = true;
-                if stop_on_first {
-                    exec_count += 1;
-                    break;
-                }
-            }
-
             exec_count += 1;
+            let all_done = pcs.iter().enumerate().all(|(i, pc)| *pc >= thread_ops[i].len());
+            if !all_done {
+                return (exec_count, true);
+            }
             if !engine.next_execution() {
-                break;
+                return (exec_count, false);
             }
         }
-
-        (exec_count, deadlock_found)
     }
 
     /// Dining philosophers model tests.
@@ -1620,8 +1569,7 @@ mod tests {
             })
             .collect();
 
-        let (exec_count, deadlock_found) =
-            run_philosopher_model(&mut engine, &thread_ops, num_philosophers, true);
+        let (exec_count, deadlock_found) = run_philosopher_until_deadlock(&mut engine, &thread_ops);
 
         assert!(
             deadlock_found,
@@ -1653,8 +1601,7 @@ mod tests {
             })
             .collect();
 
-        let (exec_count, deadlock_found) =
-            run_philosopher_model(&mut engine, &thread_ops, num_philosophers, true);
+        let (exec_count, deadlock_found) = run_philosopher_until_deadlock(&mut engine, &thread_ops);
 
         assert!(
             deadlock_found,

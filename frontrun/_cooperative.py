@@ -25,6 +25,7 @@ eagerly (before each iteration) and bail via
 torn down.
 """
 
+import math
 import queue
 import threading
 import time
@@ -548,108 +549,82 @@ class CooperativeSemaphore:
             finally:
                 _scheduler_tls._in_dpor_machinery = prev
 
-    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
-
-        # Fast path: try to decrement counter
+    def _try_acquire(self) -> bool:
+        """Attempt a non-blocking decrement; return True on success."""
         self._lock.acquire()
-        if self._value > 0:
-            self._value -= 1
+        try:
+            if self._value > 0:
+                self._value -= 1
+                return True
+            return False
+        finally:
             self._lock.release()
+
+    def _drain_until(self, deadline: float) -> bool:
+        """Spin on ``_try_acquire`` until *deadline*; report on success."""
+        while time.monotonic() < deadline:
+            if self._try_acquire():
+                self._report("lock_acquire")
+                return True
+            time.sleep(0.001)
+        return False
+
+    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
+        # Fast path: try to decrement counter
+        if self._try_acquire():
             self._report("lock_acquire")
             return True
-        self._lock.release()
 
         if not blocking:
             return False
 
         ctx = get_context()
         if ctx is None:
-            # Fall back to spinning with real lock (non-managed thread)
-            if timeout is not None:
-                deadline = time.monotonic() + timeout
-                while True:
-                    self._lock.acquire()
-                    if self._value > 0:
-                        self._value -= 1
-                        self._lock.release()
-                        self._report("lock_acquire")
-                        return True
-                    self._lock.release()
-                    if time.monotonic() >= deadline:
-                        return False
-                    time.sleep(0.001)
+            # Unmanaged thread: spin with real sleep.  A single loop handles
+            # both timeout and no-timeout via a sentinel (math.inf) deadline.
+            deadline = time.monotonic() + timeout if timeout is not None else math.inf
             while True:
-                self._lock.acquire()
-                if self._value > 0:
-                    self._value -= 1
-                    self._lock.release()
+                if self._try_acquire():
                     self._report("lock_acquire")
                     return True
-                self._lock.release()
+                if time.monotonic() >= deadline:
+                    return False
                 time.sleep(0.001)
 
-        # Spin-yield loop for managed threads
+        # Spin-yield loop for managed threads.  Timeout is intentionally
+        # ignored here: DPOR/bytecode schedulers drive progress themselves,
+        # and shutdown drains via ``_finished`` below.
         scheduler, thread_id = ctx
         before_sync_retry = getattr(scheduler, "before_sync_retry", None)
         after_sync_retry = getattr(scheduler, "after_sync_retry", None)
         if before_sync_retry is not None:
+            assert after_sync_retry is not None
             while True:
-                # Aggressive error check (option 6)
                 if scheduler._error:
                     raise SchedulerAbort("scheduler aborted")
                 if scheduler._finished:
-                    deadline = time.monotonic() + 1.0
-                    while time.monotonic() < deadline:
-                        self._lock.acquire()
-                        if self._value > 0:
-                            self._value -= 1
-                            self._lock.release()
-                            self._report("lock_acquire")
-                            return True
-                        self._lock.release()
-                        time.sleep(0.001)
-                    return False
-                assert after_sync_retry is not None
+                    return self._drain_until(time.monotonic() + 1.0)
                 if not before_sync_retry(thread_id):
                     return False
-                self._lock.acquire()
-                if self._value > 0:
-                    self._value -= 1
-                    self._lock.release()
+                if self._try_acquire():
                     self._report("lock_acquire")
                     after_sync_retry(thread_id)
                     return True
-                self._lock.release()
                 self._report("lock_wait")
                 after_sync_retry(thread_id)
-        else:
-            # Bytecode scheduling relies on re-probing after each scheduler
-            # turn; reporting wait without retrying can wedge a waiter forever.
-            self._report("lock_wait")
-            while True:
-                # Aggressive error check (option 6)
-                if scheduler._error:
-                    raise SchedulerAbort("scheduler aborted")
-                self._lock.acquire()
-                if self._value > 0:
-                    self._value -= 1
-                    self._lock.release()
-                    self._report("lock_acquire")
-                    return True
-                self._lock.release()
-                if scheduler._finished:
-                    deadline = time.monotonic() + 1.0
-                    while time.monotonic() < deadline:
-                        self._lock.acquire()
-                        if self._value > 0:
-                            self._value -= 1
-                            self._lock.release()
-                            self._report("lock_acquire")
-                            return True
-                        self._lock.release()
-                        time.sleep(0.001)
-                    return False
-                scheduler.wait_for_turn(thread_id)
+
+        # Bytecode scheduling relies on re-probing after each scheduler
+        # turn; reporting wait without retrying can wedge a waiter forever.
+        self._report("lock_wait")
+        while True:
+            if scheduler._error:
+                raise SchedulerAbort("scheduler aborted")
+            if self._try_acquire():
+                self._report("lock_acquire")
+                return True
+            if scheduler._finished:
+                return self._drain_until(time.monotonic() + 1.0)
+            scheduler.wait_for_turn(thread_id)
 
     def release(self, n: int = 1) -> None:
         if n < 1:
@@ -724,24 +699,14 @@ class CooperativeEvent:
             return self._event.wait(timeout=timeout)
 
         scheduler, thread_id = ctx
-
-        if timeout is not None:
-            deadline: float = time.monotonic() + timeout
-            while not self._event.is_set():
-                if scheduler._error:
-                    raise SchedulerAbort("scheduler aborted")
-                if scheduler._finished:
-                    return self._event.wait(timeout=1.0)
-                if time.monotonic() >= deadline:
-                    return self._event.is_set()
-                scheduler.wait_for_turn(thread_id)
-            return True
-
+        deadline = time.monotonic() + timeout if timeout is not None else math.inf
         while not self._event.is_set():
             if scheduler._error:
                 raise SchedulerAbort("scheduler aborted")
             if scheduler._finished:
                 return self._event.wait(timeout=1.0)
+            if time.monotonic() >= deadline:
+                return False
             scheduler.wait_for_turn(thread_id)
         return True
 
@@ -832,28 +797,23 @@ class CooperativeCondition:
             # _served is monotonically increasing: a stale read can
             # only cause one extra spin iteration, never a missed wakeup.
 
-            if timeout is not None:
-                deadline = time.monotonic() + timeout
-                while my_ticket >= self._served:
-                    if scheduler._error:
-                        raise SchedulerAbort("scheduler aborted")
-                    if scheduler._finished:
-                        remaining = max(0.0, deadline - time.monotonic())
-                        time.sleep(min(0.01, remaining))
-                        return my_ticket < self._served
-                    if time.monotonic() >= deadline:
-                        return False
-                    scheduler.wait_for_turn(thread_id)
-                return True
-
+            deadline = time.monotonic() + timeout if timeout is not None else math.inf
             while my_ticket >= self._served:
                 if scheduler._error:
                     raise SchedulerAbort("scheduler aborted")
                 if scheduler._finished:
-                    end = time.monotonic() + 1.0
+                    # When the scheduler is done, give notifications a
+                    # brief window to land (bounded by the remaining
+                    # user timeout, if any).  Matches the previous
+                    # per-branch behaviour: timeout case slept once for
+                    # min(0.01, remaining); no-timeout case polled for up
+                    # to 1s.  We unify with a bounded poll loop.
+                    end = time.monotonic() + min(1.0, max(0.0, deadline - time.monotonic()))
                     while my_ticket >= self._served and time.monotonic() < end:
                         time.sleep(0.001)
                     return my_ticket < self._served
+                if time.monotonic() >= deadline:
+                    return False
                 scheduler.wait_for_turn(thread_id)
             return True
         finally:
@@ -966,22 +926,7 @@ class CooperativeQueue:
             return self._queue.get(block=True, timeout=timeout)
 
         scheduler, thread_id = ctx
-
-        if timeout is not None:
-            deadline: float = time.monotonic() + timeout
-            while True:
-                if scheduler._error:
-                    raise SchedulerAbort("scheduler aborted")
-                try:
-                    return self._queue.get(block=False)
-                except queue.Empty:
-                    pass
-                if scheduler._finished:
-                    return self._queue.get(block=True, timeout=1.0)
-                if time.monotonic() >= deadline:
-                    raise queue.Empty
-                scheduler.wait_for_turn(thread_id)
-
+        deadline = time.monotonic() + timeout if timeout is not None else math.inf
         while True:
             if scheduler._error:
                 raise SchedulerAbort("scheduler aborted")
@@ -991,6 +936,8 @@ class CooperativeQueue:
                 pass
             if scheduler._finished:
                 return self._queue.get(block=True, timeout=1.0)
+            if time.monotonic() >= deadline:
+                raise queue.Empty
             scheduler.wait_for_turn(thread_id)
 
     def put(self, item: Any, block: bool = True, timeout: float | None = None) -> None:
@@ -1008,24 +955,7 @@ class CooperativeQueue:
             return
 
         scheduler, thread_id = ctx
-
-        if timeout is not None:
-            deadline: float = time.monotonic() + timeout
-            while True:
-                if scheduler._error:
-                    raise SchedulerAbort("scheduler aborted")
-                try:
-                    self._queue.put(item, block=False)
-                    return
-                except queue.Full:
-                    pass
-                if scheduler._finished:
-                    self._queue.put(item, block=True, timeout=1.0)
-                    return
-                if time.monotonic() >= deadline:
-                    raise queue.Full
-                scheduler.wait_for_turn(thread_id)
-
+        deadline = time.monotonic() + timeout if timeout is not None else math.inf
         while True:
             if scheduler._error:
                 raise SchedulerAbort("scheduler aborted")
@@ -1037,6 +967,8 @@ class CooperativeQueue:
             if scheduler._finished:
                 self._queue.put(item, block=True, timeout=1.0)
                 return
+            if time.monotonic() >= deadline:
+                raise queue.Full
             scheduler.wait_for_turn(thread_id)
 
     def qsize(self) -> int:

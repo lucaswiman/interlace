@@ -36,9 +36,6 @@ from frontrun._schema import get_schema
 from frontrun._sql_insert_tracker import record_insert, resolve_alias
 from frontrun._sql_parsing import (
     LockIntent,
-    Release,
-    RollbackTo,
-    Savepoint,
     TxOp,
     parse_sql_access,
 )
@@ -406,65 +403,54 @@ def _register_connection_db_scope(connection: Any, identity: str) -> str:
     return scope
 
 
-def _normalize_sqlite_db_identity(*args: Any, **kwargs: Any) -> str | None:
-    """Best-effort canonical identity for a sqlite3 connection target."""
-    database = kwargs.get("database")
-    if database is None and args:
-        database = args[0]
-    if database is None:
-        return None
+def _normalize_db_identity(kind: str, *args: Any, **kwargs: Any) -> str | None:
+    """Build a canonical database identity string, dispatching on ``kind``.
 
-    database_path = os.fspath(database)
-    if isinstance(database_path, bytes):
-        database_str = database_path.decode("utf-8", errors="surrogateescape")
-    else:
-        database_str = database_path
-    use_uri = bool(kwargs.get("uri"))
-    if database_str == ":memory:" and not use_uri:
-        return None
-    if use_uri or database_str.startswith("file:"):
-        return f"sqlite-uri:{database_str}"
-    return f"sqlite-path:{os.path.abspath(database_str)}"
-
-
-def _normalize_mapping_db_identity(driver: str, mapping: dict[str, Any]) -> str | None:
-    """Build a canonical DB identity from connect kwargs or driver info dicts."""
-    items = [(key, value) for key, value in sorted(mapping.items()) if value not in (None, "")]
-    if not items:
-        return None
-    return f"{driver}:{repr(items)}"
-
-
-def _infer_db_identity_from_connection(connection: Any) -> str | None:
-    """Infer a stable database identity from a live connection object."""
-    info = getattr(connection, "info", None)
-    dsn_params = getattr(info, "dsn_parameters", None)
-    if isinstance(dsn_params, dict):
-        relevant = {key: dsn_params.get(key) for key in ("host", "port", "dbname") if dsn_params.get(key)}
-        identity = _normalize_mapping_db_identity("postgres", relevant)
-        if identity is not None:
+    * ``"sqlite"``     — from ``sqlite3.connect`` positional/keyword args.
+    * ``"mapping"``    — from ``(driver, mapping_dict)``.
+    * ``"connection"`` — inferred from a live DBAPI connection.
+    """
+    if kind == "mapping":
+        driver, mapping = args
+        items = [(k, v) for k, v in sorted(mapping.items()) if v not in (None, "")]
+        return f"{driver}:{repr(items)}" if items else None
+    if kind == "sqlite":
+        database = kwargs.get("database") or (args[0] if args else None)
+        if database is None:
+            return None
+        raw = os.fspath(database)
+        s = raw.decode("utf-8", errors="surrogateescape") if isinstance(raw, bytes) else raw
+        use_uri = bool(kwargs.get("uri"))
+        if s == ":memory:" and not use_uri:
+            return None
+        if use_uri or s.startswith("file:"):
+            return f"sqlite-uri:{s}"
+        return f"sqlite-path:{os.path.abspath(s)}"
+    if kind == "connection":
+        (conn,) = args
+        info = getattr(conn, "info", None)
+        dsn_params = getattr(info, "dsn_parameters", None)
+        if isinstance(dsn_params, dict):
+            relevant = {k: dsn_params.get(k) for k in ("host", "port", "dbname") if dsn_params.get(k)}
+            if (identity := _normalize_db_identity("mapping", "postgres", relevant)) is not None:
+                return identity
+        dsn = getattr(conn, "dsn", None)
+        if isinstance(dsn, str) and dsn:
+            return f"dsn:{dsn}"
+        relevant = {
+            "host": getattr(conn, "host", None),
+            "port": getattr(conn, "port", None),
+            "database": getattr(conn, "database", None),
+            "db": getattr(conn, "db", None),
+            "dbname": getattr(info, "dbname", None),
+        }
+        if (identity := _normalize_db_identity("mapping", "dbapi", relevant)) is not None:
             return identity
-
-    dsn = getattr(connection, "dsn", None)
-    if isinstance(dsn, str) and dsn:
-        return f"dsn:{dsn}"
-
-    relevant = {
-        "host": getattr(connection, "host", None),
-        "port": getattr(connection, "port", None),
-        "database": getattr(connection, "database", None),
-        "db": getattr(connection, "db", None),
-        "dbname": getattr(getattr(connection, "info", None), "dbname", None),
-    }
-    identity = _normalize_mapping_db_identity("dbapi", relevant)
-    if identity is not None:
-        return identity
-
-    path = getattr(connection, "filename", None)
-    if isinstance(path, str) and path:
-        return f"sqlite-path:{os.path.abspath(path)}"
-
-    return None
+        path = getattr(conn, "filename", None)
+        if isinstance(path, str) and path:
+            return f"sqlite-path:{os.path.abspath(path)}"
+        return None
+    raise ValueError(f"unknown db identity kind: {kind!r}")
 
 
 def _get_connection_db_scope(db_obj: Any) -> str | None:
@@ -504,7 +490,7 @@ def _get_connection_db_scope(db_obj: Any) -> str | None:
     if connection is None:
         connection = db_obj
 
-    identity = _infer_db_identity_from_connection(connection)
+    identity = _normalize_db_identity("connection", connection)
     if identity is None:
         return None
     return _register_connection_db_scope(connection, identity)
@@ -580,20 +566,19 @@ def _report_sql_access(
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
                 _release_dpor_row_locks()
-            elif isinstance(tx, Savepoint):
+            else:  # SavepointOp
                 savepoints = getattr(_io_tls, "_tx_savepoints", {})
-                buffer = getattr(_io_tls, "_tx_buffer", [])
-                savepoints[tx.name] = len(buffer)
-                _io_tls._tx_savepoints = savepoints
-            elif isinstance(tx, RollbackTo):
-                savepoints = getattr(_io_tls, "_tx_savepoints", {})
-                if tx.name in savepoints:
-                    idx = savepoints[tx.name]
+                if tx.op == "savepoint":
                     buffer = getattr(_io_tls, "_tx_buffer", [])
-                    _io_tls._tx_buffer = buffer[:idx]
-            elif isinstance(tx, Release):  # pyright: ignore[reportUnnecessaryIsInstance]
-                savepoints = getattr(_io_tls, "_tx_savepoints", {})
-                savepoints.pop(tx.name, None)
+                    savepoints[tx.name] = len(buffer)
+                    _io_tls._tx_savepoints = savepoints
+                elif tx.op == "rollback_to":
+                    if tx.name in savepoints:
+                        idx = savepoints[tx.name]
+                        buffer = getattr(_io_tls, "_tx_buffer", [])
+                        _io_tls._tx_buffer = buffer[:idx]
+                else:  # "release"
+                    savepoints.pop(tx.name, None)
 
         # 2. Handle Data Access Operations
         if access.read_tables or access.write_tables:
@@ -1047,7 +1032,7 @@ def _patch_sqlite3() -> None:
         if "factory" not in kwargs:
             kwargs["factory"] = traced_conn_cls
         conn = orig_connect(*args, **kwargs)
-        identity = _normalize_sqlite_db_identity(*args, **kwargs)
+        identity = _normalize_db_identity("sqlite", *args, **kwargs)
         if identity is None:
             identity = f"sqlite-memory:{id(conn)}"
         _register_connection_db_scope(conn, identity)
@@ -1153,7 +1138,7 @@ def patch_sql() -> None:
             # endpoint was registered.  The listener only uses tid
             # suppression for *socket* events, so file I/O passes through.
             suppress_sql_endpoint(conn)
-            identity = _infer_db_identity_from_connection(conn)
+            identity = _normalize_db_identity("connection", conn)
             if identity is None and args and isinstance(args[0], str):
                 identity = f"{driver}-dsn:{args[0]}"
             if identity is None:
@@ -1162,7 +1147,7 @@ def patch_sql() -> None:
                     "port": kwargs.get("port"),
                     "dbname": kwargs.get("dbname") or kwargs.get("database") or kwargs.get("db"),
                 }
-                identity = _normalize_mapping_db_identity(driver, relevant)
+                identity = _normalize_db_identity("mapping", driver, relevant)
             if identity is not None:
                 _register_connection_db_scope(conn, identity)
             # Inject SET lock_timeout if configured (defect #6 workaround).

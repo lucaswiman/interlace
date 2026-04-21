@@ -28,179 +28,25 @@ Example usage:
     ```
 """
 
-import linecache
-import re
 import threading
 from collections.abc import Callable
 from typing import Any
 
-from frontrun._cooperative import real_condition, real_lock
+from frontrun._marker_coordination import MARKER_PATTERN, MarkerRegistry, ThreadCoordinator
 from frontrun._threaded_runner import join_threads_with_deadline
 from frontrun._trace_marker_runtime import build_trace_function, run_traced_callable
 from frontrun.common import InterleavingResult, Schedule, Step
 
-MARKER_PATTERN = re.compile(r"#\s*frontrun:\s*(\w+)")
-
-
-class MarkerRegistry:
-    """Tracks marker locations in source code for efficient lookup.
-
-    This class scans source files to find lines with frontrun markers and
-    maintains a mapping from (filename, line_number) to marker names.
-    """
-
-    def __init__(self):
-        self._markers: dict[tuple[str, int], str] = {}  # (filename, lineno) -> marker_name
-        self._scanned_files: set[str] = set()
-        self._lock = real_lock()
-
-    def scan_frame(self, frame: Any) -> None:  # type: ignore[name-defined]
-        """Scan the source file for the given frame to find all markers.
-
-        Args:
-            frame: A Python frame object from the trace function
-        """
-        filename = frame.f_code.co_filename
-
-        # Fast path: Skip if already scanned (no lock needed)
-        if filename in self._scanned_files:
-            return
-
-        # Double-checked locking: acquire lock and re-check
-        with self._lock:
-            # Re-check inside the lock in case another thread finished scanning
-            if filename in self._scanned_files:
-                return
-
-            # Read all lines from the file
-            try:
-                # Use linecache to read the file
-                linecache.checkcache(filename)
-                line_num = 1
-                while True:
-                    line = linecache.getline(filename, line_num)
-                    if not line:
-                        break
-
-                    # Check for marker comment
-                    match = MARKER_PATTERN.search(line)
-                    if match:
-                        marker_name = match.group(1)
-                        self._markers[(filename, line_num)] = marker_name
-
-                    line_num += 1
-            except Exception:
-                # If we can't read the file, just skip it
-                pass
-
-            # Mark as scanned AFTER we've populated all markers
-            self._scanned_files.add(filename)
-
-    def get_marker(self, filename: str, lineno: int) -> str | None:
-        """Get the marker name for a specific file location.
-
-        Args:
-            filename: The source file path
-            lineno: The line number
-
-        Returns:
-            The marker name if found, None otherwise
-        """
-        return self._markers.get((filename, lineno))
-
-
-class ThreadCoordinator:
-    """Coordinates thread execution according to a schedule.
-
-    This class manages the synchronization between threads, ensuring that
-    each thread executes markers in the order specified by the schedule.
-    """
-
-    def __init__(self, schedule: Schedule, *, deadlock_timeout: float = 5.0):
-        self.schedule = schedule
-        self.deadlock_timeout = deadlock_timeout
-        self.current_step = 0
-        self.lock = real_lock()
-        self.condition = real_condition(self.lock)
-        self.completed = False
-        self.error: Exception | None = None
-        # Execution serialization lock: ensures only one thread runs between
-        # markers, replicating GIL-like serialization needed on free-threaded
-        # Python where threads truly run in parallel.
-        self._execution_lock = real_lock()
-
-    def wait_for_turn(self, execution_name: str, marker_name: str, *, _reacquire_execution_lock: bool = False):
-        """Block until it's this execution unit's turn to execute this marker.
-
-        When *_reacquire_execution_lock* is ``True`` (used by the trace
-        executors), ``_execution_lock`` is acquired while the condition lock
-        is still held, before returning.  This prevents other threads from
-        racing ahead between being notified and the caller resuming execution.
-        The caller must have already released ``_execution_lock`` before
-        calling this method.
-
-        Args:
-            execution_name: The name of the calling execution unit
-            marker_name: The marker that was hit
-        """
-        with self.condition:
-            while True:
-                # Check if we're done or had an error
-                if self.completed or self.error:
-                    if _reacquire_execution_lock:
-                        self._execution_lock.acquire()
-                    return
-
-                # Check if we've exceeded the schedule
-                if self.current_step >= len(self.schedule.steps):
-                    self.completed = True
-                    if _reacquire_execution_lock:
-                        self._execution_lock.acquire()
-                    self.condition.notify_all()
-                    return
-
-                # Get the current expected step
-                expected_step = self.schedule.steps[self.current_step]
-
-                # Is it our turn?
-                if expected_step.execution_name == execution_name and expected_step.marker_name == marker_name:
-                    # It's our turn! Advance, optionally acquire execution lock, notify.
-                    self.current_step += 1
-                    if _reacquire_execution_lock:
-                        self._execution_lock.acquire()
-                    self.condition.notify_all()
-                    return
-
-                # Not our turn — wait with a fallback timeout so that
-                # incorrect schedules (referencing a marker that no thread
-                # ever reaches) get diagnosed promptly instead of blocking
-                # until the outer thread.join(timeout) fires.
-                if not self.condition.wait(timeout=self.deadlock_timeout):
-                    expected = self.schedule.steps[self.current_step]
-                    self.error = TimeoutError(
-                        f"Schedule stall: waiting for Step({expected.execution_name!r}, "
-                        f"{expected.marker_name!r}) at step {self.current_step}/"
-                        f"{len(self.schedule.steps)}, but no thread has reached it"
-                    )
-                    if _reacquire_execution_lock:
-                        self._execution_lock.acquire()
-                    self.condition.notify_all()
-                    return
-
-    def report_error(self, error: Exception):
-        """Report an error and wake up all waiting threads.
-
-        Args:
-            error: The exception that occurred
-        """
-        with self.condition:
-            self.error = error
-            self.condition.notify_all()
-
-    def is_finished(self) -> bool:
-        """Check if the schedule has completed or encountered an error."""
-        with self.condition:
-            return self.completed or self.error is not None
+__all__ = [
+    "MARKER_PATTERN",
+    "MarkerRegistry",
+    "ThreadCoordinator",
+    "TraceExecutor",
+    "all_marker_schedules",
+    "explore_marker_interleavings",
+    "frontrun",
+    "marker_schedule_strategy",
+]
 
 
 class _ThreadTraceExecutor:

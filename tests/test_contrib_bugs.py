@@ -87,8 +87,6 @@ class TestRedisAsyncReportedBranch:
         from frontrun import _redis_client_async
 
         source = inspect.getsource(_redis_client_async)
-        assert "_run_reported_async_command" in source, "Expected a shared async Redis reported-command helper"
-        assert "_run_reported_async_command(" in inspect.getsource(_redis_client_async._intercept_execute_command_async)
-        assert "_run_reported_async_command(" in inspect.getsource(
-            _redis_client_async._intercept_pipeline_execute_async
-        )
+        assert "_dispatch_async" in source, "Expected a shared async Redis dispatch helper"
+        assert "_dispatch_async(" in inspect.getsource(_redis_client_async._intercept_execute_command_async)
+        assert "_dispatch_async(" in inspect.getsource(_redis_client_async._intercept_pipeline_execute_async)

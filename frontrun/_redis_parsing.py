@@ -24,9 +24,6 @@ from frontrun._redis_command_data import (
     _KeySpec,
 )
 
-# Re-export _COMMAND_KEY_SPECS so existing test imports keep working.
-__all__ = ["_COMMAND_KEY_SPECS"]
-
 # ---------------------------------------------------------------------------
 # Public result type
 # ---------------------------------------------------------------------------

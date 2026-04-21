@@ -630,7 +630,7 @@ class TestCommandCoverage:
     # one key when given a plausible argument list.
     def test_all_core_commands_are_handled(self) -> None:
         """Smoke test: commands with known key-specs should not fall through to fallback."""
-        from frontrun._redis_parsing import _COMMAND_KEY_SPECS
+        from frontrun._redis_command_data import _COMMAND_KEY_SPECS
 
         # Commands that use keyword-based begin_search need the keyword in args.
         keyword_args: dict[str, tuple[object, ...]] = {

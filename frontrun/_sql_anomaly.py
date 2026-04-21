@@ -7,6 +7,7 @@ detecting cycles whose edge types determine the anomaly kind.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from frontrun._trace_format import TraceEvent
@@ -149,10 +150,49 @@ def _find_cycle(graph: dict[int, list[tuple[int, str, str]]]) -> list[tuple[int,
 # ---------------------------------------------------------------------------
 
 
+def _iter_table_read_conflicts(
+    ops: list[tuple[int, str, str, str]],
+) -> Iterator[tuple[int, int, str, set[str]]]:
+    """Yield ``(focus_tid, writer_tid, table, writer_accesses)`` for each write by
+    another thread that falls between the first and last table-level read of
+    ``focus_tid`` on ``table``.  Shared scaffolding for NRR and phantom checks.
+    """
+    for focus_tid in sorted({tid for tid, _, _, _ in ops}):
+        table_read_positions: dict[str, list[int]] = {}
+        for i, (tid, _resource, table, access) in enumerate(ops):
+            if tid == focus_tid and access == "read":
+                table_read_positions.setdefault(table, []).append(i)
+
+        for table, positions in table_read_positions.items():
+            if len(positions) < 2:
+                continue
+            first_read, last_read = positions[0], positions[-1]
+            for i, (tid, _res, tbl, access) in enumerate(ops):
+                if tid == focus_tid or tbl != table or access != "write":
+                    continue
+                if not (first_read < i < last_read):
+                    continue
+                writer_accesses = {acc for t, _r, tb, acc in ops if t == tid and tb == table}
+                yield focus_tid, tid, table, writer_accesses
+
+
 def _check_non_repeatable_read(ops: list[tuple[int, str, str, str]]) -> SqlAnomaly | None:
     # Same thread reads same resource (or same table) twice with another thread's write in between.
+    def _nrr(focus_tid: int, writer_tid: int, table: str) -> SqlAnomaly:
+        return SqlAnomaly(
+            kind="non_repeatable_read",
+            summary=(
+                f"Non-repeatable read: thread {focus_tid} read table '{table}' twice "
+                f"but thread {writer_tid} wrote to it in between, changing the result."
+            ),
+            tables=frozenset([table]),
+            threads=frozenset([focus_tid, writer_tid]),
+        )
+
+    # 1. Exact resource-level check (original logic): same exact resource_id read
+    #    twice by focus_tid with another thread's write on that same resource_id
+    #    between the two reads.  Fires regardless of the writer's other accesses.
     for focus_tid in sorted({tid for tid, _, _, _ in ops}):
-        # 1. Exact resource-level check (original logic)
         resource_read_positions: dict[str, list[int]] = {}
         for i, (tid, resource, _table, access) in enumerate(ops):
             if tid == focus_tid and access == "read":
@@ -164,49 +204,14 @@ def _check_non_repeatable_read(ops: list[tuple[int, str, str, str]]) -> SqlAnoma
             first_read, last_read = positions[0], positions[-1]
             for i, (tid, res, _table, access) in enumerate(ops):
                 if tid != focus_tid and res == resource and access == "write" and first_read < i < last_read:
-                    table = _resource_to_table(resource)
-                    return SqlAnomaly(
-                        kind="non_repeatable_read",
-                        summary=(
-                            f"Non-repeatable read: thread {focus_tid} read table '{table}' twice "
-                            f"but thread {tid} wrote to it in between, changing the result."
-                        ),
-                        tables=frozenset([table]),
-                        threads=frozenset([focus_tid, tid]),
-                    )
+                    return _nrr(focus_tid, tid, _resource_to_table(resource))
 
-        # 2. Cross-granularity check: same table, different resource IDs.
-        #    Catches cases where a row-level read is interleaved with a
-        #    table-level write (or vice versa) on the same table.
-        #    Only fires when the writing thread also reads the table
-        #    (indicating an UPDATE, not just an INSERT/DELETE).  Write-only
-        #    threads should fall through to the phantom read check.
-        table_read_positions: dict[str, list[int]] = {}
-        for i, (tid, _resource, table, access) in enumerate(ops):
-            if tid == focus_tid and access == "read":
-                table_read_positions.setdefault(table, []).append(i)
-
-        for table, positions in table_read_positions.items():
-            if len(positions) < 2:
-                continue
-            first_read, last_read = positions[0], positions[-1]
-            for i, (tid, _res, tbl, access) in enumerate(ops):
-                if tid != focus_tid and tbl == table and access == "write" and first_read < i < last_read:
-                    # Only classify as NRR if the writing thread also reads this table
-                    # (i.e. an UPDATE).  Write-only threads (INSERT/DELETE) are
-                    # phantom reads, not non-repeatable reads.
-                    writer_accesses = {acc for t, _r, tb, acc in ops if t == tid and tb == table}
-                    if "read" not in writer_accesses:
-                        continue
-                    return SqlAnomaly(
-                        kind="non_repeatable_read",
-                        summary=(
-                            f"Non-repeatable read: thread {focus_tid} read table '{table}' twice "
-                            f"but thread {tid} wrote to it in between, changing the result."
-                        ),
-                        tables=frozenset([table]),
-                        threads=frozenset([focus_tid, tid]),
-                    )
+    # 2. Cross-granularity check: same table, different resource IDs.  Only fires
+    #    when the writing thread also reads the table (i.e. an UPDATE).  Write-only
+    #    threads (INSERT/DELETE) are phantom reads, handled by _check_phantom_read.
+    for focus_tid, writer_tid, table, writer_accesses in _iter_table_read_conflicts(ops):
+        if "read" in writer_accesses:
+            return _nrr(focus_tid, writer_tid, table)
     return None
 
 
@@ -220,44 +225,21 @@ def _check_phantom_read(ops: list[tuple[int, str, str, str]]) -> SqlAnomaly | No
     reads), while non-repeatable reads involve changed values (UPDATE between
     two reads of the same row).
 
-    We use a heuristic: if the conflicting write is paired with an INSERT or
-    DELETE (i.e., the write resource differs from the read resource — table-level
-    write vs row-level read, or the writing thread only writes without reading),
-    we classify as phantom.
+    Heuristic: if the writing thread does NOT read this table, the write is
+    likely an INSERT/DELETE (no prior read needed) and we classify as phantom.
     """
-    for focus_tid in sorted({tid for tid, _, _, _ in ops}):
-        # Collect table-level reads for the focus thread
-        table_read_positions: dict[str, list[int]] = {}
-        for i, (tid, _resource, table, access) in enumerate(ops):
-            if tid == focus_tid and access == "read":
-                table_read_positions.setdefault(table, []).append(i)
-
-        for table, positions in table_read_positions.items():
-            if len(positions) < 2:
-                continue
-            first_read, last_read = positions[0], positions[-1]
-
-            # Look for writes by OTHER threads between the two reads
-            for i, (tid, _resource, tbl, access) in enumerate(ops):
-                if tid == focus_tid or tbl != table or access != "write":
-                    continue
-                if not (first_read < i < last_read):
-                    continue
-
-                # Heuristic: if the writing thread does NOT read this table,
-                # the write is likely an INSERT (no prior read needed).
-                writer_accesses = {acc for t, _r, tb, acc in ops if t == tid and tb == table}
-                if "read" not in writer_accesses:
-                    return SqlAnomaly(
-                        kind="phantom_read",
-                        summary=(
-                            f"Phantom read: thread {focus_tid} read table '{table}' twice "
-                            f"but thread {tid} inserted/deleted rows in between, "
-                            f"changing the set of rows returned."
-                        ),
-                        tables=frozenset([table]),
-                        threads=frozenset([focus_tid, tid]),
-                    )
+    for focus_tid, writer_tid, table, writer_accesses in _iter_table_read_conflicts(ops):
+        if "read" not in writer_accesses:
+            return SqlAnomaly(
+                kind="phantom_read",
+                summary=(
+                    f"Phantom read: thread {focus_tid} read table '{table}' twice "
+                    f"but thread {writer_tid} inserted/deleted rows in between, "
+                    f"changing the set of rows returned."
+                ),
+                tables=frozenset([table]),
+                threads=frozenset([focus_tid, writer_tid]),
+            )
     return None
 
 

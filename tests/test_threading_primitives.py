@@ -162,6 +162,84 @@ def test_bounded_semaphore_race_condition():
 
 
 # ---------------------------------------------------------------------------
+# Direct unit tests for CooperativeSemaphore (unmanaged thread path)
+# ---------------------------------------------------------------------------
+
+
+def test_cooperative_semaphore_nonblocking_success():
+    """Non-blocking acquire returns True when available, False when exhausted."""
+    from frontrun._cooperative import CooperativeSemaphore
+
+    sem = CooperativeSemaphore(1)
+    assert sem.acquire(blocking=False) is True
+    assert sem.acquire(blocking=False) is False
+    sem.release()
+    assert sem.acquire(blocking=False) is True
+
+
+def test_cooperative_semaphore_timeout_expires_unmanaged():
+    """Blocking acquire with timeout returns False after deadline."""
+    import time
+
+    from frontrun._cooperative import CooperativeSemaphore
+
+    sem = CooperativeSemaphore(1)
+    assert sem.acquire() is True  # take the one slot
+
+    start = time.monotonic()
+    result = sem.acquire(timeout=0.05)
+    elapsed = time.monotonic() - start
+
+    assert result is False
+    assert elapsed >= 0.04
+    assert elapsed < 1.0
+
+
+def test_cooperative_semaphore_timeout_acquires_when_released():
+    """Blocking acquire with timeout returns True if released before deadline."""
+    import threading as real_threading
+    import time
+
+    from frontrun._cooperative import CooperativeSemaphore
+
+    sem = CooperativeSemaphore(1)
+    sem.acquire()
+
+    def _releaser():
+        time.sleep(0.05)
+        sem.release()
+
+    t = real_threading.Thread(target=_releaser)
+    t.start()
+    try:
+        assert sem.acquire(timeout=2.0) is True
+    finally:
+        t.join()
+
+
+def test_cooperative_semaphore_no_timeout_acquires_when_released():
+    """Blocking acquire with no timeout waits until released (unmanaged path)."""
+    import threading as real_threading
+    import time
+
+    from frontrun._cooperative import CooperativeSemaphore
+
+    sem = CooperativeSemaphore(1)
+    sem.acquire()
+
+    def _releaser():
+        time.sleep(0.05)
+        sem.release()
+
+    t = real_threading.Thread(target=_releaser)
+    t.start()
+    try:
+        assert sem.acquire() is True
+    finally:
+        t.join()
+
+
+# ---------------------------------------------------------------------------
 # Test: threading.Event
 # ---------------------------------------------------------------------------
 

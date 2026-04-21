@@ -24,6 +24,7 @@ from frontrun._opcode_observer import (
     _is_shared_opcode,
     _make_object_key,
     _process_opcode,
+    _report_access,
     clear_instr_cache,
 )
 
@@ -615,3 +616,87 @@ class TestPrePython314BinarySubscr:
 
         opcodes = {instr.opname for instr in dis.get_instructions(fn)}
         assert "BINARY_SUBSCR" in opcodes, "Expected BINARY_SUBSCR before 3.14"
+
+
+# ---------------------------------------------------------------------------
+# 9. Access-reporting dispatch: pin which engine method each helper calls
+#    and which kind string it forwards.
+# ---------------------------------------------------------------------------
+
+
+class _DispatchRecorder:
+    """Records which engine method was invoked and the kind string passed."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, str]] = []
+
+    def report_access(self, _execution: object, _thread_id: int, object_key: int, kind: str) -> None:
+        self.calls.append(("access", object_key, kind))
+
+    def report_first_access(self, _execution: object, _thread_id: int, object_key: int, kind: str) -> None:
+        self.calls.append(("first_access", object_key, kind))
+
+
+class TestReportHelperDispatch:
+    """Pin behavior: each of the 5 access-reporting kinds dispatches to a
+    specific (engine method, kind string) pair.  This test locks in the
+    contract of the consolidated ``_report_access`` helper — which used to
+    exist as five parallel helpers (``_report_read``, ``_report_first_read``,
+    ``_report_write``, ``_report_weak_read``, ``_report_weak_write``).
+    """
+
+    @pytest.mark.parametrize(
+        ("kind", "expected_method", "expected_kind"),
+        [
+            ("read", "access", "read"),
+            ("first_read", "first_access", "read"),
+            ("write", "access", "write"),
+            ("weak_read", "access", "weak_read"),
+            ("weak_write", "access", "weak_write"),
+        ],
+    )
+    def test_dispatch(self, kind: Any, expected_method: str, expected_kind: str) -> None:
+        engine = _DispatchRecorder()
+        execution = object()
+        lock = threading.Lock()
+        sids = StableObjectIds()
+        obj = object()
+
+        _report_access(engine, execution, 7, obj, "attr_name", lock, sids, kind)
+
+        assert len(engine.calls) == 1
+        method, _key, recorded_kind = engine.calls[0]
+        assert method == expected_method
+        assert recorded_kind == expected_kind
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["read", "first_read", "write", "weak_read", "weak_write"],
+    )
+    def test_none_object_is_noop(self, kind: Any) -> None:
+        """Every kind short-circuits when obj is None."""
+        engine = _DispatchRecorder()
+        execution = object()
+        lock = threading.Lock()
+        sids = StableObjectIds()
+
+        _report_access(engine, execution, 0, None, "name", lock, sids, kind)
+
+        assert engine.calls == []
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["read", "first_read", "write", "weak_read", "weak_write"],
+    )
+    def test_object_key_uses_stable_id_and_name(self, kind: Any) -> None:
+        """All kinds compute the key via _make_object_key(stable_id, name)."""
+        engine = _DispatchRecorder()
+        execution = object()
+        lock = threading.Lock()
+        sids = StableObjectIds()
+        obj = object()
+
+        _report_access(engine, execution, 0, obj, "some_attr", lock, sids, kind)
+
+        expected_key = _make_object_key(sids.get(obj), "some_attr")
+        assert engine.calls[0][1] == expected_key
