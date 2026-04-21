@@ -24,11 +24,7 @@ from frontrun._opcode_observer import (
     _is_shared_opcode,
     _make_object_key,
     _process_opcode,
-    _report_first_read,
-    _report_read,
-    _report_weak_read,
-    _report_weak_write,
-    _report_write,
+    _report_access,
     clear_instr_cache,
 )
 
@@ -642,63 +638,65 @@ class _DispatchRecorder:
 
 
 class TestReportHelperDispatch:
-    """Pin behavior: each of the 5 report helpers dispatches to a specific
-    (engine method, kind string) pair.  This test locks in current behavior
-    so that any refactor that consolidates the helpers preserves it.
+    """Pin behavior: each of the 5 access-reporting kinds dispatches to a
+    specific (engine method, kind string) pair.  This test locks in the
+    contract of the consolidated ``_report_access`` helper — which used to
+    exist as five parallel helpers (``_report_read``, ``_report_first_read``,
+    ``_report_write``, ``_report_weak_read``, ``_report_weak_write``).
     """
 
     @pytest.mark.parametrize(
-        ("helper", "expected_method", "expected_kind"),
+        ("kind", "expected_method", "expected_kind"),
         [
-            (_report_read, "access", "read"),
-            (_report_first_read, "first_access", "read"),
-            (_report_write, "access", "write"),
-            (_report_weak_read, "access", "weak_read"),
-            (_report_weak_write, "access", "weak_write"),
+            ("read", "access", "read"),
+            ("first_read", "first_access", "read"),
+            ("write", "access", "write"),
+            ("weak_read", "access", "weak_read"),
+            ("weak_write", "access", "weak_write"),
         ],
     )
-    def test_dispatch(self, helper: Any, expected_method: str, expected_kind: str) -> None:
+    def test_dispatch(self, kind: Any, expected_method: str, expected_kind: str) -> None:
         engine = _DispatchRecorder()
         execution = object()
         lock = threading.Lock()
         sids = StableObjectIds()
         obj = object()
 
-        helper(engine, execution, 7, obj, "attr_name", lock, sids)
+        _report_access(engine, execution, 7, obj, "attr_name", lock, sids, kind)
 
         assert len(engine.calls) == 1
-        method, _key, kind = engine.calls[0]
+        method, _key, recorded_kind = engine.calls[0]
         assert method == expected_method
-        assert kind == expected_kind
+        assert recorded_kind == expected_kind
 
     @pytest.mark.parametrize(
-        "helper",
-        [_report_read, _report_first_read, _report_write, _report_weak_read, _report_weak_write],
+        "kind",
+        ["read", "first_read", "write", "weak_read", "weak_write"],
     )
-    def test_none_object_is_noop(self, helper: Any) -> None:
-        """Every helper short-circuits when obj is None."""
+    def test_none_object_is_noop(self, kind: Any) -> None:
+        """Every kind short-circuits when obj is None."""
         engine = _DispatchRecorder()
         execution = object()
         lock = threading.Lock()
         sids = StableObjectIds()
 
-        helper(engine, execution, 0, None, "name", lock, sids)
+        _report_access(engine, execution, 0, None, "name", lock, sids, kind)
 
         assert engine.calls == []
 
     @pytest.mark.parametrize(
-        "helper",
-        [_report_read, _report_first_read, _report_write, _report_weak_read, _report_weak_write],
+        "kind",
+        ["read", "first_read", "write", "weak_read", "weak_write"],
     )
-    def test_object_key_uses_stable_id_and_name(self, helper: Any) -> None:
-        """All helpers compute the key via _make_object_key(stable_id, name)."""
+    def test_object_key_uses_stable_id_and_name(self, kind: Any) -> None:
+        """All kinds compute the key via _make_object_key(stable_id, name)."""
         engine = _DispatchRecorder()
         execution = object()
         lock = threading.Lock()
         sids = StableObjectIds()
         obj = object()
 
-        helper(engine, execution, 0, obj, "some_attr", lock, sids)
+        _report_access(engine, execution, 0, obj, "some_attr", lock, sids, kind)
 
         expected_key = _make_object_key(sids.get(obj), "some_attr")
         assert engine.calls[0][1] == expected_key
