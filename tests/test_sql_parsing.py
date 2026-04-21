@@ -128,27 +128,27 @@ class TestSqlglotParseNonDml:
 
     def test_savepoint(self):
         r = _sqlglot_parse("SAVEPOINT sp1")
-        from frontrun._sql_parsing import Savepoint
+        from frontrun._sql_parsing import SavepointOp
 
-        assert r is not None and r.tx_op == Savepoint("sp1")
+        assert r is not None and r.tx_op == SavepointOp("savepoint", "sp1")
 
     def test_release_savepoint(self):
         r = _sqlglot_parse("RELEASE SAVEPOINT sp1")
-        from frontrun._sql_parsing import Release
+        from frontrun._sql_parsing import SavepointOp
 
-        assert r is not None and r.tx_op == Release("sp1")
+        assert r is not None and r.tx_op == SavepointOp("release", "sp1")
 
     def test_release_no_keyword(self):
         r = _sqlglot_parse("RELEASE sp1")
-        from frontrun._sql_parsing import Release
+        from frontrun._sql_parsing import SavepointOp
 
-        assert r is not None and r.tx_op == Release("sp1")
+        assert r is not None and r.tx_op == SavepointOp("release", "sp1")
 
     def test_rollback_to_savepoint(self):
         r = _sqlglot_parse("ROLLBACK TO SAVEPOINT sp1")
-        from frontrun._sql_parsing import RollbackTo
+        from frontrun._sql_parsing import SavepointOp
 
-        assert r is not None and r.tx_op == RollbackTo("sp1")
+        assert r is not None and r.tx_op == SavepointOp("rollback_to", "sp1")
 
     def test_set_autocommit_0(self):
         r = _sqlglot_parse("SET AUTOCOMMIT = 0")

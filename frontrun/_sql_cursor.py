@@ -36,9 +36,7 @@ from frontrun._schema import get_schema
 from frontrun._sql_insert_tracker import record_insert, resolve_alias
 from frontrun._sql_parsing import (
     LockIntent,
-    Release,
-    RollbackTo,
-    Savepoint,
+    SavepointOp,
     TxOp,
     parse_sql_access,
 )
@@ -569,20 +567,19 @@ def _report_sql_access(
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
                 _release_dpor_row_locks()
-            elif isinstance(tx, Savepoint):
+            elif isinstance(tx, SavepointOp):
                 savepoints = getattr(_io_tls, "_tx_savepoints", {})
-                buffer = getattr(_io_tls, "_tx_buffer", [])
-                savepoints[tx.name] = len(buffer)
-                _io_tls._tx_savepoints = savepoints
-            elif isinstance(tx, RollbackTo):
-                savepoints = getattr(_io_tls, "_tx_savepoints", {})
-                if tx.name in savepoints:
-                    idx = savepoints[tx.name]
+                if tx.op == "savepoint":
                     buffer = getattr(_io_tls, "_tx_buffer", [])
-                    _io_tls._tx_buffer = buffer[:idx]
-            elif isinstance(tx, Release):  # pyright: ignore[reportUnnecessaryIsInstance]
-                savepoints = getattr(_io_tls, "_tx_savepoints", {})
-                savepoints.pop(tx.name, None)
+                    savepoints[tx.name] = len(buffer)
+                    _io_tls._tx_savepoints = savepoints
+                elif tx.op == "rollback_to":
+                    if tx.name in savepoints:
+                        idx = savepoints[tx.name]
+                        buffer = getattr(_io_tls, "_tx_buffer", [])
+                        _io_tls._tx_buffer = buffer[:idx]
+                else:  # "release"
+                    savepoints.pop(tx.name, None)
 
         # 2. Handle Data Access Operations
         if access.read_tables or access.write_tables:

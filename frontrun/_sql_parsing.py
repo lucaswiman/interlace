@@ -10,7 +10,7 @@ from __future__ import annotations
 import enum
 import re
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 # ---------------------------------------------------------------------------
 # Typed enums for lock intent and transaction operations
@@ -34,27 +34,14 @@ class TxOp(enum.Enum):
 
 
 @dataclass(frozen=True)
-class Savepoint:
-    """SAVEPOINT <name> operation."""
+class SavepointOp:
+    """Tagged SAVEPOINT / ROLLBACK TO / RELEASE operation."""
 
+    op: Literal["savepoint", "rollback_to", "release"]
     name: str
 
 
-@dataclass(frozen=True)
-class RollbackTo:
-    """ROLLBACK TO SAVEPOINT <name> operation."""
-
-    name: str
-
-
-@dataclass(frozen=True)
-class Release:
-    """RELEASE SAVEPOINT <name> operation."""
-
-    name: str
-
-
-TxControl = TxOp | Savepoint | RollbackTo | Release
+TxControl = TxOp | SavepointOp
 
 
 class SqlAccessResult(NamedTuple):
@@ -167,7 +154,7 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
         if upper.startswith("SAVEPOINT "):
             parts = stripped[10:].strip().split()
             if parts:
-                return SqlAccessResult(set(), set(), None, Savepoint(parts[0]), None)
+                return SqlAccessResult(set(), set(), None, SavepointOp("savepoint", parts[0]), None)
 
         # RELEASE [SAVEPOINT] <name> — sqlglot ERROR
         if upper.startswith("RELEASE "):
@@ -176,7 +163,7 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
                 rest = rest[10:].strip()
             parts = rest.split()
             if parts:
-                return SqlAccessResult(set(), set(), None, Release(parts[0]), None)
+                return SqlAccessResult(set(), set(), None, SavepointOp("release", parts[0]), None)
 
         # LOCK TABLE <table>[, <table>...] [IN <mode> MODE] — sqlglot ERROR for all dialects
         if upper.startswith("LOCK TABLE "):
@@ -272,7 +259,7 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
         elif isinstance(ast, exp.Rollback):
             sp = ast.args.get("savepoint")
             if sp:
-                tx_op = RollbackTo(sp.name)
+                tx_op = SavepointOp("rollback_to", sp.name)
             else:
                 tx_op = TxOp.ROLLBACK
         elif isinstance(ast, exp.Set):
