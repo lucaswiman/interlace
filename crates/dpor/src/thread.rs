@@ -29,8 +29,6 @@ impl ThreadStatus {
 #[derive(Clone, Debug)]
 pub struct Thread {
     pub id: usize,
-    /// Causality vector clock for general causal ordering.
-    pub causality: VersionVec,
     /// DPOR vector clock: includes lock-based happens-before edges.
     /// Used by `process_access` for standard race detection.
     /// Paper: implements →_E from Def 3.2 (JACM'17 p.12-13).
@@ -54,7 +52,6 @@ impl Thread {
     pub fn new(id: usize, num_threads: usize) -> Self {
         Self {
             id,
-            causality: VersionVec::new(num_threads),
             dpor_vv: VersionVec::new(num_threads),
             io_vv: VersionVec::new(num_threads),
             finished: false,

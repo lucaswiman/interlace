@@ -409,7 +409,6 @@ impl DporEngine {
             SyncEvent::LockAcquire { lock_id } => {
                 if let Some(release_vv) = execution.lock_release_vv.get(&lock_id) {
                     let release_vv = release_vv.clone();
-                    execution.threads[thread_id].causality.join(&release_vv);
                     execution.threads[thread_id].dpor_vv.join(&release_vv);
                 }
                 let lock_obj_id = lock_id ^ Self::LOCK_OBJECT_XOR;
@@ -451,18 +450,14 @@ impl DporEngine {
                 });
             }
             SyncEvent::ThreadJoin { joined_thread } => {
-                let joined_causality = execution.threads[joined_thread].causality.clone();
                 let joined_dpor_vv = execution.threads[joined_thread].dpor_vv.clone();
                 let joined_io_vv = execution.threads[joined_thread].io_vv.clone();
-                execution.threads[thread_id].causality.join(&joined_causality);
                 execution.threads[thread_id].dpor_vv.join(&joined_dpor_vv);
                 execution.threads[thread_id].io_vv.join(&joined_io_vv);
             }
             SyncEvent::ThreadSpawn { child_thread } => {
-                let parent_causality = execution.threads[thread_id].causality.clone();
                 let parent_dpor_vv = execution.threads[thread_id].dpor_vv.clone();
                 let parent_io_vv = execution.threads[thread_id].io_vv.clone();
-                execution.threads[child_thread].causality.join(&parent_causality);
                 execution.threads[child_thread].dpor_vv.join(&parent_dpor_vv);
                 execution.threads[child_thread].io_vv.join(&parent_io_vv);
             }
