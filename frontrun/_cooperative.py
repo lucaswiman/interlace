@@ -725,24 +725,14 @@ class CooperativeEvent:
             return self._event.wait(timeout=timeout)
 
         scheduler, thread_id = ctx
-
-        if timeout is not None:
-            deadline: float = time.monotonic() + timeout
-            while not self._event.is_set():
-                if scheduler._error:
-                    raise SchedulerAbort("scheduler aborted")
-                if scheduler._finished:
-                    return self._event.wait(timeout=1.0)
-                if time.monotonic() >= deadline:
-                    return self._event.is_set()
-                scheduler.wait_for_turn(thread_id)
-            return True
-
+        deadline = time.monotonic() + timeout if timeout is not None else math.inf
         while not self._event.is_set():
             if scheduler._error:
                 raise SchedulerAbort("scheduler aborted")
             if scheduler._finished:
                 return self._event.wait(timeout=1.0)
+            if time.monotonic() >= deadline:
+                return False
             scheduler.wait_for_turn(thread_id)
         return True
 
@@ -833,28 +823,23 @@ class CooperativeCondition:
             # _served is monotonically increasing: a stale read can
             # only cause one extra spin iteration, never a missed wakeup.
 
-            if timeout is not None:
-                deadline = time.monotonic() + timeout
-                while my_ticket >= self._served:
-                    if scheduler._error:
-                        raise SchedulerAbort("scheduler aborted")
-                    if scheduler._finished:
-                        remaining = max(0.0, deadline - time.monotonic())
-                        time.sleep(min(0.01, remaining))
-                        return my_ticket < self._served
-                    if time.monotonic() >= deadline:
-                        return False
-                    scheduler.wait_for_turn(thread_id)
-                return True
-
+            deadline = time.monotonic() + timeout if timeout is not None else math.inf
             while my_ticket >= self._served:
                 if scheduler._error:
                     raise SchedulerAbort("scheduler aborted")
                 if scheduler._finished:
-                    end = time.monotonic() + 1.0
+                    # When the scheduler is done, give notifications a
+                    # brief window to land (bounded by the remaining
+                    # user timeout, if any).  Matches the previous
+                    # per-branch behaviour: timeout case slept once for
+                    # min(0.01, remaining); no-timeout case polled for up
+                    # to 1s.  We unify with a bounded poll loop.
+                    end = time.monotonic() + min(1.0, max(0.0, deadline - time.monotonic()))
                     while my_ticket >= self._served and time.monotonic() < end:
                         time.sleep(0.001)
                     return my_ticket < self._served
+                if time.monotonic() >= deadline:
+                    return False
                 scheduler.wait_for_turn(thread_id)
             return True
         finally:
