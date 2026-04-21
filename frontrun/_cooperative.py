@@ -549,108 +549,82 @@ class CooperativeSemaphore:
             finally:
                 _scheduler_tls._in_dpor_machinery = prev
 
-    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
-
-        # Fast path: try to decrement counter
+    def _try_acquire(self) -> bool:
+        """Attempt a non-blocking decrement; return True on success."""
         self._lock.acquire()
-        if self._value > 0:
-            self._value -= 1
+        try:
+            if self._value > 0:
+                self._value -= 1
+                return True
+            return False
+        finally:
             self._lock.release()
+
+    def _drain_until(self, deadline: float) -> bool:
+        """Spin on ``_try_acquire`` until *deadline*; report on success."""
+        while time.monotonic() < deadline:
+            if self._try_acquire():
+                self._report("lock_acquire")
+                return True
+            time.sleep(0.001)
+        return False
+
+    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
+        # Fast path: try to decrement counter
+        if self._try_acquire():
             self._report("lock_acquire")
             return True
-        self._lock.release()
 
         if not blocking:
             return False
 
         ctx = get_context()
         if ctx is None:
-            # Fall back to spinning with real lock (non-managed thread)
-            if timeout is not None:
-                deadline = time.monotonic() + timeout
-                while True:
-                    self._lock.acquire()
-                    if self._value > 0:
-                        self._value -= 1
-                        self._lock.release()
-                        self._report("lock_acquire")
-                        return True
-                    self._lock.release()
-                    if time.monotonic() >= deadline:
-                        return False
-                    time.sleep(0.001)
+            # Unmanaged thread: spin with real sleep.  A single loop handles
+            # both timeout and no-timeout via a sentinel (math.inf) deadline.
+            deadline = time.monotonic() + timeout if timeout is not None else math.inf
             while True:
-                self._lock.acquire()
-                if self._value > 0:
-                    self._value -= 1
-                    self._lock.release()
+                if self._try_acquire():
                     self._report("lock_acquire")
                     return True
-                self._lock.release()
+                if time.monotonic() >= deadline:
+                    return False
                 time.sleep(0.001)
 
-        # Spin-yield loop for managed threads
+        # Spin-yield loop for managed threads.  Timeout is intentionally
+        # ignored here: DPOR/bytecode schedulers drive progress themselves,
+        # and shutdown drains via ``_finished`` below.
         scheduler, thread_id = ctx
         before_sync_retry = getattr(scheduler, "before_sync_retry", None)
         after_sync_retry = getattr(scheduler, "after_sync_retry", None)
         if before_sync_retry is not None:
+            assert after_sync_retry is not None
             while True:
-                # Aggressive error check (option 6)
                 if scheduler._error:
                     raise SchedulerAbort("scheduler aborted")
                 if scheduler._finished:
-                    deadline = time.monotonic() + 1.0
-                    while time.monotonic() < deadline:
-                        self._lock.acquire()
-                        if self._value > 0:
-                            self._value -= 1
-                            self._lock.release()
-                            self._report("lock_acquire")
-                            return True
-                        self._lock.release()
-                        time.sleep(0.001)
-                    return False
-                assert after_sync_retry is not None
+                    return self._drain_until(time.monotonic() + 1.0)
                 if not before_sync_retry(thread_id):
                     return False
-                self._lock.acquire()
-                if self._value > 0:
-                    self._value -= 1
-                    self._lock.release()
+                if self._try_acquire():
                     self._report("lock_acquire")
                     after_sync_retry(thread_id)
                     return True
-                self._lock.release()
                 self._report("lock_wait")
                 after_sync_retry(thread_id)
-        else:
-            # Bytecode scheduling relies on re-probing after each scheduler
-            # turn; reporting wait without retrying can wedge a waiter forever.
-            self._report("lock_wait")
-            while True:
-                # Aggressive error check (option 6)
-                if scheduler._error:
-                    raise SchedulerAbort("scheduler aborted")
-                self._lock.acquire()
-                if self._value > 0:
-                    self._value -= 1
-                    self._lock.release()
-                    self._report("lock_acquire")
-                    return True
-                self._lock.release()
-                if scheduler._finished:
-                    deadline = time.monotonic() + 1.0
-                    while time.monotonic() < deadline:
-                        self._lock.acquire()
-                        if self._value > 0:
-                            self._value -= 1
-                            self._lock.release()
-                            self._report("lock_acquire")
-                            return True
-                        self._lock.release()
-                        time.sleep(0.001)
-                    return False
-                scheduler.wait_for_turn(thread_id)
+
+        # Bytecode scheduling relies on re-probing after each scheduler
+        # turn; reporting wait without retrying can wedge a waiter forever.
+        self._report("lock_wait")
+        while True:
+            if scheduler._error:
+                raise SchedulerAbort("scheduler aborted")
+            if self._try_acquire():
+                self._report("lock_acquire")
+                return True
+            if scheduler._finished:
+                return self._drain_until(time.monotonic() + 1.0)
+            scheduler.wait_for_turn(thread_id)
 
     def release(self, n: int = 1) -> None:
         if n < 1:
