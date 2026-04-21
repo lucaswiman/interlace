@@ -25,6 +25,7 @@ eagerly (before each iteration) and bail via
 torn down.
 """
 
+import math
 import queue
 import threading
 import time
@@ -966,22 +967,7 @@ class CooperativeQueue:
             return self._queue.get(block=True, timeout=timeout)
 
         scheduler, thread_id = ctx
-
-        if timeout is not None:
-            deadline: float = time.monotonic() + timeout
-            while True:
-                if scheduler._error:
-                    raise SchedulerAbort("scheduler aborted")
-                try:
-                    return self._queue.get(block=False)
-                except queue.Empty:
-                    pass
-                if scheduler._finished:
-                    return self._queue.get(block=True, timeout=1.0)
-                if time.monotonic() >= deadline:
-                    raise queue.Empty
-                scheduler.wait_for_turn(thread_id)
-
+        deadline = time.monotonic() + timeout if timeout is not None else math.inf
         while True:
             if scheduler._error:
                 raise SchedulerAbort("scheduler aborted")
@@ -991,6 +977,8 @@ class CooperativeQueue:
                 pass
             if scheduler._finished:
                 return self._queue.get(block=True, timeout=1.0)
+            if time.monotonic() >= deadline:
+                raise queue.Empty
             scheduler.wait_for_turn(thread_id)
 
     def put(self, item: Any, block: bool = True, timeout: float | None = None) -> None:
@@ -1008,24 +996,7 @@ class CooperativeQueue:
             return
 
         scheduler, thread_id = ctx
-
-        if timeout is not None:
-            deadline: float = time.monotonic() + timeout
-            while True:
-                if scheduler._error:
-                    raise SchedulerAbort("scheduler aborted")
-                try:
-                    self._queue.put(item, block=False)
-                    return
-                except queue.Full:
-                    pass
-                if scheduler._finished:
-                    self._queue.put(item, block=True, timeout=1.0)
-                    return
-                if time.monotonic() >= deadline:
-                    raise queue.Full
-                scheduler.wait_for_turn(thread_id)
-
+        deadline = time.monotonic() + timeout if timeout is not None else math.inf
         while True:
             if scheduler._error:
                 raise SchedulerAbort("scheduler aborted")
@@ -1037,6 +1008,8 @@ class CooperativeQueue:
             if scheduler._finished:
                 self._queue.put(item, block=True, timeout=1.0)
                 return
+            if time.monotonic() >= deadline:
+                raise queue.Full
             scheduler.wait_for_turn(thread_id)
 
     def qsize(self) -> int:
