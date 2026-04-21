@@ -658,3 +658,42 @@ class TestInsertTableRegex:
         m = _RE_INSERT_TABLE.match("INSERT INTO users (name) VALUES ('alice')")
         assert m is not None
         assert m.group(1) == "users"
+
+
+class TestUpdateTableRegex:
+    def test_schema_qualified_update(self):
+        """UPDATE schema.table should capture the table, not the schema."""
+        from frontrun._sql_cursor import _RE_UPDATE_TABLE
+
+        m = _RE_UPDATE_TABLE.match("UPDATE public.users SET name = 'bob' WHERE id = 1")
+        assert m is not None
+        assert m.group(1) == "users"
+
+    def test_schema_qualified_update_quoted(self):
+        """UPDATE `schema`.`table` should capture the table."""
+        from frontrun._sql_cursor import _RE_UPDATE_TABLE
+
+        m = _RE_UPDATE_TABLE.match("UPDATE `mydb`.`users` SET name = 'bob'")
+        assert m is not None
+        assert m.group(1) == "users"
+
+    def test_basic_update_still_works(self):
+        """Ensure basic UPDATE table still works after regex change."""
+        from frontrun._sql_cursor import _RE_UPDATE_TABLE
+
+        m = _RE_UPDATE_TABLE.match("UPDATE users SET name = 'bob' WHERE id = 1")
+        assert m is not None
+        assert m.group(1) == "users"
+
+
+class TestPyformatEscapedPercentWithPlaceholder:
+    def test_escaped_percent_followed_by_placeholder(self):
+        """%%%s (literal percent + placeholder) in LIKE must parse correctly.
+
+        In pyformat, '%%%s' means: literal %% (escaped percent) followed by
+        %s (placeholder).  The preprocessing should produce '%?' inside the
+        string literal so sqlglot sees a LIKE pattern, not a stray '%s'.
+        """
+        sql = "SELECT * FROM t WHERE name LIKE '%%%s'"
+        result = parse_sql_access(sql)
+        assert "t" in result.read_tables

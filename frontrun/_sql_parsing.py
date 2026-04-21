@@ -215,9 +215,9 @@ def _sqlglot_parse(sql: str) -> SqlAccessResult | None:
     # Pre-process pyformat parameter placeholders (%s, %(name)s) which
     # sqlglot default dialect chokes on (misinterprets % as modulo).
     if "%" in sql:
-        sql = re.sub(r"(?<!%)%(?:\(\w+\))?s", "?", sql)
-        # Unescape %% → % (pyformat/format uses %% for a literal percent)
-        sql = sql.replace("%%", "%")
+        sql = sql.replace("%%", "\x00")
+        sql = re.sub(r"%(?:\(\w+\))?s", "?", sql)
+        sql = sql.replace("\x00", "%")
 
     try:
         expressions = sqlglot.parse(sql)

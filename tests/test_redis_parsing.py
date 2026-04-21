@@ -470,6 +470,12 @@ class TestSpecialCommands:
         result = parse_redis_access("PFCOUNT", ("myhll",))
         assert "myhll" in result.read_keys
 
+    def test_pfcount_is_not_write(self) -> None:
+        """PFCOUNT is read-only; it must not appear in write_keys."""
+        result = parse_redis_access("PFCOUNT", ("hll1", "hll2"))
+        assert result.read_keys == ["hll1", "hll2"]
+        assert result.write_keys == []
+
     def test_pfmerge_reads_sources_writes_dest(self) -> None:
         result = parse_redis_access("PFMERGE", ("dest", "src1", "src2"))
         assert "src1" in result.read_keys

@@ -175,7 +175,7 @@ _EXHAUSTIVE_CASES: list[tuple[str, str, tuple[object, ...], list[str], list[str]
     ("SETBIT", "SETBIT", ("mykey", "7", "1"), ["mykey"], ["mykey"], False),
     # ── HyperLogLog commands ─────────────────────────────────────────────
     ("PFADD", "PFADD", ("myhll", "elem1", "elem2"), ["myhll"], ["myhll"], False),
-    ("PFCOUNT", "PFCOUNT", ("hll1", "hll2"), ["hll1", "hll2"], ["hll1", "hll2"], False),
+    ("PFCOUNT", "PFCOUNT", ("hll1", "hll2"), ["hll1", "hll2"], [], False),
     ("PFDEBUG", "PFDEBUG", ("GETREG", "mykey"), ["mykey"], ["mykey"], False),
     ("PFMERGE", "PFMERGE", ("dst", "src1", "src2"), ["dst", "src1", "src2"], ["dst"], False),
     # ── Geo commands ─────────────────────────────────────────────────────

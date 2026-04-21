@@ -920,7 +920,7 @@ class CooperativeCondition:
         # Also wake the real condition for threads in the non-cooperative
         # path (no scheduler context — they block in _real_cond.wait()).
         with self._real_cond:
-            self._real_cond.notify(n)
+            self._real_cond.notify(actual)
 
     def notify_all(self) -> None:
         # Enforce the Condition invariant: caller must hold self._lock.
