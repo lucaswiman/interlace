@@ -71,9 +71,9 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+from frontrun._marker_coordination import MarkerRegistry, ThreadCoordinator
 from frontrun._trace_marker_runtime import build_trace_function, run_traced_callable
 from frontrun.common import Schedule
-from frontrun.trace_markers import MarkerRegistry, ThreadCoordinator
 
 
 class AsyncTraceExecutor:
