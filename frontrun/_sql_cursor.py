@@ -36,7 +36,6 @@ from frontrun._schema import get_schema
 from frontrun._sql_insert_tracker import record_insert, resolve_alias
 from frontrun._sql_parsing import (
     LockIntent,
-    SavepointOp,
     TxOp,
     parse_sql_access,
 )
@@ -567,7 +566,7 @@ def _report_sql_access(
                 _io_tls._tx_buffer = []
                 _io_tls._tx_savepoints = {}
                 _release_dpor_row_locks()
-            elif isinstance(tx, SavepointOp):
+            else:  # SavepointOp
                 savepoints = getattr(_io_tls, "_tx_savepoints", {})
                 if tx.op == "savepoint":
                     buffer = getattr(_io_tls, "_tx_buffer", [])
