@@ -110,3 +110,43 @@ class TestResetConnectionState:
         reset_connection_state()
 
         assert resolve_alias("users", 42) == "sql:users:setup_ins0"
+
+
+class TestSavepointDispatch:
+    """Pins the cursor-level dispatch behavior for SAVEPOINT / ROLLBACK TO / RELEASE.
+
+    These exercise the three tagged-operation branches in _intercept_execute so the
+    behavior is locked down before/after refactoring the dataclass shapes.
+    """
+
+    def test_savepoint_records_buffer_offset(self, reporter):
+        cursor = MockCursor()
+        _intercept_execute(cursor.execute, cursor, "BEGIN")
+        _intercept_execute(cursor.execute, cursor, "INSERT INTO t1 (id) VALUES (1)")
+        _intercept_execute(cursor.execute, cursor, "SAVEPOINT sp1")
+
+        savepoints = getattr(_io_tls, "_tx_savepoints", {})
+        buffer = getattr(_io_tls, "_tx_buffer", [])
+        assert "sp1" in savepoints
+        assert savepoints["sp1"] == len(buffer)
+
+    def test_rollback_to_truncates_buffer(self, reporter):
+        cursor = MockCursor()
+        _intercept_execute(cursor.execute, cursor, "BEGIN")
+        _intercept_execute(cursor.execute, cursor, "INSERT INTO t1 (id) VALUES (1)")
+        _intercept_execute(cursor.execute, cursor, "SAVEPOINT sp1")
+        buffer_at_sp = list(getattr(_io_tls, "_tx_buffer", []))
+        _intercept_execute(cursor.execute, cursor, "INSERT INTO t2 (id) VALUES (2)")
+        assert len(getattr(_io_tls, "_tx_buffer", [])) > len(buffer_at_sp)
+
+        _intercept_execute(cursor.execute, cursor, "ROLLBACK TO SAVEPOINT sp1")
+        assert list(getattr(_io_tls, "_tx_buffer", [])) == buffer_at_sp
+
+    def test_release_removes_savepoint(self, reporter):
+        cursor = MockCursor()
+        _intercept_execute(cursor.execute, cursor, "BEGIN")
+        _intercept_execute(cursor.execute, cursor, "SAVEPOINT sp1")
+        assert "sp1" in getattr(_io_tls, "_tx_savepoints", {})
+
+        _intercept_execute(cursor.execute, cursor, "RELEASE SAVEPOINT sp1")
+        assert "sp1" not in getattr(_io_tls, "_tx_savepoints", {})
