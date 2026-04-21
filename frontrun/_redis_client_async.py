@@ -53,6 +53,40 @@ def _get_scheduler_var() -> Any:
 # ---------------------------------------------------------------------------
 
 
+async def _dispatch_async(
+    original_method: Any,
+    self: Any,
+    reported: bool,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Run *original_method*, handling the reported branch uniformly.
+
+    When *reported* is True: force a DPOR scheduling point so the engine can
+    interleave between Redis operations, then run the command with endpoint
+    I/O suppressed (otherwise every socket yield creates an empty DPOR step,
+    preventing exploration of the gap between adjacent commands).
+    """
+    if not reported:
+        return await original_method(self, *args, **kwargs)
+
+    dpor_ctx = _get_dpor_context()
+    if dpor_ctx is not None:
+        scheduler = dpor_ctx[0]
+        task_id = _get_scheduler_var()[1].get()
+        if task_id is not None and hasattr(scheduler, "pause"):
+            await scheduler.pause(task_id)
+
+    pause_var = _get_in_scheduler_pause()
+    depth = pause_var.get()
+    pause_var.set(depth + 1)
+    try:
+        with _suppress_endpoint_io():
+            return await original_method(self, *args, **kwargs)
+    finally:
+        pause_var.set(depth)
+
+
 async def _intercept_execute_command_async(
     original_method: Any,
     self: Any,
@@ -65,28 +99,8 @@ async def _intercept_execute_command_async(
 
     cmd_name = str(args[0])
     cmd_args = args[1:]
-
     reported = _report_redis_access(cmd_name, cmd_args, client=self)
-
-    if reported:
-        # Force a real DPOR scheduling point so the engine can interleave
-        # between Redis operations.  The I/O was added to _pending_io by
-        # _report_redis_access; on_proceed will flush it to the engine.
-        dpor_ctx = _get_dpor_context()
-        if dpor_ctx is not None:
-            scheduler = dpor_ctx[0]
-            refs = _get_scheduler_var()
-            task_id = refs[1].get()
-            if task_id is not None and hasattr(scheduler, "pause"):
-                await scheduler.pause(task_id)
-
-    if reported:
-        # Suppress AutoPauseCoroutine scheduling during Redis network I/O.
-        # Without this, every socket yield creates an empty DPOR step,
-        # pushing adjacent Redis commands far apart in the trace and
-        # preventing DPOR from exploring the gap between e.g. EXISTS and SET.
-        return await _run_reported_async_command(original_method, self, *args, **kwargs)
-    return await original_method(self, *args, **kwargs)
+    return await _dispatch_async(original_method, self, reported, *args, **kwargs)
 
 
 async def _intercept_pipeline_execute_async(
@@ -97,36 +111,7 @@ async def _intercept_pipeline_execute_async(
 ) -> Any:
     """Async version of ``_intercept_pipeline_execute``."""
     reported = _report_pipeline_commands(self)
-
-    if reported:
-        dpor_ctx = _get_dpor_context()
-        if dpor_ctx is not None:
-            scheduler = dpor_ctx[0]
-            refs = _get_scheduler_var()
-            task_id = refs[1].get()
-            if task_id is not None and hasattr(scheduler, "pause"):
-                await scheduler.pause(task_id)
-
-    if reported:
-        return await _run_reported_async_command(original_method, self, *args, **kwargs)
-    return await original_method(self, *args, **kwargs)
-
-
-async def _run_reported_async_command(
-    original_method: Any,
-    self: Any,
-    *args: Any,
-    **kwargs: Any,
-) -> Any:
-    """Run a reported async Redis command while suppressing endpoint I/O."""
-    pause_var = _get_in_scheduler_pause()
-    depth = pause_var.get()
-    pause_var.set(depth + 1)
-    try:
-        with _suppress_endpoint_io():
-            return await original_method(self, *args, **kwargs)
-    finally:
-        pause_var.set(depth)
+    return await _dispatch_async(original_method, self, reported, *args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
