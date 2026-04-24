@@ -1,16 +1,18 @@
 # Frontrun
 
-A library for deterministic concurrency testing.
+**Deterministic concurrency testing for Python.** Race conditions are hard to test because they depend on timing — a test that passes 95% of the time is worse than one that always fails, because it breeds false confidence. Frontrun replaces timing-dependent thread interleaving with deterministic scheduling, so race conditions either always happen or never happen.
+
+Run against unmodified library code, frontrun has already found **46 concurrency bugs across 12 open-source libraries** — urllib3, SQLAlchemy, tenacity, cachetools, and others. See the [case studies](docs/CASE_STUDIES.rst).
 
 ```bash
 pip install frontrun
 ```
 
-## Overview
+![Deadlock diagram showing DPOR exploration of the dining philosophers problem. Three threads each acquire one fork (lock) then block waiting for the next, forming a cycle.](docs/_static/deadlock-diagram.png)
 
-Frontrun is named after the insider trading crime where someone uses insider information to make a timed trade for maximum profit. The principle is the same here, except you use insider information about event ordering for maximum concurrency bugs.
+*DPOR finds the circular wait in the classic 3-philosopher dining problem: each thread's lock acquisitions (green), context switches (pink arrows), and the point where the deadlock is detected. Regenerate with `make screenshot` from `examples/dpor_dining_philosophers.py`.*
 
-The core problem: race conditions are hard to test because they depend on timing. A test that passes 95% of the time is worse than a test that always fails, because it breeds false confidence. Frontrun replaces timing-dependent thread interleaving with deterministic scheduling, so race conditions either always happen or never happen.
+## Approaches
 
 Four approaches, in order of decreasing interpretability:
 
@@ -24,13 +26,7 @@ Four approaches, in order of decreasing interpretability:
 
 All four have async variants. A C-level `LD_PRELOAD` library intercepts libc I/O for database drivers and other opaque extensions.
 
-### DPOR deadlock detection (dining philosophers)
-
-DPOR explores thread interleavings and detects deadlocks via wait-for-graph cycle analysis. Here it finds the circular wait in the classic 3-philosopher dining problem:
-
-![Deadlock diagram showing DPOR exploration of the dining philosophers problem. Three threads each acquire one fork (lock) then block waiting for the next, forming a cycle.](docs/_static/deadlock-diagram.png)
-
-The timeline shows each thread's lock acquisitions (green), context switches (pink arrows), and the point where the deadlock is detected. Run `make screenshot` to regenerate this image from `examples/dpor_dining_philosophers.py`.
+> *The name:* frontrunning is the insider-trading crime of timing trades against non-public information. Same principle here, except you use insider knowledge of event ordering to trigger concurrency bugs on demand.
 
 ## Quick Start: Bank Account Race Condition
 
