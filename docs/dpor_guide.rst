@@ -1,9 +1,15 @@
 DPOR in Practice
 ================
 
-This is a practical guide to using ``explore_dpor()`` for systematic
-concurrency testing. For the underlying algorithm and theory, see
+This is a practical guide to using ``explore()`` (or the old ``explore_dpor()``)
+for systematic concurrency testing. For the underlying algorithm and theory, see
 :doc:`dpor`.
+
+.. note::
+
+   **Prefer** :func:`frontrun.explore` **(0.5+).** The old ``explore_dpor()``
+   function is deprecated and will be removed in 0.6. Use
+   ``frontrun.explore(strategy='dpor')`` (the default) instead.
 
 
 What DPOR does
@@ -18,11 +24,12 @@ DPOR and the invariant have separate jobs:
   (e.g. two reads, or accesses to different objects) are equivalent, so DPOR
   runs only one representative from each equivalence class.
 
-- **The invariant decides whether a bug occurred.** After all threads finish,
-  ``explore_dpor()`` calls your invariant on the final state. DPOR has no
+- **The invariant decides whether a bug occurred.** After all workers finish,
+  ``explore()`` calls your invariant on the final state. DPOR has no
   built-in notion of "correct" --- it doesn't know that ``counter == 1`` is
   wrong and ``counter == 2`` is right. You supply that judgement via the
-  invariant.
+  invariant. Raising ``AssertionError`` in the invariant is treated as a failure
+  (the message is included in ``result.explanation``).
 
 (The name "invariant" is standard in tools like this --- loom, CHESS, etc. ---
 even though it is technically a *postcondition* checked once after the threads
@@ -32,14 +39,24 @@ Putting the two together:
 
 .. code-block:: python
 
+   from frontrun import explore
+
+   result = explore(
+       setup=MyState,                         # called fresh each execution
+       workers=[worker_a, worker_b],          # each receives the state
+       invariant=lambda s: s.is_consistent(), # checked after all workers finish
+   )
+   result.assert_holds()
+
+Old API (deprecated)::
+
    from frontrun.dpor import explore_dpor
 
    result = explore_dpor(
-       setup=MyState,                         # called fresh each execution
-       threads=[thread_a, thread_b],          # each receives the state
-       invariant=lambda s: s.is_consistent(), # checked after all threads finish
+       setup=MyState,
+       threads=[thread_a, thread_b],
+       invariant=lambda s: s.is_consistent(),
    )
-
    assert result.property_holds, result.explanation
 
 1. DPOR picks an interleaving (based on conflict analysis).

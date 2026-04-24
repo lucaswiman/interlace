@@ -114,13 +114,6 @@ _DEPRECATED_ALIASES: dict[str, tuple[str, str, str]] = {
         "(or frontrun.explore(...)) instead. "
         "The old API will be removed in 0.6.",
     ),
-    "explore_interleavings": (
-        "frontrun.bytecode",
-        "explore_interleavings",
-        "explore_interleavings is deprecated; use frontrun.explore(strategy='random') "
-        "(or frontrun.explore_random(...)) instead. "
-        "The old API will be removed in 0.6.",
-    ),
     "explore_async_interleavings": (
         "frontrun.async_shuffler",
         "explore_interleavings",
@@ -130,8 +123,41 @@ _DEPRECATED_ALIASES: dict[str, tuple[str, str, str]] = {
     ),
 }
 
+# Message for explore_interleavings (kept separate as it has a special dispatcher)
+_EXPLORE_INTERLEAVINGS_MSG = (
+    "explore_interleavings is deprecated; use frontrun.explore(strategy='random') "
+    "(or frontrun.explore_random(...) / frontrun.explore_async_random(...)) instead. "
+    "The old API will be removed in 0.6."
+)
+
+
+def _make_deprecated_explore_interleavings() -> Any:
+    """Return a deprecated sync/async dispatch wrapper for the old explore_interleavings."""
+    import warnings
+
+    def _dispatch(*args: Any, **kwargs: Any) -> Any:
+        warnings.warn(_EXPLORE_INTERLEAVINGS_MSG, DeprecationWarning, stacklevel=2)
+        has_threads = "threads" in kwargs
+        has_tasks = "tasks" in kwargs
+        if has_threads == has_tasks:
+            raise TypeError("explore_interleavings() requires exactly one of 'threads' or 'tasks'")
+        if has_tasks:
+            from frontrun.async_shuffler import explore_async_random as _async_impl
+
+            return _async_impl(*args, **kwargs)
+        from frontrun.bytecode import explore_random as _sync_impl
+
+        return _sync_impl(*args, **kwargs)
+
+    return _dispatch
+
 
 def __getattr__(name: str) -> Any:
+    if name == "explore_interleavings":
+        import warnings
+
+        warnings.warn(_EXPLORE_INTERLEAVINGS_MSG, DeprecationWarning, stacklevel=2)
+        return _make_deprecated_explore_interleavings()
     if name in _DEPRECATED_ALIASES:
         import importlib
         import warnings

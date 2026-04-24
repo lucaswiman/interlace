@@ -120,8 +120,12 @@ DPOR (Dynamic Partial Order Reduction) *systematically* explores every meaningfu
 
 When a race is found, the error trace shows the exact sequence of conflicting accesses and which threads were involved:
 
+> **Prefer `frontrun.explore()`** — the new unified entry point (0.5+). The old
+> per-strategy functions (`explore_dpor`, `explore_interleavings`, etc.) are
+> deprecated and scheduled for removal in 0.6.
+
 ```python
-from frontrun.dpor import explore_dpor
+from frontrun import explore
 
 class Counter:
     def __init__(self):
@@ -132,14 +136,30 @@ class Counter:
         self.value = temp + 1
 
 def test_counter_is_atomic():
+    result = explore(
+        setup=Counter,
+        workers=Counter.increment,
+        count=2,
+        invariant=lambda c: c.value == 2,
+    )
+    result.assert_holds()
+```
+
+<details>
+<summary>Old API (deprecated, will be removed in 0.6)</summary>
+
+```python
+from frontrun.dpor import explore_dpor
+
+def test_counter_is_atomic():
     result = explore_dpor(
         setup=Counter,
         threads=[lambda c: c.increment(), lambda c: c.increment()],
         invariant=lambda c: c.value == 2,
     )
-
     assert result.property_holds, result.explanation
 ```
+</details>
 
 This test fails because `Counter.increment` is not atomic. The `result.explanation` shows the conflict:
 
@@ -166,13 +186,33 @@ DPOR explored exactly 2 interleavings out of the 6 possible (the other 4 are equ
 
 **Scope and limitations:** DPOR tracks Python bytecode-level conflicts (attribute and subscript reads/writes, lock operations) plus I/O. Redis key-level conflicts are detected by intercepting redis-py's `execute_command()` (sync; active with `detect_io=True`) or via `detect_redis=True` (async). SQL conflicts are detected by intercepting DBAPI `cursor.execute()`. These key/table-level detectors are important: raw socket detection uses `host:port` as the resource ID, so every send and recv to the same server appears to conflict — without key-level or SQL-level refinement this causes a combinatorial explosion of spurious interleavings. C-extension shared state (NumPy arrays, etc.) is not tracked at all. The `frontrun` CLI adds C-level socket interception via `LD_PRELOAD` for opaque drivers, also at the coarse `host:port` level.
 
-### 3. Bytecode Exploration
+### 3. Bytecode Exploration (Random Strategy)
 
 Bytecode exploration generates random opcode-level schedules and checks an invariant under each one, in the style of [Hypothesis](https://hypothesis.readthedocs.io/). Each thread fires a [`sys.settrace`](https://docs.python.org/3/library/sys.html#sys.settrace) callback at every bytecode instruction, pausing to wait for its scheduler turn. No markers or annotations needed.
 
-`explore_interleavings()` often finds races very quickly — sometimes on the first attempt. It can also find races that are invisible to DPOR, because it doesn't need to understand *why* a schedule is bad; it just checks whether the invariant holds after the threads finish. If a C extension mutates shared state in a way that breaks your invariant, bytecode exploration will stumble into it. DPOR won't, because it can't see the C-level mutation.
+The random strategy often finds races very quickly — sometimes on the first attempt. It can also find races that are invisible to DPOR, because it doesn't need to understand *why* a schedule is bad; it just checks whether the invariant holds after the threads finish. If a C extension mutates shared state in a way that breaks your invariant, random exploration will stumble into it. DPOR won't, because it can't see the C-level mutation.
 
 The trade-off: error traces are less interpretable. You get the specific opcode schedule that broke the invariant and a best-effort interleaved source trace, but not the causal conflict analysis that DPOR provides.
+
+> **Prefer `frontrun.explore(strategy='random')`** — the new unified entry point
+> (0.5+). The old `explore_interleavings` is deprecated and will be removed in 0.6.
+
+```python
+from frontrun import explore
+
+def test_counter_is_atomic():
+    result = explore(
+        setup=lambda: Counter(value=0),
+        workers=Counter.increment,
+        count=2,
+        invariant=lambda c: c.value == 2,
+        strategy="random",
+    )
+    result.assert_holds()
+```
+
+<details>
+<summary>Old API (deprecated, will be removed in 0.6)</summary>
 
 ```python
 from frontrun.bytecode import explore_interleavings
@@ -200,6 +240,7 @@ def test_counter_is_atomic():
 
     assert result.property_holds, result.explanation
 ```
+</details>
 
 This fails with output like:
 
@@ -380,13 +421,17 @@ def test_async_counter_lost_update():
     assert counter.value == 1  # One increment lost
 ```
 
-### Async Bytecode Exploration
+### Async Exploration
 
-Async shuffler exploration works at natural ``await`` boundaries instead of opcodes, making schedules stable across Python versions:
+Async exploration works at natural ``await`` boundaries instead of opcodes, making schedules stable across Python versions. ``frontrun.explore()`` detects async workers automatically:
+
+> **Prefer `frontrun.explore()`** — the new unified entry point (0.5+). The old
+> `explore_interleavings` (async form) and `explore_async_dpor` are deprecated
+> and will be removed in 0.6.
 
 ```python
 import asyncio
-from frontrun import explore_interleavings
+from frontrun import explore
 
 class Counter:
     def __init__(self):
@@ -397,6 +442,35 @@ class Counter:
         await asyncio.sleep(0)  # any natural await is a scheduling point
         self.value = temp + 1
 
+# DPOR (default) — systematic
+async def test_async_counter_dpor():
+    result = await explore(
+        setup=Counter,
+        workers=Counter.increment,
+        count=2,
+        invariant=lambda c: c.value == 2,
+    )
+    result.assert_holds()
+
+# Random strategy — fast, probabilistic
+async def test_async_counter_random():
+    result = await explore(
+        setup=Counter,
+        workers=Counter.increment,
+        count=2,
+        invariant=lambda c: c.value == 2,
+        strategy="random",
+        max_attempts=200,
+    )
+    result.assert_holds()
+```
+
+<details>
+<summary>Old async API (deprecated, will be removed in 0.6)</summary>
+
+```python
+from frontrun import explore_interleavings
+
 async def test_async_counter_race():
     result = await explore_interleavings(
         setup=lambda: Counter(),
@@ -404,9 +478,9 @@ async def test_async_counter_race():
         invariant=lambda c: c.value == 2,
         max_attempts=200,
     )
-
     assert result.property_holds, result.explanation
 ```
+</details>
 
 ## CLI
 
