@@ -67,7 +67,7 @@ def test_transfer_lost_update():
 
 ## Case Studies
 
-46 concurrency bugs found across 12 libraries by running bytecode exploration directly against unmodified library code: TPool, threadpoolctl, cachetools, PyDispatcher, pydis, pybreaker, urllib3, SQLAlchemy, amqtt, pykka, and tenacity. See [detailed case studies](docs/CASE_STUDIES.rst).
+Running bytecode exploration against unmodified library code surfaces suspected race conditions quickly. An informal sweep across a dozen Python libraries — TPool, threadpoolctl, cachetools, PyDispatcher, pydis, pybreaker, urllib3, SQLAlchemy, amqtt, pykka, and tenacity — produced dozens of candidate findings. Quality varies: some are clear lost-update bugs, others are plausible-looking schedules whose real-world impact is unclear. See [detailed case studies](docs/CASE_STUDIES.rst) for the individual findings and traces.
 
 ## Usage Approaches
 
