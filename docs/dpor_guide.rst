@@ -79,9 +79,11 @@ detection mechanisms are layered from fine-grained to coarse:
 - Lock acquire and release (``threading.Lock``, ``threading.RLock``)
 - Thread spawn and join
 - **Redis commands** --- ``execute_command()`` is intercepted on redis-py
-  clients when ``detect_io=True`` (sync) or ``detect_redis=True`` (async).
-  Each command is classified as a read or write on specific keys; two threads
-  operating on *different* keys are independent.  See :doc:`redis`.
+  clients when ``detect_io=True``, which now covers Redis in both sync
+  and async contexts.  (The async-only ``detect_redis=True`` kwarg is
+  deprecated in 0.5 and will be removed in 0.6.)  Each command is
+  classified as a read or write on specific keys; two threads operating
+  on *different* keys are independent.  See :doc:`redis`.
 - **SQL statements** --- ``cursor.execute()`` is intercepted at the DBAPI
   layer.  Statements are parsed to per-table (or per-row) resource IDs; two
   threads touching *different* tables or rows are independent.  See
@@ -559,33 +561,28 @@ Python-level attribute accesses.
        )
        assert not result.property_holds   # race detected!
 
-**Async usage** (``detect_redis=True``):
+**Async usage** (``detect_io=True`` covers Redis from 0.5):
 
 .. code-block:: python
 
+   import asyncio
+
    import redis.asyncio as aioredis
-   from frontrun.async_dpor import explore_async_dpor
+   from frontrun import explore
 
    def test_async_redis_check_then_act(redis_port):
-       import asyncio
-
        async def maybe_init(state):
            r = aioredis.Redis(port=redis_port, decode_responses=True)
            if not await r.exists("resource"):
                await r.set("resource", "initialized")
            await r.aclose()
 
-       async def invariant(state):
-           r = aioredis.Redis(port=redis_port, decode_responses=True)
-           count = await r.get("resource")
-           await r.aclose()
-           return count is not None
-
-       asyncio.run(explore_async_dpor(
+       asyncio.run(explore(
            setup=lambda: None,
-           tasks=[maybe_init, maybe_init],
+           workers=maybe_init,
+           count=2,
            invariant=lambda s: True,
-           detect_redis=True,
+           detect_io=True,
        ))
 
 DPOR inserts fine-grained scheduling points around each Redis command, so it

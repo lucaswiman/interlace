@@ -184,7 +184,7 @@ DPOR explored exactly 2 interleavings out of the 6 possible (the other 4 are equ
 
 **Search strategies:** The default DFS strategy is optimal for **exhaustive exploration** (`stop_on_first=False`) — it produces the minimum number of executions. When the trace space is very large and you have a limited execution budget (`stop_on_first=True` or a low `max_executions`), use a non-DFS strategy like `search="bit-reversal"` to spread exploration across diverse conflict points early, finding bugs faster on average. See [search strategy documentation](docs/search.rst) for details.
 
-**Scope and limitations:** DPOR tracks Python bytecode-level conflicts (attribute and subscript reads/writes, lock operations) plus I/O. Redis key-level conflicts are detected by intercepting redis-py's `execute_command()` (sync; active with `detect_io=True`) or via `detect_redis=True` (async). SQL conflicts are detected by intercepting DBAPI `cursor.execute()`. These key/table-level detectors are important: raw socket detection uses `host:port` as the resource ID, so every send and recv to the same server appears to conflict — without key-level or SQL-level refinement this causes a combinatorial explosion of spurious interleavings. C-extension shared state (NumPy arrays, etc.) is not tracked at all. The `frontrun` CLI adds C-level socket interception via `LD_PRELOAD` for opaque drivers, also at the coarse `host:port` level.
+**Scope and limitations:** DPOR tracks Python bytecode-level conflicts (attribute and subscript reads/writes, lock operations) plus I/O. Redis key-level conflicts are detected by intercepting redis-py's `execute_command()`; activate with `detect_io=True` (works in both sync and async from 0.5). SQL conflicts are detected by intercepting DBAPI `cursor.execute()`. These key/table-level detectors are important: raw socket detection uses `host:port` as the resource ID, so every send and recv to the same server appears to conflict — without key-level or SQL-level refinement this causes a combinatorial explosion of spurious interleavings. C-extension shared state (NumPy arrays, etc.) is not tracked at all. The `frontrun` CLI adds C-level socket interception via `LD_PRELOAD` for opaque drivers, also at the coarse `host:port` level.
 
 ### 3. Bytecode Exploration (Random Strategy)
 
@@ -307,10 +307,10 @@ def test_redis_counter_race(redis_port):
     assert not result.property_holds  # DPOR finds the lost-update race
 ```
 
-**Async DPOR** — pass `detect_redis=True`:
+**Async DPOR** — `detect_io=True` covers Redis in async too (from 0.5):
 
 ```python
-from frontrun.async_dpor import explore_async_dpor
+from frontrun import explore
 import redis.asyncio as aioredis
 
 async def test_async_redis_race(redis_port):
@@ -320,13 +320,18 @@ async def test_async_redis_race(redis_port):
         await r.set("counter", str(val + 1))
         await r.aclose()
 
-    result = await explore_async_dpor(
+    result = await explore(
         setup=lambda: None,
-        tasks=[increment, increment],
+        workers=increment,
+        count=2,
         invariant=lambda s: True,  # check Redis directly in a real test
-        detect_redis=True,
+        detect_io=True,
     )
 ```
+
+> In 0.5 the async-only `detect_redis=True` kwarg was folded into `detect_io=True`
+> so sync and async behave the same. `detect_redis=True` still works through
+> 0.5 with a `DeprecationWarning`; it is removed in 0.6.
 
 The same key-level precision applies to hashes (`HGET`/`HSET`), lists, sets, sorted sets, and all other Redis data structures — 160+ commands are classified. See the [Redis technical details](docs/redis.rst) for a full walkthrough.
 
@@ -364,11 +369,11 @@ with IOEventDispatcher() as dispatcher:
 By default, frontrun only traces user code — files outside the stdlib, `site-packages`, and frontrun's own internals. When the code under test lives inside an installed package (Django apps, plugin architectures, etc.), pass `trace_packages` to widen the filter:
 
 ```python
-from frontrun.dpor import explore_dpor
+from frontrun import explore
 
-result = explore_dpor(
+result = explore(
     setup=make_state,
-    threads=[thread_a, thread_b],
+    workers=[thread_a, thread_b],
     invariant=check_invariant,
     trace_packages=["mylib.*", "django_filters.*"],
 )
