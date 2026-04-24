@@ -6,7 +6,61 @@ All releases: https://github.com/lucaswiman/frontrun/releases
 Unreleased
 ----------
 
-New changes go here
+**Public API refresh.** Several of the library's public entry points have
+been unified or renamed for ergonomics. The old names keep working in
+this release but emit ``DeprecationWarning``; they will be removed in
+0.6.
+
+New API:
+
+* ``frontrun.explore(setup, workers, invariant, ..., strategy="dpor"|"random")``
+  — single entry point that dispatches to sync or async, DPOR or
+  bytecode exploration, based on the workers and ``strategy`` kwarg.
+  Replaces the four-function matrix (``explore_dpor`` /
+  ``explore_async_dpor`` / ``explore_interleavings`` /
+  ``explore_async_interleavings``).
+* **Worker-count shorthand** — pass a single callable plus
+  ``count=N`` instead of repeating it: ``workers=Counter.increment,
+  count=2``.
+* ``frontrun.explore_random`` / ``frontrun.explore_async_random`` —
+  canonical names for random bytecode exploration. Replace
+  ``explore_interleavings`` / ``explore_async_interleavings``.
+* ``InterleavingResult.assert_holds(msg_prefix="")`` — convenience
+  method that raises ``AssertionError`` with the full race
+  explanation if the invariant failed. Prefer this over
+  ``assert result.property_holds, result.explanation``.
+* ``TraceExecutor.run({"name": fn, ...}, timeout=...)`` — sync API
+  now accepts the dict form that async has always supported; starts
+  all threads and waits for them in one call. Replaces the
+  ``run(name, fn)`` + ``wait(timeout=...)`` pair.
+* **Invariants may now raise** ``AssertionError`` — all four
+  exploration entry points catch it and fold the assertion message
+  into ``result.explanation``, so invariants can be written as natural
+  ``assert`` statements with pytest-style messages.
+* **Async ``detect_io=True`` now covers Redis** — the old async-only
+  ``detect_redis=True`` kwarg is deprecated; ``detect_io=True`` in
+  async DPOR now enables Redis key-level patching the same way sync
+  DPOR already did.
+
+Deprecated (removal in 0.6):
+
+* ``explore_dpor`` and ``explore_async_dpor`` — use
+  ``explore(..., strategy="dpor")`` (the default).
+* ``explore_interleavings`` and ``explore_async_interleavings`` — use
+  ``explore_random`` / ``explore_async_random`` or
+  ``explore(..., strategy="random")``.
+* ``TraceExecutor.run(name, fn)`` individual-call form — use the dict
+  form.
+* ``detect_redis=True`` in async DPOR — use ``detect_io=True``.
+
+Internal cleanup:
+
+* Fixed three pre-existing ``reportDeprecated`` pyright errors so
+  ``make check`` passes cleanly: drop the deprecated
+  ``show_caches=False`` argument to ``dis.get_instructions`` in
+  ``_opcode_observer`` and ``_trace_format``; swap ``Iterator`` for
+  ``Generator`` on a ``@contextmanager``-decorated function in
+  ``_real_threading``.
 
 0.4.1 (2026-04-01)
 ------------------

@@ -13,7 +13,7 @@ never participate in circular-import chains.
 import contextlib
 import queue
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from typing import Any, cast
 
 # Names are lowercase to match the existing internal API (``real_lock``,
@@ -45,7 +45,7 @@ _PATCHED_ATTRS: tuple[tuple[str, Any], ...] = (
 
 
 @contextlib.contextmanager
-def _with_real_threading_primitives() -> Iterator[None]:
+def _with_real_threading_primitives() -> Generator[None]:
     """Temporarily restore the real threading factories on ``threading``.
 
     Yields with ``threading.Lock`` / ``Event`` / etc. pointing at the

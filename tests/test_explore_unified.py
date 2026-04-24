@@ -1,0 +1,507 @@
+"""Tests for the unified frontrun.explore() entry point and related API changes.
+
+Covers:
+  (a) explore() dispatcher — sync DPOR path
+  (b) explore() dispatcher — async path
+  (c) workers=fn, count=N shorthand
+  (d) AssertionError in invariant → explanation
+  (e) Deprecation shims warn and still work
+  (f) detect_io in async DPOR covers Redis (detect_redis)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import warnings
+from dataclasses import dataclass, field
+
+import pytest
+
+from frontrun import explore, explore_async_random, explore_random
+from frontrun.common import InterleavingResult
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Counter:
+    value: int = 0
+
+    def increment(self) -> None:
+        v = self.value
+        # No artificial yield — DPOR explores all bytecode interleavings
+        self.value = v + 1
+
+
+def counter_invariant(c: Counter) -> bool:
+    return c.value == 2
+
+
+# ---------------------------------------------------------------------------
+# (a) explore() dispatcher — sync DPOR path
+# ---------------------------------------------------------------------------
+
+
+def test_explore_sync_dpor_finds_race():
+    """explore() with sync workers uses DPOR and finds the lost-update race."""
+    result = explore(
+        setup=Counter,
+        workers=Counter.increment,
+        count=2,
+        invariant=counter_invariant,
+    )
+    assert isinstance(result, InterleavingResult)
+    # Counter with no locking has a race; DPOR must find it
+    assert not result.property_holds
+    assert result.explanation is not None
+
+
+def test_explore_sync_dpor_passes_for_correct_code():
+    """explore() reports property_holds=True when there is no race."""
+
+    @dataclass
+    class LockedCounter:
+        import threading
+
+        value: int = 0
+        _lock: object = field(default_factory=lambda: __import__("threading").Lock())
+
+        def increment(self) -> None:
+            with self._lock:  # type: ignore[attr-defined]
+                self.value += 1
+
+    result = explore(
+        setup=LockedCounter,
+        workers=LockedCounter.increment,
+        count=2,
+        invariant=lambda c: c.value == 2,
+    )
+    assert isinstance(result, InterleavingResult)
+    assert result.property_holds
+
+
+def test_explore_sync_random_strategy():
+    """explore(strategy='random') finds the lost-update race."""
+    result = explore(
+        setup=Counter,
+        workers=[Counter.increment, Counter.increment],
+        invariant=counter_invariant,
+        strategy="random",
+        max_attempts=200,
+        seed=42,
+    )
+    assert isinstance(result, InterleavingResult)
+    assert not result.property_holds
+
+
+def test_explore_unknown_strategy_raises():
+    """Unknown strategy value raises ValueError."""
+    with pytest.raises(ValueError, match="unknown strategy"):
+        explore(
+            setup=Counter,
+            workers=[Counter.increment],
+            invariant=counter_invariant,
+            strategy="bananas",
+        )
+
+
+# ---------------------------------------------------------------------------
+# (b) explore() dispatcher — async path
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AsyncCounter:
+    value: int = 0
+
+    async def increment(self) -> None:
+        v = self.value
+        await asyncio.sleep(0)  # yield to scheduler
+        self.value = v + 1
+
+
+def test_explore_async_returns_coroutine():
+    """explore() with async workers returns a coroutine (not an InterleavingResult)."""
+    import inspect
+
+    coro = explore(
+        setup=AsyncCounter,
+        workers=AsyncCounter.increment,
+        count=2,
+        invariant=lambda c: c.value == 2,
+        strategy="dpor",
+    )
+    assert inspect.iscoroutine(coro), "expected a coroutine for async workers"
+    coro.close()  # avoid ResourceWarning
+
+
+def test_explore_async_dpor_finds_race():
+    """explore() with async workers (DPOR) finds the lost-update race."""
+    result = asyncio.run(
+        explore(
+            setup=AsyncCounter,
+            workers=AsyncCounter.increment,
+            count=2,
+            invariant=lambda c: c.value == 2,
+            strategy="dpor",
+        )
+    )
+    assert not result.property_holds
+
+
+def test_explore_async_random_finds_race():
+    """explore() with async workers (random) finds the lost-update race."""
+    result = asyncio.run(
+        explore(
+            setup=AsyncCounter,
+            workers=AsyncCounter.increment,
+            count=2,
+            invariant=lambda c: c.value == 2,
+            strategy="random",
+            max_attempts=200,
+            seed=42,
+        )
+    )
+    assert not result.property_holds
+
+
+# ---------------------------------------------------------------------------
+# (c) workers=fn, count=N shorthand
+# ---------------------------------------------------------------------------
+
+
+def test_count_shorthand_expands_workers():
+    """workers=fn + count=N is equivalent to workers=[fn, fn, ..., fn]."""
+    result = explore(
+        setup=Counter,
+        workers=Counter.increment,
+        count=2,
+        invariant=counter_invariant,
+    )
+    assert isinstance(result, InterleavingResult)
+    # Same as passing [Counter.increment, Counter.increment] — race exists
+    assert not result.property_holds
+
+
+def test_count_shorthand_count_one():
+    """count=1 with a single callable works (trivial, no races)."""
+    result = explore(
+        setup=Counter,
+        workers=Counter.increment,
+        count=1,
+        invariant=lambda c: c.value == 1,
+    )
+    assert result.property_holds
+
+
+def test_count_with_list_raises():
+    """Providing count AND a list raises ValueError."""
+    with pytest.raises(ValueError, match="'count' cannot be used"):
+        explore(
+            setup=Counter,
+            workers=[Counter.increment, Counter.increment],
+            invariant=counter_invariant,
+            count=2,
+        )
+
+
+def test_count_zero_raises():
+    """count=0 raises ValueError."""
+    with pytest.raises(ValueError, match="count must be a positive integer"):
+        explore(
+            setup=Counter,
+            workers=Counter.increment,
+            invariant=counter_invariant,
+            count=0,
+        )
+
+
+def test_count_negative_raises():
+    """count=-1 raises ValueError."""
+    with pytest.raises(ValueError, match="count must be a positive integer"):
+        explore(
+            setup=Counter,
+            workers=Counter.increment,
+            invariant=counter_invariant,
+            count=-1,
+        )
+
+
+def test_workers_list_without_count():
+    """workers as a plain list works (no count needed)."""
+    result = explore(
+        setup=Counter,
+        workers=[Counter.increment, Counter.increment],
+        invariant=counter_invariant,
+    )
+    assert isinstance(result, InterleavingResult)
+
+
+def test_workers_tuple_without_count():
+    """workers as a tuple works (no count needed)."""
+    result = explore(
+        setup=Counter,
+        workers=(Counter.increment, Counter.increment),
+        invariant=counter_invariant,
+    )
+    assert isinstance(result, InterleavingResult)
+
+
+# ---------------------------------------------------------------------------
+# (d) AssertionError in invariant → explanation
+# ---------------------------------------------------------------------------
+
+
+def assert_invariant_with_message(c: Counter) -> bool:
+    assert c.value == 2, f"expected 2, got {c.value}"
+    return True
+
+
+def test_assertion_error_in_invariant_dpor():
+    """AssertionError in invariant is treated as failure; message in explanation."""
+    result = explore(
+        setup=Counter,
+        workers=Counter.increment,
+        count=2,
+        invariant=assert_invariant_with_message,
+    )
+    assert not result.property_holds
+    assert result.explanation is not None
+    assert "AssertionError" in result.explanation
+    assert "expected 2" in result.explanation
+
+
+def test_assertion_error_in_invariant_random():
+    """AssertionError in invariant (random strategy) is treated as failure."""
+    result = explore(
+        setup=Counter,
+        workers=Counter.increment,
+        count=2,
+        invariant=assert_invariant_with_message,
+        strategy="random",
+        max_attempts=200,
+        seed=42,
+    )
+    assert not result.property_holds
+    assert result.explanation is not None
+    assert "AssertionError" in result.explanation
+
+
+def test_assertion_error_async_dpor():
+    """AssertionError in async DPOR invariant is treated as failure."""
+
+    def assert_inv(c: AsyncCounter) -> bool:
+        assert c.value == 2, f"async: expected 2, got {c.value}"
+        return True
+
+    result = asyncio.run(
+        explore(
+            setup=AsyncCounter,
+            workers=AsyncCounter.increment,
+            count=2,
+            invariant=assert_inv,
+            strategy="dpor",
+        )
+    )
+    assert not result.property_holds
+    assert result.explanation is not None
+    assert "AssertionError" in result.explanation
+
+
+def test_assertion_error_async_random():
+    """AssertionError in async random invariant is treated as failure."""
+
+    def assert_inv(c: AsyncCounter) -> bool:
+        assert c.value == 2, f"async-random: expected 2, got {c.value}"
+        return True
+
+    result = asyncio.run(
+        explore(
+            setup=AsyncCounter,
+            workers=AsyncCounter.increment,
+            count=2,
+            invariant=assert_inv,
+            strategy="random",
+            max_attempts=200,
+            seed=42,
+        )
+    )
+    assert not result.property_holds
+    assert result.explanation is not None
+    assert "AssertionError" in result.explanation
+
+
+# ---------------------------------------------------------------------------
+# (e) Deprecation shims warn and still work
+# ---------------------------------------------------------------------------
+
+
+def test_explore_dpor_deprecated_warns():
+    """Importing explore_dpor from frontrun emits DeprecationWarning."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        import frontrun
+
+        _ = frontrun.explore_dpor  # noqa: F841 — triggers __getattr__
+    assert any(issubclass(w.category, DeprecationWarning) and "explore_dpor" in str(w.message) for w in caught)
+
+
+def test_explore_interleavings_deprecated_warns():
+    """Calling explore_interleavings from bytecode emits DeprecationWarning."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        from frontrun.bytecode import explore_interleavings
+
+        explore_interleavings(
+            setup=Counter,
+            threads=[Counter.increment, Counter.increment],
+            invariant=counter_invariant,
+            max_attempts=5,
+            seed=42,
+        )
+    assert any(issubclass(w.category, DeprecationWarning) and "explore_interleavings" in str(w.message) for w in caught)
+
+
+def test_explore_async_interleavings_deprecated_warns():
+    """Calling explore_interleavings from async_shuffler emits DeprecationWarning."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        from frontrun.async_shuffler import explore_interleavings as _deprecated
+
+        asyncio.run(
+            _deprecated(
+                setup=AsyncCounter,
+                tasks=[AsyncCounter.increment, AsyncCounter.increment],
+                invariant=lambda c: c.value == 2,
+                max_attempts=5,
+                seed=42,
+            )
+        )
+    assert any(issubclass(w.category, DeprecationWarning) and "explore_interleavings" in str(w.message) for w in caught)
+
+
+def test_frontrun_explore_interleavings_getattr_warns():
+    """frontrun.explore_interleavings via __getattr__ emits DeprecationWarning."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        import frontrun
+
+        _ = frontrun.explore_interleavings  # noqa: F841
+    assert any(issubclass(w.category, DeprecationWarning) and "explore_interleavings" in str(w.message) for w in caught)
+
+
+def test_frontrun_explore_async_interleavings_getattr_warns():
+    """frontrun.explore_async_interleavings via __getattr__ emits DeprecationWarning."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        import frontrun
+
+        _ = frontrun.explore_async_interleavings  # noqa: F841
+    assert any(
+        issubclass(w.category, DeprecationWarning) and "explore_async_interleavings" in str(w.message) for w in caught
+    )
+
+
+def test_explore_random_works():
+    """explore_random (canonical name) works without warning."""
+    result = explore_random(
+        setup=Counter,
+        threads=[Counter.increment, Counter.increment],
+        invariant=counter_invariant,
+        max_attempts=100,
+        seed=42,
+    )
+    assert isinstance(result, InterleavingResult)
+    assert not result.property_holds
+
+
+def test_explore_async_random_works():
+    """explore_async_random (canonical name) works without warning."""
+    result = asyncio.run(
+        explore_async_random(
+            setup=AsyncCounter,
+            tasks=[AsyncCounter.increment, AsyncCounter.increment],
+            invariant=lambda c: c.value == 2,
+            max_attempts=100,
+            seed=42,
+        )
+    )
+    assert isinstance(result, InterleavingResult)
+    assert not result.property_holds
+
+
+def test_explore_async_dpor_deprecated_warns():
+    """explore_async_dpor emits DeprecationWarning (called directly)."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        from frontrun.async_dpor import explore_async_dpor
+
+        asyncio.run(
+            explore_async_dpor(
+                setup=AsyncCounter,
+                tasks=[AsyncCounter.increment, AsyncCounter.increment],
+                invariant=lambda c: c.value == 2,
+            )
+        )
+    assert any(issubclass(w.category, DeprecationWarning) and "explore_async_dpor" in str(w.message) for w in caught)
+
+
+# ---------------------------------------------------------------------------
+# (f) detect_io in async DPOR covers Redis
+# ---------------------------------------------------------------------------
+
+
+def test_detect_io_in_async_dpor_deprecated_wrapper_implies_detect_redis():
+    """explore_async_dpor(detect_io=True) does NOT separately require detect_redis=True."""
+    # We test this at the API level: the deprecated wrapper should accept detect_io
+    # and pass detect_redis=True to _explore_async_dpor without raising.
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        from frontrun.async_dpor import explore_async_dpor
+
+        # Just verify it runs without error; Redis isn't actually in scope in unit tests
+        result = asyncio.run(
+            explore_async_dpor(
+                setup=AsyncCounter,
+                tasks=[AsyncCounter.increment, AsyncCounter.increment],
+                invariant=lambda c: c.value == 2,
+                detect_io=True,  # should imply detect_redis=True internally
+            )
+        )
+    assert isinstance(result, InterleavingResult)
+
+
+def test_detect_redis_deprecated_warns():
+    """explore_async_dpor(detect_redis=True) emits additional DeprecationWarning."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        from frontrun.async_dpor import explore_async_dpor
+
+        asyncio.run(
+            explore_async_dpor(
+                setup=AsyncCounter,
+                tasks=[AsyncCounter.increment, AsyncCounter.increment],
+                invariant=lambda c: c.value == 2,
+                detect_redis=True,
+            )
+        )
+    messages = [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert any("detect_redis" in m for m in messages)
+    assert any("detect_io=True" in m for m in messages)
+
+
+def test_explore_unified_detect_io_async_dpor():
+    """frontrun.explore(detect_io=True) with async workers doesn't raise."""
+    result = asyncio.run(
+        explore(
+            setup=AsyncCounter,
+            workers=AsyncCounter.increment,
+            count=2,
+            invariant=lambda c: c.value == 2,
+            strategy="dpor",
+            detect_io=True,
+        )
+    )
+    assert isinstance(result, InterleavingResult)

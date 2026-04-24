@@ -477,3 +477,136 @@ def test_trace_runtime_clears_trace_and_reports_errors(monkeypatch):
     assert "worker" in errors
     assert isinstance(errors["worker"], ValueError)
     assert len(coordinator.reported) == 1
+
+
+# ---------------------------------------------------------------------------
+# New dict-form API tests
+# ---------------------------------------------------------------------------
+
+
+def test_dict_form_basic():
+    """TraceExecutor.run() with a dict starts all threads and waits in one call."""
+    account = BankAccount(balance=100)
+
+    schedule = Schedule(
+        [
+            Step("thread1", "read_balance"),
+            Step("thread2", "read_balance"),
+            Step("thread1", "write_balance"),
+            Step("thread2", "write_balance"),
+        ]
+    )
+
+    executor = TraceExecutor(schedule)
+    executor.run(
+        {
+            "thread1": lambda: account.transfer(50),
+            "thread2": lambda: account.transfer(50),
+        },
+        timeout=5.0,
+    )
+
+    # Both threads read 100 before either writes → lost update → 150
+    assert account.balance == 150
+
+
+def test_dict_form_returns_none():
+    """The dict form's run() returns None (like the async form)."""
+    account = BankAccount(balance=100)
+
+    schedule = Schedule(
+        [
+            Step("thread1", "read_balance"),
+            Step("thread1", "write_balance"),
+            Step("thread2", "read_balance"),
+            Step("thread2", "write_balance"),
+        ]
+    )
+
+    executor = TraceExecutor(schedule)
+    result = executor.run(
+        {
+            "thread1": lambda: account.transfer(50),
+            "thread2": lambda: account.transfer(50),
+        },
+        timeout=5.0,
+    )
+
+    assert result is None
+    assert account.balance == 200
+
+
+@pytest.mark.intentionally_leaves_dangling_threads
+def test_dict_form_timeout():
+    """The dict form raises TimeoutError when threads don't finish in time."""
+
+    def slow_worker():
+        time.sleep(10)
+
+    schedule = Schedule([Step("t1", "never")])
+    executor = TraceExecutor(schedule)
+
+    with pytest.raises(TimeoutError):
+        executor.run({"t1": slow_worker}, timeout=0.5)
+
+
+def test_dict_form_empty_dict():
+    """Passing an empty dict raises ValueError with a helpful message."""
+    schedule = Schedule([Step("t1", "m")])
+
+    executor = TraceExecutor(schedule)
+    with pytest.raises(ValueError, match="empty"):
+        executor.run({})
+
+
+def test_dict_form_non_callable_value():
+    """Passing a non-callable value in the dict raises TypeError."""
+    schedule = Schedule([Step("t1", "m")])
+
+    executor = TraceExecutor(schedule)
+    with pytest.raises(TypeError, match="callable"):
+        executor.run({"t1": "not_a_function"})  # type: ignore[arg-type]
+
+
+def test_old_form_emits_deprecation_warning():
+    """Calling run(name, fn) emits DeprecationWarning."""
+    account = BankAccount(balance=100)
+
+    schedule = Schedule(
+        [
+            Step("thread1", "read_balance"),
+            Step("thread1", "write_balance"),
+        ]
+    )
+
+    executor = TraceExecutor(schedule)
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        executor.run("thread1", lambda: account.transfer(50))
+    executor.wait(timeout=5.0)
+
+    assert account.balance == 150
+
+
+def test_old_form_still_works_after_warning():
+    """The deprecated individual-call form still executes correctly."""
+    account = BankAccount(balance=100)
+
+    schedule = Schedule(
+        [
+            Step("thread1", "read_balance"),
+            Step("thread2", "read_balance"),
+            Step("thread1", "write_balance"),
+            Step("thread2", "write_balance"),
+        ]
+    )
+
+    executor = TraceExecutor(schedule)
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        executor.run("thread1", lambda: account.transfer(50))
+        executor.run("thread2", lambda: account.transfer(50))
+    executor.wait(timeout=5.0)
+
+    assert account.balance == 150

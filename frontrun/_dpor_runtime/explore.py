@@ -10,7 +10,7 @@ from .runner import DporBytecodeRunner
 from .scheduler import DporScheduler
 
 
-def explore_dpor(
+def _explore_dpor(
     setup: Callable[[], T],
     threads: list[Callable[[T], None]],
     invariant: Callable[[T], bool],
@@ -420,7 +420,11 @@ def explore_dpor(
                         _record_and_emit_report()
                         return result
 
-            if not is_deadlock and not invariant(state):
+            if is_deadlock:
+                invariant_failed, assertion_msg = False, None
+            else:
+                invariant_failed, assertion_msg = check_invariant(invariant, state)
+            if invariant_failed:
                 result.property_holds = False
                 with engine_lock:
                     schedule = execution.schedule_trace
@@ -454,13 +458,17 @@ def explore_dpor(
                         _set_preload_pipe_fd(preload_dispatcher._write_fd)
 
                 if result.explanation is None:
-                    result.explanation = format_trace(
+                    trace_explanation = format_trace(
                         recorder.events,
                         num_threads=num_threads,
                         num_explored=result.num_explored,
                         reproduction_attempts=result.reproduction_attempts,
                         reproduction_successes=result.reproduction_successes,
                     )
+                    if assertion_msg:
+                        result.explanation = f"AssertionError: {assertion_msg}\n\n{trace_explanation}"
+                    else:
+                        result.explanation = trace_explanation
                 if result.sql_anomaly is None:
                     result.sql_anomaly = classify_sql_anomaly(recorder.events)
                 if stop_on_first:
@@ -515,3 +523,12 @@ def explore_dpor(
         generate_html_report(report, report_path)
 
     return result
+
+
+explore_dpor = deprecate(_explore_dpor, DEPRECATION_MESSAGES["explore_dpor"])
+explore_dpor.__doc__ = (
+    "Deprecated alias for the DPOR exploration entry point.\n\n"
+    ".. deprecated:: 0.5\n"
+    "    ``explore_dpor`` will be removed in 0.6. Use :func:`frontrun.explore`\n"
+    "    with ``strategy='dpor'`` (the default) instead."
+)

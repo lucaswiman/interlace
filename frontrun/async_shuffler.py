@@ -56,7 +56,13 @@ from frontrun._async_autopause import (
 from frontrun._threaded_runner import PatchScope
 from frontrun.async_dpor import _sql_async_available, patch_sql_async, unpatch_sql_async
 from frontrun.async_scheduler import InterleavedLoop
-from frontrun.common import InterleavingResult, check_serializability_violation
+from frontrun.common import (
+    DEPRECATION_MESSAGES,
+    InterleavingResult,
+    check_invariant,
+    check_serializability_violation,
+    deprecate,
+)
 
 
 class AwaitScheduler(InterleavedLoop):
@@ -242,7 +248,7 @@ async def run_with_schedule(
         return state
 
 
-async def explore_interleavings(
+async def explore_async_random(
     setup: Callable[[], Any],
     tasks: list[Callable[[Any], Coroutine[Any, Any, None]]],
     invariant: Callable[[Any], bool],
@@ -337,14 +343,27 @@ async def explore_interleavings(
                     result.explanation = explanation
                     return result
 
-            if not invariant(state):
+            invariant_failed, assertion_msg = check_invariant(invariant, state)
+            if invariant_failed:
                 result.property_holds = False
                 result.counterexample = schedule
                 result.unique_interleavings = len(seen_schedule_hashes)
+                if assertion_msg:
+                    result.explanation = f"AssertionError: {assertion_msg}"
                 return result
 
         result.unique_interleavings = len(seen_schedule_hashes)
         return result
+
+
+explore_interleavings = deprecate(explore_async_random, DEPRECATION_MESSAGES["explore_async_interleavings"])
+explore_interleavings.__doc__ = (
+    "Deprecated alias for :func:`explore_async_random`.\n\n"
+    ".. deprecated:: 0.5\n"
+    "    ``explore_interleavings`` (async form) will be removed in 0.6. Use\n"
+    "    :func:`frontrun.explore` with ``strategy='random'`` and async worker\n"
+    "    functions instead."
+)
 
 
 def schedule_strategy(num_tasks: int, max_ops: int = 100) -> Any:  # type: ignore[name-defined]

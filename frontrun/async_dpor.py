@@ -75,7 +75,12 @@ from frontrun._threaded_runner import PatchScope
 from frontrun._tracing import TraceFilter as _TraceFilter
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun.async_scheduler import InterleavedLoop
-from frontrun.common import InterleavingResult, check_serializability_violation
+from frontrun.common import (
+    DEPRECATION_MESSAGES,
+    InterleavingResult,
+    check_invariant,
+    check_serializability_violation,
+)
 
 try:
     from frontrun._dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]
@@ -962,12 +967,14 @@ async def _reproduce_async_counterexample(
         except (TimeoutError, Exception):
             continue
         if not deadlocked:
-            if invariant is not None and not invariant(state):
-                successes += 1
+            if invariant is not None:
+                inv_failed, _ = check_invariant(invariant, state)
+                if inv_failed:
+                    successes += 1
     return reproduce_on_failure, successes
 
 
-async def explore_async_dpor(
+async def _explore_async_dpor(
     setup: Callable[[], T],
     tasks: list[Callable[[T], Coroutine[Any, Any, None]]],
     invariant: Callable[[T], bool],
@@ -1236,13 +1243,19 @@ async def explore_async_dpor(
                         if stop_on_first:
                             return result
 
-                if not is_deadlock and task_error is None and not invariant(state):
-                    schedule_list = _record_failure(
-                        execution, _format_async_trace(list(execution.schedule_trace), num_tasks)
-                    )
-                    await _record_reproduction(schedule_list, invariant)
-                    if stop_on_first:
-                        return result
+                if not is_deadlock and task_error is None:
+                    invariant_failed, assertion_msg = check_invariant(invariant, state)
+                    if invariant_failed:
+                        trace_explanation = _format_async_trace(list(execution.schedule_trace), num_tasks)
+                        explanation = (
+                            f"AssertionError: {assertion_msg}\n\n{trace_explanation}"
+                            if assertion_msg
+                            else trace_explanation
+                        )
+                        schedule_list = _record_failure(execution, explanation)
+                        await _record_reproduction(schedule_list, invariant)
+                        if stop_on_first:
+                            return result
 
                 if not engine.next_execution():
                     break
@@ -1252,3 +1265,33 @@ async def explore_async_dpor(
         set_lock_timeout(prev_lock_timeout)
 
     return result
+
+
+async def explore_async_dpor(*args: Any, **kwargs: Any) -> InterleavingResult:
+    """Deprecated alias for async DPOR exploration.
+
+    .. deprecated:: 0.5
+        ``explore_async_dpor`` will be removed in 0.6.  Use
+        :func:`frontrun.explore` with async worker functions instead.
+
+    ``detect_redis=True`` is also deprecated in this release; pass
+    ``detect_io=True`` instead (it now covers Redis in both sync and
+    async contexts).
+    """
+    import warnings
+
+    warnings.warn(DEPRECATION_MESSAGES["explore_async_dpor"], DeprecationWarning, stacklevel=2)
+    detect_redis = kwargs.pop("detect_redis", False)
+    detect_io = kwargs.pop("detect_io", False)
+    if detect_redis and not detect_io:
+        warnings.warn(
+            "detect_redis=True is deprecated; use detect_io=True instead "
+            "(now covers Redis in both sync and async). "
+            "The old parameter will be removed in 0.6.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    # detect_io=True implies both detect_sql and detect_redis in the new API
+    kwargs["detect_redis"] = detect_redis or detect_io
+    kwargs["detect_sql"] = kwargs.get("detect_sql", False) or detect_io
+    return await _explore_async_dpor(*args, **kwargs)
