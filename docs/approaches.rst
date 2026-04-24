@@ -450,3 +450,18 @@ engine for conflict analysis.
 
    frontrun pytest -vv tests/           # I/O interception + monkey-patching
    frontrun python examples/orm_race.py  # same, for scripts
+
+Prefer ``assert_holds()`` over manual asserts
+---------------------------------------------
+
+All exploration functions return an :class:`~frontrun.common.InterleavingResult`.
+Use :meth:`~frontrun.common.InterleavingResult.assert_holds` to check the result
+in a single call — it raises ``AssertionError`` (with the full race explanation)
+on failure and returns ``None`` on success::
+
+   result = explore_dpor(setup, [t1, t2], invariant)
+   result.assert_holds()   # raises with explanation when property_holds is False
+
+This is preferable to ``assert result.property_holds, result.explanation``
+because it works correctly under pytest's assertion rewriting and requires no
+memory burden on the caller to supply the message argument.

@@ -210,3 +210,17 @@ scheduled tasks.
        })
 
        assert counter.value == 2  # No lost update
+
+Prefer ``assert_holds()`` over manual asserts
+----------------------------------------------
+
+Instead of writing ``assert result.property_holds, result.explanation`` after
+every exploration call, use the convenience helper :meth:`InterleavingResult.assert_holds`::
+
+   result = explore_dpor(setup, [thread1, thread2], invariant)
+   result.assert_holds()  # raises AssertionError with explanation on failure
+
+An optional ``msg_prefix`` is prepended to the explanation, which is handy
+when multiple assertions appear in one test::
+
+   result.assert_holds(msg_prefix="counter race: ")

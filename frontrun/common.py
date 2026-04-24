@@ -105,6 +105,19 @@ class InterleavingResult:
     sql_anomaly: SqlAnomaly | None = None
     races_detected: bool = False
 
+    def assert_holds(self, msg_prefix: str = "") -> None:
+        """Raise AssertionError with the race explanation if the invariant failed.
+
+        Prefer this over ``assert result.property_holds, result.explanation``.
+
+        Args:
+            msg_prefix: Optional string prepended to the explanation in the
+                AssertionError message.  Useful for identifying which assertion
+                failed when multiple calls appear in one test.
+        """
+        if not self.property_holds:
+            raise AssertionError(f"{msg_prefix}{self.explanation}" if msg_prefix else self.explanation)
+
     def __repr__(self) -> str:
         ce = self.counterexample
         if ce is not None and isinstance(ce, list) and len(ce) > 10:

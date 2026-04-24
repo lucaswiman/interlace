@@ -539,6 +539,22 @@ confusing failures when the environment isn't properly set up.
 
 ## Development
 
+### Prefer `assert_holds()` over manual asserts
+
+`InterleavingResult` exposes a convenience helper that raises `AssertionError`
+with the race explanation on failure and returns `None` silently on success:
+
+```python
+result = explore_dpor(setup, [thread1, thread2], invariant)
+result.assert_holds()  # preferred over: assert result.property_holds, result.explanation
+```
+
+An optional `msg_prefix` is prepended to the explanation:
+
+```python
+result.assert_holds(msg_prefix="transfer race: ")
+```
+
 ### Running Tests
 
 ```bash

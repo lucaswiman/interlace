@@ -607,3 +607,18 @@ the classic TOCTOU (check-then-act) race window.
   key-level semantics.
 
 For the full command classification and technical details, see :doc:`redis`.
+
+Prefer ``assert_holds()`` over manual asserts
+---------------------------------------------
+
+:meth:`InterleavingResult.assert_holds` is the recommended way to check a DPOR
+result in a test.  It raises ``AssertionError`` with the full race explanation
+when the invariant failed, and does nothing on success::
+
+   result = explore_dpor(setup, [thread1, thread2], invariant)
+   result.assert_holds()          # preferred
+   # instead of: assert result.property_holds, result.explanation
+
+Pass ``msg_prefix`` to distinguish multiple assertions in one test::
+
+   result.assert_holds(msg_prefix="transfer race: ")
