@@ -29,6 +29,7 @@ Example usage:
 """
 
 import threading
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -201,33 +202,117 @@ class TraceExecutor:
         self._sync = _ThreadTraceExecutor(schedule, deadlock_timeout=deadlock_timeout)
         self._async: Any | None = None
 
+    def _run_dict(self, tasks: dict[str, Callable[..., Any]], *, timeout: float | None = None) -> None:
+        """Start all named sync threads from a dict and wait for them to complete.
+
+        Args:
+            tasks: Mapping of execution-unit name to a zero-argument callable.
+            timeout: Optional total timeout in seconds.
+
+        Raises:
+            ValueError: If *tasks* is empty.
+            TypeError: If any value in *tasks* is not callable.
+            TimeoutError: If threads do not finish within *timeout*.
+        """
+        if not tasks:
+            raise ValueError(
+                "TraceExecutor.run() received an empty dict — pass at least one {name: callable} entry."
+            )
+        for name, fn in tasks.items():
+            if not callable(fn):
+                raise TypeError(
+                    f"TraceExecutor.run(): value for {name!r} must be callable, got {type(fn).__name__!r}."
+                )
+
+        if self._mode == "async":
+            raise TypeError("TraceExecutor is already running in async mode; cannot switch to sync dict form.")
+        self._mode = "sync"
+
+        for name, fn in tasks.items():
+            self._sync.run(name, fn)
+        self._sync.wait(timeout=timeout)
+
+    def _run_individual(
+        self,
+        execution_name: str,
+        target: Callable[..., None],
+        args: tuple[Any, ...] = (),
+        kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        """Start a single named thread (legacy individual-call form)."""
+        if self._mode == "async":
+            raise TypeError("TraceExecutor is already running in async mode")
+        self._mode = "sync"
+        self._sync.run(execution_name, target, args, kwargs)
+
     def run(
         self,
         execution_name: str | dict[str, Callable[..., Any]],
         target: Callable[..., None] | None = None,
         args: tuple[Any, ...] = (),
         kwargs: dict[str, Any] | None = None,
-        timeout: float = 10.0,
+        timeout: float | None = None,
     ) -> None:
+        """Run one or more threads under schedule control.
+
+        **New (preferred) form** — pass a dict mapping thread names to callables.
+        This starts all threads and waits for them in a single call::
+
+            executor.run({"thread1": fn1, "thread2": fn2}, timeout=5.0)
+
+        **Legacy form** — pass a name and a callable separately.
+        The caller must then call :meth:`wait` explicitly.
+        This form is *deprecated* and will be removed in 0.6::
+
+            executor.run("thread1", fn1)
+            executor.run("thread2", fn2)
+            executor.wait(timeout=5.0)
+
+        Args:
+            execution_name: Either a ``{name: callable}`` dict (new form) or a
+                string thread name (deprecated legacy form).
+            target: Target callable for the legacy individual-call form.
+            args: Positional arguments forwarded to *target* (legacy form only).
+            kwargs: Keyword arguments forwarded to *target* (legacy form only).
+            timeout: Total wait timeout in seconds (dict form only; for the
+                legacy form pass *timeout* to :meth:`wait` instead).
+        """
         if isinstance(execution_name, dict):
             if target is not None:
-                raise TypeError("TraceExecutor.run() accepts either a task mapping or a named sync target, not both")
-            if self._mode == "sync":
-                raise TypeError("TraceExecutor is already running in sync mode")
-            self._mode = "async"
-            if self._async is None:
-                from frontrun.async_trace_markers import AsyncTraceExecutor
+                raise TypeError(
+                    "TraceExecutor.run(): cannot mix the dict form and the legacy positional form. "
+                    "Pass either run({'name': fn, ...}) or run('name', fn), not both."
+                )
+            # Detect async tasks (coroutine functions) and delegate to async mode.
+            import inspect
 
-                self._async = AsyncTraceExecutor(self.schedule, deadlock_timeout=self.deadlock_timeout)
-            self._async.run(execution_name, timeout=timeout)
+            if any(inspect.iscoroutinefunction(fn) for fn in execution_name.values() if callable(fn)):
+                if self._mode == "sync":
+                    raise TypeError("TraceExecutor is already running in sync mode")
+                self._mode = "async"
+                if self._async is None:
+                    from frontrun.async_trace_markers import AsyncTraceExecutor
+
+                    self._async = AsyncTraceExecutor(self.schedule, deadlock_timeout=self.deadlock_timeout)
+                self._async.run(execution_name, timeout=timeout if timeout is not None else 10.0)
+                return
+
+            # All values are sync callables → use the new sync dict form.
+            self._run_dict(execution_name, timeout=timeout)
             return
 
         if target is None:
             raise TypeError("TraceExecutor.run() missing target for sync execution")
-        if self._mode == "async":
-            raise TypeError("TraceExecutor is already running in async mode")
-        self._mode = "sync"
-        self._sync.run(execution_name, target, args, kwargs)
+
+        warnings.warn(
+            "Calling TraceExecutor.run() with individual thread names is deprecated; "
+            "pass a dict {name: callable} instead, e.g. "
+            "executor.run({'thread1': fn1, 'thread2': fn2}, timeout=5.0). "
+            "Will be removed in 0.6.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self._run_individual(execution_name, target, args, kwargs)
 
     def wait(self, timeout: float | None = None) -> None:
         if self._mode in (None, "async"):
