@@ -492,6 +492,39 @@ def test_detect_redis_deprecated_warns():
     assert any("detect_io=True" in m for m in messages)
 
 
+def test_explore_async_random_detect_io_propagates_to_detect_sql(monkeypatch):
+    """detect_io=True must activate detect_sql=True in the async random path.
+
+    The async DPOR path correctly uses ``detect_sql = ... or detect_io``, but
+    the async random path uses ``setdefault`` which is a no-op when
+    detect_sql=False is already present from _select_kwargs.
+    """
+    import frontrun.async_shuffler as _shuffler_mod
+
+    captured_kwargs: dict[str, object] = {}
+
+    async def _spy(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return InterleavingResult(property_holds=True, num_explored=1)
+
+    monkeypatch.setattr(_shuffler_mod, "explore_async_random", _spy)
+
+    asyncio.run(
+        explore(
+            setup=AsyncCounter,
+            workers=AsyncCounter.increment,
+            count=2,
+            invariant=lambda c: c.value == 2,
+            strategy="random",
+            detect_io=True,
+        )
+    )
+    assert captured_kwargs.get("detect_sql") is True, (
+        f"detect_io=True should propagate to detect_sql=True in async random path, "
+        f"but got detect_sql={captured_kwargs.get('detect_sql')!r}"
+    )
+
+
 def test_explore_unified_detect_io_async_dpor():
     """frontrun.explore(detect_io=True) with async workers doesn't raise."""
     result = asyncio.run(

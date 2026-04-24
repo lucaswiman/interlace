@@ -452,3 +452,33 @@ class TestInlineMarkerNoDoubleTrigger:
         assert executor.coordinator.error is None, (
             f"Coordinator should not have errors (double-trigger causes stall): {executor.coordinator.error}"
         )
+
+
+class TestAsyncScheduleIncompleteness:
+    def test_incomplete_schedule_reports_unreached_steps(self):
+        """When an async schedule is only partially consumed, the error message
+        should list the specific steps that were never reached — matching the
+        sync _ThreadTraceExecutor.wait() behavior."""
+
+        async def task_a():
+            # frontrun: step_a1
+            pass
+
+        async def task_b():
+            # frontrun: step_b1
+            pass
+
+        schedule = Schedule(
+            [
+                Step("task_a", "step_a1"),
+                Step("task_b", "step_b1"),
+                Step("task_a", "step_a_never"),  # never reached
+            ]
+        )
+
+        executor = AsyncTraceExecutor(schedule, deadlock_timeout=2.0)
+        with pytest.raises(TimeoutError, match="Schedule incomplete"):
+            executor.run(
+                {"task_a": task_a, "task_b": task_b},
+                timeout=5.0,
+            )

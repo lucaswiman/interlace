@@ -339,8 +339,8 @@ async def _explore_async(
     else:  # random
         from frontrun.async_shuffler import explore_async_random as _explore_async_random
 
+        detect_io = kwargs.pop("detect_io", True)
+        detect_sql_explicit = kwargs.pop("detect_sql", False)
         random_kwargs = _select_kwargs(kwargs, _RANDOM_ASYNC_KEYS)
-        # detect_io is mapped onto detect_sql for the async random path.
-        if "detect_io" in kwargs and kwargs["detect_io"] is not None:
-            random_kwargs.setdefault("detect_sql", kwargs["detect_io"])
+        random_kwargs["detect_sql"] = detect_sql_explicit or detect_io
         return await _explore_async_random(setup=setup, tasks=workers, invariant=invariant, **random_kwargs)

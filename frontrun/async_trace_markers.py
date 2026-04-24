@@ -169,6 +169,17 @@ class AsyncTraceExecutor:
             first_error = next(iter(self.task_errors.values()))
             raise first_error
 
+        if (
+            self.coordinator.current_step > 0
+            and self.coordinator.current_step < len(self.coordinator.schedule.steps)
+            and not self.coordinator.completed
+        ):
+            remaining = self.coordinator.schedule.steps[self.coordinator.current_step :]
+            step_strs = [f"Step({s.execution_name!r}, {s.marker_name!r})" for s in remaining]
+            raise TimeoutError(
+                f"Schedule incomplete: {len(remaining)} step(s) were never reached: {', '.join(step_strs)}"
+            )
+
     def reset(self):
         """Reset the executor for another run (for testing purposes)."""
         self.task_errors = {}
