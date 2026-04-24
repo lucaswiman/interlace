@@ -962,8 +962,13 @@ async def _reproduce_async_counterexample(
         except (TimeoutError, Exception):
             continue
         if not deadlocked:
-            if invariant is not None and not invariant(state):
-                successes += 1
+            if invariant is not None:
+                try:
+                    _inv_failed = not invariant(state)
+                except AssertionError:
+                    _inv_failed = True
+                if _inv_failed:
+                    successes += 1
     return reproduce_on_failure, successes
 
 

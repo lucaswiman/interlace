@@ -292,7 +292,7 @@ def test_assertion_error_in_invariant_random():
 def test_assertion_error_async_dpor():
     """AssertionError in async DPOR invariant is treated as failure."""
 
-    async def assert_inv(c: AsyncCounter) -> bool:
+    def assert_inv(c: AsyncCounter) -> bool:
         assert c.value == 2, f"async: expected 2, got {c.value}"
         return True
 
@@ -313,7 +313,7 @@ def test_assertion_error_async_dpor():
 def test_assertion_error_async_random():
     """AssertionError in async random invariant is treated as failure."""
 
-    async def assert_inv(c: AsyncCounter) -> bool:
+    def assert_inv(c: AsyncCounter) -> bool:
         assert c.value == 2, f"async-random: expected 2, got {c.value}"
         return True
 
