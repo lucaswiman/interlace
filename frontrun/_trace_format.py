@@ -16,14 +16,10 @@ from __future__ import annotations
 
 import dis
 import linecache
-import sys
 from dataclasses import dataclass, replace
 from typing import Any
 
 from frontrun._cooperative import real_lock
-
-_PY_VERSION = sys.version_info[:2]
-
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -251,11 +247,7 @@ def _get_instruction(code: Any, offset: int) -> dis.Instruction | None:
     mapping = _instr_cache.get(code)
     if mapping is None:
         mapping = {}
-        if _PY_VERSION >= (3, 11):
-            instructions = dis.get_instructions(code, show_caches=False)
-        else:
-            instructions = dis.get_instructions(code)
-        for inst in instructions:
+        for inst in dis.get_instructions(code):
             mapping[inst.offset] = inst
         _instr_cache[code] = mapping
     return mapping.get(offset)
