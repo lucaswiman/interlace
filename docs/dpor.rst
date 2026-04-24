@@ -38,11 +38,23 @@ this collapses an exponential search space down to a handful of executions.
 Algorithm overview
 ------------------
 
-Frontrun implements a hybrid DPOR algorithm combining ideas from classic DPOR
-(`Flanagan and Godefroid, POPL 2005
-<https://dl.acm.org/doi/10.1145/1040305.1040315>`_) and Optimal DPOR (`Abdulla
-et al., "Source Sets", JACM 2017
-<https://doi.org/10.1145/3073408>`_), with optional `preemption bounding
+Frontrun implements a hybrid DPOR algorithm combining ideas from three
+papers:
+
+- **Classic DPOR** --- `Flanagan and Godefroid, POPL'05
+  <https://dl.acm.org/doi/10.1145/1040305.1040315>`_. Introduces dynamic
+  partial-order reduction with backtrack sets.
+- **Optimal DPOR with wakeup trees** --- `Abdulla, Aronis, Jonsson, and
+  Sagonas, POPL'14
+  <https://dl.acm.org/doi/10.1145/2535838.2535845>`_. Replaces backtrack
+  sets with wakeup trees to achieve exactly one execution per Mazurkiewicz
+  trace.
+- **Source sets and deferred race detection** --- `Abdulla et al., JACM'17
+  <https://doi.org/10.1145/3073408>`_. The full journal version, which
+  Frontrun follows most closely. See :ref:`dpor-wakeup-trees` below for
+  the wake-up tree machinery from Algorithm 2.
+
+Optional preemption bounding follows `Musuvathi and Qadeer, PLDI'07
 <https://www.microsoft.com/en-us/research/publication/iterative-context-bounding-for-systematic-testing-of-multithreaded-programs/>`_.
 
 The core loop repeats until no unexplored interleavings remain:
@@ -323,31 +335,140 @@ has a non-empty wakeup tree, and picks the next thread from it:
 The prefix up to Branch 0 is replayed identically; only the decision at
 Branch 1 changes.
 
+.. _dpor-wakeup-trees:
+
 Wakeup trees
 ~~~~~~~~~~~~~~
 
-A wakeup tree (``WakeupTree``) is an ordered tree of thread-ID sequences.
-Each path from the root to a leaf represents a sequence of scheduling
-decisions to explore. The tree merges shared prefixes and deduplicates
-sequences automatically.
+A wakeup tree is the engine's memory of which interleavings still need
+to be explored at a given branch. It was introduced by `Abdulla et al.
+in POPL'14
+<https://dl.acm.org/doi/10.1145/2535838.2535845>`_ and given its full
+treatment in the `JACM'17 journal version
+<https://doi.org/10.1145/3073408>`_ (Definition 6.1, p.21--22).
+``WakeupTree`` lives in ``crates/dpor/src/wakeup_tree.rs``.
 
-Key operations:
+Definition
+^^^^^^^^^^^
 
-``insert(sequence)``
-    Add a scheduling sequence to the tree. Shared prefixes are merged; new
-    branches are added at the rightmost position.
+For an execution prefix :math:`E` with sleep set :math:`P`, a wakeup tree
+:math:`\langle B, \prec \rangle` is an ordered, rooted tree whose nodes
+are labeled by thread IDs. The children of each node are totally ordered
+by the exploration-order relation :math:`\prec`. Each path from the root
+to any node spells out a **wakeup sequence** --- an initial fragment of
+a future execution that will reverse a detected race.
 
-``min_thread()``
-    Return the minimum thread ID among root-level branches. Used as a
-    deterministic proxy for the paper's :math:`\prec` ordering.
+The tree must satisfy two properties (JACM'17 Def 6.1):
 
-``subtree(thread_id)``
-    Extract the subtree for a given thread. When thread *p* is chosen at a
-    branch, the subtree for *p* becomes the wakeup guidance for subsequent
-    branches (Algorithm 2 line 17: ``WuT' = subtree(wut(E), p)``).
+*Property 1 (no blocked leaf).*
+   For every leaf :math:`w`, the set of weak initials
+   :math:`WI_{[E]}(w)` is disjoint from the sleep set :math:`P`. Every
+   sequence in the tree leads somewhere that is not already blocked by
+   sleep.
 
-``remove_branch(thread_id)``
-    Remove the branch starting with *thread_id* after it has been explored.
+*Property 2 (sleep-set-removing siblings).*
+   For siblings :math:`u.p \prec u.q` where :math:`u.q` is a leaf,
+   :math:`p \notin WI_{[E.u]}(q)`. Exploring :math:`u.p` first adds it to
+   the sleep set, but exploring :math:`u.q` afterwards is guaranteed to
+   remove :math:`p` before :math:`q` is reached. This is what lets
+   Optimal DPOR reach every Mazurkiewicz class without redundant work.
+
+Internal shape
+^^^^^^^^^^^^^^^
+
+Each ``WakeupTree`` is an ordered list of top-level children; each child
+is a ``WakeupNode`` holding a ``thread_id`` and its own ordered list of
+children. Sequences that share a prefix are merged into the same
+subtree, which is both more compact and essential for the
+:math:`\prec`-order to line up with Property 2.
+
+Example: insert evolution
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Suppose three races are detected at one branch and the algorithm inserts
+three wakeup sequences, in order:
+
+1. ``[T1]``
+2. ``[T1, T2]``
+3. ``[T2, T0, T1]``
+
+.. code-block:: text
+
+   After insert [T1]:        After insert [T1, T2]:      After insert [T2, T0, T1]:
+
+      (root)                    (root)                      (root)
+        │                         │                        ╱      ╲
+        T1                        T1                      T1       T2
+                                  │                       │        │
+                                  T2                      T2       T0
+                                                                   │
+                                                                   T1
+
+Insert 1 creates a new top-level branch ``T1``. Insert 2 matches ``T1``
+among the existing children, descends into it, and appends ``T2``.
+Insert 3 does not match ``T1`` (its first element is ``T2``), so a new
+top-level branch is appended at the rightmost position and the remaining
+chain ``T0, T1`` hangs off it as a linear path.
+
+Example: subtree extraction
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Continuing from the tree above: if the scheduler picks ``T1`` to explore
+first (via ``min_thread()``), then ``subtree(T1)`` returns the children
+below the ``T1`` node, which become the wakeup tree guiding the *next*
+branch. The parent's ``T1`` branch is removed (``remove_branch(T1)``),
+leaving the sibling ``T2`` branch behind:
+
+.. code-block:: text
+
+   Before choosing T1:           After choosing T1:
+
+   Parent wut:                   Parent wut (T1 removed):
+
+      (root)                         (root)
+      ╱    ╲                            │
+     T1    T2                           T2
+     │     │                            │
+     T2    T0                           T0
+           │                            │
+           T1                           T1
+
+                                 Child wut (for next branch)
+                                 = subtree(T1) = just "T2":
+
+                                     (root)
+                                        │
+                                        T2
+
+This propagation is what lets a *multi-step* wakeup sequence drive
+exploration correctly: insert 2, ``[T1, T2]``, requires choosing T1 at
+depth :math:`d` and then T2 at depth :math:`d+1`. Without carrying the
+subtree down, the engine would lose track of the required second step.
+
+Operations and Algorithm 2 line references
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``insert(sequence)`` (JACM'17 Algorithm 2 line 6, Def 6.2 p.22)
+    Add a scheduling sequence to the tree. The implementation walks down
+    existing children by prefix matching; the first divergence becomes a
+    new rightmost sibling. **Simplification vs. the paper:** Definition
+    6.2 uses the equivalence relation :math:`v \sim_{[E]} w` from Lemma
+    6.2 to skip inserting sequences already covered by an existing
+    branch. Frontrun uses exact prefix matching --- sound but occasionally
+    retains redundant branches (see ``ideas/optimal_dpor.md`` Phase 4c).
+
+``min_thread()`` (Algorithm 2 line 15)
+    Return the minimum thread ID among the root-level children.
+    Frontrun uses the minimum thread ID as a deterministic proxy for the
+    paper's :math:`\prec` order.
+
+``subtree(p)`` (Algorithm 2 line 17: :math:`WuT' = \text{subtree}(wut(E), p)`)
+    When thread *p* is chosen at this branch, the subtree rooted at *p*
+    becomes the wakeup guidance for the subsequent branch.
+
+``remove_branch(p)`` (Algorithm 2 line 19: "remove all sequences of form p.w")
+    Remove the top-level branch starting with *p* after it has been
+    explored.
 
 Scheduling
 ~~~~~~~~~~~
@@ -541,7 +662,28 @@ they are equivalent. The equivalence classes (called `Mazurkiewicz traces
    \{(1), (3)\} \quad \text{and} \quad \{(4), (5), (6), (2)\}
 
 DPOR explores **one representative per class** --- here just 2 executions
-instead of 6. The reduction is even more dramatic with more threads and more
+instead of 6. The two classes can be visualized as follows:
+
+.. code-block:: text
+
+   6 linearizations                        2 Mazurkiewicz classes
+   ─────────────────                       ──────────────────────
+   (1) e1, e2, e3  ┐
+                   ├── equivalent  ──►   Class A:  e1 precedes e3
+   (3) e2, e1, e3  ┘                     (representative: e1, e2, e3)
+
+   (2) e1, e3, e2  ┐
+   (4) e2, e3, e1  │
+                   ├── equivalent  ──►   Class B:  e3 precedes e1
+   (5) e3, e1, e2  │                     (representative: e3, e2, e1)
+   (6) e3, e2, e1  ┘
+
+Within each class the only variation is the position of :math:`e_2`
+relative to the two writes. Since :math:`e_2` is independent of both, it
+can slide freely and every ordering produces the same final state. DPOR
+runs one linearization per class.
+
+The reduction is even more dramatic with more threads and more
 thread-local work.
 
 
