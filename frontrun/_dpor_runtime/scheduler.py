@@ -883,6 +883,8 @@ class _ReplayDporScheduler(DporScheduler):
                         self._finished = True
                         self._condition.notify_all()
                         return False
+                    self._condition.notify_all()
+                    continue
 
                 if self._current_thread == thread_id:
                     self._current_thread = self._schedule_next()
