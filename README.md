@@ -2,7 +2,7 @@
 
 **Deterministic concurrency testing for Python.** Race conditions are hard to test because they depend on timing — a test that passes 95% of the time is worse than one that always fails, because it breeds false confidence. Frontrun replaces timing-dependent thread interleaving with deterministic scheduling, so race conditions either always happen or never happen.
 
-Run against unmodified library code, frontrun has already found **46 concurrency bugs across 12 open-source libraries** — urllib3, SQLAlchemy, tenacity, cachetools, and others. See the [case studies](docs/CASE_STUDIES.rst).
+Because frontrun operates on unmodified code, you can point it at arbitrary third-party libraries and see what races turn up. The [case studies](docs/CASE_STUDIES.rst) collect findings across a dozen popular Python packages.
 
 ```bash
 pip install frontrun
