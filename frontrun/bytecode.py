@@ -603,7 +603,7 @@ def run_with_schedule(
     return state
 
 
-def explore_interleavings(
+def explore_random(
     setup: Callable[[], T],
     threads: list[Callable[[T], None]],
     invariant: Callable[[T], bool],
@@ -674,7 +674,7 @@ def explore_interleavings(
         field reports how many distinct execution orderings were observed,
         providing a lower bound on exploration coverage.
     """
-    _require_frontrun_env("explore_interleavings")
+    _require_frontrun_env("explore_random")
     if error_on_any_race:
         raise ValueError("error_on_any_race requires DPOR (use explore_dpor instead)")
     if trace_packages is not None:
@@ -737,7 +737,14 @@ def explore_interleavings(
                     result.explanation = explanation
                     return result
 
-            if not invariant(state):
+            _invariant_failed = False
+            _assertion_msg: str | None = None
+            try:
+                _invariant_failed = not invariant(state)
+            except AssertionError as _ae:
+                _invariant_failed = True
+                _assertion_msg = str(_ae)
+            if _invariant_failed:
                 result.property_holds = False
                 result.counterexample = schedule
                 result.unique_interleavings = len(seen_schedule_hashes)
@@ -756,20 +763,29 @@ def explore_interleavings(
                                 deadlock_timeout=deadlock_timeout,
                                 patch_sleep=patch_sleep,
                             )
-                            if not invariant(replay_state):
+                            _replay_failed = False
+                            try:
+                                _replay_failed = not invariant(replay_state)
+                            except AssertionError:
+                                _replay_failed = True
+                            if _replay_failed:
                                 successes += 1
                         except Exception:
                             pass  # timeout / crash during replay — not a reproduction
                     result.reproduction_attempts = reproduce_on_failure
                     result.reproduction_successes = successes
 
-                result.explanation = format_trace(
+                _trace_explanation = format_trace(
                     recorder.events,
                     num_threads=num_threads,
                     num_explored=result.num_explored,
                     reproduction_attempts=result.reproduction_attempts,
                     reproduction_successes=result.reproduction_successes,
                 )
+                if _assertion_msg:
+                    result.explanation = f"AssertionError: {_assertion_msg}\n\n{_trace_explanation}"
+                else:
+                    result.explanation = _trace_explanation
 
                 return result
 
@@ -777,6 +793,30 @@ def explore_interleavings(
         return result
     finally:
         _set_active_trace_filter(None)
+
+
+def explore_interleavings(
+    setup: Callable[[], T],
+    threads: list[Callable[[T], None]],
+    invariant: Callable[[T], bool],
+    **kwargs: Any,
+) -> InterleavingResult:
+    """Deprecated: use ``frontrun.explore(strategy='random')`` or ``explore_random`` instead.
+
+    .. deprecated:: 0.5
+        ``explore_interleavings`` will be removed in 0.6.  Use
+        :func:`frontrun.explore` with ``strategy='random'`` instead.
+    """
+    import warnings
+
+    warnings.warn(
+        "explore_interleavings is deprecated; use frontrun.explore(strategy='random') "
+        "(or frontrun.explore_random(...)) instead. "
+        "The old API will be removed in 0.6.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return explore_random(setup=setup, threads=threads, invariant=invariant, **kwargs)
 
 
 def schedule_strategy(num_threads: int, max_ops: int = 300):

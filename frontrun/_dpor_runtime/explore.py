@@ -10,7 +10,7 @@ from .runner import DporBytecodeRunner
 from .scheduler import DporScheduler
 
 
-def explore_dpor(
+def _explore_dpor(
     setup: Callable[[], T],
     threads: list[Callable[[T], None]],
     invariant: Callable[[T], bool],
@@ -420,7 +420,15 @@ def explore_dpor(
                         _record_and_emit_report()
                         return result
 
-            if not is_deadlock and not invariant(state):
+            _invariant_failed = False
+            _assertion_msg: str | None = None
+            if not is_deadlock:
+                try:
+                    _invariant_failed = not invariant(state)
+                except AssertionError as _ae:
+                    _invariant_failed = True
+                    _assertion_msg = str(_ae)
+            if _invariant_failed:
                 result.property_holds = False
                 with engine_lock:
                     schedule = execution.schedule_trace
@@ -454,13 +462,17 @@ def explore_dpor(
                         _set_preload_pipe_fd(preload_dispatcher._write_fd)
 
                 if result.explanation is None:
-                    result.explanation = format_trace(
+                    _trace_explanation = format_trace(
                         recorder.events,
                         num_threads=num_threads,
                         num_explored=result.num_explored,
                         reproduction_attempts=result.reproduction_attempts,
                         reproduction_successes=result.reproduction_successes,
                     )
+                    if _assertion_msg:
+                        result.explanation = f"AssertionError: {_assertion_msg}\n\n{_trace_explanation}"
+                    else:
+                        result.explanation = _trace_explanation
                 if result.sql_anomaly is None:
                     result.sql_anomaly = classify_sql_anomaly(recorder.events)
                 if stop_on_first:
@@ -515,3 +527,26 @@ def explore_dpor(
         generate_html_report(report, report_path)
 
     return result
+
+
+def explore_dpor(
+    setup: Callable[[], T],
+    threads: list[Callable[[T], None]],
+    invariant: Callable[[T], bool],
+    **kwargs: Any,
+) -> InterleavingResult:
+    """Deprecated: use ``frontrun.explore(strategy='dpor')`` instead.
+
+    .. deprecated:: 0.5
+        ``explore_dpor`` will be removed in 0.6.  Use :func:`frontrun.explore`
+        with ``strategy='dpor'`` (the default) instead.
+    """
+    import warnings
+
+    warnings.warn(
+        "explore_dpor is deprecated; use frontrun.explore(strategy='dpor') (or frontrun.explore(...)) instead. "
+        "The old API will be removed in 0.6.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _explore_dpor(setup=setup, threads=threads, invariant=invariant, **kwargs)
