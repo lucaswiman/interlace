@@ -27,7 +27,7 @@ Examples::
 
 from __future__ import annotations
 
-import asyncio
+import inspect
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -127,7 +127,7 @@ def explore(
         raise ValueError(f"explore(): unknown strategy={strategy!r}; must be 'dpor' or 'random'")
 
     # --- Detect async workers ---
-    is_async = any(asyncio.iscoroutinefunction(w) for w in worker_list)
+    is_async = any(inspect.iscoroutinefunction(w) for w in worker_list)
 
     if is_async:
         return _explore_async(
@@ -250,27 +250,23 @@ def _explore_sync(
     else:  # random
         from frontrun.bytecode import explore_random as _explore_random
 
-        random_kwargs = {
-            k: v
-            for k, v in kwargs.items()
-            if k
-            in (
-                "max_attempts",
-                "max_ops",
-                "timeout_per_run",
-                "seed",
-                "debug",
-                "detect_io",
-                "deadlock_timeout",
-                "reproduce_on_failure",
-                "total_timeout",
-                "warn_nondeterministic_sql",
-                "trace_packages",
-                "patch_sleep",
-                "serializable_invariant",
-                "error_on_any_race",
-            )
+        _random_sync_keys = {
+            "max_attempts",
+            "max_ops",
+            "timeout_per_run",
+            "seed",
+            "debug",
+            "detect_io",
+            "deadlock_timeout",
+            "reproduce_on_failure",
+            "total_timeout",
+            "warn_nondeterministic_sql",
+            "trace_packages",
+            "patch_sleep",
+            "serializable_invariant",
+            "error_on_any_race",
         }
+        random_kwargs = {k: v for k, v in kwargs.items() if k in _random_sync_keys and v is not None}
         return _explore_random(setup=setup, threads=workers, invariant=invariant, **random_kwargs)
 
 
@@ -322,23 +318,20 @@ async def _explore_async(
     else:  # random
         from frontrun.async_shuffler import explore_async_random as _explore_async_random
 
-        random_kwargs = {
-            k: v
-            for k, v in kwargs.items()
-            if k
-            in (
-                "max_attempts",
-                "max_ops",
-                "timeout_per_run",
-                "seed",
-                "detect_sql",
-                "deadlock_timeout",
-                "trace_packages",
-                "patch_sleep",
-                "serializable_invariant",
-                "error_on_any_race",
-            )
+        _async_random_keys = {
+            "max_attempts",
+            "max_ops",
+            "timeout_per_run",
+            "seed",
+            "detect_sql",
+            "deadlock_timeout",
+            "trace_packages",
+            "patch_sleep",
+            "serializable_invariant",
+            "error_on_any_race",
         }
+        # Omit None values so underlying functions use their own defaults.
+        random_kwargs = {k: v for k, v in kwargs.items() if k in _async_random_keys and v is not None}
         # detect_io maps to detect_sql for async random
         if "detect_io" in kwargs:
             random_kwargs.setdefault("detect_sql", kwargs["detect_io"])

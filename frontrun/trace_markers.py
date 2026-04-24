@@ -215,14 +215,10 @@ class TraceExecutor:
             TimeoutError: If threads do not finish within *timeout*.
         """
         if not tasks:
-            raise ValueError(
-                "TraceExecutor.run() received an empty dict — pass at least one {name: callable} entry."
-            )
+            raise ValueError("TraceExecutor.run() received an empty dict — pass at least one {name: callable} entry.")
         for name, fn in tasks.items():
             if not callable(fn):
-                raise TypeError(
-                    f"TraceExecutor.run(): value for {name!r} must be callable, got {type(fn).__name__!r}."
-                )
+                raise TypeError(f"TraceExecutor.run(): value for {name!r} must be callable, got {type(fn).__name__!r}.")
 
         if self._mode == "async":
             raise TypeError("TraceExecutor is already running in async mode; cannot switch to sync dict form.")
