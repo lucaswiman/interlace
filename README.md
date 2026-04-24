@@ -61,9 +61,10 @@ def test_transfer_lost_update():
     ])
 
     executor = TraceExecutor(schedule)
-    executor.run("thread1", lambda: account.transfer(50))
-    executor.run("thread2", lambda: account.transfer(50))
-    executor.wait(timeout=5.0)
+    executor.run({
+        "thread1": lambda: account.transfer(50),
+        "thread2": lambda: account.transfer(50),
+    }, timeout=5.0)
 
     # One update was lost: balance is 150, not 200
     assert account.balance == 150
@@ -105,9 +106,10 @@ def test_counter_lost_update():
     ])
 
     executor = TraceExecutor(schedule)
-    executor.run("thread1", counter.increment)
-    executor.run("thread2", counter.increment)
-    executor.wait(timeout=5.0)
+    executor.run({
+        "thread1": counter.increment,
+        "thread2": counter.increment,
+    }, timeout=5.0)
 
     assert counter.value == 1  # One increment lost
 ```

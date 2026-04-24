@@ -967,7 +967,7 @@ async def _reproduce_async_counterexample(
     return reproduce_on_failure, successes
 
 
-async def explore_async_dpor(
+async def _explore_async_dpor(
     setup: Callable[[], T],
     tasks: list[Callable[[T], Coroutine[Any, Any, None]]],
     invariant: Callable[[T], bool],
@@ -1236,13 +1236,25 @@ async def explore_async_dpor(
                         if stop_on_first:
                             return result
 
-                if not is_deadlock and task_error is None and not invariant(state):
-                    schedule_list = _record_failure(
-                        execution, _format_async_trace(list(execution.schedule_trace), num_tasks)
-                    )
-                    await _record_reproduction(schedule_list, invariant)
-                    if stop_on_first:
-                        return result
+                if not is_deadlock and task_error is None:
+                    _invariant_failed = False
+                    _assertion_msg: str | None = None
+                    try:
+                        _invariant_failed = not invariant(state)
+                    except AssertionError as _ae:
+                        _invariant_failed = True
+                        _assertion_msg = str(_ae)
+                    if _invariant_failed:
+                        _trace_explanation = _format_async_trace(list(execution.schedule_trace), num_tasks)
+                        _explanation = (
+                            f"AssertionError: {_assertion_msg}\n\n{_trace_explanation}"
+                            if _assertion_msg
+                            else _trace_explanation
+                        )
+                        schedule_list = _record_failure(execution, _explanation)
+                        await _record_reproduction(schedule_list, invariant)
+                        if stop_on_first:
+                            return result
 
                 if not engine.next_execution():
                     break
@@ -1252,3 +1264,77 @@ async def explore_async_dpor(
         set_lock_timeout(prev_lock_timeout)
 
     return result
+
+
+async def explore_async_dpor(
+    setup: Callable[[], T],
+    tasks: list[Callable[[T], Coroutine[Any, Any, None]]],
+    invariant: Callable[[T], bool],
+    max_executions: int | None = None,
+    preemption_bound: int | None = 2,
+    max_branches: int = 100_000,
+    timeout_per_run: float = 5.0,
+    stop_on_first: bool = True,
+    deadlock_timeout: float = 5.0,
+    detect_sql: bool = False,
+    detect_redis: bool = False,
+    detect_io: bool = False,
+    trace_packages: list[str] | None = None,
+    reproduce_on_failure: int = 10,
+    total_timeout: float | None = None,
+    warn_nondeterministic_sql: bool = True,
+    lock_timeout: int | None = None,
+    patch_sleep: bool = True,
+    serializable_invariant: Callable[[T], Any] | bool = False,
+    error_on_any_race: bool = False,
+) -> InterleavingResult:
+    """Deprecated: use ``frontrun.explore(strategy='dpor')`` with async tasks instead.
+
+    .. deprecated:: 0.5
+        ``explore_async_dpor`` will be removed in 0.6.  Use
+        :func:`frontrun.explore` with async worker functions instead.
+
+    Note: ``detect_redis=True`` is deprecated in favour of ``detect_io=True``
+    which now covers Redis in both sync and async contexts.
+    """
+    import warnings
+
+    warnings.warn(
+        "explore_async_dpor is deprecated; use frontrun.explore(strategy='dpor') "
+        "(or frontrun.explore(...)) instead. "
+        "The old API will be removed in 0.6.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    if detect_redis and not detect_io:
+        warnings.warn(
+            "detect_redis=True is deprecated; use detect_io=True instead "
+            "(now covers Redis in both sync and async). "
+            "The old parameter will be removed in 0.6.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    # detect_io=True implies detect_redis=True in the new API
+    effective_detect_redis = detect_redis or detect_io
+    effective_detect_sql = detect_sql or detect_io
+    return await _explore_async_dpor(
+        setup=setup,
+        tasks=tasks,
+        invariant=invariant,
+        max_executions=max_executions,
+        preemption_bound=preemption_bound,
+        max_branches=max_branches,
+        timeout_per_run=timeout_per_run,
+        stop_on_first=stop_on_first,
+        deadlock_timeout=deadlock_timeout,
+        detect_sql=effective_detect_sql,
+        detect_redis=effective_detect_redis,
+        trace_packages=trace_packages,
+        reproduce_on_failure=reproduce_on_failure,
+        total_timeout=total_timeout,
+        warn_nondeterministic_sql=warn_nondeterministic_sql,
+        lock_timeout=lock_timeout,
+        patch_sleep=patch_sleep,
+        serializable_invariant=serializable_invariant,
+        error_on_any_race=error_on_any_race,
+    )

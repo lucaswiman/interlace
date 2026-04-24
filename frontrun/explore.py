@@ -28,8 +28,7 @@ Examples::
 from __future__ import annotations
 
 import asyncio
-import warnings
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable
 from typing import Any, TypeVar
 
 from frontrun.common import InterleavingResult

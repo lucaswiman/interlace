@@ -242,7 +242,7 @@ async def run_with_schedule(
         return state
 
 
-async def explore_interleavings(
+async def explore_async_random(
     setup: Callable[[], Any],
     tasks: list[Callable[[Any], Coroutine[Any, Any, None]]],
     invariant: Callable[[Any], bool],
@@ -337,14 +337,48 @@ async def explore_interleavings(
                     result.explanation = explanation
                     return result
 
-            if not invariant(state):
+            _invariant_failed = False
+            _assertion_msg: str | None = None
+            try:
+                _invariant_failed = not invariant(state)
+            except AssertionError as _ae:
+                _invariant_failed = True
+                _assertion_msg = str(_ae)
+            if _invariant_failed:
                 result.property_holds = False
                 result.counterexample = schedule
                 result.unique_interleavings = len(seen_schedule_hashes)
+                if _assertion_msg:
+                    result.explanation = f"AssertionError: {_assertion_msg}"
                 return result
 
         result.unique_interleavings = len(seen_schedule_hashes)
         return result
+
+
+async def explore_interleavings(
+    setup: Callable[[], Any],
+    tasks: list[Callable[[Any], Coroutine[Any, Any, None]]],
+    invariant: Callable[[Any], bool],
+    **kwargs: Any,
+) -> InterleavingResult:
+    """Deprecated: use ``frontrun.explore(strategy='random')`` with async tasks instead.
+
+    .. deprecated:: 0.5
+        ``explore_interleavings`` (async form) will be removed in 0.6.  Use
+        :func:`frontrun.explore` with ``strategy='random'`` and async worker
+        functions instead.
+    """
+    import warnings
+
+    warnings.warn(
+        "explore_interleavings (async) is deprecated; use frontrun.explore(strategy='random') "
+        "(or frontrun.explore_async_random(...)) instead. "
+        "The old API will be removed in 0.6.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return await explore_async_random(setup=setup, tasks=tasks, invariant=invariant, **kwargs)
 
 
 def schedule_strategy(num_tasks: int, max_ops: int = 100) -> Any:  # type: ignore[name-defined]

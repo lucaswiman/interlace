@@ -13,21 +13,44 @@ Async trace markers (pass a dict of task names to coroutines)::
     executor = TraceExecutor(schedule)
     executor.run({"task1": coro_factory1, "task2": coro_factory2})
 
-DPOR (Dynamic Partial Order Reduction) systematic exploration::
+Unified exploration entry point (recommended)::
 
-    from frontrun.dpor import explore_dpor
+    from frontrun import explore
 
-Async DPOR systematic exploration::
+    # Sync DPOR (default)
+    result = explore(
+        setup=Counter,
+        workers=Counter.increment,
+        count=2,
+        invariant=lambda c: c.value == 2,
+    )
+    result.assert_holds()
 
-    from frontrun.async_dpor import explore_async_dpor, await_point
+    # Async — detected automatically
+    async def worker(state): ...
+    result = await explore(setup=make_state, workers=worker, count=2, invariant=...)
 
-Bytecode exploration::
+    # Strategy selection
+    result = explore(..., strategy="dpor")    # default
+    result = explore(..., strategy="random")  # formerly explore_interleavings
 
-    from frontrun import explore_interleavings
+DPOR (Dynamic Partial Order Reduction) systematic exploration (deprecated)::
 
-Async shuffler exploration::
+    from frontrun.dpor import explore_dpor  # deprecated — use frontrun.explore instead
 
-    from frontrun import explore_interleavings
+Async DPOR systematic exploration (deprecated)::
+
+    from frontrun.async_dpor import explore_async_dpor  # deprecated — use frontrun.explore instead
+
+Bytecode exploration (deprecated)::
+
+    from frontrun import explore_random  # canonical new name
+    from frontrun import explore_interleavings  # deprecated alias
+
+Async shuffler exploration (deprecated)::
+
+    from frontrun import explore_async_random  # canonical new name
+    from frontrun import explore_async_interleavings  # deprecated alias
 
 Contrib helpers (use threads= for sync, tasks= for async)::
 
@@ -39,6 +62,7 @@ from importlib.metadata import version as _metadata_version
 from typing import Any
 
 from frontrun.common import NondeterministicSQLError
+from frontrun.explore import explore
 from frontrun.trace_markers import TraceExecutor
 
 try:
@@ -47,25 +71,84 @@ except Exception:
     __version__ = "0.0.0"
 
 
-def explore_interleavings(*args: Any, **kwargs: Any) -> Any:
-    """Dispatch to sync or async interleaving exploration.
+def explore_random(*args: Any, **kwargs: Any) -> Any:
+    """Canonical sync random-schedule exploration.
 
-    Use ``threads=[...]`` for threaded code or ``tasks=[...]`` for async code.
-    The async form returns an awaitable.
+    Use ``threads=[...]`` for threaded code.  Formerly called
+    ``explore_interleavings`` (sync form).
     """
-    has_threads = "threads" in kwargs
-    has_tasks = "tasks" in kwargs
-    if has_threads == has_tasks:
-        raise TypeError("explore_interleavings() requires exactly one of 'threads' or 'tasks'")
+    from frontrun.bytecode import explore_random as _explore_random
 
-    if has_tasks:
-        from frontrun.async_shuffler import explore_interleavings as _async_explore_interleavings
-
-        return _async_explore_interleavings(*args, **kwargs)
-
-    from frontrun.bytecode import explore_interleavings as _sync_explore_interleavings
-
-    return _sync_explore_interleavings(*args, **kwargs)
+    return _explore_random(*args, **kwargs)
 
 
-__all__ = ["NondeterministicSQLError", "TraceExecutor", "__version__", "explore_interleavings"]
+async def explore_async_random(*args: Any, **kwargs: Any) -> Any:
+    """Canonical async random-schedule exploration.
+
+    Use ``tasks=[...]`` for async code.  Formerly called
+    ``explore_interleavings`` (async form) or ``explore_async_interleavings``.
+    """
+    from frontrun.async_shuffler import explore_async_random as _explore_async_random
+
+    return await _explore_async_random(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Deprecated aliases — exposed via module-level __getattr__ (PEP 562).
+# Accessing these names emits DeprecationWarning and returns the old callable
+# wrapped in a thin shim that also warns at *call time* when the user imported
+# directly from a submodule (the __getattr__ path covers the top-level case).
+# ---------------------------------------------------------------------------
+
+_DEPRECATED_ALIASES: dict[str, tuple[str, str, str]] = {
+    "explore_dpor": (
+        "frontrun._dpor_runtime.explore",
+        "explore_dpor",
+        "explore_dpor is deprecated; use frontrun.explore(strategy='dpor') (or frontrun.explore(...)) instead. "
+        "The old API will be removed in 0.6.",
+    ),
+    "explore_async_dpor": (
+        "frontrun.async_dpor",
+        "explore_async_dpor",
+        "explore_async_dpor is deprecated; use frontrun.explore(strategy='dpor') "
+        "(or frontrun.explore(...)) instead. "
+        "The old API will be removed in 0.6.",
+    ),
+    "explore_interleavings": (
+        "frontrun.bytecode",
+        "explore_interleavings",
+        "explore_interleavings is deprecated; use frontrun.explore(strategy='random') "
+        "(or frontrun.explore_random(...)) instead. "
+        "The old API will be removed in 0.6.",
+    ),
+    "explore_async_interleavings": (
+        "frontrun.async_shuffler",
+        "explore_interleavings",
+        "explore_async_interleavings is deprecated; use frontrun.explore(strategy='random') "
+        "(or frontrun.explore_async_random(...)) instead. "
+        "The old API will be removed in 0.6.",
+    ),
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _DEPRECATED_ALIASES:
+        import importlib
+        import warnings
+
+        module_path, attr, msg = _DEPRECATED_ALIASES[name]
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        return getattr(importlib.import_module(module_path), attr)
+    raise AttributeError(f"module 'frontrun' has no attribute {name!r}")
+
+
+__all__ = [
+    "NondeterministicSQLError",
+    "TraceExecutor",
+    "__version__",
+    "explore",
+    "explore_random",
+    "explore_async_random",
+    # Deprecated aliases — not in __all__ so static analysis won't suggest them,
+    # but still accessible via __getattr__ for backward compat.
+]
