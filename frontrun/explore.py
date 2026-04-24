@@ -27,13 +27,14 @@ Examples::
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
-from frontrun.common import InterleavingResult
+from frontrun.common import InterleavingResult, any_async
 
 T = TypeVar("T")
+
+Strategy = Literal["dpor", "random"]
 
 
 def explore(
@@ -42,7 +43,7 @@ def explore(
     invariant: Callable[[Any], bool],
     *,
     count: int | None = None,
-    strategy: str = "dpor",
+    strategy: Strategy = "dpor",
     # DPOR-specific kwargs
     max_executions: int | None = None,
     preemption_bound: int | None = 2,
@@ -119,17 +120,11 @@ def explore(
         ValueError: If ``count`` and a list of workers are both provided,
             ``count <= 0``, or ``strategy`` is unrecognised.
     """
-    # --- Resolve worker list ---
     worker_list = _resolve_workers(workers, count)
-
-    # --- Validate strategy ---
     if strategy not in ("dpor", "random"):
         raise ValueError(f"explore(): unknown strategy={strategy!r}; must be 'dpor' or 'random'")
 
-    # --- Detect async workers ---
-    is_async = any(inspect.iscoroutinefunction(w) for w in worker_list)
-
-    if is_async:
+    if any_async(worker_list):
         return _explore_async(
             setup=setup,
             workers=worker_list,
@@ -185,6 +180,91 @@ def explore(
         )
 
 
+_DPOR_SYNC_KEYS = frozenset(
+    {
+        "max_executions",
+        "preemption_bound",
+        "max_branches",
+        "timeout_per_run",
+        "stop_on_first",
+        "detect_io",
+        "deadlock_timeout",
+        "reproduce_on_failure",
+        "total_timeout",
+        "warn_nondeterministic_sql",
+        "lock_timeout",
+        "trace_packages",
+        "track_dunder_dict_accesses",
+        "search",
+        "patch_sleep",
+        "serializable_invariant",
+        "error_on_any_race",
+    }
+)
+
+_RANDOM_SYNC_KEYS = frozenset(
+    {
+        "max_attempts",
+        "max_ops",
+        "timeout_per_run",
+        "seed",
+        "debug",
+        "detect_io",
+        "deadlock_timeout",
+        "reproduce_on_failure",
+        "total_timeout",
+        "warn_nondeterministic_sql",
+        "trace_packages",
+        "patch_sleep",
+        "serializable_invariant",
+        "error_on_any_race",
+    }
+)
+
+_DPOR_ASYNC_KEYS = frozenset(
+    {
+        "max_executions",
+        "preemption_bound",
+        "max_branches",
+        "timeout_per_run",
+        "stop_on_first",
+        "deadlock_timeout",
+        "reproduce_on_failure",
+        "total_timeout",
+        "warn_nondeterministic_sql",
+        "lock_timeout",
+        "trace_packages",
+        "patch_sleep",
+        "serializable_invariant",
+        "error_on_any_race",
+    }
+)
+
+_RANDOM_ASYNC_KEYS = frozenset(
+    {
+        "max_attempts",
+        "max_ops",
+        "timeout_per_run",
+        "seed",
+        "detect_sql",
+        "deadlock_timeout",
+        "trace_packages",
+        "patch_sleep",
+        "serializable_invariant",
+        "error_on_any_race",
+    }
+)
+
+
+def _select_kwargs(kwargs: dict[str, Any], allowed: frozenset[str]) -> dict[str, Any]:
+    """Keep only *allowed* keys whose value is not ``None``.
+
+    Filtering None lets the underlying implementation apply its own default
+    rather than having the dispatcher's ``None`` override it.
+    """
+    return {k: v for k, v in kwargs.items() if k in allowed and v is not None}
+
+
 def _resolve_workers(
     workers: Callable[[Any], Any] | list[Callable[[Any], Any]] | tuple[Callable[[Any], Any], ...],
     count: int | None,
@@ -222,51 +302,12 @@ def _explore_sync(
     if strategy == "dpor":
         from frontrun._dpor_runtime.explore import _explore_dpor
 
-        dpor_kwargs = {
-            k: v
-            for k, v in kwargs.items()
-            if k
-            in (
-                "max_executions",
-                "preemption_bound",
-                "max_branches",
-                "timeout_per_run",
-                "stop_on_first",
-                "detect_io",
-                "deadlock_timeout",
-                "reproduce_on_failure",
-                "total_timeout",
-                "warn_nondeterministic_sql",
-                "lock_timeout",
-                "trace_packages",
-                "track_dunder_dict_accesses",
-                "search",
-                "patch_sleep",
-                "serializable_invariant",
-                "error_on_any_race",
-            )
-        }
+        dpor_kwargs = _select_kwargs(kwargs, _DPOR_SYNC_KEYS)
         return _explore_dpor(setup=setup, threads=workers, invariant=invariant, **dpor_kwargs)
     else:  # random
         from frontrun.bytecode import explore_random as _explore_random
 
-        _random_sync_keys = {
-            "max_attempts",
-            "max_ops",
-            "timeout_per_run",
-            "seed",
-            "debug",
-            "detect_io",
-            "deadlock_timeout",
-            "reproduce_on_failure",
-            "total_timeout",
-            "warn_nondeterministic_sql",
-            "trace_packages",
-            "patch_sleep",
-            "serializable_invariant",
-            "error_on_any_race",
-        }
-        random_kwargs = {k: v for k, v in kwargs.items() if k in _random_sync_keys and v is not None}
+        random_kwargs = _select_kwargs(kwargs, _RANDOM_SYNC_KEYS)
         return _explore_random(setup=setup, threads=workers, invariant=invariant, **random_kwargs)
 
 
@@ -284,29 +325,9 @@ async def _explore_async(
         # detect_io in async DPOR enables both SQL and Redis
         detect_io = kwargs.pop("detect_io", True)
         detect_sql = kwargs.pop("detect_sql", False) or detect_io
-        detect_redis = detect_io  # detect_io now covers Redis in async too
+        detect_redis = detect_io
 
-        dpor_kwargs = {
-            k: v
-            for k, v in kwargs.items()
-            if k
-            in (
-                "max_executions",
-                "preemption_bound",
-                "max_branches",
-                "timeout_per_run",
-                "stop_on_first",
-                "deadlock_timeout",
-                "reproduce_on_failure",
-                "total_timeout",
-                "warn_nondeterministic_sql",
-                "lock_timeout",
-                "trace_packages",
-                "patch_sleep",
-                "serializable_invariant",
-                "error_on_any_race",
-            )
-        }
+        dpor_kwargs = _select_kwargs(kwargs, _DPOR_ASYNC_KEYS)
         return await _explore_async_dpor(
             setup=setup,
             tasks=workers,
@@ -318,21 +339,8 @@ async def _explore_async(
     else:  # random
         from frontrun.async_shuffler import explore_async_random as _explore_async_random
 
-        _async_random_keys = {
-            "max_attempts",
-            "max_ops",
-            "timeout_per_run",
-            "seed",
-            "detect_sql",
-            "deadlock_timeout",
-            "trace_packages",
-            "patch_sleep",
-            "serializable_invariant",
-            "error_on_any_race",
-        }
-        # Omit None values so underlying functions use their own defaults.
-        random_kwargs = {k: v for k, v in kwargs.items() if k in _async_random_keys and v is not None}
-        # detect_io maps to detect_sql for async random
-        if "detect_io" in kwargs:
+        random_kwargs = _select_kwargs(kwargs, _RANDOM_ASYNC_KEYS)
+        # detect_io is mapped onto detect_sql for the async random path.
+        if "detect_io" in kwargs and kwargs["detect_io"] is not None:
             random_kwargs.setdefault("detect_sql", kwargs["detect_io"])
         return await _explore_async_random(setup=setup, tasks=workers, invariant=invariant, **random_kwargs)

@@ -58,10 +58,12 @@ Contrib helpers (use threads= for sync, tasks= for async)::
     from frontrun.contrib.sqlalchemy import sqlalchemy_dpor, get_connection, get_async_connection
 """
 
+import importlib
+import warnings
 from importlib.metadata import version as _metadata_version
 from typing import Any
 
-from frontrun.common import NondeterministicSQLError
+from frontrun.common import DEPRECATION_MESSAGES, NondeterministicSQLError
 from frontrun.explore import explore
 from frontrun.trace_markers import TraceExecutor
 
@@ -94,74 +96,54 @@ async def explore_async_random(*args: Any, **kwargs: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Deprecated aliases — exposed via module-level __getattr__ (PEP 562).
-# Accessing these names emits DeprecationWarning and returns the old callable
-# wrapped in a thin shim that also warns at *call time* when the user imported
-# directly from a submodule (the __getattr__ path covers the top-level case).
+# Deprecated aliases — resolved lazily via module-level __getattr__ (PEP 562).
+# Each access warns; each call also warns via the underlying ``deprecate``-wrapped
+# shim.  Python's default warnings filter deduplicates by (message, category,
+# module, lineno), so a given call site only produces one DeprecationWarning
+# per process — users aren't spammed.
 # ---------------------------------------------------------------------------
 
 _DEPRECATED_ALIASES: dict[str, tuple[str, str, str]] = {
-    "explore_dpor": (
-        "frontrun._dpor_runtime.explore",
-        "explore_dpor",
-        "explore_dpor is deprecated; use frontrun.explore(strategy='dpor') (or frontrun.explore(...)) instead. "
-        "The old API will be removed in 0.6.",
-    ),
+    "explore_dpor": ("frontrun._dpor_runtime.explore", "explore_dpor", DEPRECATION_MESSAGES["explore_dpor"]),
     "explore_async_dpor": (
         "frontrun.async_dpor",
         "explore_async_dpor",
-        "explore_async_dpor is deprecated; use frontrun.explore(strategy='dpor') "
-        "(or frontrun.explore(...)) instead. "
-        "The old API will be removed in 0.6.",
+        DEPRECATION_MESSAGES["explore_async_dpor"],
     ),
     "explore_async_interleavings": (
         "frontrun.async_shuffler",
         "explore_interleavings",
-        "explore_async_interleavings is deprecated; use frontrun.explore(strategy='random') "
-        "(or frontrun.explore_async_random(...)) instead. "
-        "The old API will be removed in 0.6.",
+        DEPRECATION_MESSAGES["explore_async_interleavings"],
     ),
 }
 
-# Message for explore_interleavings (kept separate as it has a special dispatcher)
-_EXPLORE_INTERLEAVINGS_MSG = (
-    "explore_interleavings is deprecated; use frontrun.explore(strategy='random') "
-    "(or frontrun.explore_random(...) / frontrun.explore_async_random(...)) instead. "
-    "The old API will be removed in 0.6."
-)
 
+def _deprecated_explore_interleavings(*args: Any, **kwargs: Any) -> Any:
+    """Deprecated sync/async dispatch shim for the old ``explore_interleavings`` API.
 
-def _make_deprecated_explore_interleavings() -> Any:
-    """Return a deprecated sync/async dispatch wrapper for the old explore_interleavings."""
-    import warnings
+    The pre-0.5 function accepted either ``threads=`` (sync) or ``tasks=``
+    (async) and dispatched internally. Preserved here so existing code works
+    through the 0.5 series; removed in 0.6.
+    """
+    warnings.warn(DEPRECATION_MESSAGES["explore_interleavings"], DeprecationWarning, stacklevel=2)
+    has_threads = "threads" in kwargs
+    has_tasks = "tasks" in kwargs
+    if has_threads == has_tasks:
+        raise TypeError("explore_interleavings() requires exactly one of 'threads' or 'tasks'")
+    if has_tasks:
+        from frontrun.async_shuffler import explore_async_random as _async_impl
 
-    def _dispatch(*args: Any, **kwargs: Any) -> Any:
-        warnings.warn(_EXPLORE_INTERLEAVINGS_MSG, DeprecationWarning, stacklevel=2)
-        has_threads = "threads" in kwargs
-        has_tasks = "tasks" in kwargs
-        if has_threads == has_tasks:
-            raise TypeError("explore_interleavings() requires exactly one of 'threads' or 'tasks'")
-        if has_tasks:
-            from frontrun.async_shuffler import explore_async_random as _async_impl
+        return _async_impl(*args, **kwargs)
+    from frontrun.bytecode import explore_random as _sync_impl
 
-            return _async_impl(*args, **kwargs)
-        from frontrun.bytecode import explore_random as _sync_impl
-
-        return _sync_impl(*args, **kwargs)
-
-    return _dispatch
+    return _sync_impl(*args, **kwargs)
 
 
 def __getattr__(name: str) -> Any:
     if name == "explore_interleavings":
-        import warnings
-
-        warnings.warn(_EXPLORE_INTERLEAVINGS_MSG, DeprecationWarning, stacklevel=2)
-        return _make_deprecated_explore_interleavings()
+        warnings.warn(DEPRECATION_MESSAGES["explore_interleavings"], DeprecationWarning, stacklevel=2)
+        return _deprecated_explore_interleavings
     if name in _DEPRECATED_ALIASES:
-        import importlib
-        import warnings
-
         module_path, attr, msg = _DEPRECATED_ALIASES[name]
         warnings.warn(msg, DeprecationWarning, stacklevel=2)
         return getattr(importlib.import_module(module_path), attr)

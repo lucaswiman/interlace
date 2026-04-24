@@ -56,7 +56,13 @@ from frontrun._async_autopause import (
 from frontrun._threaded_runner import PatchScope
 from frontrun.async_dpor import _sql_async_available, patch_sql_async, unpatch_sql_async
 from frontrun.async_scheduler import InterleavedLoop
-from frontrun.common import InterleavingResult, check_serializability_violation
+from frontrun.common import (
+    DEPRECATION_MESSAGES,
+    InterleavingResult,
+    check_invariant,
+    check_serializability_violation,
+    deprecate,
+)
 
 
 class AwaitScheduler(InterleavedLoop):
@@ -337,48 +343,27 @@ async def explore_async_random(
                     result.explanation = explanation
                     return result
 
-            _invariant_failed = False
-            _assertion_msg: str | None = None
-            try:
-                _invariant_failed = not invariant(state)
-            except AssertionError as _ae:
-                _invariant_failed = True
-                _assertion_msg = str(_ae)
-            if _invariant_failed:
+            invariant_failed, assertion_msg = check_invariant(invariant, state)
+            if invariant_failed:
                 result.property_holds = False
                 result.counterexample = schedule
                 result.unique_interleavings = len(seen_schedule_hashes)
-                if _assertion_msg:
-                    result.explanation = f"AssertionError: {_assertion_msg}"
+                if assertion_msg:
+                    result.explanation = f"AssertionError: {assertion_msg}"
                 return result
 
         result.unique_interleavings = len(seen_schedule_hashes)
         return result
 
 
-async def explore_interleavings(
-    setup: Callable[[], Any],
-    tasks: list[Callable[[Any], Coroutine[Any, Any, None]]],
-    invariant: Callable[[Any], bool],
-    **kwargs: Any,
-) -> InterleavingResult:
-    """Deprecated: use ``frontrun.explore(strategy='random')`` with async tasks instead.
-
-    .. deprecated:: 0.5
-        ``explore_interleavings`` (async form) will be removed in 0.6.  Use
-        :func:`frontrun.explore` with ``strategy='random'`` and async worker
-        functions instead.
-    """
-    import warnings
-
-    warnings.warn(
-        "explore_interleavings (async) is deprecated; use frontrun.explore(strategy='random') "
-        "(or frontrun.explore_async_random(...)) instead. "
-        "The old API will be removed in 0.6.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return await explore_async_random(setup=setup, tasks=tasks, invariant=invariant, **kwargs)
+explore_interleavings = deprecate(explore_async_random, DEPRECATION_MESSAGES["explore_async_interleavings"])
+explore_interleavings.__doc__ = (
+    "Deprecated alias for :func:`explore_async_random`.\n\n"
+    ".. deprecated:: 0.5\n"
+    "    ``explore_interleavings`` (async form) will be removed in 0.6. Use\n"
+    "    :func:`frontrun.explore` with ``strategy='random'`` and async worker\n"
+    "    functions instead."
+)
 
 
 def schedule_strategy(num_tasks: int, max_ops: int = 100) -> Any:  # type: ignore[name-defined]

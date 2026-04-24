@@ -67,7 +67,13 @@ from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.cli import require_active as _require_frontrun_env
-from frontrun.common import InterleavingResult, check_serializability_violation
+from frontrun.common import (
+    DEPRECATION_MESSAGES,
+    InterleavingResult,
+    check_invariant,
+    check_serializability_violation,
+    deprecate,
+)
 
 # Type variable for the shared state passed between setup and thread functions
 T = TypeVar("T")
@@ -737,14 +743,8 @@ def explore_random(
                     result.explanation = explanation
                     return result
 
-            _invariant_failed = False
-            _assertion_msg: str | None = None
-            try:
-                _invariant_failed = not invariant(state)
-            except AssertionError as _ae:
-                _invariant_failed = True
-                _assertion_msg = str(_ae)
-            if _invariant_failed:
+            invariant_failed, assertion_msg = check_invariant(invariant, state)
+            if invariant_failed:
                 result.property_holds = False
                 result.counterexample = schedule
                 result.unique_interleavings = len(seen_schedule_hashes)
@@ -763,29 +763,25 @@ def explore_random(
                                 deadlock_timeout=deadlock_timeout,
                                 patch_sleep=patch_sleep,
                             )
-                            _replay_failed = False
-                            try:
-                                _replay_failed = not invariant(replay_state)
-                            except AssertionError:
-                                _replay_failed = True
-                            if _replay_failed:
+                            replay_failed, _ = check_invariant(invariant, replay_state)
+                            if replay_failed:
                                 successes += 1
                         except Exception:
                             pass  # timeout / crash during replay — not a reproduction
                     result.reproduction_attempts = reproduce_on_failure
                     result.reproduction_successes = successes
 
-                _trace_explanation = format_trace(
+                trace_explanation = format_trace(
                     recorder.events,
                     num_threads=num_threads,
                     num_explored=result.num_explored,
                     reproduction_attempts=result.reproduction_attempts,
                     reproduction_successes=result.reproduction_successes,
                 )
-                if _assertion_msg:
-                    result.explanation = f"AssertionError: {_assertion_msg}\n\n{_trace_explanation}"
+                if assertion_msg:
+                    result.explanation = f"AssertionError: {assertion_msg}\n\n{trace_explanation}"
                 else:
-                    result.explanation = _trace_explanation
+                    result.explanation = trace_explanation
 
                 return result
 
@@ -795,28 +791,13 @@ def explore_random(
         _set_active_trace_filter(None)
 
 
-def explore_interleavings(
-    setup: Callable[[], T],
-    threads: list[Callable[[T], None]],
-    invariant: Callable[[T], bool],
-    **kwargs: Any,
-) -> InterleavingResult:
-    """Deprecated: use ``frontrun.explore(strategy='random')`` or ``explore_random`` instead.
-
-    .. deprecated:: 0.5
-        ``explore_interleavings`` will be removed in 0.6.  Use
-        :func:`frontrun.explore` with ``strategy='random'`` instead.
-    """
-    import warnings
-
-    warnings.warn(
-        "explore_interleavings is deprecated; use frontrun.explore(strategy='random') "
-        "(or frontrun.explore_random(...)) instead. "
-        "The old API will be removed in 0.6.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return explore_random(setup=setup, threads=threads, invariant=invariant, **kwargs)
+explore_interleavings = deprecate(explore_random, DEPRECATION_MESSAGES["explore_interleavings"])
+explore_interleavings.__doc__ = (
+    "Deprecated alias for :func:`explore_random`.\n\n"
+    ".. deprecated:: 0.5\n"
+    "    ``explore_interleavings`` will be removed in 0.6. Use\n"
+    "    :func:`frontrun.explore` with ``strategy='random'`` instead."
+)
 
 
 def schedule_strategy(num_threads: int, max_ops: int = 300):

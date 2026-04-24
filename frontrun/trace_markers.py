@@ -36,7 +36,7 @@ from typing import Any
 from frontrun._marker_coordination import MARKER_PATTERN, MarkerRegistry, ThreadCoordinator
 from frontrun._threaded_runner import join_threads_with_deadline
 from frontrun._trace_marker_runtime import build_trace_function, run_traced_callable
-from frontrun.common import InterleavingResult, Schedule, Step
+from frontrun.common import InterleavingResult, Schedule, Step, any_async
 
 __all__ = [
     "MARKER_PATTERN",
@@ -175,6 +175,13 @@ class _ThreadTraceExecutor:
         self.marker_registry = MarkerRegistry()
 
 
+# AsyncTraceExecutor.run requires a numeric timeout; the sync path accepts
+# None and defers to _ThreadTraceExecutor.wait's own default, so callers who
+# pass None from the dict-form API need a floor when the dict contains async
+# coroutines.
+_DEFAULT_ASYNC_TIMEOUT = 10.0
+
+
 class TraceExecutor:
     """Facade over sync and async marker-based schedule execution.
 
@@ -279,10 +286,7 @@ class TraceExecutor:
                     "TraceExecutor.run(): cannot mix the dict form and the legacy positional form. "
                     "Pass either run({'name': fn, ...}) or run('name', fn), not both."
                 )
-            # Detect async tasks (coroutine functions) and delegate to async mode.
-            import inspect
-
-            if any(inspect.iscoroutinefunction(fn) for fn in execution_name.values() if callable(fn)):
+            if any_async(execution_name.values()):
                 if self._mode == "sync":
                     raise TypeError("TraceExecutor is already running in sync mode")
                 self._mode = "async"
@@ -290,7 +294,7 @@ class TraceExecutor:
                     from frontrun.async_trace_markers import AsyncTraceExecutor
 
                     self._async = AsyncTraceExecutor(self.schedule, deadlock_timeout=self.deadlock_timeout)
-                self._async.run(execution_name, timeout=timeout if timeout is not None else 10.0)
+                self._async.run(execution_name, timeout=_DEFAULT_ASYNC_TIMEOUT if timeout is None else timeout)
                 return
 
             # All values are sync callables → use the new sync dict form.

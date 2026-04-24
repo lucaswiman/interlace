@@ -65,7 +65,13 @@ from frontrun._tracing import TraceFilter as _TraceFilter
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.cli import require_active as _require_frontrun_env
-from frontrun.common import InterleavingResult, check_serializability_violation
+from frontrun.common import (
+    DEPRECATION_MESSAGES,
+    InterleavingResult,
+    check_invariant,
+    check_serializability_violation,
+    deprecate,
+)
 
 try:
     from frontrun._dpor import PyDporEngine, PyExecution  # type: ignore[reportAttributeAccessIssue]

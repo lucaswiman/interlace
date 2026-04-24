@@ -420,15 +420,11 @@ def _explore_dpor(
                         _record_and_emit_report()
                         return result
 
-            _invariant_failed = False
-            _assertion_msg: str | None = None
-            if not is_deadlock:
-                try:
-                    _invariant_failed = not invariant(state)
-                except AssertionError as _ae:
-                    _invariant_failed = True
-                    _assertion_msg = str(_ae)
-            if _invariant_failed:
+            if is_deadlock:
+                invariant_failed, assertion_msg = False, None
+            else:
+                invariant_failed, assertion_msg = check_invariant(invariant, state)
+            if invariant_failed:
                 result.property_holds = False
                 with engine_lock:
                     schedule = execution.schedule_trace
@@ -462,17 +458,17 @@ def _explore_dpor(
                         _set_preload_pipe_fd(preload_dispatcher._write_fd)
 
                 if result.explanation is None:
-                    _trace_explanation = format_trace(
+                    trace_explanation = format_trace(
                         recorder.events,
                         num_threads=num_threads,
                         num_explored=result.num_explored,
                         reproduction_attempts=result.reproduction_attempts,
                         reproduction_successes=result.reproduction_successes,
                     )
-                    if _assertion_msg:
-                        result.explanation = f"AssertionError: {_assertion_msg}\n\n{_trace_explanation}"
+                    if assertion_msg:
+                        result.explanation = f"AssertionError: {assertion_msg}\n\n{trace_explanation}"
                     else:
-                        result.explanation = _trace_explanation
+                        result.explanation = trace_explanation
                 if result.sql_anomaly is None:
                     result.sql_anomaly = classify_sql_anomaly(recorder.events)
                 if stop_on_first:
@@ -529,24 +525,10 @@ def _explore_dpor(
     return result
 
 
-def explore_dpor(
-    setup: Callable[[], T],
-    threads: list[Callable[[T], None]],
-    invariant: Callable[[T], bool],
-    **kwargs: Any,
-) -> InterleavingResult:
-    """Deprecated: use ``frontrun.explore(strategy='dpor')`` instead.
-
-    .. deprecated:: 0.5
-        ``explore_dpor`` will be removed in 0.6.  Use :func:`frontrun.explore`
-        with ``strategy='dpor'`` (the default) instead.
-    """
-    import warnings
-
-    warnings.warn(
-        "explore_dpor is deprecated; use frontrun.explore(strategy='dpor') (or frontrun.explore(...)) instead. "
-        "The old API will be removed in 0.6.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return _explore_dpor(setup=setup, threads=threads, invariant=invariant, **kwargs)
+explore_dpor = deprecate(_explore_dpor, DEPRECATION_MESSAGES["explore_dpor"])
+explore_dpor.__doc__ = (
+    "Deprecated alias for the DPOR exploration entry point.\n\n"
+    ".. deprecated:: 0.5\n"
+    "    ``explore_dpor`` will be removed in 0.6. Use :func:`frontrun.explore`\n"
+    "    with ``strategy='dpor'`` (the default) instead."
+)

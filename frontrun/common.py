@@ -2,13 +2,85 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import functools
+import inspect
+import warnings
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from itertools import permutations
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     from frontrun._sql_anomaly import SqlAnomaly
+
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+# ---------------------------------------------------------------------------
+# Deprecation messages for the 0.5 → 0.6 shim layer.
+# Centralised so the module-level __getattr__ in ``frontrun/__init__.py`` and
+# the wrappers in ``bytecode.py`` / ``async_shuffler.py`` / ``async_dpor.py`` /
+# ``_dpor_runtime/explore.py`` stay in sync.
+# ---------------------------------------------------------------------------
+
+DEPRECATION_MESSAGES = {
+    "explore_dpor": (
+        "explore_dpor is deprecated; use frontrun.explore(strategy='dpor') "
+        "(or frontrun.explore(...)) instead. The old API will be removed in 0.6."
+    ),
+    "explore_async_dpor": (
+        "explore_async_dpor is deprecated; use frontrun.explore(strategy='dpor') "
+        "with async workers instead. The old API will be removed in 0.6."
+    ),
+    "explore_interleavings": (
+        "explore_interleavings is deprecated; use frontrun.explore(strategy='random') "
+        "(or frontrun.explore_random(...)) instead. The old API will be removed in 0.6."
+    ),
+    "explore_async_interleavings": (
+        "explore_async_interleavings (also accessed as async `explore_interleavings`) is deprecated; "
+        "use frontrun.explore(strategy='random') (or frontrun.explore_async_random(...)) instead. "
+        "The old API will be removed in 0.6."
+    ),
+}
+
+
+def deprecate(fn: _F, message: str) -> _F:
+    """Wrap *fn* in a :class:`DeprecationWarning`-emitting shim.
+
+    The wrapper is :func:`functools.wraps`-preserving so ``help()`` and
+    the inspectable signature still reflect *fn*.
+    """
+
+    @functools.wraps(fn)
+    def _wrapper(*args: Any, **kwargs: Any) -> Any:
+        warnings.warn(message, DeprecationWarning, stacklevel=2)
+        return fn(*args, **kwargs)
+
+    return _wrapper  # type: ignore[return-value]
+
+
+def any_async(fns: Iterable[Any]) -> bool:
+    """Return True if any element is a coroutine function.
+
+    Non-callables are ignored so callers can pass dicts of ``name -> value``
+    directly.
+    """
+    return any(inspect.iscoroutinefunction(fn) for fn in fns if callable(fn))
+
+
+def check_invariant(invariant: Callable[[Any], Any], state: Any) -> tuple[bool, str | None]:
+    """Evaluate *invariant* on *state*, tolerating ``AssertionError``.
+
+    Returns ``(failed, assertion_message)``.  ``failed`` is True when the
+    invariant returns a falsy value or raises ``AssertionError``.  When
+    ``AssertionError`` was raised, its message is returned in the second
+    slot so callers can fold it into their result's ``explanation``.
+    """
+    try:
+        return (not invariant(state), None)
+    except AssertionError as exc:
+        return (True, str(exc))
 
 
 class NondeterministicSQLError(Exception):
