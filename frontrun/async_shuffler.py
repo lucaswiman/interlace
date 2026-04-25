@@ -53,6 +53,7 @@ from frontrun._async_autopause import (
     await_point,  # noqa: F401
     wrap_auto_paused_tasks,
 )
+from frontrun._random_schedules import fair_schedule_strategy, random_round_robin_schedule
 from frontrun._threaded_runner import PatchScope
 from frontrun.async_dpor import _sql_async_available, patch_sql_async, unpatch_sql_async
 from frontrun.async_scheduler import InterleavedLoop
@@ -315,12 +316,7 @@ async def explore_async_random(
         seen_schedule_hashes: set[int] = set()
 
         for _ in range(max_attempts):
-            num_rounds = rng.randint(1, max(1, max_ops // num_tasks))
-            schedule: list[int] = []
-            for _ in range(num_rounds):
-                round_perm = list(range(num_tasks))
-                rng.shuffle(round_perm)
-                schedule.extend(round_perm)
+            schedule = random_round_robin_schedule(rng, num_tasks, max_ops)
 
             state = await run_with_schedule(
                 schedule, setup, tasks, timeout=timeout_per_run, deadlock_timeout=deadlock_timeout
@@ -385,17 +381,4 @@ def schedule_strategy(num_tasks: int, max_ops: int = 100) -> Any:  # type: ignor
     code has far fewer interleaving points. Each schedule entry corresponds
     to one await_point() call, not one bytecode opcode.
     """
-    from hypothesis import strategies as st  # type: ignore[import-not-found]
-
-    max_rounds = max(1, max_ops // num_tasks)
-    tasks = list(range(num_tasks))
-
-    @st.composite  # type: ignore[attr-defined]
-    def _fair_schedule(draw: st.DrawFn) -> list[int]:  # type: ignore[attr-defined,name-defined]
-        num_rounds = draw(st.integers(min_value=1, max_value=max_rounds))  # type: ignore[attr-defined]
-        schedule: list[int] = []
-        for _ in range(num_rounds):
-            schedule.extend(draw(st.permutations(tasks)))  # type: ignore[attr-defined]
-        return schedule
-
-    return _fair_schedule()
+    return fair_schedule_strategy(num_tasks, max_ops)
