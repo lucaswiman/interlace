@@ -7,6 +7,104 @@ from typing import Any
 
 import pytest
 
+# ---------------------------------------------------------------------------
+# RowLockRegistry extended methods: record_acquire, pop_all, id_to_resource
+# ---------------------------------------------------------------------------
+
+
+def test_row_lock_registry_id_to_resource() -> None:
+    """id_to_resource returns the inverse mapping for format_cycle."""
+    from frontrun._dpor_core import RowLockRegistry
+
+    reg = RowLockRegistry()
+    id_x = reg._row_lock_int_id("x")
+    id_y = reg._row_lock_int_id("y")
+
+    inv = reg.id_to_resource()
+    assert inv[id_x] == "x"
+    assert inv[id_y] == "y"
+
+
+def test_row_lock_registry_record_acquire_no_graph() -> None:
+    """record_acquire stores ownership in _active_row_locks and _task_row_locks."""
+    from frontrun._dpor_core import RowLockRegistry
+
+    reg = RowLockRegistry()
+    reg.record_acquire(owner_id=0, res_id="row:1", graph=None)
+
+    assert reg._active_row_locks["row:1"] == 0
+    assert "row:1" in reg._task_row_locks[0]
+
+
+def test_row_lock_registry_record_acquire_with_graph() -> None:
+    """record_acquire calls graph.add_holding with kind='row_lock'."""
+    from frontrun._dpor_core import RowLockRegistry
+
+    class _FakeGraph:
+        def __init__(self) -> None:
+            self.holdings: list[tuple[int, int, str]] = []
+
+        def add_holding(self, owner: int, lid: int, kind: str = "lock") -> None:
+            self.holdings.append((owner, lid, kind))
+
+    reg = RowLockRegistry()
+    graph = _FakeGraph()
+    reg.record_acquire(owner_id=1, res_id="row:2", graph=graph)
+
+    assert len(graph.holdings) == 1
+    owner, lid, kind = graph.holdings[0]
+    assert owner == 1
+    assert lid == reg._row_lock_int_id("row:2")
+    assert kind == "row_lock"
+
+
+def test_row_lock_registry_pop_all_returns_pairs() -> None:
+    """pop_all removes all resources and returns (res_id, int_id) pairs."""
+    from frontrun._dpor_core import RowLockRegistry
+
+    reg = RowLockRegistry()
+    reg.record_acquire(owner_id=2, res_id="row:3", graph=None)
+    reg.record_acquire(owner_id=2, res_id="row:4", graph=None)
+
+    released = reg.pop_all(owner_id=2, graph=None)
+    assert {r for r, _ in released} == {"row:3", "row:4"}
+    assert reg._task_row_locks.get(2) is None  # cleaned up
+    assert "row:3" not in reg._active_row_locks
+    assert "row:4" not in reg._active_row_locks
+
+
+def test_row_lock_registry_pop_all_calls_graph_remove_holding() -> None:
+    """pop_all calls graph.remove_holding for each released resource."""
+    from frontrun._dpor_core import RowLockRegistry
+
+    class _FakeGraph:
+        def __init__(self) -> None:
+            self.released: list[tuple[int, int, str]] = []
+
+        def add_holding(self, owner: int, lid: int, kind: str = "lock") -> None:
+            pass
+
+        def remove_holding(self, owner: int, lid: int, kind: str = "lock") -> None:
+            self.released.append((owner, lid, kind))
+
+    reg = RowLockRegistry()
+    graph = _FakeGraph()
+    reg.record_acquire(owner_id=3, res_id="row:5", graph=graph)
+    lid = reg._row_lock_int_id("row:5")
+
+    released = reg.pop_all(owner_id=3, graph=graph)
+    assert len(released) == 1
+    assert (3, lid, "row_lock") in graph.released
+
+
+def test_row_lock_registry_pop_all_empty() -> None:
+    """pop_all on an owner with no locks returns empty list."""
+    from frontrun._dpor_core import RowLockRegistry
+
+    reg = RowLockRegistry()
+    result = reg.pop_all(owner_id=99, graph=None)
+    assert result == []
+
 
 class _PauseRecorder:
     def __init__(self) -> None:
