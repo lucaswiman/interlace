@@ -344,11 +344,17 @@ def test_scheduler_had_error():
 
 
 def test_run_thread_clears_runtime_state_after_error(monkeypatch: pytest.MonkeyPatch):
+    from frontrun import _opcode_observer
+
     scheduler = OpcodeScheduler([0], num_threads=1)
     runner = BytecodeShuffler(scheduler)
     events: list[str] = []
 
-    monkeypatch.setattr("frontrun.bytecode._USE_SYS_MONITORING", False)
+    # Install a real opcode trace handle so the install/uninstall path is
+    # exercised; the actual sys.settrace / sys.monitoring calls are patched
+    # through the tracer-backend module so we observe lifecycle events
+    # without mutating global tracer state.
+    runner._start_opcode_trace()
     monkeypatch.setattr(
         "frontrun.bytecode.set_context", lambda _scheduler, thread_id: events.append(f"context:{thread_id}")
     )
@@ -357,16 +363,21 @@ def test_run_thread_clears_runtime_state_after_error(monkeypatch: pytest.MonkeyP
         "frontrun.bytecode.set_dpor_scheduler", lambda value: events.append(f"scheduler:{value is not None}")
     )
     monkeypatch.setattr("frontrun.bytecode.set_dpor_thread_id", lambda value: events.append(f"thread_id:{value}"))
-    monkeypatch.setattr(
-        "frontrun.bytecode.sys.settrace", lambda value: events.append("trace:on" if value is not None else "trace:off")
-    )
+    monkeypatch.setattr("frontrun.bytecode.install_thread_opcode_trace", lambda _handle: events.append("trace:on"))
+    monkeypatch.setattr("frontrun.bytecode.uninstall_thread_opcode_trace", lambda _handle: events.append("trace:off"))
     monkeypatch.setattr(runner, "_setup_io_reporter", lambda thread_id: events.append(f"io:{thread_id}"))
     monkeypatch.setattr(runner, "_teardown_io_reporter", lambda: events.append("io:off"))
 
     def boom() -> None:
         raise RuntimeError("boom")
 
-    runner._run_thread(0, boom, (), {})
+    try:
+        runner._run_thread(0, boom, (), {})
+    finally:
+        # Tear down the global tracer state we installed for this test.
+        if runner._opcode_handle is not None:
+            _opcode_observer.stop_opcode_trace(runner._opcode_handle)
+            runner._opcode_handle = None
 
     assert isinstance(runner.errors[0], RuntimeError)
     assert scheduler.had_error
