@@ -58,6 +58,11 @@ from frontrun._async_autopause import (
     wrap_auto_paused_tasks,
 )
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
+from frontrun._dpor_core import (
+    compute_serializable_baseline_async,
+    format_race_failure_explanation,
+    make_dpor_engine,
+)
 from frontrun._opcode_observer import (
     _USE_SYS_MONITORING,
     ShadowStack,
@@ -1056,26 +1061,16 @@ async def _explore_async_dpor(
         _set_active_trace_filter(_TraceFilter(trace_packages))
 
     # Compute serializable baseline if requested.
-    serial_valid_states: set[Any] | None = None
-    serial_hash_fn: Callable[[Any], Any] = repr
-    if serializable_invariant is not False:
-        try:
-            from frontrun.common import compute_serializable_states_async, resolve_serializable_hash_fn
-
-            serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
-            serial_valid_states = await compute_serializable_states_async(setup, tasks, state_hash=serial_hash_fn)
-        except BaseException:
-            _set_active_trace_filter(None)
-            raise
+    serial_valid_states, serial_hash_fn = await compute_serializable_baseline_async(
+        setup, tasks, serializable_invariant
+    )
 
     num_tasks = len(tasks)
-    pb = None if preemption_bound is None else preemption_bound
-    me = None if max_executions is None else max_executions
-    engine = PyDporEngine(
+    engine = make_dpor_engine(
         num_threads=num_tasks,
-        preemption_bound=pb,
+        preemption_bound=preemption_bound,
         max_branches=max_branches,
-        max_executions=me,
+        max_executions=max_executions,
     )
 
     result = InterleavingResult(property_holds=True)
@@ -1224,9 +1219,10 @@ async def _explore_async_dpor(
                     if raw_races_check:
                         _record_failure(
                             execution,
-                            (
-                                f"Unsynchronized race detected in execution {result.num_explored}.\n"
-                                f"{len(raw_races_check)} race(s) found between tasks on shared objects."
+                            format_race_failure_explanation(
+                                result.num_explored,
+                                len(raw_races_check),
+                                actor_plural="tasks",
                             ),
                             races_detected=True,
                         )
