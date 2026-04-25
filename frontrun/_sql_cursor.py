@@ -43,11 +43,16 @@ from frontrun._sql_endpoint_suppression import (
 from frontrun._sql_insert_tracker import record_insert, resolve_alias
 from frontrun._sql_parsing import (
     LockIntent,
-    TxOp,
     parse_sql_access,
 )
 from frontrun._sql_patch_registry import CONNECT_FACTORY_TARGETS, PYTHON_CURSOR_TARGETS
 from frontrun._sql_row_locks import _acquire_pending_row_locks, _release_dpor_row_locks
+from frontrun._sql_transactions import (
+    _detect_autobegin,
+    _handle_tx_op,
+    _report_or_buffer,
+    reset_connection_state,
+)
 
 # Try to import row-level predicate helpers.  These are always present in the
 # same package, but guard with try/except for robustness.
@@ -77,7 +82,10 @@ except ImportError:
 # continue to work.
 __all__ = [
     "_acquire_pending_row_locks",
+    "_detect_autobegin",
+    "_io_tls",
     "_release_dpor_row_locks",
+    "_report_or_buffer",
     "_set_active_sql_io_context",
     "_suppress_endpoint_io",
     "_suppress_lock",
@@ -86,6 +94,7 @@ __all__ = [
     "get_active_sql_io_context",
     "is_sql_endpoint_suppressed",
     "is_tid_suppressed",
+    "reset_connection_state",
     "suppress_sql_endpoint",
     "suppress_tid_permanently",
 ]
@@ -147,79 +156,6 @@ def _warm_sql_parsers() -> None:
 # ---------------------------------------------------------------------------
 # Core interception logic
 # ---------------------------------------------------------------------------
-
-
-def _report_or_buffer(reporter: Any, res_id: str, kind: str, *, force_immediate: bool = False) -> None:
-    """Report a SQL access immediately, or buffer it if inside a transaction.
-
-    When ``force_immediate=True`` the access is reported right away even
-    inside a transaction (used for SELECT FOR UPDATE to let the DPOR engine
-    learn about write-intent conflicts before C-level blocking can occur).
-    Transaction atomicity is preserved because the DPOR scheduler still
-    skips yielding inside transactions.
-
-    Autobegin transactions (``_is_autobegin=True``) are NOT buffered: with
-    READ COMMITTED isolation (PostgreSQL default), individual statements are
-    visible to other transactions, so DPOR must see each access point to
-    explore interleavings.  Row-lock tracking still works because
-    ``_in_transaction`` is True.
-    """
-    in_tx = getattr(_io_tls, "_in_transaction", False)
-    is_autobegin = getattr(_io_tls, "_is_autobegin", False)
-    if in_tx and not force_immediate and not is_autobegin:
-        if not hasattr(_io_tls, "_tx_buffer"):
-            _io_tls._tx_buffer = []
-        _io_tls._tx_buffer.append((res_id, kind))
-    else:
-        reporter(res_id, kind)
-
-    # Track resources that need row-lock arbitration.
-    # SELECT FOR UPDATE (force_immediate) always needs arbitration.
-    # Any write inside a transaction (INSERT, UPDATE, DELETE) also needs
-    # arbitration because PG row locks (e.g. from UNIQUE constraints or
-    # row-level locks) can cause the cooperative scheduler to deadlock
-    # when one thread blocks in the kernel waiting for another's lock
-    # (defect #6).
-    if in_tx and (force_immediate or kind == "write"):
-        pending = getattr(_io_tls, "_pending_row_locks", None)
-        if pending is None:
-            pending = []
-            _io_tls._pending_row_locks = pending
-        pending.append(res_id)
-
-
-def _detect_autobegin(cursor: Any) -> None:
-    """Set ``_in_transaction`` if the connection is in autobegin mode.
-
-    DB-API drivers like psycopg2 default to ``autocommit=False``, which
-    means the first statement implicitly starts a transaction at the
-    C/driver level — no explicit ``BEGIN`` flows through
-    ``cursor.execute()``.  We detect this by checking the cursor's
-    connection: if ``autocommit`` is not ``True`` and we haven't already
-    seen a ``BEGIN``, we treat the connection as having an implicit
-    transaction.
-
-    This is best-effort: if the connection doesn't expose ``autocommit``
-    (e.g. sqlite3), we leave ``_in_transaction`` unchanged and fall back
-    to statement-level tracking.
-    """
-    if getattr(_io_tls, "_in_transaction", False):
-        return  # already in a transaction
-    conn = getattr(cursor, "connection", None)
-    if conn is None:
-        return
-    autocommit = getattr(conn, "autocommit", None)
-    if autocommit is None:
-        return  # driver doesn't expose autocommit — can't detect
-    if not autocommit:
-        # autocommit=False → autobegin: implicit transaction is active.
-        # Set _is_autobegin so _report_or_buffer reports accesses
-        # immediately (READ COMMITTED doesn't buffer) while still
-        # tracking row locks via the _in_transaction flag.
-        _io_tls._in_transaction = True
-        _io_tls._is_autobegin = True
-        _io_tls._tx_buffer = []
-        _io_tls._tx_savepoints = {}
 
 
 # Global to track primary column set per (db_scope, table) for cross-column
@@ -392,40 +328,7 @@ def _report_sql_access(
         # 1. Handle Transaction Control Operations
         if access.tx_op is not None:
             reported = True  # Suppress endpoint I/O for TX control too
-            tx = access.tx_op
-            if tx is TxOp.BEGIN:
-                _io_tls._in_transaction = True
-                _io_tls._is_autobegin = False
-                _io_tls._tx_buffer = []
-                _io_tls._tx_savepoints = {}
-            elif tx is TxOp.COMMIT:
-                _io_tls._in_transaction = False
-                _io_tls._is_autobegin = False
-                buffer = getattr(_io_tls, "_tx_buffer", [])
-                for res_id, kind in buffer:
-                    reporter(res_id, kind)
-                _io_tls._tx_buffer = []
-                _io_tls._tx_savepoints = {}
-                _release_dpor_row_locks()
-            elif tx is TxOp.ROLLBACK:
-                _io_tls._in_transaction = False
-                _io_tls._is_autobegin = False
-                _io_tls._tx_buffer = []
-                _io_tls._tx_savepoints = {}
-                _release_dpor_row_locks()
-            else:  # SavepointOp
-                savepoints = getattr(_io_tls, "_tx_savepoints", {})
-                if tx.op == "savepoint":
-                    buffer = getattr(_io_tls, "_tx_buffer", [])
-                    savepoints[tx.name] = len(buffer)
-                    _io_tls._tx_savepoints = savepoints
-                elif tx.op == "rollback_to":
-                    if tx.name in savepoints:
-                        idx = savepoints[tx.name]
-                        buffer = getattr(_io_tls, "_tx_buffer", [])
-                        _io_tls._tx_buffer = buffer[:idx]
-                else:  # "release"
-                    savepoints.pop(tx.name, None)
+            _handle_tx_op(reporter, access.tx_op)
 
         # 2. Handle Data Access Operations
         if access.read_tables or access.write_tables:
@@ -1038,19 +941,6 @@ def patch_sql() -> None:
             pass
 
     _sql_patched = True
-
-
-def reset_connection_state() -> None:
-    """Clear per-thread SQL transaction state.
-
-    Call this when a connection is returned to a connection pool to prevent
-    stale ``_in_transaction`` / ``_tx_buffer`` / ``_tx_savepoints`` state
-    from leaking across logical sessions.  Safe to call even when no
-    transaction is active (it's a no-op in that case).
-    """
-    for attr in ("_in_transaction", "_is_autobegin", "_tx_buffer", "_tx_savepoints", "_pending_row_locks"):
-        if hasattr(_io_tls, attr):
-            delattr(_io_tls, attr)
 
 
 def clear_sql_metadata() -> None:

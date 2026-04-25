@@ -14,6 +14,8 @@ from __future__ import annotations
 from frontrun._io_detection import _io_tls
 from frontrun._io_detection import get_dpor_context as _get_dpor_context
 
+__all__ = ["_acquire_pending_row_locks", "_release_dpor_row_locks"]
+
 
 def _acquire_pending_row_locks() -> None:
     """Drain pending row-lock resources from TLS and acquire them on the scheduler."""

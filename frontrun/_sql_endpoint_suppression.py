@@ -44,6 +44,20 @@ except ImportError:
         return sql
 
 
+__all__ = [
+    "_set_active_sql_io_context",
+    "_suppress_endpoint_io",
+    "_suppress_lock",
+    "_suppress_tids",
+    "clear_permanent_suppressions",
+    "get_active_sql_io_context",
+    "is_sql_endpoint_suppressed",
+    "is_tid_suppressed",
+    "suppress_sql_endpoint",
+    "suppress_tid_permanently",
+]
+
+
 # ---------------------------------------------------------------------------
 # Suppression infrastructure
 # ---------------------------------------------------------------------------
