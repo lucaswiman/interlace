@@ -16,23 +16,30 @@ drivers like pymysql, direct class patching is used as a fallback.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import importlib
 import os
 import re
 import sqlite3
-import sys
-import threading
 import time
-from collections.abc import Generator
 from typing import Any
 
-from frontrun import _real_threading as _rt
 from frontrun._io_detection import _io_tls, get_io_reporter
 from frontrun._io_detection import get_dpor_context as _get_dpor_context
 from frontrun._patching import patch_method, restore_patches, wrap_method_metadata
 from frontrun._schema import get_schema
+from frontrun._sql_endpoint_suppression import (
+    _set_active_sql_io_context,
+    _suppress_endpoint_io,
+    _suppress_lock,
+    _suppress_tids,
+    clear_permanent_suppressions,
+    get_active_sql_io_context,
+    is_sql_endpoint_suppressed,
+    is_tid_suppressed,
+    suppress_sql_endpoint,
+    suppress_tid_permanently,
+)
 from frontrun._sql_insert_tracker import record_insert, resolve_alias
 from frontrun._sql_parsing import (
     LockIntent,
@@ -41,8 +48,6 @@ from frontrun._sql_parsing import (
 )
 from frontrun._sql_patch_registry import CONNECT_FACTORY_TARGETS, PYTHON_CURSOR_TARGETS
 from frontrun._sql_row_locks import _acquire_pending_row_locks, _release_dpor_row_locks
-from frontrun._trace_format import build_call_chain
-from frontrun._tracing import should_trace_file as _should_trace_file
 
 # Try to import row-level predicate helpers.  These are always present in the
 # same package, but guard with try/except for robustness.
@@ -66,6 +71,26 @@ except ImportError:
             self.value = value
 
 
+# Re-exports for backward compatibility.  These helpers were originally
+# defined in this module; they now live in _sql_endpoint_suppression and
+# _sql_row_locks but are imported here so existing call sites and tests
+# continue to work.
+__all__ = [
+    "_acquire_pending_row_locks",
+    "_release_dpor_row_locks",
+    "_set_active_sql_io_context",
+    "_suppress_endpoint_io",
+    "_suppress_lock",
+    "_suppress_tids",
+    "clear_permanent_suppressions",
+    "get_active_sql_io_context",
+    "is_sql_endpoint_suppressed",
+    "is_tid_suppressed",
+    "suppress_sql_endpoint",
+    "suppress_tid_permanently",
+]
+
+
 # ---------------------------------------------------------------------------
 # INSERT detection regex (used by _intercept_execute for post-INSERT capture).
 # Reuses the same pattern as _sql_parsing._RE_INSERT to extract the table name
@@ -79,16 +104,11 @@ _RE_UPDATE_TABLE = re.compile(r"^\s*UPDATE\s+(?:[`\"\[]?\w+[`\"\]]?\s*\.\s*)?[`\
 
 
 # ---------------------------------------------------------------------------
-# Suppression infrastructure
+# DB scope identity tracking
 # ---------------------------------------------------------------------------
 
-# OS thread IDs currently inside a patched execute call.
-# The LD_PRELOAD bridge listener checks this to skip endpoint-level reports.
-_suppress_tids: set[int] = set()
-_suppress_lock = _rt.lock()  # Real lock (not cooperative)
 _DB_SCOPE_ATTR = "_frontrun_db_scope"
 _CONNECTION_DB_SCOPES: dict[int, str] = {}
-_ACTIVE_SQL_IO_CONTEXTS: dict[int, tuple[str | None, list[str] | None]] = {}
 
 
 def _warm_sql_parsers() -> None:
@@ -122,163 +142,6 @@ def _warm_sql_parsers() -> None:
         from sqlglot.dialects import Dialect  # noqa: F401
     except Exception:
         pass
-
-
-def _summarize_sql_for_trace(operation: Any, parameters: Any, paramstyle: str) -> str | None:
-    """Return a short SQL summary suitable for trace output."""
-    if not isinstance(operation, str):
-        return None
-    sql = operation
-    try:
-        if parameters is not None:
-            sql = resolve_parameters(operation, parameters, paramstyle)
-    except Exception:
-        sql = operation
-    sql = " ".join(sql.split())
-    if len(sql) > 160:
-        sql = f"{sql[:157]}..."
-    return f"SQL: {sql}"
-
-
-def _current_user_call_chain() -> list[str] | None:
-    """Return a best-effort call chain rooted at the first traced user frame."""
-    frame = sys._getframe(1)
-    while frame is not None and not _should_trace_file(frame.f_code.co_filename):
-        frame = frame.f_back
-    if frame is None:
-        return None
-    return build_call_chain(frame, filter_fn=_should_trace_file)
-
-
-def _set_active_sql_io_context(operation: Any, parameters: Any, paramstyle: str) -> None:
-    """Remember the current SQL statement for C-level socket I/O trace rendering."""
-    tid = threading.get_native_id()
-    summary = _summarize_sql_for_trace(operation, parameters, paramstyle)
-    chain = _current_user_call_chain()
-    with _suppress_lock:
-        _ACTIVE_SQL_IO_CONTEXTS[tid] = (summary, chain)
-
-
-def get_active_sql_io_context(tid: int) -> tuple[str | None, list[str] | None]:
-    """Return the most recent SQL trace context for a native thread id."""
-    with _suppress_lock:
-        return _ACTIVE_SQL_IO_CONTEXTS.get(tid, (None, None))
-
-
-@contextlib.contextmanager
-def _suppress_endpoint_io() -> Generator[None, None, None]:
-    """Temporarily suppress endpoint-level I/O for the current thread."""
-    tid = threading.get_native_id()
-    _io_tls._sql_suppress = True
-    with _suppress_lock:
-        _suppress_tids.add(tid)
-    try:
-        yield
-    finally:
-        with _suppress_lock:
-            _suppress_tids.discard(tid)
-        _io_tls._sql_suppress = False
-
-
-def is_tid_suppressed(tid: int) -> bool:
-    """Check if a thread ID is currently suppressed (for LD_PRELOAD bridge)."""
-    with _suppress_lock:
-        return tid in _suppress_tids or tid in _permanently_suppressed_tids
-
-
-# Persistent suppression: SQL socket endpoints whose LD_PRELOAD events
-# should be suppressed because the SQL layer reports at a higher granularity
-# (table/row level).  Keyed by resource_id (e.g. "socket:127.0.0.1:5432",
-# "socket:unix:/var/run/postgresql/.s.PGSQL.5432").
-#
-# The temporary _suppress_endpoint_io() context manager has a timing
-# problem: LD_PRELOAD events travel through an async pipe, so by the time
-# they're read the context has exited.  Permanent endpoint suppression
-# persists across the entire DPOR execution.
-_suppressed_sql_endpoints: set[str] = set()
-
-
-def _socket_resource_id_from_fd(fd: int) -> str | None:
-    """Derive the LD_PRELOAD-style resource_id from a socket file descriptor.
-
-    Returns e.g. ``"socket:127.0.0.1:5432"`` for TCP or
-    ``"socket:unix:/var/run/postgresql/.s.PGSQL.5432"`` for Unix domain sockets.
-    Returns ``None`` if the fd is not a connected socket.
-    """
-    import socket as _socket
-
-    # Duplicate the fd so we don't accidentally close the connection's socket
-    # when the temporary socket object is garbage-collected.
-    dup_fd = os.dup(fd)
-    try:
-        sock = _socket.socket(fileno=dup_fd)
-        try:
-            peer = sock.getpeername()
-        except (OSError, ValueError):
-            return None
-        finally:
-            sock.detach()  # detach so sock.__del__ doesn't close dup_fd
-    finally:
-        os.close(dup_fd)
-    if isinstance(peer, str):
-        # Unix domain socket — peer is a path string
-        return f"socket:unix:{peer}" if peer else None
-    if isinstance(peer, tuple) and len(peer) >= 2:
-        return f"socket:{peer[0]}:{peer[1]}"
-    return None
-
-
-def _resource_id_from_connection(conn: Any) -> str | None:
-    """Extract the LD_PRELOAD-compatible socket resource_id from a DB connection."""
-    fileno_fn = getattr(conn, "fileno", None)
-    if fileno_fn is None:
-        return None
-    try:
-        fd = fileno_fn()
-    except Exception:
-        return None
-    if not isinstance(fd, int) or fd < 0:
-        return None
-    return _socket_resource_id_from_fd(fd)
-
-
-def suppress_sql_endpoint(conn: Any) -> None:
-    """Register a SQL connection's socket endpoint for LD_PRELOAD suppression."""
-    resource_id = _resource_id_from_connection(conn)
-    if resource_id is not None:
-        with _suppress_lock:
-            _suppressed_sql_endpoints.add(resource_id)
-
-
-def suppress_tid_permanently(tid: int | None = None) -> None:
-    """Mark a thread as permanently suppressed for LD_PRELOAD events.
-
-    .. deprecated::
-        Prefer :func:`suppress_sql_endpoint` which suppresses by socket
-        endpoint rather than by thread, so non-SQL file I/O remains visible.
-        Kept for the connect-time path where the connection is not yet
-        established and we must suppress by thread temporarily.
-    """
-    if tid is None:
-        tid = threading.get_native_id()
-    with _suppress_lock:
-        _permanently_suppressed_tids.add(tid)
-
-
-_permanently_suppressed_tids: set[int] = set()
-
-
-def is_sql_endpoint_suppressed(resource_id: str) -> bool:
-    """Check if a resource_id matches a known SQL socket endpoint."""
-    with _suppress_lock:
-        return resource_id in _suppressed_sql_endpoints
-
-
-def clear_permanent_suppressions() -> None:
-    """Clear all permanent suppressions (between DPOR executions)."""
-    with _suppress_lock:
-        _permanently_suppressed_tids.clear()
-        _suppressed_sql_endpoints.clear()
 
 
 # ---------------------------------------------------------------------------
