@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from frontrun._dpor_core import (
+    compute_serializable_baseline_sync,
+    format_race_failure_explanation,
+    make_dpor_engine,
+)
+
 from ._shared import *
 from ._shared import _require_frontrun_env, _set_active_trace_filter, _TraceFilter
 from .preload_bridge import _PreloadBridge
@@ -134,20 +140,12 @@ def _explore_dpor(
         _set_active_trace_filter(_TraceFilter(trace_packages))
 
     # Compute serializable baseline if requested.
-    serial_valid_states: set[Any] | None = None
-    serial_hash_fn: Callable[[Any], Any] = repr
-    if serializable_invariant is not False:
-        try:
-            from frontrun.common import compute_serializable_states, resolve_serializable_hash_fn
-
-            serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
-            serial_valid_states = compute_serializable_states(setup, threads, state_hash=serial_hash_fn)
-        except BaseException:
-            _set_active_trace_filter(None)
-            raise
+    serial_valid_states, serial_hash_fn = compute_serializable_baseline_sync(
+        setup, threads, serializable_invariant
+    )
 
     num_threads = len(threads)
-    engine = PyDporEngine(
+    engine = make_dpor_engine(
         num_threads=num_threads,
         preemption_bound=preemption_bound,
         max_branches=max_branches,
@@ -391,9 +389,10 @@ def _explore_dpor(
                     if result.counterexample is None:
                         result.counterexample = schedule_list
                     if result.explanation is None:
-                        result.explanation = (
-                            f"Unsynchronized race detected in execution {result.num_explored}.\n"
-                            f"{len(raw_races_check)} race(s) found between threads on shared objects."
+                        result.explanation = format_race_failure_explanation(
+                            result.num_explored,
+                            len(raw_races_check),
+                            actor_plural="threads",
                         )
                     if stop_on_first:
                         clear_instr_cache()
