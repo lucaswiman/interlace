@@ -8,8 +8,9 @@ Unreleased
 
 **Public API refresh.** Several of the library's public entry points have
 been unified or renamed for ergonomics. The old names keep working in
-this release but emit ``DeprecationWarning``; they will be removed in
-0.6.
+this release but emit ``DeprecationWarning``; they are scheduled for
+removal in **0.7** (one full minor release of warning after 0.5
+introduces them, leaving 0.6 as a final compatibility window).
 
 New API:
 
@@ -42,7 +43,7 @@ New API:
   async DPOR now enables Redis key-level patching the same way sync
   DPOR already did.
 
-Deprecated (removal in 0.6):
+Deprecated (planned removal in 0.7):
 
 * ``explore_dpor`` and ``explore_async_dpor`` — use
   ``explore(..., strategy="dpor")`` (the default).
