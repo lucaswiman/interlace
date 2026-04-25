@@ -30,7 +30,6 @@ from frontrun._io_detection import (
     unpatch_io,
 )
 from frontrun._opcode_observer import (
-    _USE_SYS_MONITORING,
     ShadowStack,
     StableObjectIds,
     _get_instructions,
@@ -38,12 +37,8 @@ from frontrun._opcode_observer import (
     _process_opcode,
     clear_instr_cache,
     get_object_key_reverse_map,
-    make_monitoring_callbacks,
-    make_settrace_callback,
     process_opcode_with_coarsening,
     set_object_key_reverse_map,
-    setup_opcode_monitoring,
-    teardown_opcode_monitoring,
 )
 from frontrun._redis_client import (
     is_redis_tid_suppressed,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from frontrun._dpor_runtime._shared import (
-    _USE_SYS_MONITORING,
     PyDporEngine,
     PyExecution,
     ShadowStack,
@@ -24,6 +23,7 @@ from frontrun._dpor_runtime.scheduler import (
     _ReplayEngine,
     _ReplayExecution,
 )
+from frontrun._opcode_observer import _USE_SYS_MONITORING
 
 __all__ = [
     "DporBytecodeRunner",
