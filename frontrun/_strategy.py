@@ -1,20 +1,10 @@
 """Strategy interface used by :func:`frontrun.explore`.
 
-Each of the four exploration approaches (sync DPOR, sync random, async DPOR,
-async random) is wrapped in a small adapter that conforms to the
-:class:`Strategy` / :class:`AsyncStrategy` protocols below.  The
-:func:`frontrun.explore` dispatcher looks adapters up in
-:data:`STRATEGIES` / :data:`ASYNC_STRATEGIES` rather than threading a stack
-of ``if strategy == ...`` branches; adding a fifth approach later is then a
-matter of registering one more adapter.
-
-Adapters live here (rather than next to each implementation) because some of
-the implementation modules — ``async_dpor.py`` and ``_dpor_runtime/`` — are
-owned by other concurrent agents and cannot be edited from this branch.
-
-Each adapter owns its allowed-kwargs filter so the dispatcher does not need
-to know which of the unified ``explore()`` keyword arguments apply to which
-underlying implementation.
+Each exploration approach is wrapped in a small adapter that conforms to the
+:class:`Strategy` / :class:`AsyncStrategy` protocols below.  The dispatcher
+in :mod:`frontrun.explore` looks adapters up in :data:`STRATEGIES` /
+:data:`ASYNC_STRATEGIES`; adding a new approach is a matter of registering
+one more adapter.
 """
 
 from __future__ import annotations
@@ -34,21 +24,22 @@ def _select_kwargs(kwargs: dict[str, Any], allowed: frozenset[str]) -> dict[str,
     return {k: v for k, v in kwargs.items() if k in allowed and v is not None}
 
 
+def _expand_async_io_kwargs(kwargs: dict[str, Any]) -> tuple[bool, bool]:
+    """Pop ``detect_io`` / ``detect_sql`` and return ``(detect_sql, detect_io)``.
+
+    The unified ``explore()`` API exposes a single ``detect_io`` flag, but the
+    async implementations split it into ``detect_sql`` (+ ``detect_redis`` for
+    DPOR).  Both async adapters use this; sync adapters pass ``detect_io``
+    through unchanged.
+    """
+    detect_io = kwargs.pop("detect_io", True)
+    detect_sql_explicit = kwargs.pop("detect_sql", False)
+    return detect_sql_explicit or detect_io, detect_io
+
+
 @runtime_checkable
 class Strategy(Protocol):
-    """Synchronous exploration strategy.
-
-    Attributes:
-        name: Human-readable identifier (matches the ``strategy=`` kwarg of
-            :func:`frontrun.explore`, e.g. ``"dpor"`` or ``"random"``).
-        allowed_keys: The subset of :func:`frontrun.explore` keyword
-            arguments this strategy understands.  The dispatcher filters
-            unknown / ``None`` kwargs against this set before calling
-            :meth:`run`.
-    """
-
-    name: str
-    allowed_keys: frozenset[str]
+    """Synchronous exploration strategy."""
 
     def run(
         self,
@@ -62,13 +53,7 @@ class Strategy(Protocol):
 
 @runtime_checkable
 class AsyncStrategy(Protocol):
-    """Asynchronous exploration strategy.
-
-    Same shape as :class:`Strategy` but :meth:`run` returns an awaitable.
-    """
-
-    name: str
-    allowed_keys: frozenset[str]
+    """Asynchronous exploration strategy.  :meth:`run` returns an awaitable."""
 
     def run(
         self,
@@ -130,9 +115,6 @@ _RANDOM_SYNC_KEYS: frozenset[str] = frozenset(
 class _SyncDporStrategy:
     """Adapter routing sync DPOR through ``_dpor_runtime.explore._explore_dpor``."""
 
-    name: str = "dpor"
-    allowed_keys: frozenset[str] = _DPOR_SYNC_KEYS
-
     def run(
         self,
         *,
@@ -143,15 +125,13 @@ class _SyncDporStrategy:
     ) -> InterleavingResult:
         from frontrun._dpor_runtime.explore import _explore_dpor
 
-        dpor_kwargs = _select_kwargs(kwargs, self.allowed_keys)
-        return _explore_dpor(setup=setup, threads=workers, invariant=invariant, **dpor_kwargs)
+        return _explore_dpor(
+            setup=setup, threads=workers, invariant=invariant, **_select_kwargs(kwargs, _DPOR_SYNC_KEYS)
+        )
 
 
 class _SyncRandomStrategy:
     """Adapter routing sync random exploration through ``bytecode.explore_random``."""
-
-    name: str = "random"
-    allowed_keys: frozenset[str] = _RANDOM_SYNC_KEYS
 
     def run(
         self,
@@ -163,8 +143,9 @@ class _SyncRandomStrategy:
     ) -> InterleavingResult:
         from frontrun.bytecode import explore_random as _explore_random
 
-        random_kwargs = _select_kwargs(kwargs, self.allowed_keys)
-        return _explore_random(setup=setup, threads=workers, invariant=invariant, **random_kwargs)
+        return _explore_random(
+            setup=setup, threads=workers, invariant=invariant, **_select_kwargs(kwargs, _RANDOM_SYNC_KEYS)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +178,6 @@ _RANDOM_ASYNC_KEYS: frozenset[str] = frozenset(
         "max_ops",
         "timeout_per_run",
         "seed",
-        "detect_sql",
         "deadlock_timeout",
         "trace_packages",
         "patch_sleep",
@@ -208,15 +188,7 @@ _RANDOM_ASYNC_KEYS: frozenset[str] = frozenset(
 
 
 class _AsyncDporStrategy:
-    """Adapter routing async DPOR through ``async_dpor._explore_async_dpor``.
-
-    ``detect_io`` is consumed here (not forwarded) and expanded into
-    ``detect_sql`` + ``detect_redis`` because async DPOR exposes those as
-    separate kwargs while the unified API treats them as one.
-    """
-
-    name: str = "dpor"
-    allowed_keys: frozenset[str] = _DPOR_ASYNC_KEYS
+    """Adapter routing async DPOR through ``async_dpor._explore_async_dpor``."""
 
     async def run(
         self,
@@ -228,30 +200,19 @@ class _AsyncDporStrategy:
     ) -> InterleavingResult:
         from frontrun.async_dpor import _explore_async_dpor
 
-        # detect_io in async DPOR enables both SQL and Redis
-        detect_io = kwargs.pop("detect_io", True)
-        detect_sql = kwargs.pop("detect_sql", False) or detect_io
-        detect_redis = detect_io
-
-        dpor_kwargs = _select_kwargs(kwargs, self.allowed_keys)
+        detect_sql, detect_io = _expand_async_io_kwargs(kwargs)
         return await _explore_async_dpor(
             setup=setup,
             tasks=workers,
             invariant=invariant,
             detect_sql=detect_sql,
-            detect_redis=detect_redis,
-            **dpor_kwargs,
+            detect_redis=detect_io,
+            **_select_kwargs(kwargs, _DPOR_ASYNC_KEYS),
         )
 
 
 class _AsyncRandomStrategy:
-    """Adapter routing async random through ``async_shuffler.explore_async_random``.
-
-    ``detect_io`` collapses into the underlying ``detect_sql`` kwarg here.
-    """
-
-    name: str = "random"
-    allowed_keys: frozenset[str] = _RANDOM_ASYNC_KEYS
+    """Adapter routing async random through ``async_shuffler.explore_async_random``."""
 
     async def run(
         self,
@@ -263,11 +224,14 @@ class _AsyncRandomStrategy:
     ) -> InterleavingResult:
         from frontrun.async_shuffler import explore_async_random as _explore_async_random
 
-        detect_io = kwargs.pop("detect_io", True)
-        detect_sql_explicit = kwargs.pop("detect_sql", False)
-        random_kwargs = _select_kwargs(kwargs, self.allowed_keys)
-        random_kwargs["detect_sql"] = detect_sql_explicit or detect_io
-        return await _explore_async_random(setup=setup, tasks=workers, invariant=invariant, **random_kwargs)
+        detect_sql, _ = _expand_async_io_kwargs(kwargs)
+        return await _explore_async_random(
+            setup=setup,
+            tasks=workers,
+            invariant=invariant,
+            detect_sql=detect_sql,
+            **_select_kwargs(kwargs, _RANDOM_ASYNC_KEYS),
+        )
 
 
 # ---------------------------------------------------------------------------
