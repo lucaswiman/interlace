@@ -363,12 +363,8 @@ def test_run_thread_clears_runtime_state_after_error(monkeypatch: pytest.MonkeyP
         "frontrun.bytecode.set_dpor_scheduler", lambda value: events.append(f"scheduler:{value is not None}")
     )
     monkeypatch.setattr("frontrun.bytecode.set_dpor_thread_id", lambda value: events.append(f"thread_id:{value}"))
-    monkeypatch.setattr(
-        "frontrun.bytecode.install_thread_opcode_trace", lambda _handle: events.append("trace:on")
-    )
-    monkeypatch.setattr(
-        "frontrun.bytecode.uninstall_thread_opcode_trace", lambda _handle: events.append("trace:off")
-    )
+    monkeypatch.setattr("frontrun.bytecode.install_thread_opcode_trace", lambda _handle: events.append("trace:on"))
+    monkeypatch.setattr("frontrun.bytecode.uninstall_thread_opcode_trace", lambda _handle: events.append("trace:off"))
     monkeypatch.setattr(runner, "_setup_io_reporter", lambda thread_id: events.append(f"io:{thread_id}"))
     monkeypatch.setattr(runner, "_teardown_io_reporter", lambda: events.append("io:off"))
 
