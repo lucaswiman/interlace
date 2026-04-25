@@ -360,7 +360,7 @@ explore_interleavings = deprecate(explore_async_random, DEPRECATION_MESSAGES["ex
 explore_interleavings.__doc__ = (
     "Deprecated alias for :func:`explore_async_random`.\n\n"
     ".. deprecated:: 0.5\n"
-    "    ``explore_interleavings`` (async form) will be removed in 0.6. Use\n"
+    "    ``explore_interleavings`` (async form) will be removed in 0.7. Use\n"
     "    :func:`frontrun.explore` with ``strategy='random'`` and async worker\n"
     "    functions instead."
 )

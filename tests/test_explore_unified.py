@@ -538,3 +538,27 @@ def test_explore_unified_detect_io_async_dpor():
         )
     )
     assert isinstance(result, InterleavingResult)
+
+
+# ---------------------------------------------------------------------------
+# (g) Every deprecation message pins a removal version
+# ---------------------------------------------------------------------------
+
+
+def test_every_deprecation_message_pins_a_removal_version():
+    """Each entry in DEPRECATION_MESSAGES must announce when the API is removed.
+
+    Guards against future entries being added without a planned removal version
+    so users always have a concrete deadline for migrating off deprecated APIs.
+    """
+    import re
+
+    from frontrun.common import DEPRECATION_MESSAGES
+
+    # Match phrases like "removed in 0.7", "Will be removed in 1.0", etc.
+    pattern = re.compile(r"removed in \d+\.\d+", re.IGNORECASE)
+    missing = [name for name, msg in DEPRECATION_MESSAGES.items() if not pattern.search(msg)]
+    assert not missing, (
+        f"DEPRECATION_MESSAGES entries without a 'removed in X.Y' note: {missing}. "
+        "Every deprecation must pin a concrete removal version."
+    )

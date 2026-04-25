@@ -795,7 +795,7 @@ explore_interleavings = deprecate(explore_random, DEPRECATION_MESSAGES["explore_
 explore_interleavings.__doc__ = (
     "Deprecated alias for :func:`explore_random`.\n\n"
     ".. deprecated:: 0.5\n"
-    "    ``explore_interleavings`` will be removed in 0.6. Use\n"
+    "    ``explore_interleavings`` will be removed in 0.7. Use\n"
     "    :func:`frontrun.explore` with ``strategy='random'`` instead."
 )
 

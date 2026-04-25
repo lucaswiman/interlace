@@ -18,29 +18,31 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 
 
 # ---------------------------------------------------------------------------
-# Deprecation messages for the 0.5 → 0.6 shim layer.
+# Deprecation messages for the 0.5 → 0.7 shim layer.
 # Centralised so the module-level __getattr__ in ``frontrun/__init__.py`` and
 # the wrappers in ``bytecode.py`` / ``async_shuffler.py`` / ``async_dpor.py`` /
-# ``_dpor_runtime/explore.py`` stay in sync.
+# ``_dpor_runtime/explore.py`` stay in sync.  Each message must include a
+# concrete removal version (``removed in X.Y``); ``test_explore_unified``
+# enforces this so future entries can't slip in without a deadline.
 # ---------------------------------------------------------------------------
 
 DEPRECATION_MESSAGES = {
     "explore_dpor": (
         "explore_dpor is deprecated; use frontrun.explore(strategy='dpor') "
-        "(or frontrun.explore(...)) instead. The old API will be removed in 0.6."
+        "(or frontrun.explore(...)) instead. The old API will be removed in 0.7."
     ),
     "explore_async_dpor": (
         "explore_async_dpor is deprecated; use frontrun.explore(strategy='dpor') "
-        "with async workers instead. The old API will be removed in 0.6."
+        "with async workers instead. The old API will be removed in 0.7."
     ),
     "explore_interleavings": (
         "explore_interleavings is deprecated; use frontrun.explore(strategy='random') "
-        "(or frontrun.explore_random(...)) instead. The old API will be removed in 0.6."
+        "(or frontrun.explore_random(...)) instead. The old API will be removed in 0.7."
     ),
     "explore_async_interleavings": (
         "explore_async_interleavings (also accessed as async `explore_interleavings`) is deprecated; "
         "use frontrun.explore(strategy='random') (or frontrun.explore_async_random(...)) instead. "
-        "The old API will be removed in 0.6."
+        "The old API will be removed in 0.7."
     ),
 }
 
