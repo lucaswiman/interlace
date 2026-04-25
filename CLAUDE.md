@@ -80,7 +80,7 @@ Integration tests require additional packages and services:
 - `_cooperative.py` is sync-only by design: asyncio is already cooperative, so async paths use stock primitives. Don't try to add an async mirror.
 - The async DPOR pipeline lives in a single `async_dpor.py` instead of mirroring `_dpor_runtime/` — when extending DPOR, expect to make changes in two shapes (subpackage + monolith).
 - Old API names continue to work via `frontrun.__getattr__` (PEP 562); when adding/renaming public APIs, update `DEPRECATION_MESSAGES` and the alias table in `frontrun/__init__.py`.
-- `bench_dp.py` (root), `tags`, and `_startdocker.sh` are stale top-level files unrelated to the active build — ignore them; the canonical benchmarks live under `benchmarks/`.
+- Benchmarks live under `benchmarks/` only — there is no top-level bench script.
 
 ## Development workflow
 
