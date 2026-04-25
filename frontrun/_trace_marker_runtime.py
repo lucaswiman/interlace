@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable
 from typing import Any
+
+from frontrun._opcode_observer import install_thread_line_trace, uninstall_thread_line_trace
 
 
 def _release_execution_lock_safely(coordinator: Any) -> None:
@@ -70,13 +71,13 @@ def run_traced_callable(
     error: Exception | None = None
     try:
         coordinator._execution_lock.acquire()
-        sys.settrace(trace_function)
+        install_thread_line_trace(trace_function)
         body()
     except Exception as exc:
         error = exc
         error_sink[execution_name] = exc
     finally:
-        sys.settrace(None)
+        uninstall_thread_line_trace()
         _release_execution_lock_safely(coordinator)
         if error is not None:
             coordinator.report_error(error)
