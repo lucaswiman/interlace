@@ -158,6 +158,25 @@ def _report_redis_access(
     return True
 
 
+def _parse_and_report_execute_command(
+    args: tuple[Any, ...],
+    client: Any,
+) -> tuple[str, tuple[Any, ...], bool] | None:
+    """Parse ``execute_command`` *args* and report key accesses.
+
+    Returns ``(cmd_name, cmd_args, reported)`` for the command, or ``None``
+    if *args* is empty (in which case the caller should pass through to the
+    original method without any reporting).  Shared by the sync and async
+    ``execute_command`` interceptors.
+    """
+    if not args:
+        return None
+    cmd_name = str(args[0])
+    cmd_args = args[1:]
+    reported = _report_redis_access(cmd_name, cmd_args, client=client)
+    return cmd_name, cmd_args, reported
+
+
 def _intercept_execute_command(
     original_method: Any,
     self: Any,
@@ -165,13 +184,11 @@ def _intercept_execute_command(
     **kwargs: Any,
 ) -> Any:
     """Intercept redis.Redis.execute_command to report key-level accesses."""
-    if not args:
+    parsed = _parse_and_report_execute_command(args, self)
+    if parsed is None:
         return original_method(self, *args, **kwargs)
 
-    cmd_name = str(args[0])
-    cmd_args = args[1:]
-
-    reported = _report_redis_access(cmd_name, cmd_args, client=self)
+    cmd_name, cmd_args, reported = parsed
 
     # In replay mode (defect #9 fix), force a scheduling point even
     # without IO reporting so the replay scheduler can enforce the

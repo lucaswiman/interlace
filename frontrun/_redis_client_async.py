@@ -19,8 +19,8 @@ from typing import Any
 from frontrun._io_detection import get_dpor_context as _get_dpor_context
 from frontrun._patching import patch_method, restore_patches, wrap_method_metadata
 from frontrun._redis_client import (
+    _parse_and_report_execute_command,
     _report_pipeline_commands,
-    _report_redis_access,
     _suppress_endpoint_io,
 )
 from frontrun._redis_patch_registry import ASYNC_REDIS_TARGETS
@@ -94,12 +94,10 @@ async def _intercept_execute_command_async(
     **kwargs: Any,
 ) -> Any:
     """Async version of ``_intercept_execute_command``."""
-    if not args:
+    parsed = _parse_and_report_execute_command(args, self)
+    if parsed is None:
         return await original_method(self, *args, **kwargs)
-
-    cmd_name = str(args[0])
-    cmd_args = args[1:]
-    reported = _report_redis_access(cmd_name, cmd_args, client=self)
+    _cmd_name, _cmd_args, reported = parsed
     return await _dispatch_async(original_method, self, reported, *args, **kwargs)
 
 
