@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import random
+import threading
 from typing import Any
 
 import pytest
@@ -94,3 +96,150 @@ def test_dispatch_threads_or_tasks_requires_exactly_one_mode() -> None:
 
 async def _noop() -> None:
     return None
+
+
+# ---------------------------------------------------------------------------
+# Shared schedule generation helpers (sync + async random exploration)
+# ---------------------------------------------------------------------------
+
+
+def test_random_round_robin_schedule_is_fair_and_deterministic() -> None:
+    from frontrun._random_schedules import random_round_robin_schedule
+
+    rng = random.Random(0)
+    schedule = random_round_robin_schedule(rng, num_actors=3, max_ops=12)
+
+    # Every entry is a valid actor id.
+    assert schedule, "schedule should not be empty"
+    assert all(0 <= entry < 3 for entry in schedule)
+
+    # The schedule is a sequence of full permutations of [0, 1, 2], so the
+    # length is a multiple of num_actors and every actor appears equally
+    # often -- this is the fairness property.
+    assert len(schedule) % 3 == 0
+    counts = [schedule.count(i) for i in range(3)]
+    assert counts[0] == counts[1] == counts[2]
+
+    # Same RNG seed -> same schedule (determinism).
+    rng2 = random.Random(0)
+    assert random_round_robin_schedule(rng2, num_actors=3, max_ops=12) == schedule
+
+
+def test_random_round_robin_schedule_respects_max_ops_cap() -> None:
+    from frontrun._random_schedules import random_round_robin_schedule
+
+    rng = random.Random(123)
+    schedule = random_round_robin_schedule(rng, num_actors=4, max_ops=4)
+    # max_ops // num_actors == 1, so the schedule should be exactly one round.
+    assert len(schedule) == 4
+    assert sorted(schedule) == [0, 1, 2, 3]
+
+
+def test_fair_schedule_strategy_generates_round_complete_schedules() -> None:
+    pytest.importorskip("hypothesis")
+    from hypothesis import HealthCheck, given, settings
+
+    from frontrun._random_schedules import fair_schedule_strategy
+
+    # Property: every generated schedule is built from full round-robin
+    # permutations of [0, ..., num_actors - 1].
+    @given(schedule=fair_schedule_strategy(num_actors=3, max_ops=15))
+    @settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def _check(schedule: list[int]) -> None:
+        assert schedule, "fair schedule should be non-empty"
+        assert len(schedule) % 3 == 0, "fair schedule must be a sequence of complete rounds"
+        for start in range(0, len(schedule), 3):
+            assert sorted(schedule[start : start + 3]) == [0, 1, 2]
+
+    _check()
+
+
+# ---------------------------------------------------------------------------
+# Shared marker-executor finalization (sync + async trace markers)
+# ---------------------------------------------------------------------------
+
+
+def _make_completed_coordinator(num_steps: int = 1) -> Any:
+    from frontrun._marker_coordination import ThreadCoordinator
+    from frontrun.common import Schedule, Step
+
+    schedule = Schedule([Step(execution_name=f"t{i}", marker_name="m") for i in range(num_steps)])
+    coord = ThreadCoordinator(schedule)
+    coord.current_step = num_steps
+    coord.completed = True
+    return coord
+
+
+def test_finalize_marker_executor_run_no_op_when_clean() -> None:
+    from frontrun._marker_coordination import finalize_marker_executor_run
+
+    coord = _make_completed_coordinator(num_steps=2)
+    # Should not raise: no threads alive, no errors, schedule completed.
+    finalize_marker_executor_run(
+        threads=[],
+        timeout=None,
+        task_errors={},
+        coordinator=coord,
+        timeout_message=lambda alive: "unused",
+    )
+
+
+def test_finalize_marker_executor_run_raises_for_alive_threads() -> None:
+    from frontrun._marker_coordination import finalize_marker_executor_run
+
+    coord = _make_completed_coordinator()
+    blocker = threading.Event()
+    thread = threading.Thread(target=blocker.wait, name="stuck", daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(TimeoutError, match="custom-timeout-message: stuck"):
+            finalize_marker_executor_run(
+                threads=[thread],
+                timeout=0.05,
+                task_errors={},
+                coordinator=coord,
+                timeout_message=lambda alive: "custom-timeout-message: " + ", ".join(t.name for t in alive),
+            )
+    finally:
+        blocker.set()
+        thread.join(timeout=1.0)
+
+
+def test_finalize_marker_executor_run_reraises_first_task_error() -> None:
+    from frontrun._marker_coordination import finalize_marker_executor_run
+
+    coord = _make_completed_coordinator()
+    err1 = RuntimeError("first")
+    err2 = RuntimeError("second")
+    with pytest.raises(RuntimeError, match="first"):
+        finalize_marker_executor_run(
+            threads=[],
+            timeout=None,
+            task_errors={"a": err1, "b": err2},
+            coordinator=coord,
+            timeout_message=lambda alive: "unused",
+        )
+
+
+def test_finalize_marker_executor_run_detects_partial_schedule() -> None:
+    from frontrun._marker_coordination import ThreadCoordinator, finalize_marker_executor_run
+    from frontrun.common import Schedule, Step
+
+    schedule = Schedule(
+        [
+            Step(execution_name="t1", marker_name="m1"),
+            Step(execution_name="t2", marker_name="never_reached"),
+        ]
+    )
+    coord = ThreadCoordinator(schedule)
+    coord.current_step = 1  # one step consumed, second never reached
+    coord.completed = False
+
+    with pytest.raises(TimeoutError, match="Schedule incomplete.*never_reached"):
+        finalize_marker_executor_run(
+            threads=[],
+            timeout=None,
+            task_errors={},
+            coordinator=coord,
+            timeout_message=lambda alive: "unused",
+        )
