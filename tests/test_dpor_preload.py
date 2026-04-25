@@ -101,6 +101,7 @@ class TestRowLockRegistry:
     def _make_scheduler(self) -> Any:
         """Create a minimal object with the real row-lock methods from DporScheduler."""
         from frontrun._cooperative import real_condition, real_lock
+        from frontrun._dpor_core import RowLockRegistry
         from frontrun.dpor import DporScheduler
 
         class RowLockHost:
@@ -113,10 +114,10 @@ class TestRowLockRegistry:
                 self._finished = False
                 self._error: Exception | None = None
                 self._current_thread: int | None = None
-                self._active_row_locks: dict[str, int] = {}
-                self._thread_row_locks: dict[int, set[str]] = {}
-                self._row_lock_ids: dict[str, int] = {}
-                self._row_lock_next_id: int = 0
+                self._row_lock_registry = RowLockRegistry()
+                self._active_row_locks: dict[str, int] = self._row_lock_registry._active_row_locks
+                self._thread_row_locks: dict[int, set[str]] = self._row_lock_registry._task_row_locks
+                self._row_lock_ids: dict[str, int] = self._row_lock_registry._row_lock_ids
                 self._row_lock_blocked: dict[int, int] = {}
 
             # Bind the real methods from DporScheduler so tests exercise production code.
@@ -197,6 +198,7 @@ class TestRowLockRegistry:
     def _make_scheduler_with_graph(self) -> Any:
         """RowLockHost with WaitForGraph integration fields bound."""
         from frontrun._cooperative import real_condition, real_lock
+        from frontrun._dpor_core import RowLockRegistry
         from frontrun.dpor import DporScheduler
 
         class RowLockHost:
@@ -207,10 +209,10 @@ class TestRowLockRegistry:
                 self._finished = False
                 self._error: Exception | None = None
                 self._current_thread: int | None = None
-                self._active_row_locks: dict[str, int] = {}
-                self._thread_row_locks: dict[int, set[str]] = {}
-                self._row_lock_ids: dict[str, int] = {}
-                self._row_lock_next_id: int = 0
+                self._row_lock_registry = RowLockRegistry()
+                self._active_row_locks: dict[str, int] = self._row_lock_registry._active_row_locks
+                self._thread_row_locks: dict[int, set[str]] = self._row_lock_registry._task_row_locks
+                self._row_lock_ids: dict[str, int] = self._row_lock_registry._row_lock_ids
                 self._row_lock_blocked: dict[int, int] = {}
 
             acquire_row_locks = DporScheduler.acquire_row_locks

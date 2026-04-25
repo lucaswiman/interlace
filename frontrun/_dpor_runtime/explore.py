@@ -6,6 +6,7 @@ from frontrun._dpor_core import (
     compute_serializable_baseline_sync,
     format_race_failure_explanation,
     make_dpor_engine,
+    record_dpor_failure,
 )
 
 from ._shared import *
@@ -329,18 +330,14 @@ def _explore_dpor(
             _deadlock_err = scheduler._error if isinstance(scheduler._error, DeadlockError) else None
             is_deadlock = _deadlock_err is not None
             if _deadlock_err is not None:
-                result.property_holds = False
                 with engine_lock:
                     schedule = execution.schedule_trace
-                schedule_list = list(schedule)
-                result.failures.append((result.num_explored, schedule_list))
-                if result.counterexample is None:
-                    result.counterexample = schedule_list
-                if result.explanation is None:
-                    result.explanation = (
-                        f"Deadlock detected after {result.num_explored} interleaving(s).\n\n"
-                        f"{_deadlock_err.cycle_description}"
-                    )
+                schedule_list = record_dpor_failure(
+                    result,
+                    list(schedule),
+                    f"Deadlock detected after {result.num_explored} interleaving(s).\n\n"
+                    f"{_deadlock_err.cycle_description}",
+                )
 
                 # Replay the counterexample to measure reproducibility
                 if reproduce_on_failure > 0 and result.reproduction_attempts == 0:
@@ -378,20 +375,18 @@ def _explore_dpor(
                 with engine_lock:
                     raw_races_check = engine.attribute_races()
                 if raw_races_check:
-                    result.property_holds = False
-                    result.races_detected = True
                     with engine_lock:
                         schedule = execution.schedule_trace
-                    schedule_list = list(schedule)
-                    result.failures.append((result.num_explored, schedule_list))
-                    if result.counterexample is None:
-                        result.counterexample = schedule_list
-                    if result.explanation is None:
-                        result.explanation = format_race_failure_explanation(
+                    record_dpor_failure(
+                        result,
+                        list(schedule),
+                        format_race_failure_explanation(
                             result.num_explored,
                             len(raw_races_check),
                             actor_plural="threads",
-                        )
+                        ),
+                        races_detected=True,
+                    )
                     if stop_on_first:
                         clear_instr_cache()
                         _record_and_emit_report()
@@ -403,15 +398,9 @@ def _explore_dpor(
                     state, serial_valid_states, serial_hash_fn, result.num_explored
                 )
                 if ser_explanation is not None:
-                    result.property_holds = False
                     with engine_lock:
                         schedule = execution.schedule_trace
-                    schedule_list = list(schedule)
-                    result.failures.append((result.num_explored, schedule_list))
-                    if result.counterexample is None:
-                        result.counterexample = schedule_list
-                    if result.explanation is None:
-                        result.explanation = ser_explanation
+                    record_dpor_failure(result, list(schedule), ser_explanation)
                     if stop_on_first:
                         clear_instr_cache()
                         _record_and_emit_report()
@@ -422,13 +411,11 @@ def _explore_dpor(
             else:
                 invariant_failed, assertion_msg = check_invariant(invariant, state)
             if invariant_failed:
-                result.property_holds = False
                 with engine_lock:
                     schedule = execution.schedule_trace
-                schedule_list = list(schedule)
-                result.failures.append((result.num_explored, schedule_list))
-                if result.counterexample is None:
-                    result.counterexample = schedule_list
+                # explanation=None defers message-setting: it depends on
+                # reproduction counts computed just below.
+                schedule_list = record_dpor_failure(result, list(schedule), None)
 
                 # Replay the counterexample to measure reproducibility
                 if reproduce_on_failure > 0 and result.reproduction_attempts == 0:

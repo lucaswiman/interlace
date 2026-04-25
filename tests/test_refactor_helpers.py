@@ -375,8 +375,8 @@ def test_dpor_scheduler_uses_row_lock_registry() -> None:
     # This test verifies the call site was updated, not just the helper.
     # Import is guarded so the test is skipped if _dpor is not built.
     pytest.importorskip("frontrun._dpor")
-    from frontrun._dpor_runtime.scheduler import DporScheduler
     from frontrun._dpor_core import RowLockRegistry
+    from frontrun._dpor_runtime.scheduler import DporScheduler
 
     # DporScheduler should have a _row_lock_registry attribute that is a RowLockRegistry.
     assert hasattr(DporScheduler, "__init__")
@@ -390,8 +390,8 @@ def test_dpor_scheduler_uses_row_lock_registry() -> None:
 def test_async_dpor_scheduler_uses_row_lock_registry() -> None:
     """AsyncDporScheduler delegates row-lock operations to RowLockRegistry."""
     pytest.importorskip("frontrun._dpor")
-    from frontrun.async_dpor import AsyncDporScheduler
     from frontrun._dpor_core import RowLockRegistry
+    from frontrun.async_dpor import AsyncDporScheduler
 
     assert hasattr(AsyncDporScheduler, "__init__")
     reg = RowLockRegistry()
