@@ -555,7 +555,7 @@ def test_every_deprecation_message_pins_a_removal_version():
 
     from frontrun.common import DEPRECATION_MESSAGES
 
-    # Match phrases like "removed in 0.7", "Will be removed in 1.0", etc.
+    # Match phrases like "removed in 0.6", "Will be removed in 1.0", etc.
     pattern = re.compile(r"removed in \d+\.\d+", re.IGNORECASE)
     missing = [name for name, msg in DEPRECATION_MESSAGES.items() if not pattern.search(msg)]
     assert not missing, (

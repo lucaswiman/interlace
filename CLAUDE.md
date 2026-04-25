@@ -9,7 +9,7 @@ Deterministic concurrency testing library. Four exploration approaches:
 - **Random bytecode exploration** — opcode-level fuzzing with Hypothesis (`frontrun/bytecode.py`, async: `async_shuffler.py`)
 - **Systematic DPOR** — Rust engine, vector clocks, wakeup tree (sync: `frontrun/_dpor_runtime/` subpackage; async: `frontrun/async_dpor.py`, still a single ~1.3 kLOC module). Pure helpers shared by both live in `frontrun/_dpor_core/` (`engine.py`, `invariants.py`) — first slice of an in-progress unification.
 
-Unified entry point is `frontrun.explore(strategy=...)`, which dispatches through the `Strategy` / `AsyncStrategy` Protocol registries in `frontrun/_strategy.py`. Older names (`explore_dpor`, `explore_interleavings`, …) resolve via a `__getattr__` deprecation shim in `frontrun/__init__.py`; messages live in `frontrun/common.py::DEPRECATION_MESSAGES` and are pinned for removal in **0.7**. C-level I/O interception is handled by the `LD_PRELOAD` library in `crates/io/`.
+Unified entry point is `frontrun.explore(strategy=...)`, which dispatches through the `Strategy` / `AsyncStrategy` Protocol registries in `frontrun/_strategy.py`. Older names (`explore_dpor`, `explore_interleavings`, …) resolve via a `__getattr__` deprecation shim in `frontrun/__init__.py`; messages live in `frontrun/common.py::DEPRECATION_MESSAGES` and are pinned for removal in **0.6**. C-level I/O interception is handled by the `LD_PRELOAD` library in `crates/io/`.
 
 ## Project layout
 

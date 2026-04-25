@@ -265,7 +265,7 @@ class TraceExecutor:
 
         **Legacy form** — pass a name and a callable separately.
         The caller must then call :meth:`wait` explicitly.
-        This form is *deprecated* and will be removed in 0.7::
+        This form is *deprecated* and will be removed in 0.6::
 
             executor.run("thread1", fn1)
             executor.run("thread2", fn2)
@@ -308,7 +308,7 @@ class TraceExecutor:
             "Calling TraceExecutor.run() with individual thread names is deprecated; "
             "pass a dict {name: callable} instead, e.g. "
             "executor.run({'thread1': fn1, 'thread2': fn2}, timeout=5.0). "
-            "Will be removed in 0.7.",
+            "Will be removed in 0.6.",
             DeprecationWarning,
             stacklevel=2,
         )

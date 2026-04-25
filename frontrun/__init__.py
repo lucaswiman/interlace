@@ -123,7 +123,7 @@ def _deprecated_explore_interleavings(*args: Any, **kwargs: Any) -> Any:
 
     The pre-0.5 function accepted either ``threads=`` (sync) or ``tasks=``
     (async) and dispatched internally. Preserved here through the 0.5 and 0.6
-    series; removed in 0.7.
+    series; removed in 0.6.
     """
     warnings.warn(DEPRECATION_MESSAGES["explore_interleavings"], DeprecationWarning, stacklevel=2)
     has_threads = "threads" in kwargs
