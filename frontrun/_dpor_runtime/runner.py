@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
+from frontrun._opcode_observer import (
+    OpcodeTraceHandle,
+    install_thread_opcode_trace,
+    start_opcode_trace,
+    stop_opcode_trace,
+    uninstall_thread_opcode_trace,
+)
 from frontrun._threaded_runner import PatchScope, notify_scheduler_timeout, run_thread_group
 
 from ._shared import *
 from ._shared import (
-    _USE_SYS_MONITORING,
     _append_unique_lock_event,
     _dpor_tls,
     _make_object_key,
@@ -21,12 +27,10 @@ from .scheduler import DporScheduler
 class DporBytecodeRunner:
     """Runs threads under DPOR-controlled bytecode-level interleaving.
 
-    Uses sys.monitoring (PEP 669) on Python 3.12+ for thread-safe opcode
-    instrumentation. Falls back to sys.settrace on 3.10-3.11.
+    Opcode tracing is delegated to the tracer-backend in
+    :mod:`frontrun._opcode_observer`, which picks ``sys.monitoring`` on
+    Python 3.12+ and ``sys.settrace`` on 3.10–3.11.
     """
-
-    # sys.monitoring tool ID for DPOR (use PROFILER to avoid conflict with debuggers)
-    _TOOL_ID: int | None = None
 
     def __init__(
         self,
@@ -42,7 +46,7 @@ class DporBytecodeRunner:
         self._lock_patched = False
         self._io_patched = False
         self._sleep_patched = False
-        self._monitoring_active = False
+        self._opcode_handle: OpcodeTraceHandle | None = None
 
     def _patch_locks(self) -> None:
         install_wait_for_graph()
@@ -86,33 +90,7 @@ class DporBytecodeRunner:
         scope.add(self._patch_sleep, self._unpatch_sleep, enabled=patch_sleep)
         return scope
 
-    # --- sys.settrace backend (3.10-3.11) ---
-
-    def _make_trace(self, thread_id: int) -> Callable[..., Any]:
-        scheduler = self.scheduler
-        _detect_io = scheduler._detect_io
-
-        def _get_tid() -> int | None:
-            return thread_id
-
-        def _on_opcode(code: Any, offset: int, frame: Any, tid: int) -> bool:
-            return process_opcode_with_coarsening(code, offset, frame, scheduler, tid, _detect_io)
-
-        return make_settrace_callback(
-            get_thread_id=_get_tid,
-            on_opcode=_on_opcode,
-            remove_shadow_stack=scheduler.remove_shadow_stack,
-            detect_io=_detect_io,
-            is_active=lambda: not (scheduler._finished or scheduler._error),
-        )
-
-    # --- sys.monitoring backend (3.12+) ---
-
-    def _setup_monitoring(self) -> None:
-        """Set up sys.monitoring INSTRUCTION events for all code objects."""
-        if not _USE_SYS_MONITORING:
-            return
-
+    def _start_opcode_trace(self) -> None:
         scheduler = self.scheduler
         _detect_io = scheduler._detect_io
 
@@ -125,27 +103,21 @@ class DporBytecodeRunner:
         def _on_opcode(code: Any, offset: int, frame: Any, tid: int) -> bool:
             return process_opcode_with_coarsening(code, offset, frame, scheduler, tid, _detect_io)
 
-        handle_py_start, handle_py_return, handle_instruction = make_monitoring_callbacks(
+        self._opcode_handle = start_opcode_trace(
             get_thread_id=_get_tid,
             on_opcode=_on_opcode,
             remove_shadow_stack=scheduler.remove_shadow_stack,
             detect_io=_detect_io,
             is_active=lambda: not (scheduler._finished or scheduler._error),
-        )
-
-        DporBytecodeRunner._TOOL_ID = setup_opcode_monitoring(
             tool_name="frontrun._dpor",
-            handle_py_start=handle_py_start,
-            handle_py_return=handle_py_return,
-            handle_instruction=handle_instruction,
         )
-        self._monitoring_active = True
 
-    def _teardown_monitoring(self) -> None:
-        if not self._monitoring_active:
+    def _stop_opcode_trace(self) -> None:
+        handle = self._opcode_handle
+        if handle is None:
             return
-        teardown_opcode_monitoring(DporBytecodeRunner._TOOL_ID)
-        self._monitoring_active = False
+        stop_opcode_trace(handle)
+        self._opcode_handle = None
 
     # --- Thread entry points ---
 
@@ -410,20 +382,16 @@ class DporBytecodeRunner:
             self.scheduler._pending_io_by_thread.pop(_tid, None)
 
     @contextmanager
-    def _thread_runtime(
-        self,
-        thread_id: int,
-        *,
-        trace_fn: Callable[..., Any] | None = None,
-    ):
+    def _thread_runtime(self, thread_id: int):
         self._setup_dpor_tls(thread_id)
-        if trace_fn is not None:
-            sys.settrace(trace_fn)
+        handle = self._opcode_handle
+        if handle is not None:
+            install_thread_opcode_trace(handle)
         try:
             yield
         finally:
-            if trace_fn is not None:
-                sys.settrace(None)
+            if handle is not None:
+                uninstall_thread_opcode_trace(handle)
             self._teardown_dpor_tls()
             self.scheduler.mark_done(thread_id)
 
@@ -432,11 +400,9 @@ class DporBytecodeRunner:
         thread_id: int,
         func: Callable[..., None],
         args: tuple[Any, ...],
-        *,
-        trace_fn: Callable[..., Any] | None = None,
     ) -> None:
         try:
-            with self._thread_runtime(thread_id, trace_fn=trace_fn):
+            with self._thread_runtime(thread_id):
                 func(*args)
         except SchedulerAbort:
             pass  # scheduler already has the error; just exit cleanly
@@ -453,9 +419,7 @@ class DporBytecodeRunner:
         if args is None:
             args = [() for _ in funcs]
 
-        use_monitoring = _USE_SYS_MONITORING
-        if use_monitoring:
-            self._setup_monitoring()
+        self._start_opcode_trace()
         run_thread = self._run_thread
 
         def make_thread_target(
@@ -464,12 +428,7 @@ class DporBytecodeRunner:
             thread_args: tuple[Any, ...],
         ) -> Callable[[], None]:
             def target() -> None:
-                run_thread(
-                    thread_id,
-                    func,
-                    thread_args,
-                    trace_fn=None if use_monitoring else self._make_trace(thread_id),
-                )
+                run_thread(thread_id, func, thread_args)
 
             return target
 
@@ -483,7 +442,7 @@ class DporBytecodeRunner:
             name_prefix="dpor",
             timeout=timeout,
             thread_store=self.threads,
-            teardown=self._teardown_monitoring if use_monitoring else None,
+            teardown=self._stop_opcode_trace,
             on_timeout=on_timeout,
         )
 

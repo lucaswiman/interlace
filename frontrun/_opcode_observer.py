@@ -38,6 +38,7 @@ _PY_VERSION = sys.version_info[:2]
 _USE_SYS_MONITORING = _PY_VERSION >= (3, 12)
 
 __all__ = [
+    "OpcodeTraceHandle",
     "ShadowStack",
     "StableObjectIds",
     "_CALL_OPCODES",
@@ -50,12 +51,18 @@ __all__ = [
     "_process_opcode",
     "clear_instr_cache",
     "get_object_key_reverse_map",
+    "install_thread_line_trace",
+    "install_thread_opcode_trace",
     "make_monitoring_callbacks",
     "make_settrace_callback",
     "process_opcode_with_coarsening",
     "set_object_key_reverse_map",
     "setup_opcode_monitoring",
+    "start_opcode_trace",
+    "stop_opcode_trace",
     "teardown_opcode_monitoring",
+    "uninstall_thread_line_trace",
+    "uninstall_thread_opcode_trace",
 ]
 
 
@@ -1333,21 +1340,46 @@ def _process_opcode(
 # ---------------------------------------------------------------------------
 
 
+ToolKind = Literal["profiler", "optimizer"]
+
+
+def _resolve_tool_id(tool_kind: ToolKind) -> int:
+    """Return the sys.monitoring tool ID matching *tool_kind*.
+
+    ``"profiler"`` (default for DPOR) or ``"optimizer"`` (used by
+    BytecodeShuffler so that random fuzzing and DPOR can coexist when
+    nested, although in practice they aren't).
+    """
+    mon = sys.monitoring
+    if tool_kind == "profiler":
+        return mon.PROFILER_ID  # type: ignore[attr-defined,no-any-return]
+    if tool_kind == "optimizer":
+        return mon.OPTIMIZER_ID  # type: ignore[attr-defined,no-any-return]
+    raise ValueError(f"Unknown tool_kind: {tool_kind!r}")
+
+
 def setup_opcode_monitoring(
     *,
     tool_name: str,
     handle_py_start: Any,
     handle_py_return: Any,
     handle_instruction: Any,
+    tool_kind: ToolKind = "profiler",
+    monitor_returns: bool = True,
 ) -> int:
     """Set up sys.monitoring for opcode tracing. Returns the tool ID.
 
     Handles the full tool ID lifecycle including defensive cleanup of
     stale tool IDs from interrupted runs (e.g. pytest-timeout kills a
     test before teardown).
+
+    *tool_kind* selects the sys.monitoring tool ID slot
+    (``"profiler"`` for DPOR, ``"optimizer"`` for the BytecodeShuffler).
+    When *monitor_returns* is False, PY_RETURN is not registered (used by
+    callers that don't need shadow-stack cleanup).
     """
     mon = sys.monitoring
-    tool_id: int = mon.PROFILER_ID  # type: ignore[attr-defined]
+    tool_id: int = _resolve_tool_id(tool_kind)
 
     try:
         mon.use_tool_id(tool_id, tool_name)  # type: ignore[attr-defined]
@@ -1360,9 +1392,13 @@ def setup_opcode_monitoring(
         mon.free_tool_id(tool_id)  # type: ignore[attr-defined]
         mon.use_tool_id(tool_id, tool_name)  # type: ignore[attr-defined]
 
-    mon.set_events(tool_id, mon.events.PY_START | mon.events.PY_RETURN | mon.events.INSTRUCTION)  # type: ignore[attr-defined]
+    events = mon.events.PY_START | mon.events.INSTRUCTION  # type: ignore[attr-defined]
+    if monitor_returns:
+        events |= mon.events.PY_RETURN  # type: ignore[attr-defined]
+    mon.set_events(tool_id, events)  # type: ignore[attr-defined]
     mon.register_callback(tool_id, mon.events.PY_START, handle_py_start)  # type: ignore[attr-defined]
-    mon.register_callback(tool_id, mon.events.PY_RETURN, handle_py_return)  # type: ignore[attr-defined]
+    if monitor_returns:
+        mon.register_callback(tool_id, mon.events.PY_RETURN, handle_py_return)  # type: ignore[attr-defined]
     mon.register_callback(tool_id, mon.events.INSTRUCTION, handle_instruction)  # type: ignore[attr-defined]
     return tool_id
 
@@ -1587,3 +1623,169 @@ def make_monitoring_callbacks(
         return None
 
     return handle_py_start, handle_py_return, handle_instruction
+
+
+# ---------------------------------------------------------------------------
+# High-level tracer-backend API
+# ---------------------------------------------------------------------------
+#
+# This is the only API the rest of the codebase should use to install opcode-
+# or line-level tracers.  It owns the dispatch between ``sys.settrace``
+# (Python 3.10-3.11) and ``sys.monitoring`` (3.12+, mandatory on 3.14t free-
+# threaded due to CPython issue #118415).
+#
+# Usage pattern for opcode tracing
+# --------------------------------
+# Opcode tracing is logically "global per scheduler".  ``sys.monitoring`` is
+# globally registered and fires for every thread automatically; ``sys.settrace``
+# is per-thread and must be installed inside each worker thread.
+# The handle returned by ``start_opcode_trace`` captures both modes:
+#
+#     handle = start_opcode_trace(get_thread_id=..., on_opcode=..., ...)
+#     try:
+#         # In each worker thread:
+#         install_thread_opcode_trace(handle)   # no-op on sys.monitoring
+#         try:
+#             ...do work...
+#         finally:
+#             uninstall_thread_opcode_trace(handle)
+#     finally:
+#         stop_opcode_trace(handle)
+#
+# Usage pattern for line tracing
+# ------------------------------
+# Line tracing always uses ``sys.settrace`` (no opcode events, so the
+# free-threading bug does not apply).  Install per-thread:
+#
+#     install_thread_line_trace(trace_function)
+#     try:
+#         ...do work...
+#     finally:
+#         uninstall_thread_line_trace()
+
+
+class OpcodeTraceHandle:
+    """Opaque handle returned by :func:`start_opcode_trace`.
+
+    Carries enough state to install/uninstall per-thread tracers (settrace
+    backend) and to tear down the global monitoring tool (monitoring backend).
+    """
+
+    __slots__ = ("_settrace_callback", "_tool_id", "using_monitoring")
+
+    def __init__(
+        self,
+        *,
+        using_monitoring: bool,
+        tool_id: int | None,
+        settrace_callback: Any,
+    ) -> None:
+        self.using_monitoring = using_monitoring
+        self._tool_id = tool_id
+        self._settrace_callback = settrace_callback
+
+
+def start_opcode_trace(
+    *,
+    get_thread_id: Any,
+    on_opcode: Any,
+    remove_shadow_stack: Any = None,
+    detect_io: bool = False,
+    is_active: Any = None,
+    tool_name: str = "frontrun",
+    tool_kind: ToolKind = "profiler",
+    monitor_returns: bool = True,
+) -> OpcodeTraceHandle:
+    """Start opcode-level tracing using the appropriate backend.
+
+    On Python 3.12+ this immediately installs ``sys.monitoring`` callbacks
+    (which fire globally for all threads).  On Python 3.10-3.11 it only
+    constructs a ``sys.settrace`` callback; per-thread activation happens
+    via :func:`install_thread_opcode_trace`.
+
+    Parameters
+    ----------
+    get_thread_id, on_opcode, remove_shadow_stack, detect_io, is_active:
+        Forwarded to :func:`make_settrace_callback` /
+        :func:`make_monitoring_callbacks`.  ``remove_shadow_stack`` defaults
+        to a no-op for callers that don't track a shadow stack.
+    tool_name, tool_kind, monitor_returns:
+        Forwarded to :func:`setup_opcode_monitoring` (sys.monitoring path
+        only).
+    """
+
+    def _noop_remove_shadow_stack(_frame_id: int) -> None:
+        return None
+
+    _remove_shadow_stack = remove_shadow_stack if remove_shadow_stack is not None else _noop_remove_shadow_stack
+
+    if _USE_SYS_MONITORING:
+        handle_py_start, handle_py_return, handle_instruction = make_monitoring_callbacks(
+            get_thread_id=get_thread_id,
+            on_opcode=on_opcode,
+            remove_shadow_stack=_remove_shadow_stack,
+            detect_io=detect_io,
+            is_active=is_active,
+        )
+        tool_id = setup_opcode_monitoring(
+            tool_name=tool_name,
+            handle_py_start=handle_py_start,
+            handle_py_return=handle_py_return,
+            handle_instruction=handle_instruction,
+            tool_kind=tool_kind,
+            monitor_returns=monitor_returns,
+        )
+        return OpcodeTraceHandle(using_monitoring=True, tool_id=tool_id, settrace_callback=None)
+
+    trace_callback = make_settrace_callback(
+        get_thread_id=get_thread_id,
+        on_opcode=on_opcode,
+        remove_shadow_stack=_remove_shadow_stack,
+        detect_io=detect_io,
+        is_active=is_active,
+    )
+    return OpcodeTraceHandle(using_monitoring=False, tool_id=None, settrace_callback=trace_callback)
+
+
+def install_thread_opcode_trace(handle: OpcodeTraceHandle) -> None:
+    """Install opcode tracing on the current thread.
+
+    No-op when the sys.monitoring backend is in use (it is global, not
+    per-thread).  On the sys.settrace backend, this calls
+    ``sys.settrace(handle's callback)``.
+    """
+    if handle.using_monitoring:
+        return
+    sys.settrace(handle._settrace_callback)
+
+
+def uninstall_thread_opcode_trace(handle: OpcodeTraceHandle) -> None:
+    """Uninstall opcode tracing on the current thread.
+
+    No-op when the sys.monitoring backend is in use.  On the sys.settrace
+    backend, this calls ``sys.settrace(None)``.
+    """
+    if handle.using_monitoring:
+        return
+    sys.settrace(None)
+
+
+def stop_opcode_trace(handle: OpcodeTraceHandle) -> None:
+    """Stop opcode tracing and free any backend resources."""
+    if handle.using_monitoring:
+        teardown_opcode_monitoring(handle._tool_id)
+
+
+def install_thread_line_trace(trace_fn: Any) -> None:
+    """Install a sys.settrace line-level trace function on the current thread.
+
+    Used by ``_trace_marker_runtime`` for marker-based scheduling.  Line
+    tracing is per-thread and does not use opcode events, so the
+    free-threading PEP 669 path does not apply.
+    """
+    sys.settrace(trace_fn)
+
+
+def uninstall_thread_line_trace() -> None:
+    """Remove the sys.settrace function from the current thread."""
+    sys.settrace(None)

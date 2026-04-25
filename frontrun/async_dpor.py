@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import sys
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, TypeVar
@@ -58,16 +57,21 @@ from frontrun._async_autopause import (
     wrap_auto_paused_tasks,
 )
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
+from frontrun._dpor_core import (
+    compute_serializable_baseline_async,
+    format_race_failure_explanation,
+    make_dpor_engine,
+)
 from frontrun._opcode_observer import (
-    _USE_SYS_MONITORING,
+    OpcodeTraceHandle,
     ShadowStack,
     StableObjectIds,
     _make_object_key,
     _process_opcode,
-    make_monitoring_callbacks,
-    make_settrace_callback,
-    setup_opcode_monitoring,
-    teardown_opcode_monitoring,
+    install_thread_opcode_trace,
+    start_opcode_trace,
+    stop_opcode_trace,
+    uninstall_thread_opcode_trace,
 )
 from frontrun._sql_cursor import clear_sql_metadata, get_lock_timeout, set_lock_timeout
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
@@ -371,8 +375,6 @@ class AsyncDporScheduler(InterleavedLoop):
     and reported to the engine before the next scheduling decision.
     """
 
-    _TOOL_ID: int | None = None
-
     def __init__(
         self,
         engine: PyDporEngine,
@@ -395,7 +397,7 @@ class AsyncDporScheduler(InterleavedLoop):
         self.trace_recorder = None
         self._iter_to_container: dict[int, Any] = {}
         self._shadow_stacks: dict[int, ShadowStack] = {}
-        self._monitoring_active = False
+        self._opcode_handle: OpcodeTraceHandle | None = None
         self._stable_ids = stable_ids if stable_ids is not None else StableObjectIds()
         # Pending I/O accesses per task (from SQL interception)
         self._pending_io: dict[int, list[tuple[int, str, bool]]] = {i: [] for i in range(num_tasks)}
@@ -540,20 +542,12 @@ class AsyncDporScheduler(InterleavedLoop):
             task_funcs = dict(enumerate(task_funcs))
 
         wrapped = wrap_auto_paused_tasks(task_funcs, self)
-        if _USE_SYS_MONITORING:
-            self._setup_monitoring()
-            try:
-                await super().run_all(wrapped, timeout=timeout)
-            finally:
-                self._teardown_monitoring()
-                self._shadow_stacks.clear()
-        else:
-            self._setup_settrace()
-            try:
-                await super().run_all(wrapped, timeout=timeout)
-            finally:
-                sys.settrace(None)
-                self._shadow_stacks.clear()
+        self._start_opcode_trace()
+        try:
+            await super().run_all(wrapped, timeout=timeout)
+        finally:
+            self._stop_opcode_trace()
+            self._shadow_stacks.clear()
 
     async def pause(self, task_id: Any, marker: Any = None) -> None:
         """DPOR-aware pause that ensures fair task wakeup.
@@ -640,37 +634,29 @@ class AsyncDporScheduler(InterleavedLoop):
             _in_trace_processing.reset(token)
         return False  # async never yields at opcode level
 
-    def _setup_settrace(self) -> None:
-        trace = make_settrace_callback(
+    def _start_opcode_trace(self) -> None:
+        """Install the opcode tracer and activate it for the event-loop thread.
+
+        Async DPOR runs all tasks on a single event-loop thread, so we install
+        the per-thread trace exactly once (on sys.settrace; no-op on
+        sys.monitoring, which is global).
+        """
+        self._opcode_handle = start_opcode_trace(
             get_thread_id=self._get_task_id,
             on_opcode=self._on_opcode,
             remove_shadow_stack=self.remove_shadow_stack,
-        )
-        sys.settrace(trace)
-
-    def _setup_monitoring(self) -> None:
-        if not _USE_SYS_MONITORING:
-            return
-
-        handle_py_start, handle_py_return, handle_instruction = make_monitoring_callbacks(
-            get_thread_id=self._get_task_id,
-            on_opcode=self._on_opcode,
-            remove_shadow_stack=self.remove_shadow_stack,
-        )
-
-        AsyncDporScheduler._TOOL_ID = setup_opcode_monitoring(
             tool_name="frontrun.async_dpor",
-            handle_py_start=handle_py_start,
-            handle_py_return=handle_py_return,
-            handle_instruction=handle_instruction,
         )
-        self._monitoring_active = True
+        install_thread_opcode_trace(self._opcode_handle)
 
-    def _teardown_monitoring(self) -> None:
-        if not self._monitoring_active:
+    def _stop_opcode_trace(self) -> None:
+        """Uninstall the per-thread tracer and tear down backend resources."""
+        handle = getattr(self, "_opcode_handle", None)
+        if handle is None:
             return
-        teardown_opcode_monitoring(AsyncDporScheduler._TOOL_ID)
-        self._monitoring_active = False
+        uninstall_thread_opcode_trace(handle)
+        stop_opcode_trace(handle)
+        self._opcode_handle = None
 
     def _row_lock_int_id(self, res_id: str) -> int:
         """Return a stable integer ID for *res_id* (allocated on first call)."""
@@ -1056,26 +1042,16 @@ async def _explore_async_dpor(
         _set_active_trace_filter(_TraceFilter(trace_packages))
 
     # Compute serializable baseline if requested.
-    serial_valid_states: set[Any] | None = None
-    serial_hash_fn: Callable[[Any], Any] = repr
-    if serializable_invariant is not False:
-        try:
-            from frontrun.common import compute_serializable_states_async, resolve_serializable_hash_fn
-
-            serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
-            serial_valid_states = await compute_serializable_states_async(setup, tasks, state_hash=serial_hash_fn)
-        except BaseException:
-            _set_active_trace_filter(None)
-            raise
+    serial_valid_states, serial_hash_fn = await compute_serializable_baseline_async(
+        setup, tasks, serializable_invariant
+    )
 
     num_tasks = len(tasks)
-    pb = None if preemption_bound is None else preemption_bound
-    me = None if max_executions is None else max_executions
-    engine = PyDporEngine(
+    engine = make_dpor_engine(
         num_threads=num_tasks,
-        preemption_bound=pb,
+        preemption_bound=preemption_bound,
         max_branches=max_branches,
-        max_executions=me,
+        max_executions=max_executions,
     )
 
     result = InterleavingResult(property_holds=True)
@@ -1224,9 +1200,10 @@ async def _explore_async_dpor(
                     if raw_races_check:
                         _record_failure(
                             execution,
-                            (
-                                f"Unsynchronized race detected in execution {result.num_explored}.\n"
-                                f"{len(raw_races_check)} race(s) found between tasks on shared objects."
+                            format_race_failure_explanation(
+                                result.num_explored,
+                                len(raw_races_check),
+                                actor_plural="tasks",
                             ),
                             races_detected=True,
                         )

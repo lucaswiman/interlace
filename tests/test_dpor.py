@@ -235,16 +235,20 @@ def test_dpor_runner_cleans_up_runtime_state_after_error(monkeypatch) -> None:
 
     monkeypatch.setattr(runner, "_setup_dpor_tls", lambda thread_id: events.append(f"setup:{thread_id}"))
     monkeypatch.setattr(runner, "_teardown_dpor_tls", lambda: events.append("teardown"))
-    monkeypatch.setattr(runner, "_make_trace", lambda thread_id: f"trace:{thread_id}")
     monkeypatch.setattr(
-        "frontrun._dpor_runtime.runner.sys.settrace",
-        lambda value: events.append("trace:on" if value is not None else "trace:off"),
+        "frontrun._dpor_runtime.runner.install_thread_opcode_trace",
+        lambda _handle: events.append("trace:on"),
+    )
+    monkeypatch.setattr(
+        "frontrun._dpor_runtime.runner.uninstall_thread_opcode_trace",
+        lambda _handle: events.append("trace:off"),
     )
 
     def boom() -> None:
         raise RuntimeError("boom")
 
-    runner._run_thread(0, boom, (), trace_fn=runner._make_trace(0))
+    runner._opcode_handle = object()  # type: ignore[assignment]  # sentinel triggers install/uninstall
+    runner._run_thread(0, boom, ())
 
     assert isinstance(runner.errors[0], RuntimeError)
     assert isinstance(scheduler.error, RuntimeError)
@@ -270,15 +274,11 @@ def test_dpor_runner_swallows_scheduler_abort(monkeypatch) -> None:
 
     monkeypatch.setattr(runner, "_setup_dpor_tls", lambda thread_id: events.append(f"setup:{thread_id}"))
     monkeypatch.setattr(runner, "_teardown_dpor_tls", lambda: events.append("teardown"))
-    monkeypatch.setattr(
-        "frontrun._dpor_runtime.runner.sys.settrace",
-        lambda value: events.append("trace:on" if value is not None else "trace:off"),
-    )
 
     def abort() -> None:
         raise SchedulerAbort()
 
-    runner._run_thread(0, abort, (), trace_fn=None)
+    runner._run_thread(0, abort, ())
 
     assert runner.errors == {}
     assert scheduler.error is None

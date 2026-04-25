@@ -57,13 +57,18 @@ from frontrun._io_detection import (
     set_io_reporter,
     unpatch_io,
 )
+from frontrun._opcode_observer import (
+    OpcodeTraceHandle,
+    install_thread_opcode_trace,
+    start_opcode_trace,
+    stop_opcode_trace,
+    uninstall_thread_opcode_trace,
+)
 from frontrun._sql_cursor import patch_sql, unpatch_sql
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._threaded_runner import PatchScope, notify_scheduler_timeout, run_thread_group
 from frontrun._trace_format import TraceRecorder, build_call_chain, format_trace
 from frontrun._tracing import TraceFilter as _TraceFilter
-from frontrun._tracing import is_cmdline_user_code as _is_cmdline_user_code
-from frontrun._tracing import is_dynamic_code as _is_dynamic_code
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
 from frontrun._tracing import should_trace_file as _should_trace_file
 from frontrun.cli import require_active as _require_frontrun_env
@@ -77,12 +82,6 @@ from frontrun.common import (
 
 # Type variable for the shared state passed between setup and thread functions
 T = TypeVar("T")
-
-_PY_VERSION = sys.version_info[:2]
-# sys.monitoring (PEP 669) is available since 3.12 and is required for
-# free-threaded builds (3.13t/3.14t) where sys.settrace + f_trace_opcodes
-# has a known crash bug (CPython #118415).
-_USE_SYS_MONITORING = _PY_VERSION >= (3, 12)
 
 
 class OpcodeScheduler:
@@ -221,9 +220,6 @@ class BytecodeShuffler:
     another thread that tries to acquire it.
     """
 
-    # sys.monitoring tool ID (use OPTIMIZER_ID to avoid conflict with DPOR's PROFILER_ID)
-    _TOOL_ID: int | None = None
-
     def __init__(self, scheduler: OpcodeScheduler, detect_io: bool = True):
         self.scheduler = scheduler
         self.detect_io = detect_io
@@ -232,7 +228,7 @@ class BytecodeShuffler:
         self._lock_patched = False
         self._io_patched = False
         self._sleep_patched = False
-        self._monitoring_active = False
+        self._opcode_handle: OpcodeTraceHandle | None = None
 
     def _patch_locks(self):
         """Replace threading and queue primitives with cooperative versions."""
@@ -281,120 +277,58 @@ class BytecodeShuffler:
         scope.add(self._patch_sleep, self._unpatch_sleep, enabled=patch_sleep)
         return scope
 
-    def _make_trace(self, thread_id: int) -> Callable[[Any, str, Any], Any]:  # type: ignore[return-value]
-        """Create a sys.settrace function for the given thread."""
+    def _start_opcode_trace(self) -> None:
+        """Construct opcode tracing via the tracer-backend.
+
+        On sys.monitoring (3.12+) this also installs the global tool;
+        per-thread activation is a no-op.  On sys.settrace (3.10-3.11) this
+        only constructs the trace callback; per-thread activation happens
+        in :meth:`_thread_runtime` via ``install_thread_opcode_trace``.
+
+        Uses the OPTIMIZER tool ID slot (DPOR uses PROFILER) and skips
+        PY_RETURN registration since BytecodeShuffler does not maintain a
+        shadow stack.
+        """
         scheduler = self.scheduler
         recorder = scheduler.trace_recorder
+        from frontrun._cooperative import _scheduler_tls
 
-        def trace(frame: Any, event: str, arg: Any) -> Any:  # type: ignore[name-defined]
-            if scheduler._finished or scheduler._error:
+        def _get_tid() -> int | None:
+            tid = getattr(_scheduler_tls, "thread_id", None)
+            if tid is None:
                 return None
-
-            if event == "call":
-                filename = frame.f_code.co_filename
-                if _should_trace_file(filename):
-                    # Only trace dynamically generated code (<string>, etc.)
-                    # if its caller is user code.  Libraries like SQLAlchemy
-                    # and dataclasses use exec/compile internally, creating
-                    # thousands of scheduling points in non-user code.
-                    # Exception: in python -c mode, functions defined in
-                    # the -c string ARE user code.
-                    if _is_dynamic_code(filename) and not _is_cmdline_user_code(filename, frame.f_globals):
-                        caller = frame.f_back
-                        if caller is None or not _should_trace_file(caller.f_code.co_filename):
-                            return None
-                    frame.f_trace_opcodes = True
-                    return trace
-                return None
-
-            if event == "opcode":
-                if recorder is not None:
-                    recorder.record_from_opcode(thread_id, frame)
-                scheduler.wait_for_turn(thread_id)
-                return trace
-
-            return trace
-
-        return trace
-
-    # --- sys.monitoring backend (3.12+) ---
-
-    def _setup_monitoring(self) -> None:
-        """Set up sys.monitoring INSTRUCTION events for opcode-level scheduling."""
-        if not _USE_SYS_MONITORING:
-            return
-
-        mon = sys.monitoring
-        tool_id = mon.OPTIMIZER_ID  # type: ignore[attr-defined]
-        BytecodeShuffler._TOOL_ID = tool_id
-
-        mon.use_tool_id(tool_id, "frontrun-bytecode")  # type: ignore[attr-defined]
-        mon.set_events(tool_id, mon.events.PY_START | mon.events.INSTRUCTION)  # type: ignore[attr-defined]
-
-        scheduler = self.scheduler
-
-        def handle_py_start(code: Any, instruction_offset: int) -> Any:
-            # Only use mon.DISABLE for code that should *never* be traced
-            # (stdlib, site-packages, frontrun internals).  Do NOT disable
-            # for transient conditions like scheduler._finished — DISABLE
-            # permanently removes INSTRUCTION events from the code object,
-            # corrupting monitoring state for subsequent iterations and
-            # tests that share the same tool ID.
-            if not _should_trace_file(code.co_filename):
-                return mon.DISABLE  # type: ignore[attr-defined]
-            return None
-
-        recorder = scheduler.trace_recorder
-
-        def handle_instruction(code: Any, instruction_offset: int) -> Any:
-            if scheduler._finished or scheduler._error:
-                return None
-            if not _should_trace_file(code.co_filename):
-                return None
-            # Skip dynamically generated code (<string>, etc.) unless its
-            # caller is user code.  Libraries use exec/compile internally
-            # and those shouldn't create scheduling points.  Exception:
-            # in python -c mode, functions defined in the -c string
-            # ARE user code.
-            if _is_dynamic_code(code.co_filename):
-                frame = sys._getframe(1)
-                if not _is_cmdline_user_code(code.co_filename, frame.f_globals):
-                    caller = frame.f_back
-                    if caller is None or not _should_trace_file(caller.f_code.co_filename):
-                        return None
-
-            from frontrun._cooperative import _scheduler_tls
-
-            thread_id = getattr(_scheduler_tls, "thread_id", None)
-            if thread_id is None:
-                return None
-            # Guard against zombie threads from a previous runner
+            # Guard against zombie threads from a previous runner instance
+            # (sys.monitoring is global, so old threads can still trip the
+            # callback after this scheduler's run ends).
             if getattr(_scheduler_tls, "scheduler", None) is not scheduler:
                 return None
+            return tid  # type: ignore[no-any-return]
 
+        def _on_opcode(code: Any, offset: int, frame: Any, tid: int) -> bool:
             if recorder is not None:
-                frame = sys._getframe(1)
-                recorder.record_from_opcode(thread_id, frame)
+                recorder.record_from_opcode(tid, frame)
+            scheduler.wait_for_turn(tid)
+            # Returning False suppresses the PEP 667 LocalsToFast workaround
+            # in make_settrace_callback; BytecodeShuffler historically did
+            # not apply it.
+            return False
 
-            scheduler.wait_for_turn(thread_id)
-            return None
+        self._opcode_handle = start_opcode_trace(
+            get_thread_id=_get_tid,
+            on_opcode=_on_opcode,
+            is_active=lambda: not (scheduler._finished or scheduler._error),
+            tool_name="frontrun-bytecode",
+            tool_kind="optimizer",
+            monitor_returns=False,
+        )
 
-        mon.register_callback(tool_id, mon.events.PY_START, handle_py_start)  # type: ignore[attr-defined]
-        mon.register_callback(tool_id, mon.events.INSTRUCTION, handle_instruction)  # type: ignore[attr-defined]
-        self._monitoring_active = True
-
-    def _teardown_monitoring(self) -> None:
-        """Remove sys.monitoring callbacks and free the tool ID."""
-        if not self._monitoring_active:
+    def _stop_opcode_trace(self) -> None:
+        """Tear down opcode tracing started by :meth:`_start_opcode_trace`."""
+        handle = self._opcode_handle
+        if handle is None:
             return
-        mon = sys.monitoring
-        tool_id = BytecodeShuffler._TOOL_ID
-        if tool_id is not None:
-            mon.set_events(tool_id, 0)  # type: ignore[attr-defined]
-            mon.register_callback(tool_id, mon.events.PY_START, None)  # type: ignore[attr-defined]
-            mon.register_callback(tool_id, mon.events.INSTRUCTION, None)  # type: ignore[attr-defined]
-            mon.free_tool_id(tool_id)  # type: ignore[attr-defined]
-        self._monitoring_active = False
+        stop_opcode_trace(handle)
+        self._opcode_handle = None
 
     # --- Thread entry points ---
 
@@ -434,7 +368,7 @@ class BytecodeShuffler:
             set_io_reporter(None)
 
     @contextmanager
-    def _thread_runtime(self, thread_id: int, *, trace_fn: Callable[[Any, str, Any], Any] | None = None):
+    def _thread_runtime(self, thread_id: int):
         set_context(self.scheduler, thread_id)
         self._setup_io_reporter(thread_id)
         # Register OpcodeScheduler as the dpor scheduler so that
@@ -442,13 +376,17 @@ class BytecodeShuffler:
         # points during replay, matching the schedule generated by DPOR.
         set_dpor_scheduler(self.scheduler)
         set_dpor_thread_id(thread_id)
-        if trace_fn is not None:
-            sys.settrace(trace_fn)
+        # On sys.settrace (3.10-3.11) this activates the per-thread tracer;
+        # on sys.monitoring (3.12+) it is a no-op (the tool was registered
+        # globally in run()).
+        handle = self._opcode_handle
+        if handle is not None:
+            install_thread_opcode_trace(handle)
         try:
             yield
         finally:
-            if trace_fn is not None:
-                sys.settrace(None)
+            if handle is not None:
+                uninstall_thread_opcode_trace(handle)
             self._teardown_io_reporter()
             set_dpor_scheduler(None)
             set_dpor_thread_id(None)
@@ -459,9 +397,7 @@ class BytecodeShuffler:
         self, thread_id: int, func: Callable[..., None], args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> None:
         try:
-            with self._thread_runtime(
-                thread_id, trace_fn=self._make_trace(thread_id) if not _USE_SYS_MONITORING else None
-            ):
+            with self._thread_runtime(thread_id):
                 func(*args, **kwargs)
         except SchedulerAbort:
             pass  # scheduler already has the error; just exit cleanly
@@ -489,9 +425,7 @@ class BytecodeShuffler:
         if kwargs is None:
             kwargs = [{} for _ in funcs]
 
-        use_monitoring = _USE_SYS_MONITORING
-        if use_monitoring:
-            self._setup_monitoring()
+        self._start_opcode_trace()
         run_thread = self._run_thread
 
         thread_args = [(a, kw) for a, kw in zip(args, kwargs)]
@@ -518,7 +452,7 @@ class BytecodeShuffler:
             name_prefix="frontrun",
             timeout=timeout,
             thread_store=self.threads,
-            teardown=self._teardown_monitoring if use_monitoring else None,
+            teardown=self._stop_opcode_trace,
             on_timeout=on_timeout,
         )
 
@@ -686,14 +620,9 @@ def explore_random(
     if trace_packages is not None:
         _set_active_trace_filter(_TraceFilter(trace_packages))
     try:
-        # Compute serializable baseline if requested.
-        serial_valid_states: set[Any] | None = None
-        serial_hash_fn: Callable[[Any], Any] = repr
-        if serializable_invariant is not False:
-            from frontrun.common import compute_serializable_states, resolve_serializable_hash_fn
+        from frontrun._dpor_core import compute_serializable_baseline_sync
 
-            serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
-            serial_valid_states = compute_serializable_states(setup, threads, state_hash=serial_hash_fn)
+        serial_valid_states, serial_hash_fn = compute_serializable_baseline_sync(setup, threads, serializable_invariant)
 
         rng = random.Random(seed)
         num_threads = len(threads)
