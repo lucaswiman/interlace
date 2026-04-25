@@ -58,9 +58,11 @@ from frontrun._async_autopause import (
 )
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
 from frontrun._dpor_core import (
+    RowLockRegistry,
     compute_serializable_baseline_async,
     format_race_failure_explanation,
     make_dpor_engine,
+    record_dpor_failure,
 )
 from frontrun._opcode_observer import (
     OpcodeTraceHandle,
@@ -406,13 +408,12 @@ class AsyncDporScheduler(InterleavedLoop):
         # When DPOR schedules a blocked task, override to run the holder.
         self._lock_blocked: dict[int, int] = {}
 
-        # Row lock tracking: resource_id → holding task_id
-        self._active_row_locks: dict[str, int] = {}
-        # task_id → set of held resource_ids
-        self._task_row_locks: dict[int, set[str]] = {}
-        # resource_id → integer ID for WaitForGraph
-        self._row_lock_ids: dict[str, int] = {}
-        self._row_lock_next_id: int = 0
+        # Row lock tracking: state and _row_lock_int_id() live in RowLockRegistry;
+        # alias dicts into this namespace so the rest of the class is unchanged.
+        self._row_lock_registry = RowLockRegistry()
+        self._active_row_locks: dict[str, int] = self._row_lock_registry._active_row_locks
+        self._task_row_locks: dict[int, set[str]] = self._row_lock_registry._task_row_locks
+        self._row_lock_ids: dict[str, int] = self._row_lock_registry._row_lock_ids
 
         # Request the first scheduling decision
         self._current_task = self._schedule_next()
@@ -660,12 +661,7 @@ class AsyncDporScheduler(InterleavedLoop):
 
     def _row_lock_int_id(self, res_id: str) -> int:
         """Return a stable integer ID for *res_id* (allocated on first call)."""
-        lid = self._row_lock_ids.get(res_id)
-        if lid is None:
-            lid = self._row_lock_next_id
-            self._row_lock_next_id += 1
-            self._row_lock_ids[res_id] = lid
-        return lid
+        return self._row_lock_registry._row_lock_int_id(res_id)
 
     def acquire_row_locks(self, thread_id: int, resource_ids: list[str]) -> None:
         """Track SQL row locks in the async WaitForGraph for cross-resource deadlock detection.
@@ -692,7 +688,7 @@ class AsyncDporScheduler(InterleavedLoop):
                     cycle = graph.add_waiting(thread_id, lock_int_id, kind="row_lock")
                     if cycle is not None:
                         graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
-                        desc = format_cycle(cycle, {v: k for k, v in self._row_lock_ids.items()})
+                        desc = format_cycle(cycle, self._row_lock_registry.id_to_resource())
                         raise DeadlockError(f"Row-lock deadlock detected: {desc}", desc)
                     # No cycle but contention — remove waiting edge (we can't
                     # actually block in async), let the SQL proceed.  The DB
@@ -701,23 +697,15 @@ class AsyncDporScheduler(InterleavedLoop):
                     graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
                 # Even without a graph, record ownership optimistically so
                 # that the DPOR engine can explore alternative interleavings.
-            self._active_row_locks[res_id] = thread_id
-            self._task_row_locks.setdefault(thread_id, set()).add(res_id)
-            if graph is not None:
-                graph.add_holding(thread_id, lock_int_id, kind="row_lock")
+            # Record ownership and notify graph — shared logic via registry.
+            self._row_lock_registry.record_acquire(thread_id, res_id, graph)
 
     def release_row_locks(self, thread_id: int) -> None:
         """Release all row locks held by *thread_id* (called on COMMIT/ROLLBACK)."""
         graph = _async_wait_graph
-        held = self._task_row_locks.pop(thread_id, None)
-        if not held:
-            return
-        for res_id in held:
-            self._active_row_locks.pop(res_id, None)
-            if graph is not None:
-                lid = self._row_lock_ids.get(res_id)
-                if lid is not None:
-                    graph.remove_holding(thread_id, lid, kind="row_lock")
+        # Shared release logic via registry (sync also uses pop_all; async skips
+        # engine.report_sync because row-lock release is tracked at await points).
+        self._row_lock_registry.pop_all(thread_id, graph)
 
     def _flush_pending_io(self, task_id: int) -> None:
         """Flush pending I/O accesses to the DPOR engine."""
@@ -1065,16 +1053,6 @@ async def _explore_async_dpor(
     if lock_timeout is not None:
         set_lock_timeout(lock_timeout)
 
-    def _record_failure(execution: PyExecution, explanation: str, *, races_detected: bool = False) -> list[int]:
-        result.property_holds = False
-        result.races_detected = result.races_detected or races_detected
-        schedule_list = list(execution.schedule_trace)
-        result.failures.append((result.num_explored, schedule_list))
-        if result.counterexample is None:
-            result.counterexample = schedule_list
-            result.explanation = explanation
-        return schedule_list
-
     async def _record_reproduction(
         schedule_list: list[int],
         invariant_fn: Callable[[T], bool] | None,
@@ -1178,14 +1156,15 @@ async def _explore_async_dpor(
                         )
 
                 if is_deadlock:
-                    schedule_list = _record_failure(execution, deadlock_explanation)
+                    schedule_list = record_dpor_failure(result, list(execution.schedule_trace), deadlock_explanation)
                     await _record_reproduction(schedule_list, None)
                     if stop_on_first:
                         return result
                 elif task_error is not None:
                     exc_type = type(task_error).__name__
-                    _record_failure(
-                        execution,
+                    record_dpor_failure(
+                        result,
+                        list(execution.schedule_trace),
                         f"Task crash in execution {result.num_explored}: {exc_type}: {task_error}",
                     )
                     if stop_on_first:
@@ -1198,8 +1177,9 @@ async def _explore_async_dpor(
                 if error_on_any_race and not is_deadlock and task_error is None:
                     raw_races_check = engine.attribute_races()
                     if raw_races_check:
-                        _record_failure(
-                            execution,
+                        record_dpor_failure(
+                            result,
+                            list(execution.schedule_trace),
                             format_race_failure_explanation(
                                 result.num_explored,
                                 len(raw_races_check),
@@ -1216,20 +1196,21 @@ async def _explore_async_dpor(
                         state, serial_valid_states, serial_hash_fn, result.num_explored
                     )
                     if ser_explanation is not None:
-                        _record_failure(execution, ser_explanation)
+                        record_dpor_failure(result, list(execution.schedule_trace), ser_explanation)
                         if stop_on_first:
                             return result
 
                 if not is_deadlock and task_error is None:
                     invariant_failed, assertion_msg = check_invariant(invariant, state)
                     if invariant_failed:
-                        trace_explanation = _format_async_trace(list(execution.schedule_trace), num_tasks)
+                        schedule_list = list(execution.schedule_trace)
+                        trace_explanation = _format_async_trace(schedule_list, num_tasks)
                         explanation = (
                             f"AssertionError: {assertion_msg}\n\n{trace_explanation}"
                             if assertion_msg
                             else trace_explanation
                         )
-                        schedule_list = _record_failure(execution, explanation)
+                        schedule_list = record_dpor_failure(result, schedule_list, explanation)
                         await _record_reproduction(schedule_list, invariant)
                         if stop_on_first:
                             return result

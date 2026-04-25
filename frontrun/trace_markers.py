@@ -33,8 +33,12 @@ import warnings
 from collections.abc import Callable
 from typing import Any
 
-from frontrun._marker_coordination import MARKER_PATTERN, MarkerRegistry, ThreadCoordinator
-from frontrun._threaded_runner import join_threads_with_deadline
+from frontrun._marker_coordination import (
+    MARKER_PATTERN,
+    MarkerRegistry,
+    ThreadCoordinator,
+    finalize_marker_executor_run,
+)
 from frontrun._trace_marker_runtime import build_trace_function, run_traced_callable
 from frontrun.common import InterleavingResult, Schedule, Step, any_async
 
@@ -138,34 +142,15 @@ class _ThreadTraceExecutor:
             TimeoutError: If threads don't complete within the timeout
             Any exception that occurred in a thread during execution
         """
-        alive_threads = join_threads_with_deadline(self.threads, timeout)
-        if alive_threads:
-            thread_names = ", ".join(thread.name for thread in alive_threads)
-            raise TimeoutError(f"Threads did not complete within timeout: {thread_names}")
-
-        # If any thread had an error, raise it
-        if self.thread_errors:
-            # Raise the first error we encountered
-            first_error = next(iter(self.thread_errors.values()))
-            raise first_error
-
-        # Check if the schedule was partially consumed but not completed.
-        # If at least one step was processed (so the schedule was in use)
-        # but the full schedule wasn't completed, it means the schedule
-        # references markers that no thread reached.  If zero steps were
-        # consumed, the markers were simply never hit — which could be a
-        # different issue (wrong file, exec'd code, etc.) and is not
-        # necessarily an error.
-        if (
-            self.coordinator.current_step > 0
-            and self.coordinator.current_step < len(self.coordinator.schedule.steps)
-            and not self.coordinator.completed
-        ):
-            remaining = self.coordinator.schedule.steps[self.coordinator.current_step :]
-            step_strs = [f"Step({s.execution_name!r}, {s.marker_name!r})" for s in remaining]
-            raise TimeoutError(
-                f"Schedule incomplete: {len(remaining)} step(s) were never reached: {', '.join(step_strs)}"
-            )
+        finalize_marker_executor_run(
+            threads=self.threads,
+            timeout=timeout,
+            task_errors=self.thread_errors,
+            coordinator=self.coordinator,
+            timeout_message=lambda alive: (
+                "Threads did not complete within timeout: " + ", ".join(t.name for t in alive)
+            ),
+        )
 
     def reset(self):
         """Reset the executor for another run (for testing purposes)."""

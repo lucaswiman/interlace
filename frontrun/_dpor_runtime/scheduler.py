@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from frontrun._dpor_core import RowLockRegistry
+
 from ._shared import *
 from ._shared import _dpor_tls, _get_instructions, _process_opcode
 from .preload_bridge import _PreloadBridge
@@ -99,17 +101,20 @@ class DporScheduler:
 
         # Row-lock registry: resource_id → thread_id holding the lock.
         # SELECT FOR UPDATE is exclusive — only one thread can hold it at a time.
-        self._active_row_locks: dict[str, int] = {}
+        # State and _row_lock_int_id() live in the shared RowLockRegistry;
+        # alias dicts into this namespace so the rest of the class is unchanged.
+        self._row_lock_registry = RowLockRegistry()
+        self._active_row_locks: dict[str, int] = self._row_lock_registry._active_row_locks
         # Reverse index: thread_id → set of resource_ids held by that thread.
         # Avoids O(n) scan in _release_row_locks_unlocked.
-        self._thread_row_locks: dict[int, set[str]] = {}
+        self._task_row_locks: dict[int, set[str]] = self._row_lock_registry._task_row_locks
+        # For backward compatibility, keep a _thread_row_locks alias pointing
+        # to the same dict (was renamed to _task_row_locks to match async).
+        self._thread_row_locks: dict[int, set[str]] = self._row_lock_registry._task_row_locks
 
         # Stable integer IDs for row-lock resources (for WaitForGraph nodes).
-        # String resource IDs are assigned monotonically increasing integers so
-        # row-lock nodes ("row_lock", int) are disjoint from cooperative-lock
-        # nodes ("lock", id(obj)) in the WaitForGraph.
-        self._row_lock_ids: dict[str, int] = {}
-        self._row_lock_next_id: int = 0
+        # Managed by self._row_lock_registry._row_lock_int_id(); no direct access needed.
+        self._row_lock_ids: dict[str, int] = self._row_lock_registry._row_lock_ids
 
         # Threads currently blocked waiting for a DPOR row lock.
         # Maps blocked_thread_id → holder_thread_id.  Used by
@@ -672,12 +677,7 @@ class DporScheduler:
 
     def _row_lock_int_id(self, res_id: str) -> int:
         """Return a stable monotonic integer ID for *res_id* (allocated on first call)."""
-        lid = self._row_lock_ids.get(res_id)
-        if lid is None:
-            lid = self._row_lock_next_id
-            self._row_lock_next_id += 1
-            self._row_lock_ids[res_id] = lid
-        return lid
+        return self._row_lock_registry._row_lock_int_id(res_id)
 
     def acquire_row_locks(self, thread_id: int, resource_ids: list[str]) -> None:
         """Block until all *resource_ids* can be held by *thread_id*.
@@ -705,7 +705,7 @@ class DporScheduler:
                         cycle = graph.add_waiting(thread_id, lock_int_id, kind="row_lock")
                         if cycle is not None:
                             graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
-                            desc = format_cycle(cycle, {v: k for k, v in self._row_lock_ids.items()})
+                            desc = format_cycle(cycle, self._row_lock_registry.id_to_resource())
                             err = DeadlockError(f"Row-lock deadlock detected: {desc}", desc)
                             if self._error is None:
                                 self._error = err
@@ -736,10 +736,8 @@ class DporScheduler:
                         graph.remove_waiting(thread_id, lock_int_id, kind="row_lock")
                     if self._finished or self._error:
                         return
-                self._active_row_locks[res_id] = thread_id
-                self._thread_row_locks.setdefault(thread_id, set()).add(res_id)
-                if graph is not None:
-                    graph.add_holding(thread_id, lock_int_id, kind="row_lock")
+                # Record ownership and notify graph — shared logic via registry.
+                self._row_lock_registry.record_acquire(thread_id, res_id, graph)
                 # Report row-lock acquire to the DPOR engine so vector clocks
                 # reflect the serialization from database row locking.
                 _elock = getattr(self, "_engine_lock", None)
@@ -752,20 +750,16 @@ class DporScheduler:
         """Remove row locks for *thread_id*. Caller must hold ``self._condition``."""
         from frontrun._deadlock import get_wait_for_graph
 
-        held = self._thread_row_locks.pop(thread_id, None)
-        if not held:
-            return False
         graph = get_wait_for_graph()
-        for r in held:
-            self._active_row_locks.pop(r, None)
-            lid = self._row_lock_ids.get(r)
-            if graph is not None and lid is not None:
-                graph.remove_holding(thread_id, lid, kind="row_lock")
-            # Report row-lock release to the DPOR engine so vector clocks
-            # reflect the serialization from database row locking.
-            _elock = getattr(self, "_engine_lock", None)
-            if lid is not None and _elock is not None:
-                _saved_path_id = getattr(_dpor_tls, "_last_path_id", None)
+        released = self._row_lock_registry.pop_all(thread_id, graph)
+        if not released:
+            return False
+        # Report each release to the DPOR engine so vector clocks
+        # reflect the serialization from database row locking.
+        _elock = getattr(self, "_engine_lock", None)
+        if _elock is not None:
+            _saved_path_id = getattr(_dpor_tls, "_last_path_id", None)
+            for _res_id, lid in released:
                 with _elock:
                     self.engine.report_sync(self.execution, thread_id, "lock_release", lid, _saved_path_id)
         return True

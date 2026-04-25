@@ -71,7 +71,11 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-from frontrun._marker_coordination import MarkerRegistry, ThreadCoordinator
+from frontrun._marker_coordination import (
+    MarkerRegistry,
+    ThreadCoordinator,
+    finalize_marker_executor_run,
+)
 from frontrun._trace_marker_runtime import build_trace_function, run_traced_callable
 from frontrun.common import Schedule
 
@@ -149,36 +153,13 @@ class AsyncTraceExecutor:
             threads.append(thread)
             thread.start()
 
-        # Wait for all threads to complete using a shared deadline so that
-        # N threads with timeout T wait at most T seconds total, not N*T.
-        import time as _time
-
-        deadline = _time.monotonic() + timeout
-        for thread in threads:
-            remaining = deadline - _time.monotonic()
-            thread.join(timeout=max(0.0, remaining))
-
-        # Check if any threads are still alive after timeout
-        alive_threads: list[threading.Thread] = [thread for thread in threads if thread.is_alive()]
-        if alive_threads:
-            thread_names = [thread.name for thread in alive_threads]
-            raise TimeoutError(f"Tasks did not complete within {timeout}s: {thread_names}")
-
-        # If any task had an error, raise the first one
-        if self.task_errors:
-            first_error = next(iter(self.task_errors.values()))
-            raise first_error
-
-        if (
-            self.coordinator.current_step > 0
-            and self.coordinator.current_step < len(self.coordinator.schedule.steps)
-            and not self.coordinator.completed
-        ):
-            remaining = self.coordinator.schedule.steps[self.coordinator.current_step :]
-            step_strs = [f"Step({s.execution_name!r}, {s.marker_name!r})" for s in remaining]
-            raise TimeoutError(
-                f"Schedule incomplete: {len(remaining)} step(s) were never reached: {', '.join(step_strs)}"
-            )
+        finalize_marker_executor_run(
+            threads=threads,
+            timeout=timeout,
+            task_errors=self.task_errors,
+            coordinator=self.coordinator,
+            timeout_message=lambda alive: f"Tasks did not complete within {timeout}s: {[t.name for t in alive]}",
+        )
 
     def reset(self):
         """Reset the executor for another run (for testing purposes)."""

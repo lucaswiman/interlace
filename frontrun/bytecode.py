@@ -64,6 +64,7 @@ from frontrun._opcode_observer import (
     stop_opcode_trace,
     uninstall_thread_opcode_trace,
 )
+from frontrun._random_schedules import fair_schedule_strategy, random_round_robin_schedule
 from frontrun._sql_cursor import patch_sql, unpatch_sql
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
 from frontrun._threaded_runner import PatchScope, notify_scheduler_timeout, run_thread_group
@@ -633,12 +634,7 @@ def explore_random(
         for _ in range(max_attempts):
             if total_deadline is not None and time.monotonic() > total_deadline:
                 break
-            num_rounds = rng.randint(1, max(1, max_ops // num_threads))
-            schedule: list[int] = []
-            for _ in range(num_rounds):
-                round_perm = list(range(num_threads))
-                rng.shuffle(round_perm)
-                schedule.extend(round_perm)
+            schedule = random_round_robin_schedule(rng, num_threads, max_ops)
 
             clear_insert_tracker()
             if debug:
@@ -752,17 +748,4 @@ def schedule_strategy(num_threads: int, max_ops: int = 300):
     still interact oddly with threading. Consider using
     settings(phases=[Phase.generate]) to skip shrinking if needed.
     """
-    from hypothesis import strategies as st
-
-    max_rounds = max(1, max_ops // num_threads)
-    threads = list(range(num_threads))
-
-    @st.composite
-    def _fair_schedule(draw: st.DrawFn) -> list[int]:
-        num_rounds = draw(st.integers(min_value=1, max_value=max_rounds))
-        schedule: list[int] = []
-        for _ in range(num_rounds):
-            schedule.extend(draw(st.permutations(threads)))
-        return schedule
-
-    return _fair_schedule()
+    return fair_schedule_strategy(num_threads, max_ops)

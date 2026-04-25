@@ -11,12 +11,57 @@ from __future__ import annotations
 
 import linecache
 import re
+import threading
+from collections.abc import Callable
 from typing import Any
 
 from frontrun._cooperative import real_condition, real_lock
+from frontrun._threaded_runner import join_threads_with_deadline
 from frontrun.common import Schedule
 
 MARKER_PATTERN = re.compile(r"#\s*frontrun:\s*(\w+)")
+
+
+def finalize_marker_executor_run(
+    *,
+    threads: list[threading.Thread],
+    timeout: float | None,
+    task_errors: dict[str, Exception],
+    coordinator: ThreadCoordinator,
+    timeout_message: Callable[[list[threading.Thread]], str],
+) -> None:
+    """Join worker threads and validate post-conditions for a marker-based run.
+
+    Shared between the sync :class:`~frontrun.trace_markers.TraceExecutor`
+    and the async :class:`~frontrun.async_trace_markers.AsyncTraceExecutor`
+    (which runs each async task inside its own worker thread).
+
+    Raises:
+        TimeoutError: If any worker is still alive after ``timeout``,
+            using ``timeout_message`` to format the message; or if the
+            schedule was partially consumed but not completed.
+        Exception: The first exception found in ``task_errors``.
+    """
+    alive = join_threads_with_deadline(threads, timeout)
+    if alive:
+        raise TimeoutError(timeout_message(alive))
+
+    if task_errors:
+        raise next(iter(task_errors.values()))
+
+    # If at least one step was processed (so the schedule was in use) but
+    # the full schedule wasn't completed, it means the schedule references
+    # markers that no worker reached. If zero steps were consumed, the
+    # markers were simply never hit -- which could be a different issue
+    # (wrong file, exec'd code, etc.) and is not necessarily an error.
+    if (
+        coordinator.current_step > 0
+        and coordinator.current_step < len(coordinator.schedule.steps)
+        and not coordinator.completed
+    ):
+        remaining = coordinator.schedule.steps[coordinator.current_step :]
+        step_strs = [f"Step({s.execution_name!r}, {s.marker_name!r})" for s in remaining]
+        raise TimeoutError(f"Schedule incomplete: {len(remaining)} step(s) were never reached: {', '.join(step_strs)}")
 
 
 class MarkerRegistry:
