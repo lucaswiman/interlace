@@ -1,9 +1,4 @@
-"""Thin pure-Python wrappers around :class:`frontrun._dpor.PyDporEngine`.
-
-These helpers exist only to give sync and async DPOR a single place to
-construct the Rust engine with a stable keyword-only signature.  No
-threading, asyncio, or scheduler state lives here.
-"""
+"""Shared keyword-only constructor for :class:`PyDporEngine`."""
 
 from __future__ import annotations
 
@@ -27,12 +22,6 @@ def make_dpor_engine(
     max_executions: int | None,
     search: str | None = None,
 ) -> Any:
-    """Construct a :class:`PyDporEngine` with a stable keyword-only signature.
-
-    The Rust engine accepts the same constructor arguments for both sync
-    and async exploration; this wrapper only exists so the two callers
-    share an import site and a normalised set of defaults.
-    """
     return PyDporEngine(
         num_threads=num_threads,
         preemption_bound=preemption_bound,

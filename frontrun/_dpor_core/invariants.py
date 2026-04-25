@@ -1,21 +1,4 @@
-"""Pure invariant / serializability / race helpers shared by sync and async DPOR.
-
-The functions in this module never touch threading, asyncio, sys.settrace,
-sys.monitoring, ContextVars, or any scheduler internals.  They take raw
-inputs (state, baseline sets, counts, callables) and return strings,
-booleans, or sets.
-
-Both ``frontrun/_dpor_runtime/explore.py`` and ``frontrun/async_dpor.py``
-import from here so the two drivers stay in lockstep on:
-
-* the shape of the serializability baseline,
-* the wording of the unsynchronized-race failure explanation, and
-* the trace-filter teardown that runs when baseline computation raises.
-
-The actual ``check_invariant`` and ``check_serializability_violation``
-helpers continue to live in :mod:`frontrun.common`; both drivers (and
-the random/marker explorers) already share them from there.
-"""
+"""Serializability-baseline + race-failure formatting shared by sync/async DPOR."""
 
 from __future__ import annotations
 
@@ -35,15 +18,10 @@ def compute_serializable_baseline_sync(
     threads: list[Callable[[Any], None]],
     serializable_invariant: Callable[[Any], Any] | bool,
 ) -> tuple[set[Any] | None, Callable[[Any], Any]]:
-    """Compute the serializable-states baseline for the sync DPOR driver.
+    """Return ``(serial_valid_states, serial_hash_fn)`` for the sync driver.
 
-    Returns ``(serial_valid_states, serial_hash_fn)``.  When
-    *serializable_invariant* is ``False``, the baseline is ``None`` and
-    the hash function defaults to :func:`repr`.
-
-    On any exception during baseline computation the active trace filter
-    is cleared (mirroring the explicit ``_set_active_trace_filter(None)``
-    that the driver previously did inline) before re-raising.
+    When *serializable_invariant* is ``False``, returns ``(None, repr)``.
+    On any exception the active trace filter is cleared before re-raising.
     """
     if serializable_invariant is False:
         return None, repr
@@ -61,11 +39,7 @@ async def compute_serializable_baseline_async(
     tasks: list[Callable[[Any], Any]],
     serializable_invariant: Callable[[Any], Any] | bool,
 ) -> tuple[set[Any] | None, Callable[[Any], Any]]:
-    """Async counterpart to :func:`compute_serializable_baseline_sync`.
-
-    Mirrors the sync version exactly except that it awaits each task in
-    every permutation (via :func:`compute_serializable_states_async`).
-    """
+    """Async counterpart to :func:`compute_serializable_baseline_sync`."""
     if serializable_invariant is False:
         return None, repr
     try:
@@ -83,12 +57,7 @@ def format_race_failure_explanation(
     *,
     actor_plural: str = "threads",
 ) -> str:
-    """Build the explanation string for an ``error_on_any_race`` failure.
-
-    *actor_plural* is ``"threads"`` for the sync driver and ``"tasks"``
-    for the async driver — the only place the two messages differed
-    before extraction.
-    """
+    """Build the ``error_on_any_race`` failure explanation."""
     return (
         f"Unsynchronized race detected in execution {execution_num}.\n"
         f"{num_races} race(s) found between {actor_plural} on shared objects."
