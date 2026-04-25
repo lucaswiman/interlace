@@ -302,14 +302,11 @@ async def explore_async_random(
     if error_on_any_race:
         raise ValueError("error_on_any_race requires DPOR (use explore_async_dpor instead)")
 
-    # Compute serializable baseline if requested.
-    serial_valid_states: set[Any] | None = None
-    serial_hash_fn: Callable[[Any], Any] = repr
-    if serializable_invariant is not False:
-        from frontrun.common import compute_serializable_states_async, resolve_serializable_hash_fn
+    from frontrun._dpor_core import compute_serializable_baseline_async
 
-        serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
-        serial_valid_states = await compute_serializable_states_async(setup, tasks, state_hash=serial_hash_fn)
+    serial_valid_states, serial_hash_fn = await compute_serializable_baseline_async(
+        setup, tasks, serializable_invariant
+    )
 
     with _patch_async_runtime(detect_sql=detect_sql, patch_sleep=patch_sleep):
         rng = random.Random(seed)

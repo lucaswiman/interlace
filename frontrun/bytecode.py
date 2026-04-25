@@ -620,14 +620,9 @@ def explore_random(
     if trace_packages is not None:
         _set_active_trace_filter(_TraceFilter(trace_packages))
     try:
-        # Compute serializable baseline if requested.
-        serial_valid_states: set[Any] | None = None
-        serial_hash_fn: Callable[[Any], Any] = repr
-        if serializable_invariant is not False:
-            from frontrun.common import compute_serializable_states, resolve_serializable_hash_fn
+        from frontrun._dpor_core import compute_serializable_baseline_sync
 
-            serial_hash_fn = resolve_serializable_hash_fn(serializable_invariant) or repr
-            serial_valid_states = compute_serializable_states(setup, threads, state_hash=serial_hash_fn)
+        serial_valid_states, serial_hash_fn = compute_serializable_baseline_sync(setup, threads, serializable_invariant)
 
         rng = random.Random(seed)
         num_threads = len(threads)
