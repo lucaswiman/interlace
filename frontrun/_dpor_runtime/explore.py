@@ -140,9 +140,7 @@ def _explore_dpor(
         _set_active_trace_filter(_TraceFilter(trace_packages))
 
     # Compute serializable baseline if requested.
-    serial_valid_states, serial_hash_fn = compute_serializable_baseline_sync(
-        setup, threads, serializable_invariant
-    )
+    serial_valid_states, serial_hash_fn = compute_serializable_baseline_sync(setup, threads, serializable_invariant)
 
     num_threads = len(threads)
     engine = make_dpor_engine(
