@@ -397,7 +397,6 @@ class AsyncDporScheduler(InterleavedLoop):
         self.trace_recorder = None
         self._iter_to_container: dict[int, Any] = {}
         self._shadow_stacks: dict[int, ShadowStack] = {}
-        self._monitoring_active = False
         self._opcode_handle: OpcodeTraceHandle | None = None
         self._stable_ids = stable_ids if stable_ids is not None else StableObjectIds()
         # Pending I/O accesses per task (from SQL interception)
@@ -649,7 +648,6 @@ class AsyncDporScheduler(InterleavedLoop):
             tool_name="frontrun.async_dpor",
         )
         install_thread_opcode_trace(self._opcode_handle)
-        self._monitoring_active = self._opcode_handle._using_monitoring
 
     def _stop_opcode_trace(self) -> None:
         """Uninstall the per-thread tracer and tear down backend resources."""
@@ -659,7 +657,6 @@ class AsyncDporScheduler(InterleavedLoop):
         uninstall_thread_opcode_trace(handle)
         stop_opcode_trace(handle)
         self._opcode_handle = None
-        self._monitoring_active = False
 
     def _row_lock_int_id(self, res_id: str) -> int:
         """Return a stable integer ID for *res_id* (allocated on first call)."""

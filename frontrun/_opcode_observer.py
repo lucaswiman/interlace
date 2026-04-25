@@ -1340,10 +1340,13 @@ def _process_opcode(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_tool_id(tool_kind: str) -> int:
+ToolKind = Literal["profiler", "optimizer"]
+
+
+def _resolve_tool_id(tool_kind: ToolKind) -> int:
     """Return the sys.monitoring tool ID matching *tool_kind*.
 
-    Accepts ``"profiler"`` (default for DPOR) or ``"optimizer"`` (used by
+    ``"profiler"`` (default for DPOR) or ``"optimizer"`` (used by
     BytecodeShuffler so that random fuzzing and DPOR can coexist when
     nested, although in practice they aren't).
     """
@@ -1361,7 +1364,7 @@ def setup_opcode_monitoring(
     handle_py_start: Any,
     handle_py_return: Any,
     handle_instruction: Any,
-    tool_kind: str = "profiler",
+    tool_kind: ToolKind = "profiler",
     monitor_returns: bool = True,
 ) -> int:
     """Set up sys.monitoring for opcode tracing. Returns the tool ID.
@@ -1668,7 +1671,7 @@ class OpcodeTraceHandle:
     backend) and to tear down the global monitoring tool (monitoring backend).
     """
 
-    __slots__ = ("_settrace_callback", "_tool_id", "_using_monitoring")
+    __slots__ = ("_settrace_callback", "_tool_id", "using_monitoring")
 
     def __init__(
         self,
@@ -1677,7 +1680,7 @@ class OpcodeTraceHandle:
         tool_id: int | None,
         settrace_callback: Any,
     ) -> None:
-        self._using_monitoring = using_monitoring
+        self.using_monitoring = using_monitoring
         self._tool_id = tool_id
         self._settrace_callback = settrace_callback
 
@@ -1690,7 +1693,7 @@ def start_opcode_trace(
     detect_io: bool = False,
     is_active: Any = None,
     tool_name: str = "frontrun",
-    tool_kind: str = "profiler",
+    tool_kind: ToolKind = "profiler",
     monitor_returns: bool = True,
 ) -> OpcodeTraceHandle:
     """Start opcode-level tracing using the appropriate backend.
@@ -1751,7 +1754,7 @@ def install_thread_opcode_trace(handle: OpcodeTraceHandle) -> None:
     per-thread).  On the sys.settrace backend, this calls
     ``sys.settrace(handle's callback)``.
     """
-    if handle._using_monitoring:
+    if handle.using_monitoring:
         return
     sys.settrace(handle._settrace_callback)
 
@@ -1762,14 +1765,14 @@ def uninstall_thread_opcode_trace(handle: OpcodeTraceHandle) -> None:
     No-op when the sys.monitoring backend is in use.  On the sys.settrace
     backend, this calls ``sys.settrace(None)``.
     """
-    if handle._using_monitoring:
+    if handle.using_monitoring:
         return
     sys.settrace(None)
 
 
 def stop_opcode_trace(handle: OpcodeTraceHandle) -> None:
     """Stop opcode tracing and free any backend resources."""
-    if handle._using_monitoring:
+    if handle.using_monitoring:
         teardown_opcode_monitoring(handle._tool_id)
 
 
