@@ -40,6 +40,7 @@ from frontrun._sql_parsing import (
     parse_sql_access,
 )
 from frontrun._sql_patch_registry import CONNECT_FACTORY_TARGETS, PYTHON_CURSOR_TARGETS
+from frontrun._sql_row_locks import _acquire_pending_row_locks, _release_dpor_row_locks
 from frontrun._trace_format import build_call_chain
 from frontrun._tracing import should_trace_file as _should_trace_file
 
@@ -356,23 +357,6 @@ def _detect_autobegin(cursor: Any) -> None:
         _io_tls._is_autobegin = True
         _io_tls._tx_buffer = []
         _io_tls._tx_savepoints = {}
-
-
-def _acquire_pending_row_locks() -> None:
-    """Drain pending row-lock resources from TLS and acquire them on the scheduler."""
-    lock_resources = getattr(_io_tls, "_pending_row_locks", None)
-    if lock_resources:
-        _io_tls._pending_row_locks = []
-        ctx = _get_dpor_context()
-        if ctx is not None:
-            ctx[0].acquire_row_locks(ctx[1], lock_resources)
-
-
-def _release_dpor_row_locks() -> None:
-    """Release any DPOR row locks held by the current thread."""
-    ctx = _get_dpor_context()
-    if ctx is not None:
-        ctx[0].release_row_locks(ctx[1])
 
 
 # Global to track primary column set per (db_scope, table) for cross-column

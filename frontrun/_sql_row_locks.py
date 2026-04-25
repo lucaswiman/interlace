@@ -1,0 +1,32 @@
+"""DPOR row-lock acquire/release helpers for SQL interception.
+
+Row locks are scheduler-level locks (in the DPOR engine) tracking which
+rows a transaction holds. They are populated by ``_report_or_buffer``
+inside ``_sql_transactions`` (which writes ``_io_tls._pending_row_locks``)
+and drained here at the next scheduling point.
+
+Kept separate from ``_sql_cursor.py`` so the DPOR-context glue is
+isolated from cursor patching.
+"""
+
+from __future__ import annotations
+
+from frontrun._io_detection import _io_tls
+from frontrun._io_detection import get_dpor_context as _get_dpor_context
+
+
+def _acquire_pending_row_locks() -> None:
+    """Drain pending row-lock resources from TLS and acquire them on the scheduler."""
+    lock_resources = getattr(_io_tls, "_pending_row_locks", None)
+    if lock_resources:
+        _io_tls._pending_row_locks = []
+        ctx = _get_dpor_context()
+        if ctx is not None:
+            ctx[0].acquire_row_locks(ctx[1], lock_resources)
+
+
+def _release_dpor_row_locks() -> None:
+    """Release any DPOR row locks held by the current thread."""
+    ctx = _get_dpor_context()
+    if ctx is not None:
+        ctx[0].release_row_locks(ctx[1])
