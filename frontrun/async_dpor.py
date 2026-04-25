@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import sys
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, TypeVar
@@ -59,15 +58,15 @@ from frontrun._async_autopause import (
 )
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
 from frontrun._opcode_observer import (
-    _USE_SYS_MONITORING,
+    OpcodeTraceHandle,
     ShadowStack,
     StableObjectIds,
     _make_object_key,
     _process_opcode,
-    make_monitoring_callbacks,
-    make_settrace_callback,
-    setup_opcode_monitoring,
-    teardown_opcode_monitoring,
+    install_thread_opcode_trace,
+    start_opcode_trace,
+    stop_opcode_trace,
+    uninstall_thread_opcode_trace,
 )
 from frontrun._sql_cursor import clear_sql_metadata, get_lock_timeout, set_lock_timeout
 from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
@@ -371,8 +370,6 @@ class AsyncDporScheduler(InterleavedLoop):
     and reported to the engine before the next scheduling decision.
     """
 
-    _TOOL_ID: int | None = None
-
     def __init__(
         self,
         engine: PyDporEngine,
@@ -396,6 +393,7 @@ class AsyncDporScheduler(InterleavedLoop):
         self._iter_to_container: dict[int, Any] = {}
         self._shadow_stacks: dict[int, ShadowStack] = {}
         self._monitoring_active = False
+        self._opcode_handle: OpcodeTraceHandle | None = None
         self._stable_ids = stable_ids if stable_ids is not None else StableObjectIds()
         # Pending I/O accesses per task (from SQL interception)
         self._pending_io: dict[int, list[tuple[int, str, bool]]] = {i: [] for i in range(num_tasks)}
@@ -540,20 +538,12 @@ class AsyncDporScheduler(InterleavedLoop):
             task_funcs = dict(enumerate(task_funcs))
 
         wrapped = wrap_auto_paused_tasks(task_funcs, self)
-        if _USE_SYS_MONITORING:
-            self._setup_monitoring()
-            try:
-                await super().run_all(wrapped, timeout=timeout)
-            finally:
-                self._teardown_monitoring()
-                self._shadow_stacks.clear()
-        else:
-            self._setup_settrace()
-            try:
-                await super().run_all(wrapped, timeout=timeout)
-            finally:
-                sys.settrace(None)
-                self._shadow_stacks.clear()
+        self._start_opcode_trace()
+        try:
+            await super().run_all(wrapped, timeout=timeout)
+        finally:
+            self._stop_opcode_trace()
+            self._shadow_stacks.clear()
 
     async def pause(self, task_id: Any, marker: Any = None) -> None:
         """DPOR-aware pause that ensures fair task wakeup.
@@ -640,36 +630,30 @@ class AsyncDporScheduler(InterleavedLoop):
             _in_trace_processing.reset(token)
         return False  # async never yields at opcode level
 
-    def _setup_settrace(self) -> None:
-        trace = make_settrace_callback(
+    def _start_opcode_trace(self) -> None:
+        """Install the opcode tracer and activate it for the event-loop thread.
+
+        Async DPOR runs all tasks on a single event-loop thread, so we install
+        the per-thread trace exactly once (on sys.settrace; no-op on
+        sys.monitoring, which is global).
+        """
+        self._opcode_handle = start_opcode_trace(
             get_thread_id=self._get_task_id,
             on_opcode=self._on_opcode,
             remove_shadow_stack=self.remove_shadow_stack,
-        )
-        sys.settrace(trace)
-
-    def _setup_monitoring(self) -> None:
-        if not _USE_SYS_MONITORING:
-            return
-
-        handle_py_start, handle_py_return, handle_instruction = make_monitoring_callbacks(
-            get_thread_id=self._get_task_id,
-            on_opcode=self._on_opcode,
-            remove_shadow_stack=self.remove_shadow_stack,
-        )
-
-        AsyncDporScheduler._TOOL_ID = setup_opcode_monitoring(
             tool_name="frontrun.async_dpor",
-            handle_py_start=handle_py_start,
-            handle_py_return=handle_py_return,
-            handle_instruction=handle_instruction,
         )
-        self._monitoring_active = True
+        install_thread_opcode_trace(self._opcode_handle)
+        self._monitoring_active = self._opcode_handle._using_monitoring
 
-    def _teardown_monitoring(self) -> None:
-        if not self._monitoring_active:
+    def _stop_opcode_trace(self) -> None:
+        """Uninstall the per-thread tracer and tear down backend resources."""
+        handle = getattr(self, "_opcode_handle", None)
+        if handle is None:
             return
-        teardown_opcode_monitoring(AsyncDporScheduler._TOOL_ID)
+        uninstall_thread_opcode_trace(handle)
+        stop_opcode_trace(handle)
+        self._opcode_handle = None
         self._monitoring_active = False
 
     def _row_lock_int_id(self, res_id: str) -> int:
