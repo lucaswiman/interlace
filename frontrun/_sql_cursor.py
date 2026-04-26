@@ -16,9 +16,7 @@ drivers like pymysql, direct class patching is used as a fallback.
 
 from __future__ import annotations
 
-import hashlib
 import importlib
-import os
 import re
 import sqlite3
 import time
@@ -29,6 +27,16 @@ from frontrun._io_detection import _io_tls, get_io_reporter
 from frontrun._io_detection import get_dpor_context as _get_dpor_context
 from frontrun._patching import patch_method, restore_patches, wrap_method_metadata
 from frontrun._schema import get_schema
+from frontrun._sql_db_scope import (
+    _CONNECTION_DB_SCOPES,
+    _DB_SCOPE_ATTR,
+    _get_connection_db_scope,
+    _get_primary_colset,
+    _normalize_db_identity,
+    _register_connection_db_scope,
+    _stable_db_scope,
+    _table_primary_colset,
+)
 from frontrun._sql_endpoint_suppression import (
     _set_active_sql_io_context,
     _suppress_endpoint_io,
@@ -82,15 +90,23 @@ except ImportError:
 # _sql_row_locks but are imported here so existing call sites and tests
 # continue to work.
 __all__ = [
+    "_CONNECTION_DB_SCOPES",
+    "_DB_SCOPE_ATTR",
     "_acquire_pending_row_locks",
     "_detect_autobegin",
+    "_get_connection_db_scope",
+    "_get_primary_colset",
     "_io_tls",
+    "_normalize_db_identity",
+    "_register_connection_db_scope",
     "_release_dpor_row_locks",
     "_report_or_buffer",
     "_set_active_sql_io_context",
+    "_stable_db_scope",
     "_suppress_endpoint_io",
     "_suppress_lock",
     "_suppress_tids",
+    "_table_primary_colset",
     "clear_permanent_suppressions",
     "get_active_sql_io_context",
     "is_sql_endpoint_suppressed",
@@ -111,14 +127,6 @@ _RE_INSERT_TABLE = re.compile(
     r"^\s*INSERT\s+(?:OR\s+\w+\s+|IGNORE\s+)?INTO\s+(?:[`\"\[]?\w+[`\"\]]?\s*\.\s*)?[`\"\[]?(\w+)", re.I
 )
 _RE_UPDATE_TABLE = re.compile(r"^\s*UPDATE\s+(?:[`\"\[]?\w+[`\"\]]?\s*\.\s*)?[`\"\[]?(\w+)", re.I)
-
-
-# ---------------------------------------------------------------------------
-# DB scope identity tracking
-# ---------------------------------------------------------------------------
-
-_DB_SCOPE_ATTR = "_frontrun_db_scope"
-_CONNECTION_DB_SCOPES: dict[int, str] = {}
 
 
 def _warm_sql_parsers() -> None:
@@ -219,127 +227,6 @@ def _dpor_schedule_and_suppress_sync(
 # ---------------------------------------------------------------------------
 # Core interception logic
 # ---------------------------------------------------------------------------
-
-
-# Global to track primary column set per (db_scope, table) for cross-column
-# conflict detection.  Keyed by (db_scope, table) rather than just table to
-# avoid cross-database contamination when the same table name exists in
-# multiple databases with different schemas/access patterns.
-_table_primary_colset: dict[tuple[str | None, str], tuple[str, ...]] = {}
-
-
-def _get_primary_colset(table: str, colset: tuple[str, ...], *, db_scope: str | None = None) -> tuple[str, ...]:
-    """Return the primary column set for a table, initializing it if necessary."""
-    return _table_primary_colset.setdefault((db_scope, table), colset)
-
-
-def _stable_db_scope(identity: str) -> str:
-    """Return a short deterministic token for a database identity string."""
-    return hashlib.sha1(identity.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
-
-
-def _register_connection_db_scope(connection: Any, identity: str) -> str:
-    """Associate a stable database scope with a connection object."""
-    scope = _stable_db_scope(identity)
-    _CONNECTION_DB_SCOPES[id(connection)] = scope
-    try:
-        setattr(connection, _DB_SCOPE_ATTR, scope)
-    except AttributeError:
-        pass
-    return scope
-
-
-def _normalize_db_identity(kind: str, *args: Any, **kwargs: Any) -> str | None:
-    """Build a canonical database identity string, dispatching on ``kind``.
-
-    * ``"sqlite"``     — from ``sqlite3.connect`` positional/keyword args.
-    * ``"mapping"``    — from ``(driver, mapping_dict)``.
-    * ``"connection"`` — inferred from a live DBAPI connection.
-    """
-    if kind == "mapping":
-        driver, mapping = args
-        items = [(k, v) for k, v in sorted(mapping.items()) if v not in (None, "")]
-        return f"{driver}:{repr(items)}" if items else None
-    if kind == "sqlite":
-        database = kwargs.get("database") or (args[0] if args else None)
-        if database is None:
-            return None
-        raw = os.fspath(database)
-        s = raw.decode("utf-8", errors="surrogateescape") if isinstance(raw, bytes) else raw
-        use_uri = bool(kwargs.get("uri"))
-        if s == ":memory:" and not use_uri:
-            return None
-        if use_uri or s.startswith("file:"):
-            return f"sqlite-uri:{s}"
-        return f"sqlite-path:{os.path.abspath(s)}"
-    if kind == "connection":
-        (conn,) = args
-        info = getattr(conn, "info", None)
-        dsn_params = getattr(info, "dsn_parameters", None)
-        if isinstance(dsn_params, dict):
-            relevant = {k: dsn_params.get(k) for k in ("host", "port", "dbname") if dsn_params.get(k)}
-            if (identity := _normalize_db_identity("mapping", "postgres", relevant)) is not None:
-                return identity
-        dsn = getattr(conn, "dsn", None)
-        if isinstance(dsn, str) and dsn:
-            return f"dsn:{dsn}"
-        relevant = {
-            "host": getattr(conn, "host", None),
-            "port": getattr(conn, "port", None),
-            "database": getattr(conn, "database", None),
-            "db": getattr(conn, "db", None),
-            "dbname": getattr(info, "dbname", None),
-        }
-        if (identity := _normalize_db_identity("mapping", "dbapi", relevant)) is not None:
-            return identity
-        path = getattr(conn, "filename", None)
-        if isinstance(path, str) and path:
-            return f"sqlite-path:{os.path.abspath(path)}"
-        return None
-    raise ValueError(f"unknown db identity kind: {kind!r}")
-
-
-def _get_connection_db_scope(db_obj: Any) -> str | None:
-    """Resolve the stable database scope for a cursor/connection-like object."""
-    if db_obj is None:
-        return None
-    if type(db_obj).__module__.startswith("unittest.mock"):
-        return None
-
-    seen: set[int] = set()
-    pending = [db_obj]
-    while pending:
-        candidate = pending.pop(0)
-        if type(candidate).__module__.startswith("unittest.mock"):
-            continue
-        candidate_id = id(candidate)
-        if candidate_id in seen:
-            continue
-        seen.add(candidate_id)
-
-        scope = getattr(candidate, _DB_SCOPE_ATTR, None)
-        if isinstance(scope, str):
-            return scope
-
-        mapped_scope = _CONNECTION_DB_SCOPES.get(candidate_id)
-        if mapped_scope is not None:
-            return mapped_scope
-
-        for attr in ("connection", "_conn", "_connection"):
-            nested = getattr(candidate, attr, None)
-            if nested is not None:
-                pending.append(nested)
-
-    connection = getattr(db_obj, "connection", None)
-    if connection is None:
-        connection = getattr(db_obj, "_conn", None)
-    if connection is None:
-        connection = db_obj
-
-    identity = _normalize_db_identity("connection", connection)
-    if identity is None:
-        return None
-    return _register_connection_db_scope(connection, identity)
 
 
 def _sql_resource_id(

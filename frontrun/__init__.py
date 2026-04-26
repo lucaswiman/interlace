@@ -61,11 +61,15 @@ Contrib helpers (use threads= for sync, tasks= for async)::
 import importlib
 import warnings
 from importlib.metadata import version as _metadata_version
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from frontrun.common import DEPRECATION_MESSAGES, NondeterministicSQLError
 from frontrun.explore import explore
 from frontrun.trace_markers import TraceExecutor
+
+if TYPE_CHECKING:
+    from frontrun.async_shuffler import explore_async_random as explore_async_random
+    from frontrun.bytecode import explore_random as explore_random
 
 try:
     __version__: str = _metadata_version("frontrun")
