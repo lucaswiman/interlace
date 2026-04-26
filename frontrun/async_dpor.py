@@ -64,6 +64,7 @@ from frontrun._dpor_core import (
     extend_replay_schedule,
     format_race_failure_explanation,
     group_schedule_runs,
+    is_reproduction_run,
     make_deadline,
     make_dpor_engine,
     record_dpor_failure,
@@ -926,16 +927,14 @@ async def _reproduce_async_counterexample(
         try:
             await scheduler.run_all(task_funcs, timeout=timeout_per_run)
         except DeadlockError:
-            if invariant is None:
-                successes += 1
             deadlocked = True
         except (TimeoutError, Exception):
             continue
-        if not deadlocked:
-            if invariant is not None:
-                inv_failed, _ = check_invariant(invariant, state)
-                if inv_failed:
-                    successes += 1
+        inv_failed, _ = (
+            check_invariant(invariant, state) if (invariant is not None and not deadlocked) else (False, None)
+        )
+        if is_reproduction_run(deadlocked=deadlocked, has_invariant=invariant is not None, invariant_failed=inv_failed):
+            successes += 1
     return reproduce_on_failure, successes
 
 

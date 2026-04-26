@@ -108,3 +108,21 @@ def advance_replay_index(
         replay_index += 1
         if scheduled not in actors_done:
             return replay_index, scheduled
+
+
+def is_reproduction_run(*, deadlocked: bool, has_invariant: bool, invariant_failed: bool) -> bool:
+    """Return ``True`` when a single reproduction run counts as a confirmed bug.
+
+    Shared classification logic used by both the sync and async reproduction
+    loops — the surrounding setup/teardown and exception handling differ, but
+    the decision of *whether a run reproduced the original failure* is identical.
+
+    Rules:
+    - If the run **deadlocked** it reproduces iff the original failure *was* a
+      deadlock (i.e. there is no invariant to check).
+    - If the run **completed** without deadlock it reproduces iff the invariant
+      was provided and failed.
+    """
+    if deadlocked:
+        return not has_invariant
+    return has_invariant and invariant_failed

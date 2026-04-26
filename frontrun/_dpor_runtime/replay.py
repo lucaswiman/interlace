@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from frontrun._dpor_core import is_reproduction_run
+
 from ._shared import *
 from .runner import DporBytecodeRunner
 from .scheduler import DporScheduler, _IOAnchoredReplayScheduler, _ReplayDporScheduler
@@ -104,6 +106,8 @@ def _reproduce_dpor_counterexample(
     successes = 0
     try:
         for _ in range(reproduce_on_failure):
+            deadlocked = False
+            inv_failed = False
             try:
                 replay_state = _run_dpor_schedule(
                     schedule_list,
@@ -115,13 +119,16 @@ def _reproduce_dpor_counterexample(
                     io_schedule=io_schedule,
                     patch_sleep=patch_sleep,
                 )
-                if invariant is not None and not invariant(replay_state):
-                    successes += 1
+                if invariant is not None:
+                    inv_failed = not invariant(replay_state)
             except DeadlockError:
-                if invariant is None:
-                    successes += 1
+                deadlocked = True
             except Exception:
-                pass  # timeout / crash during replay — not a reproduction
+                continue  # timeout / crash during replay — not a reproduction
+            if is_reproduction_run(
+                deadlocked=deadlocked, has_invariant=invariant is not None, invariant_failed=inv_failed
+            ):
+                successes += 1
 
     finally:
         set_redis_replay_mode(False)
