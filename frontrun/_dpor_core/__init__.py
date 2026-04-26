@@ -11,6 +11,7 @@ from frontrun._dpor_core.invariants import (
 )
 from frontrun._dpor_core.row_locks import RowLockRegistry
 from frontrun._dpor_core.utils import (
+    advance_replay_index,
     extend_replay_schedule,
     group_schedule_runs,
     make_deadline,
@@ -19,6 +20,7 @@ from frontrun._dpor_core.utils import (
 
 __all__ = [
     "RowLockRegistry",
+    "advance_replay_index",
     "compute_serializable_baseline_async",
     "compute_serializable_baseline_sync",
     "extend_replay_schedule",

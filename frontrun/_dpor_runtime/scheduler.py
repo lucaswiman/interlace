@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from frontrun._dpor_core import RowLockRegistry, extend_replay_schedule
+from frontrun._dpor_core import RowLockRegistry, advance_replay_index, extend_replay_schedule
 
 from ._shared import *
 from ._shared import _dpor_tls, _get_instructions, _process_opcode
@@ -842,15 +842,13 @@ class _ReplayDporScheduler(DporScheduler):
         )
 
     def _schedule_next(self) -> int | None:
-        while True:
-            if self._replay_index >= len(self._replay_schedule):
-                if not self._extend_schedule():
-                    return None
-            scheduled = self._replay_schedule[self._replay_index]
-            self._replay_index += 1
-            if scheduled in self._threads_done:
-                continue
-            return scheduled
+        self._replay_index, next_actor = advance_replay_index(
+            self._replay_schedule,
+            self._replay_index,
+            self._extend_schedule,
+            self._threads_done,
+        )
+        return next_actor
 
     def wait_for_turn(self, thread_id: int) -> bool:
         return self._wait_for_turn(thread_id)

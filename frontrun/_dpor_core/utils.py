@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -73,3 +74,37 @@ def extend_replay_schedule(
         return False
     replay_schedule.extend(active)
     return True
+
+
+def advance_replay_index(
+    replay_schedule: list[int],
+    replay_index: int,
+    extend_fn: Callable[[], bool],
+    actors_done: set[int],
+) -> tuple[int, int | None]:
+    """Walk *replay_schedule* forward past finished actors and return the next live one.
+
+    Shared indexing core used by both the sync :class:`_ReplayDporScheduler`
+    and the async :class:`_ReplayAsyncScheduler`.  Neither the wait mechanism
+    (condition variable vs asyncio callback) nor the "current actor" field are
+    touched here — callers own those.
+
+    Args:
+        replay_schedule: The schedule list (may be extended in-place by *extend_fn*).
+        replay_index:    Current read position; advanced by this function.
+        extend_fn:       Zero-arg callable that appends more entries and returns
+                         ``True``, or returns ``False`` when the schedule is exhausted.
+        actors_done:     Set of actor IDs that have already finished.
+
+    Returns:
+        ``(new_index, next_actor)`` where *next_actor* is ``None`` when the
+        schedule is exhausted and no live actor can be scheduled.
+    """
+    while True:
+        if replay_index >= len(replay_schedule):
+            if not extend_fn():
+                return replay_index, None
+        scheduled = replay_schedule[replay_index]
+        replay_index += 1
+        if scheduled not in actors_done:
+            return replay_index, scheduled

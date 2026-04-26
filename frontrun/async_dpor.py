@@ -59,6 +59,7 @@ from frontrun._async_autopause import (
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
 from frontrun._dpor_core import (
     RowLockRegistry,
+    advance_replay_index,
     compute_serializable_baseline_async,
     extend_replay_schedule,
     format_race_failure_explanation,
@@ -859,6 +860,18 @@ class _ReplayAsyncScheduler(InterleavedLoop):
             self._tasks_done,
         )
 
+    def _advance(self) -> None:
+        """Advance ``_replay_index`` and ``_current_task`` to the next live actor."""
+        self._replay_index, next_actor = advance_replay_index(
+            self._replay_schedule,
+            self._replay_index,
+            self._extend_schedule,
+            self._tasks_done,
+        )
+        self._current_task = next_actor
+        if next_actor is None:
+            self._finished = True
+
     def should_proceed(self, task_id: Any, marker: Any = None) -> bool:
         if self._current_task is None:
             self._finished = True
@@ -866,17 +879,7 @@ class _ReplayAsyncScheduler(InterleavedLoop):
         return self._current_task == task_id
 
     def on_proceed(self, task_id: Any, marker: Any = None) -> None:
-        while True:
-            if self._replay_index >= len(self._replay_schedule):
-                if not self._extend_schedule():
-                    self._current_task = None
-                    self._finished = True
-                    return
-            scheduled = self._replay_schedule[self._replay_index]
-            self._replay_index += 1
-            if scheduled not in self._tasks_done:
-                self._current_task = scheduled
-                return
+        self._advance()
 
     def finish_task(self, task_id: int) -> None:
         self._tasks_done.add(task_id)
@@ -887,17 +890,7 @@ class _ReplayAsyncScheduler(InterleavedLoop):
             self._tasks_done.add(task_id)
             if self._current_task == task_id:
                 # Advance to the next scheduled task so other tasks can proceed.
-                while True:
-                    if self._replay_index >= len(self._replay_schedule):
-                        if not self._extend_schedule():
-                            self._current_task = None
-                            self._finished = True
-                            break
-                    scheduled = self._replay_schedule[self._replay_index]
-                    self._replay_index += 1
-                    if scheduled not in self._tasks_done:
-                        self._current_task = scheduled
-                        break
+                self._advance()
             self._condition.notify_all()
 
 
