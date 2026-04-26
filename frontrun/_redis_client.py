@@ -22,7 +22,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import threading
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from typing import Any
 
 from frontrun import _real_threading as _rt
@@ -177,6 +177,36 @@ def _parse_and_report_execute_command(
     return cmd_name, cmd_args, reported
 
 
+def _run_sync_dpor_envelope(
+    execute_fn: Callable[[], Any],
+    resource_id: str,
+    reported: bool,
+    needs_scheduling_point: bool,
+) -> Any:
+    """Run *execute_fn* inside the sync DPOR scheduling envelope.
+
+    Bookends the call with ``before_io`` / ``after_io`` when
+    *needs_scheduling_point* is True, and suppresses endpoint-level I/O
+    when *reported* is True.  Shared by ``_intercept_execute_command``
+    and ``_intercept_pipeline_execute``.
+    """
+    dpor_ctx = None
+    if needs_scheduling_point:
+        dpor_ctx = _get_dpor_context()
+        if dpor_ctx is not None:
+            dpor_ctx[0].before_io(dpor_ctx[1], resource_id)
+
+    try:
+        if reported:
+            with _suppress_endpoint_io():
+                return execute_fn()
+        else:
+            return execute_fn()
+    finally:
+        if dpor_ctx is not None:
+            dpor_ctx[0].after_io(dpor_ctx[1], resource_id)
+
+
 def _intercept_execute_command(
     original_method: Any,
     self: Any,
@@ -201,33 +231,19 @@ def _intercept_execute_command(
         access = parse_redis_access(cmd_name, cmd_args)
         needs_scheduling_point = bool(access.read_keys or access.write_keys)
 
-    # Force a DPOR scheduling point so the engine can interleave between
-    # Redis operations.
-    dpor_ctx = None
+    # Build a structured resource ID for IO-anchored replay.
     resource_id = ""
     if needs_scheduling_point:
-        dpor_ctx = _get_dpor_context()
-        if dpor_ctx is not None:
-            # Build a structured resource ID for IO-anchored replay.
-            db_scope = _get_redis_db_scope(self) or ""
-            first_key = str(cmd_args[0]) if cmd_args else ""
-            resource_id = f"redis:{cmd_name}:{first_key}:{db_scope}"
-            dpor_ctx[0].before_io(dpor_ctx[1], resource_id)
+        db_scope = _get_redis_db_scope(self) or ""
+        first_key = str(cmd_args[0]) if cmd_args else ""
+        resource_id = f"redis:{cmd_name}:{first_key}:{db_scope}"
 
-    try:
-        if reported:
-            with _suppress_endpoint_io():
-                result = original_method(self, *args, **kwargs)
-        else:
-            result = original_method(self, *args, **kwargs)
-    finally:
-        # after_io runs inside a finally so the IO trace is recorded
-        # even if the command raises.  During replay, this atomically
-        # switches threads under the scheduler's condition lock.
-        if dpor_ctx is not None:
-            dpor_ctx[0].after_io(dpor_ctx[1], resource_id)
-
-    return result
+    return _run_sync_dpor_envelope(
+        lambda: original_method(self, *args, **kwargs),
+        resource_id,
+        reported,
+        needs_scheduling_point,
+    )
 
 
 def _intercept_pipeline_execute(
@@ -247,25 +263,12 @@ def _intercept_pipeline_execute(
     # schedule to misalign.  See defect #10.
     needs_scheduling_point = reported or _redis_replay_mode
 
-    dpor_ctx = None
-    resource_id = ""
-    if needs_scheduling_point:
-        dpor_ctx = _get_dpor_context()
-        if dpor_ctx is not None:
-            resource_id = "redis:PIPELINE"
-            dpor_ctx[0].before_io(dpor_ctx[1], resource_id)
-
-    try:
-        if reported:
-            with _suppress_endpoint_io():
-                result = original_method(self, *args, **kwargs)
-        else:
-            result = original_method(self, *args, **kwargs)
-    finally:
-        if dpor_ctx is not None:
-            dpor_ctx[0].after_io(dpor_ctx[1], resource_id)
-
-    return result
+    return _run_sync_dpor_envelope(
+        lambda: original_method(self, *args, **kwargs),
+        "redis:PIPELINE",
+        reported,
+        needs_scheduling_point,
+    )
 
 
 # ---------------------------------------------------------------------------
