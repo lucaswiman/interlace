@@ -40,7 +40,7 @@ from frontrun._marker_coordination import (
     finalize_marker_executor_run,
 )
 from frontrun._trace_marker_runtime import build_trace_function, run_traced_callable
-from frontrun.common import InterleavingResult, Schedule, Step, any_async
+from frontrun.common import DEPRECATION_MESSAGES, InterleavingResult, Schedule, Step, any_async
 
 __all__ = [
     "MARKER_PATTERN",
@@ -290,10 +290,7 @@ class TraceExecutor:
             raise TypeError("TraceExecutor.run() missing target for sync execution")
 
         warnings.warn(
-            "Calling TraceExecutor.run() with individual thread names is deprecated; "
-            "pass a dict {name: callable} instead, e.g. "
-            "executor.run({'thread1': fn1, 'thread2': fn2}, timeout=5.0). "
-            "Will be removed in 0.6.",
+            DEPRECATION_MESSAGES["trace_executor_run_legacy_form"],
             DeprecationWarning,
             stacklevel=2,
         )

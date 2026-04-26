@@ -1240,9 +1240,7 @@ async def explore_async_dpor(*args: Any, **kwargs: Any) -> InterleavingResult:
     detect_io = kwargs.pop("detect_io", False)
     if detect_redis and not detect_io:
         warnings.warn(
-            "detect_redis=True is deprecated; use detect_io=True instead "
-            "(now covers Redis in both sync and async). "
-            "The old parameter will be removed in 0.6.",
+            DEPRECATION_MESSAGES["detect_redis_param"],
             DeprecationWarning,
             stacklevel=2,
         )
