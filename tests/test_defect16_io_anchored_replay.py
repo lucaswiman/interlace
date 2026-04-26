@@ -19,11 +19,6 @@ Running::
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
-import time
-
 import pytest
 
 try:
@@ -32,42 +27,6 @@ except ImportError:
     pytest.skip("redis package not installed", allow_module_level=True)
 
 from frontrun.dpor import explore_dpor
-
-_REDIS_PORT = int(os.environ.get("REDIS_PORT", "16399"))
-
-
-@pytest.fixture(scope="module")
-def redis_port():
-    """Provide a Redis port, starting a server if needed."""
-    r = redis_lib.Redis(port=_REDIS_PORT)
-    try:
-        r.ping()
-        r.close()
-        yield _REDIS_PORT
-        return
-    except redis_lib.ConnectionError:
-        r.close()
-
-    if not shutil.which("redis-server"):
-        pytest.skip("redis-server not available")
-
-    proc = subprocess.Popen(
-        ["redis-server", "--port", str(_REDIS_PORT), "--save", "", "--appendonly", "no", "--loglevel", "warning"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    time.sleep(0.5)
-    r = redis_lib.Redis(port=_REDIS_PORT)
-    try:
-        r.ping()
-    except redis_lib.ConnectionError:
-        proc.kill()
-        pytest.skip("Could not start redis-server")
-    finally:
-        r.close()
-    yield _REDIS_PORT
-    proc.terminate()
-    proc.wait(timeout=5)
 
 
 class TestStateDependentReplayReproduction:
