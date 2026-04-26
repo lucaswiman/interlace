@@ -60,9 +60,13 @@ from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
 from frontrun._dpor_core import (
     RowLockRegistry,
     compute_serializable_baseline_async,
+    extend_replay_schedule,
     format_race_failure_explanation,
+    group_schedule_runs,
+    make_deadline,
     make_dpor_engine,
     record_dpor_failure,
+    reset_execution_state,
 )
 from frontrun._opcode_observer import (
     OpcodeTraceHandle,
@@ -76,7 +80,7 @@ from frontrun._opcode_observer import (
     uninstall_thread_opcode_trace,
 )
 from frontrun._sql_cursor import clear_sql_metadata, get_lock_timeout, set_lock_timeout
-from frontrun._sql_insert_tracker import check_uncaptured_inserts, clear_insert_tracker
+from frontrun._sql_insert_tracker import check_uncaptured_inserts
 from frontrun._threaded_runner import PatchScope
 from frontrun._tracing import TraceFilter as _TraceFilter
 from frontrun._tracing import set_active_trace_filter as _set_active_trace_filter
@@ -825,13 +829,7 @@ def _format_async_trace(schedule: list[int], num_tasks: int) -> str:
     lines.append("")
     lines.append("Task interleaving (task ID at each scheduling point):")
 
-    # Group consecutive runs by the same task
-    runs: list[tuple[int, int]] = []  # (task_id, count)
-    for tid in schedule:
-        if runs and runs[-1][0] == tid:
-            runs[-1] = (tid, runs[-1][1] + 1)
-        else:
-            runs.append((tid, 1))
+    runs = group_schedule_runs(schedule)
 
     for i, (tid, count) in enumerate(runs):
         step_label = "step" if count == 1 else "steps"
@@ -853,13 +851,13 @@ class _ReplayAsyncScheduler(InterleavedLoop):
         self._num_replay_tasks = num_tasks
 
     def _extend_schedule(self) -> bool:
-        if self._replay_index >= self._replay_max_ops:
-            return False
-        active = [t for t in range(self._num_replay_tasks) if t not in self._tasks_done]
-        if not active:
-            return False
-        self._replay_schedule.extend(active)
-        return True
+        return extend_replay_schedule(
+            self._replay_schedule,
+            self._replay_index,
+            self._replay_max_ops,
+            self._num_replay_tasks,
+            self._tasks_done,
+        )
 
     def should_proceed(self, task_id: Any, marker: Any = None) -> bool:
         if self._current_task is None:
@@ -1044,7 +1042,7 @@ async def _explore_async_dpor(
 
     result = InterleavingResult(property_holds=True)
     stable_ids = StableObjectIds()
-    total_deadline = time.monotonic() + total_timeout if total_timeout is not None else None
+    total_deadline = make_deadline(total_timeout)
 
     clear_sql_metadata()
 
@@ -1082,8 +1080,7 @@ async def _explore_async_dpor(
             while True:
                 if total_deadline is not None and time.monotonic() > total_deadline:
                     break
-                clear_insert_tracker()
-                stable_ids.reset_for_execution()
+                reset_execution_state(stable_ids)
                 execution = engine.begin_execution()
 
                 # Clear wait-for graph and held-locks tracking between executions

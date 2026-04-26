@@ -22,6 +22,7 @@ import os
 import re
 import sqlite3
 import time
+from collections.abc import Callable
 from typing import Any
 
 from frontrun._io_detection import _io_tls, get_io_reporter
@@ -151,6 +152,68 @@ def _warm_sql_parsers() -> None:
         from sqlglot.dialects import Dialect  # noqa: F401
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Shared sync DPOR scheduling + endpoint suppression
+# ---------------------------------------------------------------------------
+
+
+def _dpor_schedule_and_suppress_sync(
+    reported: bool,
+    operation: Any,
+    parameters: Any,
+    paramstyle: str,
+    execute: Callable[[], Any],
+) -> Any:
+    """DPOR scheduling point + endpoint I/O suppression for sync SQL execution.
+
+    Sync counterpart to ``_sql_cursor_async._dpor_schedule_and_suppress_async``.
+    Acquires pending row locks, forces a DPOR scheduling point if *reported* or
+    *operation* is a string, suppresses endpoint-level and cooperative-lock I/O
+    during the actual driver call, and releases row locks on exception.
+
+    Args:
+        reported: Whether ``_report_sql_access`` recorded table accesses.
+        operation: The raw SQL operation value (used to decide scheduling).
+        parameters: The bound parameters (forwarded to ``_set_active_sql_io_context``).
+        paramstyle: PEP 249 paramstyle string (forwarded to ``_set_active_sql_io_context``).
+        execute: A zero-argument callable that performs the actual driver method call.
+    """
+    from frontrun._cooperative import suppress_sync_reporting, unsuppress_sync_reporting
+
+    # Block if another DPOR thread holds a conflicting row lock
+    _acquire_pending_row_locks()
+
+    # Force a scheduling point so the scheduler can interleave between
+    # SQL operations.  Without this, all code inside frontrun/ is skipped
+    # by the tracer, so pending_io is never flushed between back-to-back
+    # SQL calls.  This is needed both during DPOR exploration (to report
+    # accesses) and during replay (to consume schedule entries that DPOR
+    # generated for SQL statements).
+    _dpor_ctx = _get_dpor_context()
+    if _dpor_ctx is not None and (reported or isinstance(operation, str)):
+        _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
+
+    _set_active_sql_io_context(operation, parameters, paramstyle)
+    # Suppress cooperative lock sync events during the actual DB call.
+    # Internal psycopg2/driver locks are implementation details.
+    suppress_sync_reporting()
+    try:
+        if reported:
+            with _suppress_endpoint_io():
+                return execute()
+        return execute()
+    except Exception:
+        # Release row locks on execution failure to prevent framework-induced
+        # deadlocks.  Without this, if a SQL statement raises (e.g.,
+        # OperationalError from SQLite lock contention), any row locks
+        # acquired by _acquire_pending_row_locks remain held until thread
+        # exit, blocking other DPOR threads indefinitely.
+        _release_dpor_row_locks()
+        raise
+    finally:
+        unsuppress_sync_reporting()
 
 
 # ---------------------------------------------------------------------------
@@ -581,8 +644,6 @@ def _intercept_execute(
     called.  ROLLBACK clears the buffer.  SAVEPOINTs and ROLLBACK TO SAVEPOINT
     are supported via buffer truncation.
     """
-    from frontrun._cooperative import suppress_sync_reporting, unsuppress_sync_reporting
-
     insert_match = _RE_INSERT_TABLE.match(operation) if isinstance(operation, str) else None
     update_match = _RE_UPDATE_TABLE.match(operation) if isinstance(operation, str) else None
 
@@ -615,39 +676,13 @@ def _intercept_execute(
         paramstyle=paramstyle,
     )
 
-    # Block if another DPOR thread holds a conflicting row lock
-    _acquire_pending_row_locks()
-
-    # Force a scheduling point so the scheduler can interleave between
-    # SQL operations.  Without this, all code inside frontrun/ is skipped
-    # by the tracer, so pending_io is never flushed between back-to-back
-    # SQL calls.  This is needed both during DPOR exploration (to report
-    # accesses) and during replay (to consume schedule entries that DPOR
-    # generated for SQL statements).
-    _dpor_ctx = _get_dpor_context()
-    if _dpor_ctx is not None and (reported or isinstance(operation, str)):
-        _dpor_ctx[0].report_and_wait(None, _dpor_ctx[1])
-
-    _set_active_sql_io_context(operation, parameters, paramstyle)
-    # Suppress cooperative lock sync events during the actual DB call.
-    # Internal psycopg2/driver locks are implementation details.
-    suppress_sync_reporting()
-    try:
-        if reported:
-            with _suppress_endpoint_io():
-                result = _execute_with_retry(original_method, self, operation, parameters)
-        else:
-            result = _execute_with_retry(original_method, self, operation, parameters)
-    except Exception:
-        # Release row locks on execution failure to prevent framework-induced
-        # deadlocks.  Without this, if a SQL statement raises (e.g.,
-        # OperationalError from SQLite lock contention), any row locks
-        # acquired by _acquire_pending_row_locks remain held until thread
-        # exit, blocking other DPOR threads indefinitely.
-        _release_dpor_row_locks()
-        raise
-    finally:
-        unsuppress_sync_reporting()
+    result = _dpor_schedule_and_suppress_sync(
+        reported,
+        operation,
+        parameters,
+        paramstyle,
+        lambda: _execute_with_retry(original_method, self, operation, parameters),
+    )
 
     # Defect #6 fix: release row locks for 0-row UPDATEs.
     # In PostgreSQL, an UPDATE that matches 0 rows acquires no row locks
