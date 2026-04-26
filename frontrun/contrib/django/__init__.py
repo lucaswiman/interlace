@@ -23,7 +23,7 @@ from typing import Any
 
 from frontrun.contrib._shared import dispatch_threads_or_tasks
 from frontrun.contrib.django._async import async_django_dpor
-from frontrun.contrib.django._sync import DJANGO_TRACE_PACKAGES
+from frontrun.contrib.django._shared import DJANGO_TRACE_PACKAGES
 from frontrun.contrib.django._sync import django_dpor as _sync_django_dpor
 
 

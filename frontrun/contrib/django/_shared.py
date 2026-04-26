@@ -70,3 +70,36 @@ def wrap_async_task(
             await fn(state)
 
     return wrapper
+
+
+def prepare_django_dpor(
+    setup: Callable[[], Any],
+    workers: list[Callable[..., Any]],
+    wrap_worker: Callable[..., Any],
+    *,
+    db_alias: str,
+    lock_timeout: int | None,
+    trace_packages: list[str] | None,
+) -> tuple[Callable[[], Any], list[Callable[..., Any]], list[str]]:
+    """Wrap *setup* and each worker for Django connection management.
+
+    Called by both ``django_dpor`` (sync) and ``async_django_dpor`` (async).
+    Returns ``(wrapped_setup, wrapped_workers, resolved_trace_packages)``.
+
+    Args:
+        setup: User-supplied setup callable.
+        workers: List of thread or task callables.
+        wrap_worker: Either :func:`wrap_sync_thread` or :func:`wrap_async_task`.
+        db_alias: Django database alias.
+        lock_timeout: Optional per-connection lock timeout in milliseconds.
+        trace_packages: Package patterns to trace; ``None`` resolves to
+            :data:`DJANGO_TRACE_PACKAGES`.
+    """
+    from django.db import connections  # type: ignore[import-not-found]
+
+    resolved_packages = list(DJANGO_TRACE_PACKAGES) if trace_packages is None else trace_packages
+    wrapped_setup = wrap_setup(setup, connections.close_all)
+    wrapped_workers = [
+        wrap_worker(fn, connections=connections, db_alias=db_alias, lock_timeout=lock_timeout) for fn in workers
+    ]
+    return wrapped_setup, wrapped_workers, resolved_packages

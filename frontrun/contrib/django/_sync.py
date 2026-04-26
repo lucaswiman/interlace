@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from frontrun.contrib.django._shared import DJANGO_TRACE_PACKAGES, wrap_setup, wrap_sync_thread
+from frontrun.contrib.django._shared import prepare_django_dpor, wrap_sync_thread
 
 T = TypeVar("T")
 
@@ -60,23 +60,17 @@ def django_dpor(
             disable extra tracing beyond user code.
         **kwargs: Forwarded verbatim to ``explore_dpor``.
     """
-    from django.db import connections  # type: ignore[import-not-found]
-
     from frontrun.dpor import explore_dpor
 
-    if trace_packages is None:
-        trace_packages = list(DJANGO_TRACE_PACKAGES)
-    wrapped_setup = wrap_setup(setup, connections.close_all)
-    wrapped_threads = [
-        wrap_sync_thread(fn, connections=connections, db_alias=db_alias, lock_timeout=lock_timeout) for fn in threads
-    ]
-
+    wrapped_setup, wrapped_threads, resolved_packages = prepare_django_dpor(
+        setup, threads, wrap_sync_thread, db_alias=db_alias, lock_timeout=lock_timeout, trace_packages=trace_packages
+    )
     return explore_dpor(
         setup=wrapped_setup,
         threads=wrapped_threads,
         invariant=invariant,
         detect_io=detect_io,
         lock_timeout=lock_timeout,
-        trace_packages=trace_packages,
+        trace_packages=resolved_packages,
         **kwargs,
     )
