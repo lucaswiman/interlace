@@ -29,12 +29,9 @@ Running::
 from __future__ import annotations
 
 import os
-import shutil
 import sqlite3
-import subprocess
 import tempfile
 import threading
-import time
 
 import pytest
 
@@ -46,43 +43,6 @@ except ImportError:
 from frontrun.dpor import explore_dpor
 
 pytestmark = pytest.mark.integration
-
-# Use a non-default port to avoid colliding with a user's Redis.
-_REDIS_PORT = int(os.environ.get("REDIS_PORT", "16399"))
-
-
-@pytest.fixture(scope="module")
-def redis_port():
-    """Provide a Redis port, starting a server if one isn't already listening."""
-    r = redis_lib.Redis(port=_REDIS_PORT)
-    try:
-        r.ping()
-        r.close()
-        yield _REDIS_PORT
-        return
-    except redis_lib.ConnectionError:
-        r.close()
-
-    if not shutil.which("redis-server"):
-        pytest.skip("redis-server not installed and no Redis listening on port " + str(_REDIS_PORT))
-
-    proc = subprocess.Popen(
-        ["redis-server", "--port", str(_REDIS_PORT), "--save", "", "--appendonly", "no", "--loglevel", "warning"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    time.sleep(0.5)
-    r = redis_lib.Redis(port=_REDIS_PORT)
-    try:
-        r.ping()
-    except redis_lib.ConnectionError:
-        proc.kill()
-        pytest.skip("Could not start redis-server")
-    finally:
-        r.close()
-    yield _REDIS_PORT
-    proc.terminate()
-    proc.wait(timeout=5)
 
 
 # ---------------------------------------------------------------------------

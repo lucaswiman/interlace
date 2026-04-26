@@ -562,3 +562,55 @@ def test_every_deprecation_message_pins_a_removal_version():
         f"DEPRECATION_MESSAGES entries without a 'removed in X.Y' note: {missing}. "
         "Every deprecation must pin a concrete removal version."
     )
+
+
+# ---------------------------------------------------------------------------
+# (h) Straggler deprecations are in DEPRECATION_MESSAGES
+# ---------------------------------------------------------------------------
+
+
+def test_trace_executor_run_legacy_form_in_registry():
+    """TraceExecutor.run() legacy single-call warning must come from DEPRECATION_MESSAGES.
+
+    Ensures the inline warning in trace_markers.py is centralised so the
+    removal-version enforcement in test_every_deprecation_message_pins_a_removal_version
+    covers it automatically.
+    """
+    import warnings
+
+    from frontrun import TraceExecutor
+    from frontrun.common import DEPRECATION_MESSAGES, Schedule, Step
+
+    assert "trace_executor_run_legacy_form" in DEPRECATION_MESSAGES, (
+        "DEPRECATION_MESSAGES is missing 'trace_executor_run_legacy_form'. "
+        "Add it so the removal-version enforcement test covers this deprecation."
+    )
+
+    schedule = Schedule([Step("t1", "m")])
+    executor = TraceExecutor(schedule)
+
+    def worker():
+        x = 1  # frontrun: m
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        executor.run("t1", worker)
+    executor.wait(timeout=5.0)
+
+    dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert dep_warnings, "Expected a DeprecationWarning from legacy run() form"
+    # The warning text must match the registry entry exactly.
+    assert dep_warnings[0].message.args[0] == DEPRECATION_MESSAGES["trace_executor_run_legacy_form"]
+
+
+def test_detect_redis_param_in_registry():
+    """detect_redis= deprecation warning must come from DEPRECATION_MESSAGES.
+
+    Ensures the inline warning in async_dpor.py is centralised.
+    """
+    from frontrun.common import DEPRECATION_MESSAGES
+
+    assert "detect_redis_param" in DEPRECATION_MESSAGES, (
+        "DEPRECATION_MESSAGES is missing 'detect_redis_param'. "
+        "Add it so the removal-version enforcement test covers this deprecation."
+    )

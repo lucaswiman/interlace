@@ -11,19 +11,23 @@ from frontrun._dpor_core.invariants import (
 )
 from frontrun._dpor_core.row_locks import RowLockRegistry
 from frontrun._dpor_core.utils import (
+    advance_replay_index,
     extend_replay_schedule,
     group_schedule_runs,
+    is_reproduction_run,
     make_deadline,
     reset_execution_state,
 )
 
 __all__ = [
     "RowLockRegistry",
+    "advance_replay_index",
     "compute_serializable_baseline_async",
     "compute_serializable_baseline_sync",
     "extend_replay_schedule",
     "format_race_failure_explanation",
     "group_schedule_runs",
+    "is_reproduction_run",
     "make_deadline",
     "make_dpor_engine",
     "record_dpor_failure",

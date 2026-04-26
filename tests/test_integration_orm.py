@@ -153,9 +153,7 @@ class TestOrmTraceMarkers:
         )
 
         executor = TraceExecutor(schedule)
-        executor.run("a", handler_a)
-        executor.run("b", handler_b)
-        executor.wait(timeout=10.0)
+        executor.run({"a": handler_a, "b": handler_b}, timeout=10.0)
 
         assert not errors, errors
         assert _read_count(engine) == 1, "Expected lost update (login_count=1, not 2)"

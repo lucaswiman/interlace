@@ -44,6 +44,17 @@ DEPRECATION_MESSAGES = {
         "use frontrun.explore(strategy='random') (or frontrun.explore_async_random(...)) instead. "
         "The old API will be removed in 0.6."
     ),
+    "trace_executor_run_legacy_form": (
+        "Calling TraceExecutor.run() with individual thread names is deprecated; "
+        "pass a dict {name: callable} instead, e.g. "
+        "executor.run({'thread1': fn1, 'thread2': fn2}, timeout=5.0). "
+        "Will be removed in 0.6."
+    ),
+    "detect_redis_param": (
+        "detect_redis=True is deprecated; use detect_io=True instead "
+        "(now covers Redis in both sync and async). "
+        "The old parameter will be removed in 0.6."
+    ),
 }
 
 

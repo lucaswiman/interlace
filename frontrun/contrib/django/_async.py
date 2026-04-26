@@ -22,7 +22,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
 from frontrun.common import InterleavingResult
-from frontrun.contrib.django._shared import DJANGO_TRACE_PACKAGES, wrap_async_task, wrap_setup
+from frontrun.contrib.django._shared import prepare_django_dpor, wrap_async_task
 
 T = TypeVar("T")
 
@@ -59,23 +59,17 @@ async def async_django_dpor(
             Pass ``[]`` to disable extra tracing beyond user code.
         **kwargs: Forwarded verbatim to ``explore_async_dpor``.
     """
-    from django.db import connections  # type: ignore[import-not-found]
-
     from frontrun.async_dpor import explore_async_dpor
 
-    if trace_packages is None:
-        trace_packages = list(DJANGO_TRACE_PACKAGES)
-    wrapped_setup = wrap_setup(setup, connections.close_all)
-    wrapped_tasks = [
-        wrap_async_task(fn, connections=connections, db_alias=db_alias, lock_timeout=lock_timeout) for fn in tasks
-    ]
-
+    wrapped_setup, wrapped_tasks, resolved_packages = prepare_django_dpor(
+        setup, tasks, wrap_async_task, db_alias=db_alias, lock_timeout=lock_timeout, trace_packages=trace_packages
+    )
     return await explore_async_dpor(
         setup=wrapped_setup,
         tasks=wrapped_tasks,
         invariant=invariant,
         detect_sql=detect_sql,
-        trace_packages=trace_packages,
+        trace_packages=resolved_packages,
         lock_timeout=lock_timeout,
         **kwargs,
     )

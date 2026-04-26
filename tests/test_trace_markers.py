@@ -36,9 +36,7 @@ def test_race_condition_buggy_schedule():
     )
 
     executor = TraceExecutor(schedule)
-    executor.run("thread1", lambda: account.transfer(50))
-    executor.run("thread2", lambda: account.transfer(50))
-    executor.wait(timeout=5.0)
+    executor.run({"thread1": lambda: account.transfer(50), "thread2": lambda: account.transfer(50)}, timeout=5.0)
 
     assert account.balance == 150
 
@@ -57,9 +55,7 @@ def test_race_condition_correct_schedule():
     )
 
     executor = TraceExecutor(schedule)
-    executor.run("thread1", lambda: account.transfer(50))
-    executor.run("thread2", lambda: account.transfer(50))
-    executor.wait(timeout=5.0)
+    executor.run({"thread1": lambda: account.transfer(50), "thread2": lambda: account.transfer(50)}, timeout=5.0)
 
     assert account.balance == 200
 
@@ -82,8 +78,7 @@ def test_multiple_markers_same_thread():
     )
 
     executor = TraceExecutor(schedule)
-    executor.run("main", worker_with_markers)
-    executor.wait(timeout=5.0)
+    executor.run({"main": worker_with_markers}, timeout=5.0)
 
     assert results == ["step1", "step2", "step3"]
 
@@ -119,9 +114,7 @@ def test_alternating_execution():
     )
 
     executor = TraceExecutor(schedule)
-    executor.run("thread1", worker1)
-    executor.run("thread2", worker2)
-    executor.wait(timeout=5.0)
+    executor.run({"thread1": worker1, "thread2": worker2}, timeout=5.0)
 
     assert results == ["t1_a", "t2_a", "t1_b", "t2_b"]
 
@@ -255,10 +248,9 @@ def test_complex_race_scenario():
     )
 
     executor = TraceExecutor(schedule)
-    executor.run("t1", counter.increment_racy)
-    executor.run("t2", counter.increment_racy)
-    executor.run("t3", counter.increment_racy)
-    executor.wait(timeout=5.0)
+    executor.run(
+        {"t1": counter.increment_racy, "t2": counter.increment_racy, "t3": counter.increment_racy}, timeout=5.0
+    )
 
     # All three threads read 0, then all write 1
     assert counter.value == 1
@@ -301,9 +293,7 @@ def worker_{name}():
     )
 
     executor = TraceExecutor(schedule)
-    executor.run("thread1", worker1)
-    executor.run("thread2", worker2)
-    executor.wait(timeout=5.0)
+    executor.run({"thread1": worker1, "thread2": worker2}, timeout=5.0)
 
     assert "thread1_step1" in results
     assert "thread1_step2" in results
@@ -339,8 +329,7 @@ def some_func(a, b):
     )
 
     executor = TraceExecutor(schedule)
-    executor.run("main", worker)
-    executor.wait(timeout=5.0)
+    executor.run({"main": worker}, timeout=5.0)
 
     assert "arg1-arg2" in results
 
@@ -397,9 +386,7 @@ def get_value():
     )
 
     executor = TraceExecutor(schedule)
-    executor.run("thread1", worker1)
-    executor.run("thread2", worker2)
-    executor.wait(timeout=5.0)
+    executor.run({"thread1": worker1, "thread2": worker2}, timeout=5.0)
 
     assert "t1_processed" in results
     assert "t2_processed" in results
@@ -414,12 +401,10 @@ def test_wait_timeout_is_total_not_per_thread():
 
     schedule = Schedule([Step("t1", "never"), Step("t2", "never")])
     executor = TraceExecutor(schedule)
-    executor.run("t1", slow_worker)
-    executor.run("t2", slow_worker)
 
     start = time.monotonic()
     with pytest.raises(TimeoutError):
-        executor.wait(timeout=1.0)
+        executor.run({"t1": slow_worker, "t2": slow_worker}, timeout=1.0)
     elapsed = time.monotonic() - start
     # With per-thread timeout, elapsed would be ~2s (1s per thread).
     # With a proper total deadline, it should be ~1s.

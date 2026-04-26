@@ -73,9 +73,7 @@ def test_atomicity_violation_exact_schedule():
     )
 
     executor = TraceExecutor(schedule)
-    executor.run("thread1", lambda: counter.increment())
-    executor.run("thread2", lambda: counter.increment())
-    executor.wait(timeout=5.0)
+    executor.run({"thread1": lambda: counter.increment(), "thread2": lambda: counter.increment()}, timeout=5.0)
 
     # Bug manifests: both increments happened but value is only 1
     assert counter.value == 1, "Lost update - expected 2 but got 1"
@@ -149,9 +147,10 @@ def test_order_violation_exact_schedule():
     )
 
     executor = TraceExecutor(schedule)
-    executor.run("init_thread", lambda: manager.init_resource("hello"))
-    executor.run("user_thread", lambda: manager.use_resource())
-    executor.wait(timeout=5.0)
+    executor.run(
+        {"init_thread": lambda: manager.init_resource("hello"), "user_thread": lambda: manager.use_resource()},
+        timeout=5.0,
+    )
 
     # Bug manifests: use_resource ran before init_resource
     assert manager.used_before_init, "Resource should have been used before initialization"
@@ -243,13 +242,11 @@ def test_deadlock_exact_schedule():
     )
 
     executor = TraceExecutor(schedule)
-    executor.run("thread1", lambda: bank.transfer_a_to_b(10))
-    executor.run("thread2", lambda: bank.transfer_b_to_a(10))
-
-    # Wait with a short timeout - threads won't complete due to deadlock
-    # The wait() method now raises TimeoutError when threads don't complete
+    # Run with a short timeout - threads won't complete due to deadlock
     try:
-        executor.wait(timeout=1.0)
+        executor.run(
+            {"thread1": lambda: bank.transfer_a_to_b(10), "thread2": lambda: bank.transfer_b_to_a(10)}, timeout=1.0
+        )
         assert False, "Should have timed out due to deadlock"
     except TimeoutError:
         # Expected - deadlock occurred

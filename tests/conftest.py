@@ -12,8 +12,11 @@ Usage:
 """
 
 import os
+import shutil
+import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
@@ -123,3 +126,56 @@ def _check_thread_cleanup(request):
             f"If this is intentional (e.g., testing deadlocks that cannot be cleaned up), "
             f"mark the test with @pytest.mark.intentionally_leaves_dangling_threads"
         )
+
+
+# ---------------------------------------------------------------------------
+# Shared Redis fixture
+# ---------------------------------------------------------------------------
+
+# Use a non-default port to avoid colliding with a user's Redis installation.
+# CI can override via REDIS_PORT env var (e.g. when using a service container).
+_REDIS_PORT = int(os.environ.get("REDIS_PORT", "16399"))
+
+
+@pytest.fixture(scope="module")
+def redis_port():
+    """Provide a Redis port, starting a server if one isn't already listening.
+
+    Yields the port number (int).  Skips the whole module if redis-py is not
+    installed, if no Redis is reachable on that port, and redis-server is not
+    available to start one.
+    """
+    try:
+        import redis as redis_lib
+    except ImportError:
+        pytest.skip("redis package not installed")
+
+    r = redis_lib.Redis(port=_REDIS_PORT)
+    try:
+        r.ping()
+        r.close()
+        yield _REDIS_PORT
+        return
+    except redis_lib.ConnectionError:
+        r.close()
+
+    if not shutil.which("redis-server"):
+        pytest.skip("redis-server not installed and no Redis listening on port " + str(_REDIS_PORT))
+
+    proc = subprocess.Popen(
+        ["redis-server", "--port", str(_REDIS_PORT), "--save", "", "--appendonly", "no", "--loglevel", "warning"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(0.5)
+    r = redis_lib.Redis(port=_REDIS_PORT)
+    try:
+        r.ping()
+    except redis_lib.ConnectionError:
+        proc.kill()
+        pytest.skip("Could not start redis-server")
+    finally:
+        r.close()
+    yield _REDIS_PORT
+    proc.terminate()
+    proc.wait(timeout=5)

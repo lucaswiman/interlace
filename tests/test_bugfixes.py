@@ -297,9 +297,8 @@ class TestTraceMarkerTimeout:
             x = 1  # frontrun: marker_that_exists
             _ = x + 1  # no marker here
 
-        executor.run("t1", worker)
         with pytest.raises(TimeoutError, match="Schedule incomplete.*marker_that_does_not_exist"):
-            executor.wait(timeout=5.0)
+            executor.run({"t1": worker}, timeout=5.0)
 
 
 # ---------------------------------------------------------------------------
