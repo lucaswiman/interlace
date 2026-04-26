@@ -578,9 +578,8 @@ def test_trace_executor_run_legacy_form_in_registry():
     """
     import warnings
 
-    from frontrun.common import DEPRECATION_MESSAGES
     from frontrun import TraceExecutor
-    from frontrun.common import Schedule, Step
+    from frontrun.common import DEPRECATION_MESSAGES, Schedule, Step
 
     assert "trace_executor_run_legacy_form" in DEPRECATION_MESSAGES, (
         "DEPRECATION_MESSAGES is missing 'trace_executor_run_legacy_form'. "

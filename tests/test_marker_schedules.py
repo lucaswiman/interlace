@@ -271,9 +271,7 @@ class TestExploreMarkerInterleavings:
         # Replay the counterexample
         account = BankAccount(balance=100)
         executor = TraceExecutor(result.counterexample)
-        executor.run("thread1", lambda: account.transfer(50))
-        executor.run("thread2", lambda: account.transfer(50))
-        executor.wait(timeout=5.0)
+        executor.run({"thread1": lambda: account.transfer(50), "thread2": lambda: account.transfer(50)}, timeout=5.0)
         # The counterexample should reproduce the invariant violation
         assert account.balance != 200
 

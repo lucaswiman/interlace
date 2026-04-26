@@ -368,12 +368,27 @@ def frontrun(
 
     executor = TraceExecutor(schedule, deadlock_timeout=deadlock_timeout)
 
+    wrapped: dict[str, Callable[..., Any]] = {}
     for execution_name, target in threads.items():
-        args = thread_args.get(execution_name, ())
-        kwargs = thread_kwargs.get(execution_name, {})
-        executor.run(execution_name, target, args, kwargs)
+        t_args = thread_args.get(execution_name, ())
+        t_kwargs = thread_kwargs.get(execution_name, {})
+        if t_args or t_kwargs:
+            fn: Callable[..., Any] = target
+            a: tuple[Any, ...] = t_args
+            kw: dict[str, Any] = t_kwargs
 
-    executor.wait(timeout=timeout)
+            def _wrap(
+                _fn: Callable[..., Any] = fn,
+                _a: tuple[Any, ...] = a,
+                _kw: dict[str, Any] = kw,
+            ) -> None:
+                _fn(*_a, **_kw)
+
+            wrapped[execution_name] = _wrap
+        else:
+            wrapped[execution_name] = target
+
+    executor.run(wrapped, timeout=timeout)
     return executor
 
 
@@ -531,15 +546,16 @@ def explore_marker_interleavings(
         state = setup()
         executor = TraceExecutor(schedule, deadlock_timeout=deadlock_timeout)
 
+        runners: dict[str, Callable[..., Any]] = {}
         for exec_name, (target_fn, _markers) in threads.items():
 
             def _make_runner(s: Any = state, fn: Callable[..., None] = target_fn) -> None:
                 fn(s)
 
-            executor.run(exec_name, _make_runner)
+            runners[exec_name] = _make_runner
 
         try:
-            executor.wait(timeout=timeout)
+            executor.run(runners, timeout=timeout)
         except TimeoutError:
             # Schedule stall — treat as non-violation and skip
             num_explored += 1
