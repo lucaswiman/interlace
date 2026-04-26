@@ -61,38 +61,20 @@ Contrib helpers (use threads= for sync, tasks= for async)::
 import importlib
 import warnings
 from importlib.metadata import version as _metadata_version
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from frontrun.common import DEPRECATION_MESSAGES, NondeterministicSQLError
 from frontrun.explore import explore
 from frontrun.trace_markers import TraceExecutor
 
+if TYPE_CHECKING:
+    from frontrun.async_shuffler import explore_async_random as explore_async_random
+    from frontrun.bytecode import explore_random as explore_random
+
 try:
     __version__: str = _metadata_version("frontrun")
 except Exception:
     __version__ = "0.0.0"
-
-
-def explore_random(*args: Any, **kwargs: Any) -> Any:
-    """Canonical sync random-schedule exploration.
-
-    Use ``threads=[...]`` for threaded code.  Formerly called
-    ``explore_interleavings`` (sync form).
-    """
-    from frontrun.bytecode import explore_random as _explore_random
-
-    return _explore_random(*args, **kwargs)
-
-
-async def explore_async_random(*args: Any, **kwargs: Any) -> Any:
-    """Canonical async random-schedule exploration.
-
-    Use ``tasks=[...]`` for async code.  Formerly called
-    ``explore_interleavings`` (async form) or ``explore_async_interleavings``.
-    """
-    from frontrun.async_shuffler import explore_async_random as _explore_async_random
-
-    return await _explore_async_random(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +84,11 @@ async def explore_async_random(*args: Any, **kwargs: Any) -> Any:
 # module, lineno), so a given call site only produces one DeprecationWarning
 # per process — users aren't spammed.
 # ---------------------------------------------------------------------------
+
+_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    "explore_random": ("frontrun.bytecode", "explore_random"),
+    "explore_async_random": ("frontrun.async_shuffler", "explore_async_random"),
+}
 
 _DEPRECATED_ALIASES: dict[str, tuple[str, str, str]] = {
     "explore_dpor": ("frontrun._dpor_runtime.explore", "explore_dpor", DEPRECATION_MESSAGES["explore_dpor"]),
@@ -140,6 +127,9 @@ def _deprecated_explore_interleavings(*args: Any, **kwargs: Any) -> Any:
 
 
 def __getattr__(name: str) -> Any:
+    if name in _LAZY_IMPORTS:
+        module_path, attr = _LAZY_IMPORTS[name]
+        return getattr(importlib.import_module(module_path), attr)
     if name == "explore_interleavings":
         warnings.warn(DEPRECATION_MESSAGES["explore_interleavings"], DeprecationWarning, stacklevel=2)
         return _deprecated_explore_interleavings

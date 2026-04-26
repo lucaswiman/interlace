@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from frontrun._dpor_core import RowLockRegistry
+from frontrun._dpor_core import RowLockRegistry, extend_replay_schedule
 
 from ._shared import *
 from ._shared import _dpor_tls, _get_instructions, _process_opcode
@@ -833,13 +833,13 @@ class _ReplayDporScheduler(DporScheduler):
         )
 
     def _extend_schedule(self) -> bool:
-        if self._replay_index >= self._replay_max_ops:
-            return False
-        active = [t for t in range(self.num_threads) if t not in self._threads_done]
-        if not active:
-            return False
-        self._replay_schedule.extend(active)
-        return True
+        return extend_replay_schedule(
+            self._replay_schedule,
+            self._replay_index,
+            self._replay_max_ops,
+            self.num_threads,
+            self._threads_done,
+        )
 
     def _schedule_next(self) -> int | None:
         while True:

@@ -15,15 +15,6 @@ from typing import Any, Protocol, runtime_checkable
 from frontrun.common import InterleavingResult
 
 
-def _select_kwargs(kwargs: dict[str, Any], allowed: frozenset[str]) -> dict[str, Any]:
-    """Keep only *allowed* keys whose value is not ``None``.
-
-    Filtering ``None`` lets the underlying implementation apply its own
-    default rather than letting the dispatcher's ``None`` override it.
-    """
-    return {k: v for k, v in kwargs.items() if k in allowed and v is not None}
-
-
 def _expand_async_io_kwargs(kwargs: dict[str, Any]) -> tuple[bool, bool]:
     """Pop ``detect_io`` / ``detect_sql`` and return ``(detect_sql, detect_io)``.
 
@@ -126,7 +117,10 @@ class _SyncDporStrategy:
         from frontrun._dpor_runtime.explore import _explore_dpor
 
         return _explore_dpor(
-            setup=setup, threads=workers, invariant=invariant, **_select_kwargs(kwargs, _DPOR_SYNC_KEYS)
+            setup=setup,
+            threads=workers,
+            invariant=invariant,
+            **{k: v for k, v in kwargs.items() if k in _DPOR_SYNC_KEYS and v is not None},
         )
 
 
@@ -144,7 +138,10 @@ class _SyncRandomStrategy:
         from frontrun.bytecode import explore_random as _explore_random
 
         return _explore_random(
-            setup=setup, threads=workers, invariant=invariant, **_select_kwargs(kwargs, _RANDOM_SYNC_KEYS)
+            setup=setup,
+            threads=workers,
+            invariant=invariant,
+            **{k: v for k, v in kwargs.items() if k in _RANDOM_SYNC_KEYS and v is not None},
         )
 
 
@@ -207,7 +204,7 @@ class _AsyncDporStrategy:
             invariant=invariant,
             detect_sql=detect_sql,
             detect_redis=detect_io,
-            **_select_kwargs(kwargs, _DPOR_ASYNC_KEYS),
+            **{k: v for k, v in kwargs.items() if k in _DPOR_ASYNC_KEYS and v is not None},
         )
 
 
@@ -230,7 +227,7 @@ class _AsyncRandomStrategy:
             tasks=workers,
             invariant=invariant,
             detect_sql=detect_sql,
-            **_select_kwargs(kwargs, _RANDOM_ASYNC_KEYS),
+            **{k: v for k, v in kwargs.items() if k in _RANDOM_ASYNC_KEYS and v is not None},
         )
 
 

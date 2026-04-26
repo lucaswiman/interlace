@@ -5,8 +5,10 @@ from __future__ import annotations
 from frontrun._dpor_core import (
     compute_serializable_baseline_sync,
     format_race_failure_explanation,
+    make_deadline,
     make_dpor_engine,
     record_dpor_failure,
+    reset_execution_state,
 )
 
 from ._shared import *
@@ -159,7 +161,7 @@ def _explore_dpor(
     # block when contested, so we need a Python-level lock shared across
     # worker threads, the sync reporter, and the main loop.
     engine_lock = real_lock()
-    total_deadline = time.monotonic() + total_timeout if total_timeout is not None else None
+    total_deadline = make_deadline(total_timeout)
 
     # Set up the LD_PRELOAD → DPOR bridge for C-level I/O detection.
     # When code under test uses C extensions that call libc send()/recv()
@@ -277,8 +279,7 @@ def _explore_dpor(
         while True:
             if total_deadline is not None and time.monotonic() > total_deadline:
                 break
-            clear_insert_tracker()
-            stable_ids.reset_for_execution()
+            reset_execution_state(stable_ids)
             with engine_lock:
                 execution = engine.begin_execution()
             recorder = TraceRecorder()
