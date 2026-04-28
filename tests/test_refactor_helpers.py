@@ -525,15 +525,6 @@ def test_noop_lock_reentrant() -> None:
             pass
 
 
-def test_async_dpor_uses_shared_noop_lock() -> None:
-    """async_dpor._NoOpLock points at the shared _dpor_core.NoOpLock."""
-    pytest.importorskip("frontrun._dpor")
-    from frontrun._dpor_core import NoOpLock
-    from frontrun.async_dpor import _NoOpLock
-
-    assert _NoOpLock is NoOpLock
-
-
 # ---------------------------------------------------------------------------
 # Target 4: shared dpor_exploration_iter generator (concurrency abstraction
 # layer that lets sync + async DPOR drivers share the per-execution boundary).
@@ -551,23 +542,18 @@ class _StubEngine:
         self.num_executions = num_executions
         self._begin_calls = 0
         self._next_calls = 0
-        # The lock's __enter__/__exit__ must wrap each begin/next call so the
-        # PyO3 &mut self borrows on free-threaded Python are serialised.
-        self.calls_under_lock: list[str] = []
         self.current_lock: Any = None
 
     def begin_execution(self) -> _StubExecution:
         if self.current_lock is not None and not self.current_lock.entered:
             raise AssertionError("begin_execution must run while engine_lock is held")
         self._begin_calls += 1
-        self.calls_under_lock.append("begin")
         return _StubExecution()
 
     def next_execution(self) -> bool:
         if self.current_lock is not None and not self.current_lock.entered:
             raise AssertionError("next_execution must run while engine_lock is held")
         self._next_calls += 1
-        self.calls_under_lock.append("next")
         return self._next_calls < self.num_executions
 
 
@@ -693,31 +679,38 @@ def test_dpor_exploration_iter_stops_at_total_deadline() -> None:
     assert engine._begin_calls == 0
 
 
-def test_dpor_exploration_iter_stops_when_deadline_expires_mid_run() -> None:
+def test_dpor_exploration_iter_stops_when_deadline_expires_mid_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """If the deadline expires after some iterations, the loop exits cleanly."""
-    import time
+    from frontrun._dpor_core import concurrency, dpor_exploration_iter
 
-    from frontrun._dpor_core import dpor_exploration_iter
+    # Fake clock that advances by 1.0 on each call.
+    fake_now = [0.0]
+
+    def _monotonic() -> float:
+        t = fake_now[0]
+        fake_now[0] += 1.0
+        return t
+
+    monkeypatch.setattr(concurrency.time, "monotonic", _monotonic)
 
     engine = _StubEngine(num_executions=10)
     lock = _RecordingLock()
     engine.current_lock = lock
     stable_ids = _StubStableIds()
 
-    deadline = time.monotonic() + 0.05  # tiny slice
-    seen = 0
-    for _ in dpor_exploration_iter(
-        engine=engine,
-        engine_lock=lock,
-        stable_ids=stable_ids,
-        total_deadline=deadline,
-    ):
-        seen += 1
-        # Burn time to push us past the deadline before the next iter check.
-        time.sleep(0.06)
-        if seen > 3:
-            break  # safety-net: if abstraction is broken, bound the loop
-    assert 1 <= seen <= 2
+    # Deadline of 2.5 means iterations 1, 2, 3 yield (clock reads 0.0, 1.0, 2.0)
+    # and iteration 4's check (clock reads 3.0) triggers the early return.
+    seen = list(
+        dpor_exploration_iter(
+            engine=engine,
+            engine_lock=lock,
+            stable_ids=stable_ids,
+            total_deadline=2.5,
+        )
+    )
+    assert len(seen) == 3
 
 
 def test_dpor_exploration_iter_works_with_real_threading_lock() -> None:

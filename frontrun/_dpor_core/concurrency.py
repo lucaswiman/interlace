@@ -57,14 +57,6 @@ class NoOpLock:
         return None
 
 
-class _EngineLock(Protocol):
-    """Anything that supports the ``with`` statement (lock or no-op)."""
-
-    def __enter__(self) -> Any: ...
-
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Any: ...
-
-
 class _DporEngine(Protocol):
     """Subset of :class:`frontrun._dpor.PyDporEngine` used by the driver loop."""
 
@@ -89,7 +81,7 @@ class ExplorationStep:
 def dpor_exploration_iter(
     *,
     engine: _DporEngine,
-    engine_lock: AbstractContextManager[Any] | _EngineLock,
+    engine_lock: AbstractContextManager[Any],
     stable_ids: StableObjectIds,
     total_deadline: float | None,
 ) -> Iterator[ExplorationStep]:

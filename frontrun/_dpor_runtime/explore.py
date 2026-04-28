@@ -276,13 +276,13 @@ def _explore_dpor(
         generate_html_report(report, report_path)
 
     try:
-        for _step in dpor_exploration_iter(
+        for step in dpor_exploration_iter(
             engine=engine,
             engine_lock=engine_lock,
             stable_ids=stable_ids,
             total_deadline=total_deadline,
         ):
-            execution = _step.execution
+            execution = step.execution
             recorder = TraceRecorder()
             # Clear bridge state for this new execution.
             if preload_bridge is not None:

@@ -136,12 +136,6 @@ except ImportError:
 T = TypeVar("T")
 
 
-# Backwards-compatible alias: `_NoOpLock` was the historic name for the
-# shared :class:`frontrun._dpor_core.NoOpLock`.  Kept as an alias because
-# tests and external callers reference both names.
-_NoOpLock = NoOpLock
-
-
 # Guards against re-entering async opcode tracing while _process_opcode()
 # is already running for the current task.
 _in_trace_processing: contextvars.ContextVar[bool] = contextvars.ContextVar("_in_trace_processing", default=False)
@@ -397,7 +391,7 @@ class AsyncDporScheduler(InterleavedLoop):
         self._current_task: int | None = None
         self._detect_sql = detect_sql
         self._detect_redis = detect_redis
-        self._engine_lock = _NoOpLock()
+        self._engine_lock = NoOpLock()
         self.trace_recorder = None
         self._iter_to_container: dict[int, Any] = {}
         self._shadow_stacks: dict[int, ShadowStack] = {}
@@ -1070,13 +1064,13 @@ async def _explore_async_dpor(
             patch_scope.add(_patch_asyncio_lock, _unpatch_asyncio_lock)
             patch_scope.add(_patch_asyncio_sleep, _unpatch_asyncio_sleep, enabled=patch_sleep)
 
-            for _step in dpor_exploration_iter(
+            for step in dpor_exploration_iter(
                 engine=engine,
                 engine_lock=engine_lock,
                 stable_ids=stable_ids,
                 total_deadline=total_deadline,
             ):
-                execution = _step.execution
+                execution = step.execution
 
                 # Clear wait-for graph and held-locks tracking between executions
                 if _async_wait_graph is not None:
