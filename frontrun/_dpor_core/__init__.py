@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from frontrun._dpor_core.concurrency import (
+    ExplorationStep,
+    NoOpLock,
+    dpor_exploration_iter,
+)
 from frontrun._dpor_core.engine import make_dpor_engine
 from frontrun._dpor_core.failures import record_dpor_failure
 from frontrun._dpor_core.invariants import (
@@ -20,10 +25,13 @@ from frontrun._dpor_core.utils import (
 )
 
 __all__ = [
+    "ExplorationStep",
+    "NoOpLock",
     "RowLockRegistry",
     "advance_replay_index",
     "compute_serializable_baseline_async",
     "compute_serializable_baseline_sync",
+    "dpor_exploration_iter",
     "extend_replay_schedule",
     "format_race_failure_explanation",
     "group_schedule_runs",

@@ -605,14 +605,15 @@ def test_dpor_exploration_iter_yields_one_step_per_execution() -> None:
     engine.current_lock = lock
     stable_ids = _StubStableIds()
 
-    seen: list[Any] = []
-    for step in dpor_exploration_iter(
-        engine=engine,
-        engine_lock=lock,
-        stable_ids=stable_ids,
-        total_deadline=None,
-    ):
-        seen.append(step.execution)
+    seen: list[Any] = [
+        step.execution
+        for step in dpor_exploration_iter(
+            engine=engine,
+            engine_lock=lock,
+            stable_ids=stable_ids,
+            total_deadline=None,
+        )
+    ]
 
     assert len(seen) == 3
     assert all(isinstance(e, _StubExecution) for e in seen)

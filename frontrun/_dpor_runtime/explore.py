@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from frontrun._dpor_core import (
     compute_serializable_baseline_sync,
+    dpor_exploration_iter,
     format_race_failure_explanation,
     make_deadline,
     make_dpor_engine,
     record_dpor_failure,
-    reset_execution_state,
 )
 
 from ._shared import *
@@ -276,12 +276,13 @@ def _explore_dpor(
         generate_html_report(report, report_path)
 
     try:
-        while True:
-            if total_deadline is not None and time.monotonic() > total_deadline:
-                break
-            reset_execution_state(stable_ids)
-            with engine_lock:
-                execution = engine.begin_execution()
+        for _step in dpor_exploration_iter(
+            engine=engine,
+            engine_lock=engine_lock,
+            stable_ids=stable_ids,
+            total_deadline=total_deadline,
+        ):
+            execution = _step.execution
             recorder = TraceRecorder()
             # Clear bridge state for this new execution.
             if preload_bridge is not None:
@@ -492,9 +493,6 @@ def _explore_dpor(
                     )
                 )
 
-            with engine_lock:
-                if not engine.next_execution():
-                    break
     finally:
         if trace_packages is not None:
             _set_active_trace_filter(None)
