@@ -1,0 +1,118 @@
+"""Shared concurrency primitives unifying sync (threaded) and async DPOR drivers.
+
+The sync driver in :mod:`frontrun._dpor_runtime` and the async driver in
+:mod:`frontrun.async_dpor` share the same outer-loop shape but historically
+diverged on two small concurrency-shaped details:
+
+* The **engine lock** — sync DPOR runs workers on real threads, so PyO3
+  ``&mut self`` borrows on the Rust ``PyDporEngine`` need a real
+  :class:`threading.Lock` to serialise them (panics rather than blocks on
+  free-threaded Python).  Async DPOR runs all tasks on a single event-loop
+  thread, so it uses a no-op context manager.
+
+* The **per-execution boundary** — both drivers loop ``while True``,
+  reset per-execution state, call ``engine.begin_execution()``, run the
+  workers, then call ``engine.next_execution()`` (and bail out on a
+  ``total_timeout`` deadline).  The body of each iteration is necessarily
+  driver-specific (threads vs tasks, sync vs ``await``), but the
+  *boundary* is identical.
+
+This module exposes both pieces:
+
+* :class:`NoOpLock` — context-manager-shaped no-op lock for async DPOR.
+* :func:`dpor_exploration_iter` — generator that yields one
+  :class:`ExplorationStep` per execution, holding the engine lock while
+  it advances the engine.  The caller (sync or async) owns the body.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Iterator
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol
+
+from frontrun._dpor_core.utils import reset_execution_state
+
+if TYPE_CHECKING:
+    from frontrun._opcode_observer import StableObjectIds
+
+
+class NoOpLock:
+    """Context-manager-shaped no-op lock for single-threaded engine calls.
+
+    Used by the async DPOR driver, which runs every task on the asyncio
+    event-loop thread and therefore has no contention on the underlying
+    Rust ``PyDporEngine``.  The sync driver passes a real
+    :class:`threading.Lock` instead.
+    """
+
+    __slots__ = ()
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+
+class _DporEngine(Protocol):
+    """Subset of :class:`frontrun._dpor.PyDporEngine` used by the driver loop."""
+
+    def begin_execution(self) -> Any: ...
+
+    def next_execution(self) -> bool: ...
+
+
+@dataclass(frozen=True)
+class ExplorationStep:
+    """One iteration of :func:`dpor_exploration_iter`.
+
+    Attributes:
+        execution: The fresh ``PyExecution`` returned by ``begin_execution``.
+        index: 1-indexed iteration number (the run that's *about to happen*).
+    """
+
+    execution: Any
+    index: int
+
+
+def dpor_exploration_iter(
+    *,
+    engine: _DporEngine,
+    engine_lock: AbstractContextManager[Any],
+    stable_ids: StableObjectIds,
+    total_deadline: float | None,
+) -> Iterator[ExplorationStep]:
+    """Yield one :class:`ExplorationStep` per DPOR execution to explore.
+
+    Encapsulates the boundary work shared by ``_explore_dpor`` (sync) and
+    ``_explore_async_dpor`` (async):
+
+    1. Bail out if ``total_deadline`` (an absolute :func:`time.monotonic`
+       timestamp from :func:`make_deadline`) has passed.
+    2. :func:`reset_execution_state` to clear per-execution state.
+    3. ``engine.begin_execution()`` under ``engine_lock``.
+    4. Yield to the caller, which runs the workers and inspects the
+       resulting state (invariants, races, deadlocks).
+    5. ``engine.next_execution()`` under ``engine_lock``; stop when it
+       returns ``False`` (search tree exhausted).
+
+    The body of the loop runs *outside* the engine lock — workers acquire
+    fine-grained subsections of the lock as needed.  The generator works
+    in both sync and ``async def`` callers because Python's ``for`` loop
+    doesn't care about the function's color.
+    """
+    index = 0
+    while True:
+        if total_deadline is not None and time.monotonic() > total_deadline:
+            return
+        reset_execution_state(stable_ids)
+        with engine_lock:
+            execution = engine.begin_execution()
+        index += 1
+        yield ExplorationStep(execution=execution, index=index)
+        with engine_lock:
+            if not engine.next_execution():
+                return

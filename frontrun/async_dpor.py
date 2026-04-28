@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import time
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, TypeVar
 
@@ -58,9 +57,11 @@ from frontrun._async_autopause import (
 )
 from frontrun._deadlock import DeadlockError, WaitForGraph, format_cycle
 from frontrun._dpor_core import (
+    NoOpLock,
     RowLockRegistry,
     advance_replay_index,
     compute_serializable_baseline_async,
+    dpor_exploration_iter,
     extend_replay_schedule,
     format_race_failure_explanation,
     group_schedule_runs,
@@ -68,7 +69,6 @@ from frontrun._dpor_core import (
     make_deadline,
     make_dpor_engine,
     record_dpor_failure,
-    reset_execution_state,
 )
 from frontrun._opcode_observer import (
     OpcodeTraceHandle,
@@ -134,16 +134,6 @@ except ImportError:
 
 
 T = TypeVar("T")
-
-
-class _NoOpLock:
-    """Context-manager-shaped lock for single-threaded async DPOR engine calls."""
-
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        return None
 
 
 # Guards against re-entering async opcode tracing while _process_opcode()
@@ -401,7 +391,7 @@ class AsyncDporScheduler(InterleavedLoop):
         self._current_task: int | None = None
         self._detect_sql = detect_sql
         self._detect_redis = detect_redis
-        self._engine_lock = _NoOpLock()
+        self._engine_lock = NoOpLock()
         self.trace_recorder = None
         self._iter_to_container: dict[int, Any] = {}
         self._shadow_stacks: dict[int, ShadowStack] = {}
@@ -1062,6 +1052,11 @@ async def _explore_async_dpor(
         result.reproduction_attempts = attempts
         result.reproduction_successes = successes
 
+    # Single-threaded async DPOR doesn't need a real engine lock; the
+    # shared NoOpLock keeps the dpor_exploration_iter contract uniform
+    # across the sync (threading.Lock) and async drivers.
+    engine_lock = NoOpLock()
+
     try:
         with PatchScope() as patch_scope:
             patch_scope.add(patch_sql_async, unpatch_sql_async, enabled=detect_sql and _sql_async_available)
@@ -1069,11 +1064,13 @@ async def _explore_async_dpor(
             patch_scope.add(_patch_asyncio_lock, _unpatch_asyncio_lock)
             patch_scope.add(_patch_asyncio_sleep, _unpatch_asyncio_sleep, enabled=patch_sleep)
 
-            while True:
-                if total_deadline is not None and time.monotonic() > total_deadline:
-                    break
-                reset_execution_state(stable_ids)
-                execution = engine.begin_execution()
+            for step in dpor_exploration_iter(
+                engine=engine,
+                engine_lock=engine_lock,
+                stable_ids=stable_ids,
+                total_deadline=total_deadline,
+            ):
+                execution = step.execution
 
                 # Clear wait-for graph and held-locks tracking between executions
                 if _async_wait_graph is not None:
@@ -1203,9 +1200,6 @@ async def _explore_async_dpor(
                         await _record_reproduction(schedule_list, invariant)
                         if stop_on_first:
                             return result
-
-                if not engine.next_execution():
-                    break
     finally:
         if trace_packages is not None:
             _set_active_trace_filter(None)

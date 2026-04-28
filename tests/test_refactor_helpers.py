@@ -494,3 +494,280 @@ def test_async_dpor_scheduler_uses_row_lock_registry() -> None:
     assert hasattr(AsyncDporScheduler, "__init__")
     reg = RowLockRegistry()
     assert callable(reg._row_lock_int_id)
+
+
+# ---------------------------------------------------------------------------
+# Target 3: shared NoOpLock for the async/threading abstraction
+# ---------------------------------------------------------------------------
+
+
+def test_noop_lock_importable_from_dpor_core() -> None:
+    """NoOpLock is importable from frontrun._dpor_core for both sync + async drivers."""
+    from frontrun._dpor_core import NoOpLock  # noqa: F401
+
+
+def test_noop_lock_is_context_manager() -> None:
+    """NoOpLock supports the `with` statement and returns None."""
+    from frontrun._dpor_core import NoOpLock
+
+    lock = NoOpLock()
+    with lock as result:
+        assert result is None
+
+
+def test_noop_lock_reentrant() -> None:
+    """NoOpLock is safely reentrant (single-threaded async DPOR uses this)."""
+    from frontrun._dpor_core import NoOpLock
+
+    lock = NoOpLock()
+    with lock:
+        with lock:  # noqa: SIM117
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Target 4: shared dpor_exploration_iter generator (concurrency abstraction
+# layer that lets sync + async DPOR drivers share the per-execution boundary).
+# ---------------------------------------------------------------------------
+
+
+class _StubExecution:
+    """Sentinel returned by the fake engine for each exploration iteration."""
+
+
+class _StubEngine:
+    """Records `begin_execution` / `next_execution` calls and lock interactions."""
+
+    def __init__(self, num_executions: int) -> None:
+        self.num_executions = num_executions
+        self._begin_calls = 0
+        self._next_calls = 0
+        self.current_lock: Any = None
+
+    def begin_execution(self) -> _StubExecution:
+        if self.current_lock is not None and not self.current_lock.entered:
+            raise AssertionError("begin_execution must run while engine_lock is held")
+        self._begin_calls += 1
+        return _StubExecution()
+
+    def next_execution(self) -> bool:
+        if self.current_lock is not None and not self.current_lock.entered:
+            raise AssertionError("next_execution must run while engine_lock is held")
+        self._next_calls += 1
+        return self._next_calls < self.num_executions
+
+
+class _RecordingLock:
+    """Context manager that records whether it is currently held."""
+
+    def __init__(self) -> None:
+        self.entered = False
+        self.enter_count = 0
+        self.exit_count = 0
+
+    def __enter__(self) -> _RecordingLock:
+        self.entered = True
+        self.enter_count += 1
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.entered = False
+        self.exit_count += 1
+
+
+class _StubStableIds:
+    def __init__(self) -> None:
+        self.resets = 0
+
+    def reset_for_execution(self) -> None:
+        self.resets += 1
+
+
+def test_dpor_exploration_iter_yields_one_step_per_execution() -> None:
+    from frontrun._dpor_core import dpor_exploration_iter
+
+    engine = _StubEngine(num_executions=3)
+    lock = _RecordingLock()
+    engine.current_lock = lock
+    stable_ids = _StubStableIds()
+
+    seen: list[Any] = [
+        step.execution
+        for step in dpor_exploration_iter(
+            engine=engine,
+            engine_lock=lock,
+            stable_ids=stable_ids,
+            total_deadline=None,
+        )
+    ]
+
+    assert len(seen) == 3
+    assert all(isinstance(e, _StubExecution) for e in seen)
+    assert engine._begin_calls == 3
+    # next_execution() is called after every iteration's body, including the
+    # final one (which returns False to terminate).
+    assert engine._next_calls == 3
+
+
+def test_dpor_exploration_iter_resets_state_each_iteration() -> None:
+    from frontrun._dpor_core import dpor_exploration_iter
+
+    engine = _StubEngine(num_executions=2)
+    lock = _RecordingLock()
+    engine.current_lock = lock
+    stable_ids = _StubStableIds()
+
+    for _ in dpor_exploration_iter(
+        engine=engine,
+        engine_lock=lock,
+        stable_ids=stable_ids,
+        total_deadline=None,
+    ):
+        pass
+
+    assert stable_ids.resets == 2
+
+
+def test_dpor_exploration_iter_holds_lock_across_engine_calls() -> None:
+    from frontrun._dpor_core import dpor_exploration_iter
+
+    engine = _StubEngine(num_executions=2)
+    lock = _RecordingLock()
+    engine.current_lock = lock
+    stable_ids = _StubStableIds()
+
+    for _ in dpor_exploration_iter(
+        engine=engine,
+        engine_lock=lock,
+        stable_ids=stable_ids,
+        total_deadline=None,
+    ):
+        # Body runs *outside* the engine lock — the user's per-execution
+        # work (worker spawning, scheduling) is what acquires fine-grained
+        # subsections of the lock as needed.
+        assert lock.entered is False
+
+    # Each begin/next pair entered the lock once.
+    # 2 begins + 2 nexts == 4 enters.
+    assert lock.enter_count == 4
+    assert lock.exit_count == 4
+
+
+def test_dpor_exploration_iter_stops_at_total_deadline() -> None:
+    """Once total_deadline is in the past, the generator yields nothing further."""
+    import time
+
+    from frontrun._dpor_core import dpor_exploration_iter
+
+    engine = _StubEngine(num_executions=10)
+    lock = _RecordingLock()
+    engine.current_lock = lock
+    stable_ids = _StubStableIds()
+
+    past = time.monotonic() - 1.0
+    seen = list(
+        dpor_exploration_iter(
+            engine=engine,
+            engine_lock=lock,
+            stable_ids=stable_ids,
+            total_deadline=past,
+        )
+    )
+    assert seen == []
+    # No begin_execution should have been called when the deadline is already
+    # past at the start of the very first iteration.
+    assert engine._begin_calls == 0
+
+
+def test_dpor_exploration_iter_stops_when_deadline_expires_mid_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the deadline expires after some iterations, the loop exits cleanly."""
+    from frontrun._dpor_core import concurrency, dpor_exploration_iter
+
+    # Fake clock that advances by 1.0 on each call.
+    fake_now = [0.0]
+
+    def _monotonic() -> float:
+        t = fake_now[0]
+        fake_now[0] += 1.0
+        return t
+
+    monkeypatch.setattr(concurrency.time, "monotonic", _monotonic)
+
+    engine = _StubEngine(num_executions=10)
+    lock = _RecordingLock()
+    engine.current_lock = lock
+    stable_ids = _StubStableIds()
+
+    # Deadline of 2.5 means iterations 1, 2, 3 yield (clock reads 0.0, 1.0, 2.0)
+    # and iteration 4's check (clock reads 3.0) triggers the early return.
+    seen = list(
+        dpor_exploration_iter(
+            engine=engine,
+            engine_lock=lock,
+            stable_ids=stable_ids,
+            total_deadline=2.5,
+        )
+    )
+    assert len(seen) == 3
+
+
+def test_dpor_exploration_iter_works_with_real_threading_lock() -> None:
+    """A real threading.Lock is accepted (sync DPOR's engine_lock)."""
+    from frontrun._dpor_core import dpor_exploration_iter
+
+    real_lock = threading.Lock()
+    engine = _StubEngine(num_executions=2)
+    engine.current_lock = None  # the real lock has no `.entered` attribute
+    stable_ids = _StubStableIds()
+
+    seen = list(
+        dpor_exploration_iter(
+            engine=engine,
+            engine_lock=real_lock,
+            stable_ids=stable_ids,
+            total_deadline=None,
+        )
+    )
+    assert len(seen) == 2
+
+
+def test_dpor_exploration_iter_works_with_noop_lock() -> None:
+    """The shared NoOpLock works as engine_lock (async DPOR's contract)."""
+    from frontrun._dpor_core import NoOpLock, dpor_exploration_iter
+
+    engine = _StubEngine(num_executions=2)
+    engine.current_lock = None  # NoOpLock doesn't expose `.entered`
+    stable_ids = _StubStableIds()
+
+    seen = list(
+        dpor_exploration_iter(
+            engine=engine,
+            engine_lock=NoOpLock(),
+            stable_ids=stable_ids,
+            total_deadline=None,
+        )
+    )
+    assert len(seen) == 2
+
+
+def test_dpor_exploration_step_carries_execution_and_index() -> None:
+    """Each ExplorationStep exposes `.execution` and a 1-indexed `.index`."""
+    from frontrun._dpor_core import dpor_exploration_iter
+
+    engine = _StubEngine(num_executions=3)
+    lock = _RecordingLock()
+    engine.current_lock = lock
+    stable_ids = _StubStableIds()
+
+    indices = []
+    for step in dpor_exploration_iter(
+        engine=engine,
+        engine_lock=lock,
+        stable_ids=stable_ids,
+        total_deadline=None,
+    ):
+        indices.append(step.index)
+        assert isinstance(step.execution, _StubExecution)
+    assert indices == [1, 2, 3]
